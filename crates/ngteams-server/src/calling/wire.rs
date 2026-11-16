@@ -7,7 +7,8 @@ use std::collections::BTreeMap;
 use base64::Engine as _;
 use serde_json::{Map, Value, json};
 
-use super::state::{Call, KEEP_ALIVE, Kind, Party, Seat, Status};
+use super::state::{Call, KEEP_ALIVE, Kind, Party, Seat, Showing, Status};
+use teams_sdp::sdp::SHARING_LABEL;
 
 /// A party's callbacks, by the name its request gave each.
 pub(crate) type Links = BTreeMap<String, String>;
@@ -435,20 +436,54 @@ pub(crate) fn music_entry(version: u64, playing: bool) -> Value {
 }
 
 /// What an endpoint in the call sends and takes: a 1:1 call's lists no media streams (its media goes through no
-/// mixer); a group call's its main audio and its main video (only taken, until the media node forwards video), by
-/// the party's sources.
+/// mixer); a group call's its main audio, its main video (sent while its camera is on) and, while it shares its
+/// screen, its sharing stream, by the party's sources: what the others' source requests name.
 fn endpoint_call(kind: Kind, party: &Party) -> Value {
     let Some(leg) = party.leg.as_ref().filter(|_| kind == Kind::Group) else {
         return json!({"serverMuteVersion": 0});
     };
-    json!({
-        "mediaStreams": [
-            {"type": "audio", "label": "main-audio", "sourceId": leg.sources.audio, "direction": "sendrecv",
-                "serverMuted": false},
-            {"type": "video", "label": "main-video", "sourceId": leg.sources.video, "direction": "recvonly"},
-        ],
-        "serverMuteVersion": 0,
+    let camera = if party.showing.camera { "sendrecv" } else { "recvonly" };
+    let mut streams = vec![
+        json!({"type": "audio", "label": "main-audio", "sourceId": leg.sources.audio, "direction": "sendrecv",
+            "serverMuted": false}),
+        json!({"type": "video", "label": "main-video", "sourceId": leg.sources.video, "direction": camera}),
+    ];
+    if party.showing.sharing {
+        streams.push(
+            json!({"type": "video", "label": SHARING_LABEL, "sourceId": leg.sources.sharing,
+            "direction": "sendonly"}),
+        );
+    }
+    json!({"mediaStreams": streams, "serverMuteVersion": 0})
+}
+
+/// What a group call party sends, as its `updateMediaDescriptions` describes its lines: its camera while a line other
+/// than the sharing line goes out, its screen while the sharing line (labelled so) does; none for a body that
+/// describes nothing.
+pub(crate) fn showing(body: &Value) -> Option<Showing> {
+    let described = body
+        .get("UpdateMediaDescriptions")
+        .or_else(|| body.get("updateMediaDescriptions"))?
+        .pointer("/mediaDescriptions/descriptions")?
+        .as_array()?;
+    let sends = |line: &&Value| {
+        line.get("direction")
+            .and_then(Value::as_str)
+            .is_some_and(|direction| matches!(direction, "sendrecv" | "sendonly"))
+    };
+    let screen = |line: &&Value| line.get("label").and_then(Value::as_str) == Some(SHARING_LABEL);
+    Some(Showing {
+        camera: described.iter().filter(sends).any(|line| !screen(&line)),
+        sharing: described.iter().filter(sends).any(|line| screen(&line)),
     })
+}
+
+/// The bandwidth seed (`sendSideBWSeed`, bits a second) of channel parameters (`applyChannelParameters`, whose
+/// `mediaParameter` is a JSON text).
+pub(crate) fn seed(parameters: &Value) -> Option<u64> {
+    let text = parameters.pointer("/multiChannelParameter/mediaParameter")?.as_str()?;
+    let parameter: Value = serde_json::from_str(text).ok()?;
+    parameter.pointer("/sendSideBWSeed/seedValueBitsPerSec")?.as_u64()
 }
 
 /// One party as the roster lists it.
@@ -672,5 +707,46 @@ mod tests {
     #[test]
     fn times_are_written_with_seven_fractional_digits() {
         assert_eq!(iso(1_700_000_000_123), "2023-11-14T22:13:20.1230000Z");
+    }
+
+    #[test]
+    fn the_lines_described_say_what_a_party_sends() {
+        let described =
+            |lines: Value| json!({"UpdateMediaDescriptions": {"mediaDescriptions": {"descriptions": lines}}});
+        let camera_on =
+            described(json!([{"mid": "1", "direction": "sendrecv"}, {"mid": "2", "direction": "recvonly"}]));
+        assert_eq!(
+            showing(&camera_on),
+            Some(Showing {
+                camera: true,
+                sharing: false
+            })
+        );
+        let sharing = described(json!([{"mid": "1", "direction": "recvonly"},
+            {"mid": "11", "direction": "sendonly", "label": SHARING_LABEL}]));
+        assert_eq!(
+            showing(&sharing),
+            Some(Showing {
+                camera: false,
+                sharing: true
+            })
+        );
+        let stopped = json!({"updateMediaDescriptions": {"mediaDescriptions": {"descriptions": [
+            {"mid": "1", "direction": "recvonly"}, {"mid": "11", "direction": "recvonly"}]}}});
+        assert_eq!(showing(&stopped), Some(Showing::default()));
+        assert_eq!(showing(&json!({"other": {}})), None);
+    }
+
+    #[test]
+    fn the_bandwidth_seed_is_read_from_its_parameter_text() {
+        let seeded = json!({"multiChannelParameter": {"mids": ["*"],
+            "mediaParameter": "{\"sendSideBWSeed\": {\"seedValueBitsPerSec\": 4000000}}"}});
+        assert_eq!(seed(&seeded), Some(4_000_000));
+        let capabilities = json!({"multiChannelParameter": {"mids": ["1"],
+            "mediaParameter": "{\"maxVideoSendCapabilities\": {}}"}});
+        assert_eq!(seed(&capabilities), None);
+        let unreadable = json!({"multiChannelParameter": {"mediaParameter": "not json"}});
+        assert_eq!(seed(&unreadable), None);
+        assert_eq!(seed(&json!({})), None);
     }
 }

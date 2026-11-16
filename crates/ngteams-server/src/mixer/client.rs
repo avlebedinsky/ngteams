@@ -207,6 +207,13 @@ impl MediaNodes for HttpNodes {
         sdp_in(&answer, "answer")
     }
 
+    async fn seed(&self, home: &MediaHome, call: &str, leg: &str, seed: u64) -> Result<(), MediaError> {
+        let path = format!("{}/parameters", leg_path(call, leg));
+        self.call(Method::POST, home, &path, Some(json!({"seed": seed})))
+            .await?;
+        Ok(())
+    }
+
     async fn delete_leg(&self, home: &MediaHome, call: &str, leg: &str) -> Result<(), MediaError> {
         self.call(Method::DELETE, home, &leg_path(call, leg), None).await?;
         Ok(())

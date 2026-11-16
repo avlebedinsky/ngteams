@@ -3,8 +3,9 @@
 //!
 //! - **str0m does the transport** (ICE-lite, DTLS, SRTP, SCTP) on one UDP socket, sans-IO in one media thread
 //!   ([`node`]); **libopus decodes and encodes**; the mix, its buffer and the dominant speakers are ours
-//!   ([`audio`]); **`teams-sdp` speaks the dialect** (its mixer side). Video isn't served: every video line is
-//!   answered rejected ([`leg`]).
+//!   ([`audio`]); **`teams-sdp` speaks the dialect** (its mixer side). Video is forwarded, never transcoded: each
+//!   receiving line shows the camera or screen its source requests name, from that source's next keyframe on
+//!   ([`video`]).
 //! - **Signaling reaches it only over the internal API** ([`api`], [`client`]): a call's row names its node, so any
 //!   signaling node reaches any call's room; Redis only lists the live nodes ([`registry`]), for a new room's pick
 //!   and the sweeper's look at a call's node. Without Redis the process's own node is the only one.
@@ -21,6 +22,7 @@ mod leg;
 mod node;
 mod registry;
 mod room;
+mod video;
 
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};

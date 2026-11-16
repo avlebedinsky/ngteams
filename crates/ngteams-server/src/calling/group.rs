@@ -55,6 +55,21 @@ async fn member(app: &App, chat: Option<&str>, account: &str) -> Result<bool, Db
     Ok(members.is_some_and(|members| members.iter().any(|member| member == account)))
 }
 
+/// Hands the node the bandwidth a party seeded in `content` (a `mediaContent`'s `applyChannelParameters`) for its leg
+/// `leg`, if it seeded any: no video goes to the leg before. One not handed on is logged.
+async fn seed_leg(app: &App, home: &MediaHome, call: &str, leg: &str, content: Option<&Value>) {
+    let Some(seed) = content
+        .and_then(|content| content.get("applyChannelParameters"))
+        .and_then(wire::seed)
+    else {
+        return;
+    };
+    let Ok(nodes) = nodes(app) else { return };
+    if let Err(error) = nodes.seed(home, call, leg, seed).await {
+        tracing::warn!(%error, "a call leg's bandwidth seed wasn't handed to its media node");
+    }
+}
+
 fn home_of(call: &Call) -> Result<&MediaHome, Failure> {
     call.media.as_ref().ok_or(Failure::Refused(Refusal::Gone))
 }
@@ -106,6 +121,9 @@ pub(super) async fn start(app: &App, caller: &Caller, asked: Start<'_>, body: &V
         super::ops::ring(app, &call.id, &invitation, endpoints).await;
     }
     carry_out(app, &call, out).await;
+    if let (Some(home), Some(leg)) = (call.media.as_ref(), call.party(Seat::CALLER).leg.as_ref()) {
+        seed_leg(app, home, &call.id, &leg.id, Some(asked.offer)).await;
+    }
     Ok(Json(wire::conversation(&origin, region, &call)).into_response())
 }
 
@@ -267,7 +285,9 @@ pub(super) async fn accept(app: &App, caller: &Caller, key: Key<'_>, body: &Valu
     let call = kept.call;
     let seat = call.seat_of(&caller.id).ok_or(Refusal::Missing)?;
     let leg = call.answerable(seat)?;
+    let content = body.pointer("/callAcceptance/mediaContent");
     nodes(app)?.answer_leg(home_of(&call)?, &call.id, leg, &answer).await?;
+    seed_leg(app, home_of(&call)?, &call.id, leg, content).await;
     let answered = step(app, key, caller, |call, seat, at, out| {
         call.group_accept(seat, (leg, &endpoint), (links.clone(), body), at, out)
     })
@@ -293,13 +313,44 @@ pub(super) async fn renegotiate(app: &App, caller: &Caller, key: Key<'_>, body: 
             return Ok(StatusCode::OK.into_response());
         }
     }
+    let leg = &leg_of(&call, seat)?.id;
     let answer = nodes(app)?
-        .renegotiate_leg(home_of(&call)?, &call.id, &leg_of(&call, seat)?.id, &offer)
+        .renegotiate_leg(home_of(&call)?, &call.id, leg, &offer)
         .await?;
+    let offered = body.pointer("/mediaNegotiation/mediaContent");
+    seed_leg(app, home_of(&call)?, &call.id, leg, offered).await;
     step(app, key, caller, |call, seat, at, out| {
         call.group_renegotiated(seat, (&endpoint, links.clone()), &content(&answer), at, out)
     })
     .await?;
+    Ok(StatusCode::OK.into_response())
+}
+
+/// `updateMediaDescriptions` of a party in a group call: what it sends now (its camera, its screen) goes into the
+/// roster, which tells the others. A body that describes nothing changes nothing.
+pub(super) async fn describe(app: &App, caller: &Caller, key: Key<'_>, body: &Value) -> Result<Response, Failure> {
+    match wire::showing(body) {
+        Some(showing) => {
+            step(app, key, caller, |call, seat, at, out| {
+                call.group_described(seat, showing, at, out)
+            })
+            .await?;
+        }
+        None => {
+            step(app, key, caller, |call, seat, _, _| call.described(seat)).await?;
+        }
+    }
+    Ok(StatusCode::OK.into_response())
+}
+
+/// `applyChannelParameters` of a party in a group call: a bandwidth seed among them goes to its leg on the media node.
+pub(super) async fn parameters(app: &App, caller: &Caller, key: Key<'_>, body: &Value) -> Result<Response, Failure> {
+    let kept = repo::find(&app.db, key).await?.ok_or(Refusal::Missing)?;
+    let call = kept.call;
+    let seat = call.seat_of(&caller.id).ok_or(Refusal::Missing)?;
+    call.in_call(seat)?;
+    let leg = leg_of(&call, seat)?;
+    seed_leg(app, home_of(&call)?, &call.id, &leg.id, Some(body)).await;
     Ok(StatusCode::OK.into_response())
 }
 
@@ -371,6 +422,7 @@ async fn join(app: &App, caller: &Caller, key: Key<'_>, call: &Call, body: &Valu
             return Err(error.into());
         }
     };
+    seed_leg(app, home, &call.id, &leg, body.pointer("/callInvitation/mediaContent")).await;
     let region = &app.config.region;
     let joined = step_any(app, key, |call, at, out| {
         call.join(

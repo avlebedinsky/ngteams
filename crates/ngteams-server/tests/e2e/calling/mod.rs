@@ -6,6 +6,7 @@ mod client;
 mod engines;
 mod group_media;
 mod group_signaling;
+mod group_video;
 mod held_socket;
 mod history;
 mod mixer;

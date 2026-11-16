@@ -7,6 +7,7 @@ use std::time::Duration;
 use ngteams_server::mixer::MediaNode;
 use teams_core::engine::Action;
 use teams_core::{CallAction, CallId, CallStatus, CallView, End};
+use teams_media::devices::file::PatternCamera;
 use teams_media::test_turn::TurnServer;
 use teams_media::tone::Tone;
 use teams_proto::Mri;
@@ -16,11 +17,11 @@ use super::engines::{A_TONE, B_TONE, Engine, TALK, WAIT, heard, relayed};
 use crate::support::{Backend, TestServer, backends, redis_url};
 use crate::trouter::{Account, ORIGIN};
 
-const C_TONE: Tone = Tone {
+pub(super) const C_TONE: Tone = Tone {
     hz: 880.0,
     amplitude: 0.5,
 };
-const SILENT: Tone = Tone {
+pub(super) const SILENT: Tone = Tone {
     hz: 440.0,
     amplitude: 0.0,
 };
@@ -38,7 +39,7 @@ fn on_loopback(config: &mut ngteams_server::config::Config) {
 }
 
 /// A server with its media node, the loopback TURN relay it names, and a directory for the recordings.
-struct Mixed {
+pub(super) struct Mixed {
     server: TestServer,
     node: Option<MediaNode>,
     turn: TurnServer,
@@ -46,7 +47,7 @@ struct Mixed {
 }
 
 impl Mixed {
-    async fn start(backend: Backend) -> Self {
+    pub(super) async fn start(backend: Backend) -> Self {
         Self::start_with(backend, |_| {}).await
     }
 
@@ -71,17 +72,23 @@ impl Mixed {
         }
     }
 
-    fn node(&self) -> &MediaNode {
+    pub(super) fn node(&self) -> &MediaNode {
         self.node.as_ref().unwrap()
     }
 
     /// A new account's engine, its microphone `tone`.
-    async fn engine(&self, name: &str, tone: Tone) -> Engine {
+    pub(super) async fn engine(&self, name: &str, tone: Tone) -> Engine {
+        self.engine_filmed(name, tone, PatternCamera::default()).await
+    }
+
+    /// [`Mixed::engine`] with its camera's picture of the shape `camera`.
+    pub(super) async fn engine_filmed(&self, name: &str, tone: Tone, camera: PatternCamera) -> Engine {
         let tag = uuid::Uuid::new_v4().simple().to_string();
         let upn = format!("{}-{tag}@own.test", name.to_lowercase());
         let id = self.server.add_user(&upn, name).await;
         let account = Account::sign_in(&self.server, &upn, &id).await;
-        Engine::start(&account, name, (&self.server, &self.server), (tone, self.dir.path())).await
+        let nodes = (&self.server, &self.server);
+        Engine::start_filmed(&account, name, nodes, (tone, self.dir.path(), camera)).await
     }
 
     /// A member with no client.
@@ -92,7 +99,7 @@ impl Mixed {
     }
 
     /// The call that isn't over, its id.
-    async fn open_call(&self) -> String {
+    pub(super) async fn open_call(&self) -> String {
         let calls = ngteams_server::calling::open_calls(&self.server.app.db).await.unwrap();
         let [call] = calls.as_slice() else {
             panic!("one call: {calls:?}");
@@ -102,7 +109,7 @@ impl Mixed {
 
     /// Until the node's room of `call` has `legs` legs connected with their control plane up (a callee that doesn't
     /// answer has a leg that never connects).
-    async fn connected(&self, call: &str, legs: usize) {
+    pub(super) async fn connected(&self, call: &str, legs: usize) {
         let deadline = tokio::time::Instant::now() + WAIT;
         loop {
             let room = self.node().room(call).await.unwrap_or_default();
@@ -117,7 +124,7 @@ impl Mixed {
         }
     }
 
-    async fn stop(mut self) {
+    pub(super) async fn stop(mut self) {
         if let Some(node) = self.node.take() {
             node.stop().await;
         }
@@ -127,7 +134,7 @@ impl Mixed {
 }
 
 /// The group chat `first` makes with `others` and the members `quiet`, once every other engine has it.
-async fn group_chat(first: &Engine, others: &[&Engine], quiet: &[String]) -> String {
+pub(super) async fn group_chat(first: &Engine, others: &[&Engine], quiet: &[String]) -> String {
     let mut members: Vec<Mri> = others.iter().map(|engine| Mri::new(engine.mri.clone())).collect();
     members.extend(quiet.iter().map(Mri::new));
     let create = Action::CreateChat {
@@ -172,7 +179,7 @@ async fn one_client_hears_its_own_silence_and_gets_the_control_planes_ack() {
 }
 
 /// Each engine's call id once all are connected: the first places the call, the others answer their rings.
-async fn connect_all(chat: &str, engines: &mut [&mut Engine]) -> Vec<CallId> {
+pub(super) async fn connect_all(chat: &str, engines: &mut [&mut Engine]) -> Vec<CallId> {
     let (first, rest) = engines.split_first_mut().unwrap();
     let call = first.call(CallAction::Call { chat: chat.to_owned() }).await;
     first.status(call, &CallStatus::Connected).await;
@@ -187,7 +194,7 @@ async fn connect_all(chat: &str, engines: &mut [&mut Engine]) -> Vec<CallId> {
 }
 
 /// Each engine hangs up its call, and waits for its end.
-async fn hang_up_all(engines: &mut [&mut Engine], calls: &[CallId]) {
+pub(super) async fn hang_up_all(engines: &mut [&mut Engine], calls: &[CallId]) {
     for (engine, call) in engines.iter_mut().zip(calls) {
         engine.call(CallAction::HangUp { call: *call }).await;
         engine.ended(*call).await;

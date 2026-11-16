@@ -28,6 +28,15 @@ pub struct Sources {
     pub data: u32,
 }
 
+impl Sources {
+    /// The stream id of the party's first receiving video line on its media node: the others count on from it, within
+    /// the ids the party was given.
+    #[must_use]
+    pub fn first_slot(self) -> u32 {
+        self.data + 1
+    }
+}
+
 /// An offer or an answer, as a call's requests carry it (`mediaContent`'s `blob` and `contentType`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Sdp {
@@ -71,6 +80,12 @@ pub trait MediaNodes: Send + Sync + Debug {
 
     /// A party's new offer on its leg: the node's answer.
     async fn renegotiate_leg(&self, home: &MediaHome, call: &str, leg: &str, offer: &Sdp) -> Result<Sdp, MediaError>;
+
+    /// The party seeded the bandwidth its leg may be sent at (`applyChannelParameters`' `sendSideBWSeed`, bits a
+    /// second): no video goes to a leg before.
+    async fn seed(&self, _home: &MediaHome, _call: &str, _leg: &str, _seed: u64) -> Result<(), MediaError> {
+        Ok(())
+    }
 
     /// The party left, declined or wasn't reached.
     async fn delete_leg(&self, home: &MediaHome, call: &str, leg: &str) -> Result<(), MediaError>;

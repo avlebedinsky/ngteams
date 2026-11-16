@@ -1,12 +1,15 @@
 //! A call's room: its legs and its 20 ms tick, on the node's monotonic clock. Each tick takes a frame from every leg,
 //! mixes for each listener every active source but its own, and sends the mix; the dominant speakers are told when
-//! they change (at most every 300 ms) and to a leg once its control plane comes up.
+//! they change (at most every 300 ms) and to a leg once its control plane comes up. Video is forwarded as it comes:
+//! each frame of a camera or a screen goes onto every receiving line whose source request named it ([`super::video`]).
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use super::audio::{self, Activity, FRAME, Heard, Speakers};
-use super::leg::Leg;
+use super::control::SourceRequest;
+use super::leg::{Driven, Leg};
+use super::video::{Asked, Frame, Slot};
 
 /// The tick.
 pub(crate) const TICK: Duration = Duration::from_millis(20);
@@ -24,6 +27,10 @@ pub(crate) struct Room {
     told_at: Option<Instant>,
     /// When the next tick is due.
     pub next_tick: Instant,
+    /// What each receiving line shows, by its leg and its stream id.
+    slots: BTreeMap<(String, u32), Slot>,
+    /// When each source was last asked for a keyframe.
+    asked: Asked,
 }
 
 impl Room {
@@ -35,6 +42,8 @@ impl Room {
             told: Vec::new(),
             told_at: None,
             next_tick: now + TICK,
+            slots: BTreeMap::new(),
+            asked: Asked::default(),
         }
     }
 
@@ -45,10 +54,77 @@ impl Room {
             self.speakers.forget(leg.sources.audio);
         }
         self.activity.remove(id);
+        self.slots.retain(|(leg, _), _| leg != id);
+    }
+
+    /// What the leg `id`'s `Rtc` gave: its control plane up, its source requests, its decoders' wish for a keyframe,
+    /// and its camera's and screen's frames, forwarded.
+    pub(crate) fn driven(&mut self, id: &str, driven: Driven, now: Instant) {
+        if driven.control_up {
+            self.control_up(id);
+        }
+        for request in driven.requests {
+            self.request(id, request, now);
+        }
+        for stream in driven.keyframes {
+            let source = self.slots.get(&(id.to_owned(), stream)).and_then(Slot::source);
+            if let Some(source) = source {
+                self.ask_keyframe(source, now);
+            }
+        }
+        for frame in &driven.frames {
+            self.forward(id, frame, now);
+        }
+    }
+
+    /// The leg `id`'s line `request.stream` is to show `request.source`: from that source's next keyframe, asked for.
+    fn request(&mut self, id: &str, request: SourceRequest, now: Instant) {
+        let slot = self.slots.entry((id.to_owned(), request.stream)).or_default();
+        if slot.show(request.source)
+            && let Some(source) = slot.source()
+        {
+            self.ask_keyframe(source, now);
+        }
+    }
+
+    /// `frame` of the leg `from` onto every other leg's line that shows its source; a line still waiting for a keyframe
+    /// has the source asked for one.
+    fn forward(&mut self, from: &str, frame: &Frame, now: Instant) {
+        let mut wanted = false;
+        for ((id, stream), slot) in &mut self.slots {
+            if id == from || slot.source() != Some(frame.source) {
+                continue;
+            }
+            let Some(leg) = self.legs.get_mut(id).filter(|leg| leg.seed.is_some()) else {
+                continue;
+            };
+            match slot.pass(frame.keyframe, frame.time) {
+                Some(time) => {
+                    leg.write_video(*stream, time, frame, now);
+                }
+                None => wanted = true,
+            }
+        }
+        if wanted {
+            self.ask_keyframe(frame.source, now);
+        }
+    }
+
+    /// Asks the leg whose camera or screen `source` is for a keyframe, unless it was asked a moment ago.
+    fn ask_keyframe(&mut self, source: u32, now: Instant) {
+        let owner = self
+            .legs
+            .values_mut()
+            .find(|leg| leg.sources.video == source || leg.sources.sharing == source);
+        if let Some(leg) = owner
+            && self.asked.due(source, now)
+        {
+            leg.request_keyframe(source);
+        }
     }
 
     /// A leg's control plane came up: it hears who spoke so far.
-    pub(crate) fn control_up(&mut self, id: &str) {
+    fn control_up(&mut self, id: &str) {
         let history = self.speakers.history().to_vec();
         if let Some(leg) = self.legs.get_mut(id)
             && !history.is_empty()

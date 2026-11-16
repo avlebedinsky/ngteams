@@ -1,7 +1,9 @@
 //! The mixer's side of the dialect: host candidates written as they are, one data stream for the session, and the
 //! stream ids the mixer names its lines by. Synthetic SDP in str0m's shape.
 
+use std::fmt::Write as _;
 use teams_sdp::sdp::{NgcSdp, NgcSession, SdpError, StreamIds};
+
 use teams_sdp::{SdpAnswer, SdpOffer};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -123,4 +125,51 @@ fn the_clients_side_still_refuses_a_host_candidate() {
         client.write_offer(&SdpOffer::new(str0m_offer(2))),
         Err(SdpError::LocalCandidate(kind)) if kind == "host"
     ));
+}
+
+/// An offer in str0m's shape with `videos` H.264 lines (`v0`, `v1`, …) between audio and data, each going both ways.
+fn str0m_offer_with_video(videos: usize) -> String {
+    let base = str0m_offer(2);
+    let (head, data) = base.split_once("m=application").unwrap_or((&base, ""));
+    let transport = "a=ice-ufrag:Ufrag0123\r\na=ice-pwd:Password0123456789abcd\r\n\
+        a=fingerprint:sha-256 00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF\r\n\
+        a=setup:actpass\r\n";
+    let mut lines = String::new();
+    let mut bundle = String::new();
+    for n in 0..videos {
+        let _ = write!(
+            lines,
+            "m=video 9 UDP/TLS/RTP/SAVPF 107 99\r\nc=IN IP4 0.0.0.0\r\n{transport}a=mid:v{n}\r\na=sendrecv\r\n\
+             a=rtcp-mux\r\na=rtpmap:107 H264/90000\r\n\
+             a=fmtp:107 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f\r\n\
+             a=rtcp-fb:107 nack pli\r\na=rtpmap:99 rtx/90000\r\na=fmtp:99 apt=107\r\na=ssrc:{} cname:mixer\r\n",
+            900 + n
+        );
+        let _ = write!(bundle, " v{n}");
+    }
+    format!("{head}{lines}m=application{data}")
+        .replace("a=group:BUNDLE au da", &format!("a=group:BUNDLE au{bundle} da"))
+}
+
+#[test]
+fn each_receiving_line_of_the_mixers_names_a_stream_of_its_own() -> TestResult {
+    let mut mixer = NgcSession::mixer();
+    mixer.set_stream_ids(IDS);
+    mixer.set_slot_stream_ids(1004);
+    let offer = mixer.write_offer(&SdpOffer::new(str0m_offer_with_video(4)))?;
+    // the main line, two receiving lines and the sharing line (the last video line)
+    assert_eq!(
+        values(&offer, "video", "x-source-streamid"),
+        ["1001", "1004", "1005", "1002"]
+    );
+    assert_eq!(
+        values(&offer, "video", "label"),
+        ["main-video", "main-video", "main-video", "applicationsharing-video"]
+    );
+    // without the slots' ids, each video line is named as the main one
+    let mut unset = NgcSession::mixer();
+    unset.set_stream_ids(IDS);
+    let offer = unset.write_offer(&SdpOffer::new(str0m_offer_with_video(3)))?;
+    assert_eq!(values(&offer, "video", "x-source-streamid"), ["1001", "1001", "1002"]);
+    Ok(())
 }

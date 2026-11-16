@@ -61,6 +61,13 @@ pub(crate) enum Command {
         offer: Sdp,
         reply: Reply<Sdp>,
     },
+    /// The leg seeded its bandwidth (bits a second).
+    Seed {
+        call: String,
+        leg: String,
+        seed: u64,
+        reply: Reply<()>,
+    },
     DeleteLeg {
         call: String,
         leg: String,
@@ -189,6 +196,9 @@ impl Node {
             } => {
                 let _ = reply.send(self.leg(&call, &leg).and_then(|leg| Ok(leg.renegotiate(&offer, now)?)));
             }
+            Command::Seed { call, leg, seed, reply } => {
+                let _ = reply.send(self.leg(&call, &leg).map(|leg| leg.seed = Some(seed)));
+            }
             Command::DeleteLeg { call, leg, reply } => {
                 if let Some(room) = self.rooms.get_mut(&call) {
                     room.remove(&leg);
@@ -263,19 +273,21 @@ impl Node {
             }
         };
         for room in rooms.values_mut() {
-            let mut up = Vec::new();
+            let mut driven = Vec::new();
             for (id, leg) in &mut room.legs {
                 leg.tick(now);
-                if leg.drive(now, &mut send).control_up {
-                    up.push(id.clone());
-                }
+                driven.push((id.clone(), leg.drive(now, &mut send)));
             }
-            for id in up {
-                room.control_up(&id);
+            for (id, driven) in driven {
+                room.driven(&id, driven, now);
             }
             room.run_ticks(now);
-            for leg in room.legs.values_mut() {
-                leg.drive(now, &mut send);
+            let mut driven = Vec::new();
+            for (id, leg) in &mut room.legs {
+                driven.push((id.clone(), leg.drive(now, &mut send)));
+            }
+            for (id, driven) in driven {
+                room.driven(&id, driven, now);
             }
         }
         if now.duration_since(self.judged) >= HEALTH_EVERY {

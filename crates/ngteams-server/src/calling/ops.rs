@@ -384,10 +384,20 @@ impl Leg<'_> {
             ("callAcceptance", "acknowledge") => self.acknowledge_acceptance().await,
             ("active", "hold") => self.hold().await,
             ("holdSession", "resume") => self.resume().await,
-            ("active", "updateMediaDescriptions") | ("mcProxy", "applyChannelParameters") => {
-                self.simple(Call::described).await
-            }
+            ("active", "updateMediaDescriptions") | ("mcProxy", "applyChannelParameters") => self.lines(op).await,
             _ => Err(Refusal::Missing.into()),
+        }
+    }
+
+    /// A party's media lines described again, or its channel parameters: a group call's tell the roster and the media
+    /// node; a 1:1 call's change nothing anyone is told.
+    async fn lines(&self, op: &str) -> Result<Response, Failure> {
+        match (self.group, op) {
+            (true, "updateMediaDescriptions") => {
+                super::group::describe(self.app, self.caller, self.key, self.body).await
+            }
+            (true, _) => super::group::parameters(self.app, self.caller, self.key, self.body).await,
+            (false, _) => self.simple(Call::described).await,
         }
     }
 

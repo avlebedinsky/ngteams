@@ -146,6 +146,16 @@ pub(crate) struct Party {
     /// A group call party's renegotiation whose answer waits for its acknowledgement.
     #[serde(default)]
     pub answered: Option<Pending>,
+    /// What a group call party sends, as its media descriptions said last.
+    #[serde(default)]
+    pub showing: Showing,
+}
+
+/// What a group call party sends besides its audio: its camera, its screen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Showing {
+    pub camera: bool,
+    pub sharing: bool,
 }
 
 /// A group call party's renegotiation the media node answered: its number, and when (Unix milliseconds).

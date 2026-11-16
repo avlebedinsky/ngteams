@@ -142,6 +142,10 @@ pub(crate) fn router(internal: Arc<Internal>) -> Router {
         )
         .route("/internal/mixer/v1/rooms/{call}/legs/{leg}/answer", post(answer))
         .route("/internal/mixer/v1/rooms/{call}/legs/{leg}/offer", post(offer))
+        .route(
+            "/internal/mixer/v1/rooms/{call}/legs/{leg}/parameters",
+            post(parameters),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(BODY_LIMIT))
         .with_state(internal)
 }
@@ -160,6 +164,12 @@ pub(crate) struct Answer {
 #[derive(Deserialize)]
 pub(crate) struct Offer {
     pub offer: Sdp,
+}
+
+/// A leg's channel parameters: the bandwidth it seeded (bits a second).
+#[derive(Deserialize)]
+pub(crate) struct Parameters {
+    pub seed: u64,
 }
 
 async fn put_leg(
@@ -217,6 +227,24 @@ async fn offer(
         })
         .await??;
     Ok(Json(json!({"answer": answer})).into_response())
+}
+
+async fn parameters(
+    State(internal): Shared,
+    Path((call, leg)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<Parameters>,
+) -> Result<StatusCode, Refused> {
+    internal.admit(&headers).await?;
+    internal
+        .ask(|reply| Command::Seed {
+            call,
+            leg,
+            seed: body.seed,
+            reply,
+        })
+        .await??;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn delete_leg(

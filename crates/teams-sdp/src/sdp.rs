@@ -577,6 +577,20 @@ struct MixerSide {
     /// The data line's stream, drawn once: an answer that names another each time is a changed answer.
     data_ssrc: u32,
     ids: Option<StreamIds>,
+    /// The stream id of the first receiving video line, the next ones counting on ([`NgcSession::set_slot_stream_ids`]).
+    slots: Option<u32>,
+}
+
+impl MixerSide {
+    /// The stream id a line labelled `label` is named by, it being the `video`-th video line labelled `main-video` (the
+    /// first is the main line, the others receiving lines).
+    fn stream_id(self, label: &str, video: u32) -> Option<u32> {
+        let ids = self.ids?;
+        match (label, self.slots) {
+            ("main-video", Some(first)) if video > 0 => Some(first + video - 1),
+            _ => ids.of(label),
+        }
+    }
 }
 
 /// How a session writes: the client's side or a mixer's.
@@ -635,6 +649,7 @@ impl NgcSession {
             mixer: Some(MixerSide {
                 data_ssrc: fresh_ssrc(),
                 ids: None,
+                slots: None,
             }),
             ..Self::default()
         }
@@ -644,6 +659,14 @@ impl NgcSession {
     pub fn set_stream_ids(&mut self, ids: StreamIds) {
         if let Some(mixer) = &mut self.mixer {
             mixer.ids = Some(ids);
+        }
+    }
+
+    /// The stream id a mixer's session names its first receiving video line by (each video line labelled `main-video`
+    /// after the main one), the next ones counting on from it; until set, every such line is named as the main one.
+    pub fn set_slot_stream_ids(&mut self, first: u32) {
+        if let Some(mixer) = &mut self.mixer {
+            mixer.slots = Some(first);
         }
     }
 
@@ -1191,7 +1214,12 @@ fn write(parsed: &Parsed, names: &[Line], writing: Writing) -> Result<NgcSdp, Sd
         .ok_or(SdpError::Unwritable("no relayed candidate"))?;
     let mut out = Vec::new();
     write_session(parsed, names, &mut out)?;
+    let mut video = 0;
     for ((section, name), ours) in parsed.media.iter().zip(names).zip(candidates) {
+        let stream = writing.mixer.and_then(|mixer| mixer.stream_id(&name.label, video));
+        if section.kind == Kind::Video && name.label == Kind::Video.label() {
+            video += 1;
+        }
         if section.rejected() {
             // a rejected line names the static format the web client's rejected lines name (`34` for video; `0`, PCMU,
             // for audio), whatever libwebrtc listed
@@ -1208,6 +1236,7 @@ fn write(parsed: &Parsed, names: &[Line], writing: Writing) -> Result<NgcSdp, Sd
             let written = Written {
                 candidates: ours.lines,
                 at,
+                stream,
             };
             write_section(section, name, writing, written, &mut out)?;
         }
@@ -1221,6 +1250,8 @@ fn write(parsed: &Parsed, names: &[Line], writing: Writing) -> Result<NgcSdp, Sd
 struct Written {
     candidates: Vec<String>,
     at: (String, String),
+    /// The stream id a mixer names the line by.
+    stream: Option<u32>,
 }
 
 fn write_session(parsed: &Parsed, names: &[Line], out: &mut Vec<String>) -> Result<(), SdpError> {
@@ -1321,6 +1352,7 @@ fn write_section(
     let Written {
         candidates,
         at: (address, port),
+        stream,
     } = written;
     let family = if address.contains(':') { "IP6" } else { "IP4" };
     let formats = match section.kind {
@@ -1361,7 +1393,7 @@ fn write_section(
         out.push("a=rtcp-rsize".to_owned());
     }
     out.push(format!("a=label:{}", name.label));
-    if let Some(id) = writing.mixer.and_then(|mixer| mixer.ids?.of(&name.label)) {
+    if let Some(id) = stream {
         out.push(format!("a=x-source-streamid:{id}"));
     }
     if section.kind == Kind::Data {

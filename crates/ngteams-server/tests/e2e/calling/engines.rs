@@ -4,8 +4,9 @@
 //! 1:1 call connects, a tone and video cross both ways, mute and hold show at the far end, and the chat tells the call.
 //! The same with each client on another node.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use teams_core::engine::{self, Action, EngineHandle, EngineOptions, Event, Parts, Push};
@@ -14,7 +15,7 @@ use teams_core::{
     Relay, VideoOutput,
 };
 use teams_media::devices::file::{AudioInput, FileDevices, FrameCounter, Pacing, PatternCamera};
-use teams_media::devices::{VideoSink, wav};
+use teams_media::devices::{DeviceError, VideoFrame, VideoSink, wav};
 use teams_media::processing::ProcessingConfig;
 use teams_media::session::SessionConfig;
 use teams_media::test_turn::{self, TurnServer};
@@ -36,7 +37,7 @@ pub(super) const TALK: Duration = Duration::from_secs(2);
 /// The far tone is heard at least this loud in a recording.
 pub(super) const HEARD: f32 = 0.25;
 /// Frames a side must have decoded of the other's test pattern.
-const FRAMES: u64 = 20;
+pub(super) const FRAMES: u64 = 20;
 pub(super) const A_TONE: Tone = Tone {
     hz: 440.0,
     amplitude: 0.5,
@@ -46,16 +47,48 @@ pub(super) const B_TONE: Tone = Tone {
     amplitude: 0.5,
 };
 
-/// What an engine's calls showed: the far end's decoded frames and its own camera's.
+/// What an engine's calls showed: the far end's decoded frames (all lines together, and each line apart) and its own
+/// camera's.
 #[derive(Clone, Default)]
 pub(super) struct Shown {
     remote: FrameCounter,
     preview: FrameCounter,
+    lines: Arc<Mutex<BTreeMap<usize, Seen>>>,
+}
+
+/// What one video line showed: how many frames, and the last one's size.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Seen {
+    pub(super) frames: u64,
+    pub(super) width: u32,
+    pub(super) height: u32,
+}
+
+/// One line's sink: counted with all the others, and apart.
+struct LineSink {
+    all: FrameCounter,
+    line: usize,
+    lines: Arc<Mutex<BTreeMap<usize, Seen>>>,
+}
+
+impl VideoSink for LineSink {
+    fn show(&mut self, frame: &VideoFrame) -> Result<(), DeviceError> {
+        let mut lines = self.lines.lock().unwrap_or_else(PoisonError::into_inner);
+        let seen = lines.entry(self.line).or_default();
+        seen.frames += 1;
+        (seen.width, seen.height) = (frame.width, frame.height);
+        drop(lines);
+        self.all.show(frame)
+    }
 }
 
 impl VideoOutput for Shown {
-    fn remote(&self, _line: usize) -> Box<dyn VideoSink> {
-        Box::new(self.remote.clone())
+    fn remote(&self, line: usize) -> Box<dyn VideoSink> {
+        Box::new(LineSink {
+            all: self.remote.clone(),
+            line,
+            lines: Arc::clone(&self.lines),
+        })
     }
 
     fn preview(&self) -> Option<Box<dyn VideoSink>> {
@@ -79,8 +112,18 @@ impl Engine {
     pub(super) async fn start(
         account: &Account,
         name: &str,
-        (socket, http): (&TestServer, &TestServer),
+        nodes: (&TestServer, &TestServer),
         (tone, dir): (Tone, &Path),
+    ) -> Self {
+        Self::start_filmed(account, name, nodes, (tone, dir, PatternCamera::default())).await
+    }
+
+    /// [`Engine::start`] with its camera's picture of the shape `camera`.
+    pub(super) async fn start_filmed(
+        account: &Account,
+        name: &str,
+        (socket, http): (&TestServer, &TestServer),
+        (tone, dir, camera): (Tone, &Path, PatternCamera),
     ) -> Self {
         let cloud = Cloud::own(ORIGIN).unwrap();
         let mri = Mri::new(account.mri.clone());
@@ -101,7 +144,7 @@ impl Engine {
             devices: Arc::new(FileDevices {
                 input: AudioInput::Tone(tone),
                 recording: Some(recording.clone()),
-                camera: PatternCamera::default(),
+                camera,
                 pacing: Pacing::RealTime,
             }),
             relay: Relay::Teams,
@@ -238,6 +281,12 @@ impl Engine {
             _ => None,
         })
         .await
+    }
+
+    /// What its video line `line` showed so far.
+    pub(super) fn seen(&self, line: usize) -> Seen {
+        let lines = self.video.lines.lock().unwrap_or_else(PoisonError::into_inner);
+        lines.get(&line).copied().unwrap_or_default()
     }
 
     pub(super) async fn shut_down(self) {

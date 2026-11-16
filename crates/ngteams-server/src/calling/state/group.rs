@@ -7,14 +7,15 @@ use serde_json::Value;
 
 use super::{
     At, Call, KEEP_ALIVE, KEEP_ALIVE_SLACK, Kind, Leg, NEGOTIATION_WAIT_MS, Out, Outcome, Party, Pending, Phase,
-    Refusal, Reserved, Seat, Status, Watcher,
+    Refusal, Reserved, Seat, Showing, Status, Watcher,
 };
 use crate::calling::media::Sources;
 use crate::calling::wire::{self, Links};
 
-/// The first party's first source id; each party's sources are this far apart.
+/// The first party's first source id; each party's sources are this far apart: its audio, video, sharing and data, then
+/// its receiving lines' stream ids ([`Sources::first_slot`], nine of them).
 const FIRST_SOURCE: u32 = 1000;
-const SOURCE_STEP: u32 = 10;
+const SOURCE_STEP: u32 = 20;
 
 impl Call {
     /// The sources of the next party to get a leg.
@@ -213,6 +214,7 @@ impl Call {
 
     fn let_go(party: &mut Party, out: &mut Out) {
         party.ring_due = None;
+        party.showing = Showing::default();
         if let Some(leg) = party.leg.take() {
             out.released.extend(leg.ids().map(str::to_owned));
         }
@@ -470,6 +472,23 @@ impl Call {
         Ok(())
     }
 
+    /// A party in the call described its media lines again (`updateMediaDescriptions`): what it sends now is told in
+    /// the roster when it changed, so the others ask the media node for its camera or its screen.
+    pub(crate) fn group_described(
+        &mut self,
+        seat: Seat,
+        showing: Showing,
+        at: At<'_>,
+        out: &mut Out,
+    ) -> Result<(), Refusal> {
+        self.in_call(seat)?;
+        if self.party(seat).showing != showing {
+            self.party_mut(seat).showing = showing;
+            self.tell_group(at.origin, &[seat], None, out);
+        }
+        Ok(())
+    }
+
     /// Whether the party's last renegotiation answer waits for its acknowledgement at `now`. One that waited
     /// [`NEGOTIATION_WAIT_MS`] is taken as lost: the client never sends it again.
     pub(crate) fn waits_for_acknowledgement(&self, seat: Seat, now: i64) -> bool {
@@ -700,7 +719,7 @@ mod tests {
         let sources: Vec<u32> = (0..4)
             .map(|seat| call.party(Seat(seat)).leg.as_ref().unwrap().sources.audio)
             .collect();
-        assert_eq!(sources, [1000, 1010, 1020, 1030]);
+        assert_eq!(sources, [1000, 1020, 1040, 1060]);
         // the caller, in the call, rings nowhere: its links aren't a ringing leg's
         let mut caller = call.clone();
         assert_eq!(
@@ -889,7 +908,7 @@ mod tests {
         // e joins: a new seat, then in the call with the node's answer at its own acceptance
         let reserved = call.reserve(&party("e"), "leg-e").unwrap();
         let seat = reserved.seat;
-        assert_eq!((seat, reserved.sources.audio), (Seat(4), 1040));
+        assert_eq!((seat, reserved.sources.audio), (Seat(4), 1080));
         assert_eq!(legs(&call, seat), ["leg-e"]);
         assert_eq!(
             call.join(
@@ -1354,5 +1373,46 @@ mod tests {
         let refused = wire::running_elsewhere(ORIGIN, &call);
         assert_eq!(refused["conversationEnd"]["subCode"], 5704);
         assert_eq!(wire::add_failure("8:orgid:x")["participants"]["8:orgid:x"]["code"], 580);
+    }
+
+    #[test]
+    fn a_camera_or_a_screen_described_is_told_in_the_roster_once() {
+        let (mut call, _) = started();
+        accepted(&mut call, 1, "B", 1_005_000);
+        let camera = Showing {
+            camera: true,
+            sharing: false,
+        };
+        let mut out = Out::default();
+        call.group_described(Seat(1), camera, at(1_006_000), &mut out).unwrap();
+        assert_eq!(
+            paths(&out),
+            [("A", "rosterUpdate"), ("B", "rosterUpdate"), ("C", "rosterUpdate")]
+        );
+        let streams = &out.deliveries[0].body["participants"]["8:orgid:b"]["endpoints"]["ep-B"]["call"]["mediaStreams"];
+        assert_eq!(streams[1]["direction"], "sendrecv");
+        assert_eq!(streams.as_array().unwrap().len(), 2);
+        // the same again tells nothing
+        let mut again = Out::default();
+        call.group_described(Seat(1), camera, at(1_006_500), &mut again)
+            .unwrap();
+        assert!(again.deliveries.is_empty());
+        let both = Showing {
+            camera: true,
+            sharing: true,
+        };
+        let mut out = Out::default();
+        call.group_described(Seat(1), both, at(1_007_000), &mut out).unwrap();
+        let streams = &out.deliveries[0].body["participants"]["8:orgid:b"]["endpoints"]["ep-B"]["call"]["mediaStreams"];
+        assert_eq!(streams[2]["label"], "applicationsharing-video");
+        assert_eq!(streams[2]["sourceId"], 1022);
+        assert_eq!(streams[2]["direction"], "sendonly");
+        // a party not in the call describes nothing; one that leaves shows nothing more
+        assert_eq!(
+            call.group_described(Seat(2), both, at(1_007_000), &mut Out::default()),
+            Err(Refusal::Forbidden)
+        );
+        call.group_leave(Seat(1), &json!({}), at(1_008_000), &mut Out::default());
+        assert_eq!(call.party(Seat(1)).showing, Showing::default());
     }
 }
