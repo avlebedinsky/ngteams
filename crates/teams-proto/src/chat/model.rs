@@ -1031,8 +1031,9 @@ impl Unshown {
 }
 
 /// What a message's `properties` (`properties`, as the message carried them or the store keeps them) hold that this
-/// build can't show: `files` entries it can't read ([`SharedFiles::unread`]), and `cards` other than an empty list (a
-/// JSON string of one, as captured, or a list), each kept as it came. A missing one is nothing to show.
+/// build can't show: `files` entries it can't read ([`SharedFiles::unread`]), and `cards` (a JSON string of a list, as
+/// captured, or a list) that hold a card this build doesn't draw ([`crate::chat::card::message_cards`]), each kept as
+/// it came. A missing one, or an empty list, is nothing to show.
 #[must_use]
 pub fn unshown_parts(properties: &Map<String, Value>) -> Vec<Unshown> {
     unshown_parts_in(&crate::Cloud::Microsoft, properties)
@@ -1049,7 +1050,9 @@ pub fn unshown_parts_in(cloud: &crate::Cloud, properties: &Map<String, Value>) -
     if let Some(raw) = shared_files_in(cloud, properties.get("files")).unread {
         parts.push(Unshown::Files(raw));
     }
-    if let Some(raw) = unknown("cards") {
+    if let Some(raw) =
+        unknown("cards").filter(|raw| !crate::chat::card::message_cards(Some(raw)).is_some_and(|cards| cards.drawn()))
+    {
         parts.push(Unshown::Cards(raw));
     }
     parts

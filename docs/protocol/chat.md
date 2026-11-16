@@ -595,6 +595,52 @@ screenshot of Teams.
   thumbnail the entry names in that form (`teams_proto::LinkPreviewPicture` on `Service::Ams`), the page's picture
   link the only thing it sends. That read's answer hasn't been seen live; a card whose picture can't be read is drawn
   without it.
+- **Another form**: a link that an app card stands for (a YouTube link) has `previewenabled: false` and a `previewurl`
+  in the gateway's `urlp/v1/url/content?url=<picture>` form (seen live 2026-11-16, [App cards](#app-cards)).
+
+## App cards
+
+How a link's app card travels and how Teams draws it, **seen live** on 2026-11-16: lab account a posted YouTube links and
+a Vimeo link in its 1:1 chat with b in the web client, and the capture kept the compose box's reads, the sent message
+and its Trouter delivery (fixture `app-card.json` is written from it, with made-up values).
+
+- **Where it comes from**: when the compose box sees a link that an app unfurls, the web client asks the app for a
+  card with an invoke on the chat service: `POST v1/agents/28:<the app's bot>/invoke`, `name`
+  `composeExtension/anonymousQueryLink` (the second link of the session: `composeExtension/queryLink`), the app's id
+  (`com.microsoft.teamspace.tab.youtube`) and `value.url` the link. The answer (`composeExtension.attachments`) holds
+  the Adaptive Card and a hero `preview` of it. The compose box shows the card under the text, with a close mark,
+  and, the first time, a line "By using YouTube, you agree to the privacy policy, terms of use, and permissions." The
+  sent message does not carry that line, and Teams does not show it after a reload.
+- **The message**: a plain `RichText/Html` message. Its `content` is the link's paragraph, then a
+  `<span itemscope itemtype="http://schema.skype.com/InputExtension" itemid="<cardClientId>">` with an empty
+  `<span itemprop="cardId">`. `properties.cards` is a JSON string of a list, one entry for each card: `appId`,
+  `appName` (`YouTube`), `appIcon`, `cardClientId` (`app-preview-card-<hex>`), `contentType`
+  (`application/vnd.microsoft.card.adaptive`) and `content`. In the sent message `appIcon` is the app's icon on
+  `res.cdn.office.net`. In the delivered message the service changed it to the async gateway's copy,
+  `urlp/v1/url/content?url=<the icon>`, and the elements had no `separator: false`. `properties.links` has the link
+  with `previewenabled: false` and a `preview` (`title`, the counts as `description`, `previewurl` the gateway's
+  `urlp/v1/url/content?url=` of YouTube's `mqdefault.jpg`), so no link preview is drawn.
+- **YouTube's card**: Adaptive Card `version` 1.6 (`fallbackText` says it needs 1.6): a `Media` element (`sources`, one
+  `video/mp4` source whose `url` is the watch link, no `poster`); the title (`size` `large`, `weight` `bolder`,
+  `maxLines` 4); the channel and "<n> views · <age>" (`isSubtle`, one line each, `spacing` `Small` and `None`); an
+  `ActionSet` (`spacing` `Medium`) with an "Open" `Action.Submit`. Its `data.msteams` is an `invoke` whose `value` is a
+  `tab/tabInfoAction`, with `tabInfo` (`contentUrl` the app's stage page with `{chat.id}`-style placeholders,
+  `websiteUrl` the watch link, `entityId` a GUID). The card's `selectAction` is the same action.
+- **How Teams draws it**: under the message's text, in the bubble, a card 448 px wide with a 16 px padding: the app's
+  20 px icon and its name (semibold) in a row, then the video's picture across the card at 16:9 with a white round
+  play mark (56 px) in its middle, then the title, the channel, the counts and an outlined "Open" button. The web
+  client reads the picture itself from `img.youtube.com/vi/<id>/maxresdefault.jpg`. When that picture is missing (an
+  old video), it shows a grey stand-in with YouTube's logo. A click on the picture plays the video in the card
+  (YouTube's embedded player). "Open" shows the YouTube app's player in a Teams dialog and sends no request. Dark mode
+  only changes the surfaces.
+- **Other sites**: a Vimeo link got no app card. It got an ordinary link preview (`previewenabled: true`, the
+  `urlp/v1/url/image/Thumbnail` picture, [Link previews](#link-previews)).
+- **The native client** reads `properties.cards` with `teams_proto::chat::card::message_cards`: an entry whose card it
+  draws is not content it can't show; any other entry still is. The video's picture is YouTube's `hqdefault.jpg` of
+  the video, which exists for every video. The client reads it through the async gateway's thumbnail, as a card's
+  pictures are read, and does not reach YouTube itself. It reads the app's icon in the same way. A click on the
+  picture or on "Open" opens the watch link in the browser, because the client has no web player. Not seen live:
+  the gateway's thumbnail of these two pictures.
 
 ## Cards
 

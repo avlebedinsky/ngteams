@@ -9,10 +9,11 @@ use base64::engine::general_purpose::STANDARD;
 use serde_json::{Value, json};
 use teams_proto::LinkPreviewPicture;
 use teams_proto::chat::card::{
-    ActionKind, ActionStyle, BotAction, CardMessage, ChoiceStyle, ContainerStyle, DateFormat, HAlign, ImageSize,
-    InputKind, Kind, Spacing, TextColor, TextInputStyle, TextPart, TextSize, TextWeight, VAlign, Via, Width,
-    card_message, input, markdown_html, plain_words, text_parts,
+    ADAPTIVE, ActionKind, ActionStyle, BotAction, CardMessage, ChoiceStyle, ContainerStyle, DateFormat, HAlign,
+    ImageSize, InputKind, Kind, Spacing, TextColor, TextInputStyle, TextPart, TextSize, TextWeight, VAlign, Via, Width,
+    card_message, input, markdown_html, message_cards, plain_words, text_parts, youtube_picture,
 };
+use teams_proto::chat::{Unshown, unshown_parts};
 
 /// A `RichText/Media_Card` content carrying `activity`, as the chat service gives it.
 fn content(activity: &Value) -> String {
@@ -653,4 +654,167 @@ fn a_card_picture_is_read_through_the_gateway() {
         None
     );
     assert_eq!(LinkPreviewPicture::card_picture_src("data:image/png;base64,AAAA"), None);
+}
+
+/// The synthetic message of a YouTube link with its app's card in `properties.cards`, in the delivered shape.
+const APP_CARD: &str = include_str!("../../../tests/fixtures/chatsvc/app-card.json");
+/// The fixture's made-up video's watch link.
+const WATCH: &str = "https://www.youtube.com/watch?v=Ab3_dEf-Gh9";
+
+fn app_card_properties() -> serde_json::Map<String, Value> {
+    let fixture: Value = serde_json::from_str(APP_CARD).unwrap();
+    fixture["read_back"]["properties"].as_object().unwrap().clone()
+}
+
+/// A `properties.cards` value of one entry.
+fn cards_of(entry: &Value) -> Value {
+    Value::String(json!([entry]).to_string())
+}
+
+/// The fixture's one app card.
+fn app_card() -> teams_proto::chat::card::Card {
+    let message = message_cards(app_card_properties().get("cards")).unwrap();
+    assert!(!message.unshown);
+    assert_eq!(message.cards.len(), 1);
+    message.cards.into_iter().next().unwrap()
+}
+
+#[test]
+fn reads_a_link_s_app_card_its_app_and_its_video() {
+    let card = app_card();
+    assert!(!card.unshown);
+    let app = card.app.as_ref().unwrap();
+    assert_eq!(app.id.as_deref(), Some("com.microsoft.teamspace.tab.youtube"));
+    assert_eq!(app.name.as_deref(), Some("YouTube"));
+    // the delivered icon is the async gateway's copy of the app's icon: the picture is the link inside it
+    assert_eq!(
+        app.icon_picture().as_deref(),
+        Some("https://res.cdn.office.net/teamsappdata/made-up/com.microsoft.teamspace.tab.youtube_largeimage.png")
+    );
+    let Kind::Media(media) = &card.body[0].kind else {
+        panic!("a media element")
+    };
+    assert_eq!(media.link(), Some(WATCH));
+    assert_eq!(media.sources[0].mime_type.as_deref(), Some("video/mp4"));
+    assert_eq!(
+        media.picture().as_deref(),
+        Some("https://i.ytimg.com/vi/Ab3_dEf-Gh9/hqdefault.jpg")
+    );
+}
+
+#[test]
+fn reads_a_link_s_app_card_its_text_and_its_open_button() {
+    let card = app_card();
+    let Kind::Text(title) = &card.body[1].kind else {
+        panic!("the title")
+    };
+    assert_eq!(title.text, "A made-up video for the test");
+    assert_eq!(
+        (title.look.size, title.look.weight),
+        (TextSize::Large, TextWeight::Bolder)
+    );
+    assert_eq!(title.max_lines, Some(4));
+    let Kind::Text(channel) = &card.body[2].kind else {
+        panic!("the channel")
+    };
+    assert!(channel.look.subtle);
+    assert_eq!(card.body[2].spacing, Spacing::Small);
+    assert_eq!(card.body[3].spacing, Spacing::None);
+    let Kind::Actions(actions) = &card.body[4].kind else {
+        panic!("the buttons")
+    };
+    assert_eq!(card.body[4].spacing, Spacing::Medium);
+    assert_eq!(actions[0].title, "Open");
+    assert_eq!(actions[0].kind, ActionKind::OpenTab(WATCH.to_owned()));
+    assert_eq!(
+        card.select_action.as_deref().map(|action| &action.kind),
+        Some(&ActionKind::OpenTab(WATCH.to_owned()))
+    );
+}
+
+#[test]
+fn a_link_s_app_card_is_shown_but_a_card_this_build_cannot_draw_is_not() {
+    assert!(unshown_parts(&app_card_properties()).is_empty());
+    let unshown = |entry: Value| {
+        let mut properties = app_card_properties();
+        properties.insert("cards".to_owned(), cards_of(&entry));
+        let parts = unshown_parts(&properties);
+        matches!(parts.as_slice(), [Unshown::Cards(_)])
+    };
+    assert!(unshown(
+        json!({"appName": "Made-up", "contentType": "application/vnd.made-up.card", "content": {}})
+    ));
+    assert!(unshown(json!({"appName": "Made-up", "contentType": ADAPTIVE})));
+    assert!(unshown(json!({
+        "contentType": ADAPTIVE,
+        "content": {"type": "AdaptiveCard", "body": [{"type": "Made.Up"}]},
+    })));
+    // a media element without a link it may open
+    assert!(unshown(json!({
+        "contentType": ADAPTIVE,
+        "content": {"type": "AdaptiveCard", "body": [{"type": "Media", "sources": [{"url": "javascript:x"}]}]},
+    })));
+    assert!(!unshown(json!({
+        "contentType": ADAPTIVE,
+        "content": {"type": "AdaptiveCard", "body": [{"type": "TextBlock", "text": "Made-up"}]},
+    })));
+    let mut not_a_list = app_card_properties();
+    not_a_list.insert("cards".to_owned(), Value::String("not json".to_owned()));
+    assert!(matches!(unshown_parts(&not_a_list).as_slice(), [Unshown::Cards(_)]));
+    // none, or an empty list: no cards
+    assert_eq!(message_cards(None), None);
+    assert_eq!(message_cards(Some(&json!("[]"))), None);
+    assert_eq!(message_cards(Some(&json!([]))), None);
+}
+
+#[test]
+fn a_tab_action_without_a_website_link_stays_a_bot_action() {
+    let message = adaptive(&json!({
+        "type": "AdaptiveCard",
+        "actions": [{"type": "Action.Submit", "title": "Open", "data": {"msteams": {"type": "invoke",
+            "value": {"type": "tab/tabInfoAction", "tabInfo": {"websiteUrl": "javascript:x"}}}}}],
+    }));
+    assert!(matches!(message.cards[0].actions[0].kind, ActionKind::Submit(_)));
+}
+
+#[test]
+fn a_media_s_picture_is_its_poster_or_youtube_s_picture_of_its_video() {
+    let message = adaptive(&json!({
+        "type": "AdaptiveCard",
+        "body": [{"type": "Media", "poster": "https://example.invalid/poster.png", "altText": "A made-up clip",
+                  "sources": [{"mimeType": "video/mp4", "url": "https://example.invalid/clip.mp4"}]}],
+    }));
+    let Kind::Media(media) = &message.cards[0].body[0].kind else {
+        panic!("a media element")
+    };
+    assert_eq!(media.picture().as_deref(), Some("https://example.invalid/poster.png"));
+    assert_eq!(media.alt.as_deref(), Some("A made-up clip"));
+    assert_eq!(media.link(), Some("https://example.invalid/clip.mp4"));
+    let hq = Some("https://i.ytimg.com/vi/Ab3_dEf-Gh9/hqdefault.jpg".to_owned());
+    for link in [
+        "https://youtu.be/Ab3_dEf-Gh9?si=madeup",
+        "https://www.youtube.com/watch?v=Ab3_dEf-Gh9&t=42",
+        "https://youtube.com/watch?feature=share&v=Ab3_dEf-Gh9",
+        "https://m.youtube.com/watch?v=Ab3_dEf-Gh9",
+        "https://music.youtube.com/watch?v=Ab3_dEf-Gh9",
+        "https://www.youtube.com/shorts/Ab3_dEf-Gh9",
+        "https://www.youtube.com/embed/Ab3_dEf-Gh9",
+        "https://www.youtube.com/live/Ab3_dEf-Gh9?feature=share",
+        "http://www.youtube-nocookie.com/embed/Ab3_dEf-Gh9",
+    ] {
+        assert_eq!(youtube_picture(link), hq, "{link}");
+    }
+    for link in [
+        "https://vimeo.com/123456789",
+        "https://www.youtube.com/watch?v=short",
+        "https://www.youtube.com/watch?v=Ab3_dEf-Gh9x",
+        "https://www.youtube.com/watch",
+        "https://www.youtube.com/@channel",
+        "https://notyoutube.com/watch?v=Ab3_dEf-Gh9",
+        "https://youtu.be.example.invalid/Ab3_dEf-Gh9",
+        "ftp://youtu.be/Ab3_dEf-Gh9",
+        "https://www.youtube.com/watch?v=Ab3_dEf%2FGh",
+    ] {
+        assert_eq!(youtube_picture(link), None, "{link}");
+    }
 }

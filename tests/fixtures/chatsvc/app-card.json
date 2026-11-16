@@ -1,0 +1,32 @@
+{
+  "_synthetic": "Written synthetic-from-capture, made-up values: a message whose only text is a YouTube link, as a Trouter delivery gave it to the sender's own page on 2026-11-16 (lab account a's web client, a's 1:1 chat with b; read locally for its shape only). The compose box asked the YouTube app (com.microsoft.teamspace.tab.youtube, through the chat service's composeExtension/anonymousQueryLink invoke) for the link's card and sent it in properties.cards: a JSON string of a list, each entry appId, cardClientId, appName, appIcon (in the delivered form, the async gateway's urlp content link of the app's icon), contentType application/vnd.microsoft.card.adaptive and content, an Adaptive Card 1.6: a Media element (one source, video/mp4, the watch link), the title (large, bolder, at most 4 lines), the channel and the views and age (subtle, one line each), an ActionSet with an Open Action.Submit whose msteams invoke is a tab/tabInfoAction, and the same action as the card's selectAction. The content ends in an InputExtension span naming the card's cardClientId; properties.links has the link with previewenabled false. The video id, the title, the channel, the counts, the card and entity ids and the icon's path are made up; the delivery dropped the elements' separator: false, as here. <guid:entity> stands for the tab's entityId; <guid:a>, <guid:b> are lab accounts' object ids; tests fill them in. See docs/protocol/chat.md, App cards.",
+  "read_back": {
+    "sequenceId": 11,
+    "conversationid": "19:<guid:a>_<guid:b>@unq.gbl.spaces",
+    "conversationLink": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/conversations/19:<guid:a>_<guid:b>@unq.gbl.spaces",
+    "contenttype": "Text",
+    "type": "Message",
+    "amsreferences": [],
+    "fromDisplayNameInToken": "Lab B",
+    "id": "1760000110000",
+    "clientmessageid": "4054054054054054054",
+    "version": "1760000110000",
+    "messagetype": "RichText/Html",
+    "content": "<p><a href=\"https://youtu.be/Ab3_dEf-Gh9?si=madeup\" rel=\"noreferrer noopener\" title=\"https://youtu.be/ab3_def-gh9?si=madeup\" target=\"_blank\">https://youtu.be/Ab3_dEf-Gh9?si=madeup</a> </p>\n<span itemid=\"app-preview-card-made-up-405\" itemscope=\"\" itemtype=\"http://schema.skype.com/InputExtension\"><span itemprop=\"cardId\"></span></span>",
+    "from": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/contacts/8:orgid:<guid:b>",
+    "imdisplayname": "Lab B",
+    "composetime": "2026-01-01T00:01:50.0000000Z",
+    "originalarrivaltime": "2026-01-01T00:01:50.0000000Z",
+    "properties": {
+      "cards": "[{\"appId\":\"com.microsoft.teamspace.tab.youtube\",\"cardClientId\":\"app-preview-card-made-up-405\",\"appName\":\"YouTube\",\"appIcon\":\"https://us-prod.asyncgw.teams.microsoft.com/urlp/v1/url/content?url=https%3a%2f%2fres.cdn.office.net%2fteamsappdata%2fmade-up%2fcom.microsoft.teamspace.tab.youtube_largeimage.png\",\"content\":{\"type\":\"AdaptiveCard\",\"body\":[{\"sources\":[{\"mimeType\":\"video/mp4\",\"url\":\"https://www.youtube.com/watch?v=Ab3_dEf-Gh9\"}],\"type\":\"Media\"},{\"color\":null,\"horizontalAlignment\":null,\"isSubtle\":false,\"maxLines\":4,\"size\":\"large\",\"text\":\"A made-up video for the test\",\"weight\":\"bolder\",\"wrap\":true,\"type\":\"TextBlock\"},{\"color\":null,\"horizontalAlignment\":null,\"isSubtle\":true,\"maxLines\":1,\"size\":null,\"text\":\"Made-up Channel\",\"weight\":null,\"wrap\":true,\"spacing\":\"Small\",\"type\":\"TextBlock\"},{\"color\":null,\"horizontalAlignment\":null,\"isSubtle\":true,\"maxLines\":1,\"size\":null,\"text\":\"1.2K views · 3 days ago\",\"weight\":null,\"wrap\":true,\"spacing\":\"None\",\"type\":\"TextBlock\"},{\"actions\":[{\"data\":{\"msteams\":{\"type\":\"invoke\",\"value\":{\"type\":\"tab/tabInfoAction\",\"tabInfo\":{\"contentUrl\":\"https://tabs.teams.microsoft.com/youtubeContentStage?videoId%3dAb3_dEf-Gh9&chatId={chat.id}&theme={app.theme}&userId={user.id}\",\"websiteUrl\":\"https://www.youtube.com/watch?v=Ab3_dEf-Gh9\",\"entityId\":\"<guid:entity>\"}}}},\"title\":\"Open\",\"type\":\"Action.Submit\"}],\"spacing\":\"Medium\",\"type\":\"ActionSet\"}],\"$schema\":\"http://adaptivecards.io/schemas/adaptive-card.json\",\"version\":\"1.6\",\"fallbackText\":\"This card requires CaptionSource to be viewed. Ask your platform to update to Adaptive Cards v1.6 for this and more!\",\"selectAction\":{\"data\":{\"msteams\":{\"type\":\"invoke\",\"value\":{\"type\":\"tab/tabInfoAction\",\"tabInfo\":{\"contentUrl\":\"https://tabs.teams.microsoft.com/youtubeContentStage?videoId%3dAb3_dEf-Gh9&chatId={chat.id}&theme={app.theme}&userId={user.id}\",\"websiteUrl\":\"https://www.youtube.com/watch?v=Ab3_dEf-Gh9\",\"entityId\":\"<guid:entity>\"}}}},\"type\":\"Action.Submit\"}},\"contentType\":\"application/vnd.microsoft.card.adaptive\"}]",
+      "files": "[]",
+      "formatVariant": "TEAMS",
+      "importance": "",
+      "languageStamp": "languages=en:100;length:40;&detector=Bling",
+      "links": "[{\"@type\":\"http://schema.skype.com/HyperLink\",\"itemid\":\"0\",\"url\":\"https://youtu.be/Ab3_dEf-Gh9?si=madeup\",\"previewenabled\":false,\"preview\":{\"previewurl\":\"https://us-prod.asyncgw.teams.microsoft.com/urlp/v1/url/content?url=https%3a%2f%2fi.ytimg.com%2fvi%2fAb3_dEf-Gh9%2fmqdefault.jpg\",\"title\":\"A made-up video for the test\",\"description\":\"1.2K views · 3 days ago\"}}]",
+      "mentions": "[]",
+      "subject": "",
+      "title": ""
+    }
+  }
+}

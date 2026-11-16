@@ -17,6 +17,13 @@
 //! `data` as given, its `Action.Execute` `verb`, its `msteams` kind ([`Via`]) and whether the card's answers go with
 //! it; a card's `refresh` keeps its `Action.Execute` and the users it refreshes for by itself.
 //!
+//! A link's app card (`properties.cards` of a text message, [`message_cards`]) is the card an app's link unfurling
+//! made for a link the compose box saw (`docs/protocol/chat.md`, "App cards"): each entry names its app and carries
+//! one attachment, read as a card message's attachments are, with the app ([`CardApp`]) on its card. A YouTube
+//! link's card holds a `Media` element ([`Media`]): its picture is its `poster`, or YouTube's picture of its video
+//! ([`youtube_picture`]). An `Action.Submit` whose `msteams` invoke is a `tab/tabInfoAction` opens the app's tab in
+//! Teams; it sends nothing, so it is read as [`ActionKind::OpenTab`] with the tab's `websiteUrl`.
+//!
 //! Nothing here reads the network: a picture is kept as its link, a view asks the engine for it. A link is kept only
 //! when it is `http`, `https`, `mailto` or `tel`.
 //!
@@ -50,6 +57,14 @@ pub struct CardMessage {
     pub unshown: bool,
 }
 
+impl CardMessage {
+    /// Whether this build draws all of it: every attachment a card, none with a part it can't show.
+    #[must_use]
+    pub fn drawn(&self) -> bool {
+        !self.unshown && self.cards.iter().all(|card| !card.unshown)
+    }
+}
+
 /// One card.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Card {
@@ -66,6 +81,39 @@ pub struct Card {
     pub fallback_text: Option<String>,
     /// Its `speak` or its `summary`: what Teams reads out, kept for no view yet.
     pub summary: Option<String>,
+    /// The app whose card it is, for a link's app card ([`message_cards`]).
+    pub app: Option<CardApp>,
+}
+
+/// The app a link's app card names (`appId`, `appName`, `appIcon`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CardApp {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    /// Its icon's link: the app's own, or the async gateway's copy of it (`urlp/v1/url/content?url=<icon>`).
+    pub icon: Option<String>,
+}
+
+impl CardApp {
+    /// The icon's picture: the link inside the async gateway's copy, or the icon's own link; `None` without an `http`
+    /// or `https` one.
+    #[must_use]
+    pub fn icon_picture(&self) -> Option<String> {
+        let icon = self.icon.as_deref()?;
+        let url = url::Url::parse(icon).ok()?;
+        let copied = url
+            .host_str()
+            .is_some_and(|host| host.ends_with(".asyncgw.teams.microsoft.com"))
+            && url.path().starts_with("/urlp/v1/url/");
+        let picture = if copied {
+            url.query_pairs()
+                .find(|(name, _)| name == "url")
+                .map(|(_, picture)| picture.into_owned())?
+        } else {
+            icon.to_owned()
+        };
+        is_picture_link(&picture).then_some(picture)
+    }
 }
 
 /// An element of a card's body or of a container, with what every element has.
@@ -99,6 +147,40 @@ pub enum Kind {
     Table(Table),
     /// An `Input.*` element.
     Input(Input),
+    Media(Media),
+}
+
+/// A `Media` element: a video or a sound, drawn as its picture with a play mark.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Media {
+    /// Its sources, each with a link it may open.
+    pub sources: Vec<MediaSource>,
+    /// Its `poster`.
+    pub poster: Option<String>,
+    pub alt: Option<String>,
+}
+
+/// One source of a [`Media`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediaSource {
+    pub mime_type: Option<String>,
+    pub url: String,
+}
+
+impl Media {
+    /// What a click opens: its first source's link.
+    #[must_use]
+    pub fn link(&self) -> Option<&str> {
+        self.sources.first().map(|source| source.url.as_str())
+    }
+
+    /// The picture drawn for it: its poster, else YouTube's picture of a YouTube source's video.
+    #[must_use]
+    pub fn picture(&self) -> Option<String> {
+        self.poster
+            .clone()
+            .or_else(|| self.sources.iter().find_map(|source| youtube_picture(&source.url)))
+    }
 }
 
 /// An input of a card (`Input.*`): its answer goes with a button that sends to the bot.
@@ -451,6 +533,9 @@ pub enum ActionKind {
     /// Sends to the bot (`Action.Submit`, `Action.Execute`, a hero card's `imBack`, `messageBack`, `postBack` or
     /// `invoke`): what only Teams' bot path runs.
     Submit(BotAction),
+    /// Opens an app's tab (an `Action.Submit` whose `msteams` invoke is a `tab/tabInfoAction`): Teams shows the tab in
+    /// its own view and sends nothing; the link is the tab's `websiteUrl`, where it opens outside Teams.
+    OpenTab(String),
 }
 
 /// A button that sends to the bot, and what it carries.
@@ -547,15 +632,88 @@ pub fn card_message(content: &str) -> Option<CardMessage> {
     let attachments = activity.get("attachments")?.as_array()?;
     let mut message = CardMessage::default();
     for attachment in attachments {
-        let content = attachment.get("content");
-        match (str_of(attachment, "contentType"), content) {
-            (Some(ADAPTIVE), Some(card)) => message.cards.push(adaptive_card(card)),
-            (Some(HERO), Some(card)) => message.cards.push(hero(card, ImageSize::Stretch)),
-            (Some(THUMBNAIL), Some(card)) => message.cards.push(hero(card, ImageSize::Medium)),
-            _ => message.unshown = true,
+        match attachment_card(attachment) {
+            Some(card) => message.cards.push(card),
+            None => message.unshown = true,
         }
     }
     Some(message)
+}
+
+/// The cards of a text message's `properties.cards` (a list, or a JSON string of one): each entry's attachment read
+/// as a card message's is, its app on its card; an entry that isn't a card this build reads marks the message
+/// [`CardMessage::unshown`]. `None` when there is no list or it is empty.
+#[must_use]
+pub fn message_cards(value: Option<&Value>) -> Option<CardMessage> {
+    let parsed;
+    let list = match value? {
+        Value::String(text) => {
+            parsed = serde_json::from_str::<Value>(text).ok()?;
+            parsed.as_array()?
+        }
+        Value::Array(list) => list,
+        _ => return None,
+    };
+    if list.is_empty() {
+        return None;
+    }
+    let mut message = CardMessage::default();
+    for entry in list {
+        match attachment_card(entry) {
+            Some(mut card) => {
+                card.app = Some(CardApp {
+                    id: string_of(entry, "appId"),
+                    name: string_of(entry, "appName"),
+                    icon: string_of(entry, "appIcon"),
+                });
+                message.cards.push(card);
+            }
+            None => message.unshown = true,
+        }
+    }
+    Some(message)
+}
+
+/// An attachment's card: an Adaptive Card, or a hero or thumbnail card as Teams draws it; `None` for another kind.
+fn attachment_card(attachment: &Value) -> Option<Card> {
+    let card = attachment.get("content")?;
+    match str_of(attachment, "contentType")? {
+        ADAPTIVE => Some(adaptive_card(card)),
+        HERO => Some(hero(card, ImageSize::Stretch)),
+        THUMBNAIL => Some(hero(card, ImageSize::Medium)),
+        _ => None,
+    }
+}
+
+/// YouTube's picture of the video a YouTube link (`youtu.be/<id>`, `youtube.com/watch?v=<id>`, `/shorts/<id>`,
+/// `/embed/<id>`, `/live/<id>`) names: `https://i.ytimg.com/vi/<id>/hqdefault.jpg`, which YouTube has for every
+/// video. `None` for any other link.
+#[must_use]
+pub fn youtube_picture(link: &str) -> Option<String> {
+    let url = url::Url::parse(link).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = url.host_str()?;
+    let host = host.strip_prefix("www.").unwrap_or(host);
+    let mut segments = url.path_segments()?;
+    let id = match host {
+        "youtu.be" => segments.next().map(str::to_owned),
+        "youtube.com" | "m.youtube.com" | "music.youtube.com" | "youtube-nocookie.com" => match segments.next()? {
+            "watch" => url
+                .query_pairs()
+                .find(|(name, _)| name == "v")
+                .map(|(_, id)| id.into_owned()),
+            "shorts" | "embed" | "live" => segments.next().map(str::to_owned),
+            _ => None,
+        },
+        _ => None,
+    }?;
+    let video = id.len() == 11
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
+    video.then(|| format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg"))
 }
 
 /// The `b64` of a content's `<Swift>`.
@@ -590,6 +748,7 @@ fn adaptive(card: &Value, depth: usize) -> Card {
         unshown: read.unshown,
         fallback_text: string_of(card, "fallbackText"),
         summary: string_of(card, "speak").or_else(|| string_of(card, "summary")),
+        app: None,
     }
 }
 
@@ -639,6 +798,7 @@ fn hero(card: &Value, size: ImageSize) -> Card {
         refresh: None,
         fallback_text: None,
         summary: None,
+        app: None,
     }
 }
 
@@ -751,6 +911,7 @@ impl Reader {
             ),
             "ActionSet" => Kind::Actions(self.actions(item.get("actions"), depth)),
             "Table" => Kind::Table(self.table(item, depth)),
+            "Media" => Kind::Media(Self::media(item)?),
             // the chat view doesn't draw inputs yet: an input with a `fallback` gets its fallback, as an element of a
             // type this build doesn't draw does
             kind if kind.starts_with("Input.") && item.get("fallback").is_none() => {
@@ -812,6 +973,30 @@ impl Reader {
             person: str_of(item, "style") == Some("person"),
             align: h_align(str_of(item, "horizontalAlignment")),
             select_action: self.select(item, depth),
+        })
+    }
+
+    /// A `Media` element; `None` for one without a source it may open (its fallback takes its place).
+    fn media(item: &Value) -> Option<Media> {
+        let sources: Vec<MediaSource> = array_of(item, "sources")
+            .iter()
+            .filter_map(|source| {
+                let url = str_of(source, "url").filter(|url| is_link(url))?;
+                Some(MediaSource {
+                    mime_type: string_of(source, "mimeType"),
+                    url: url.to_owned(),
+                })
+            })
+            .collect();
+        if sources.is_empty() {
+            return None;
+        }
+        Some(Media {
+            sources,
+            poster: str_of(item, "poster")
+                .filter(|url| is_picture_link(url))
+                .map(str::to_owned),
+            alt: string_of(item, "altText"),
         })
     }
 
@@ -887,6 +1072,7 @@ impl Reader {
                 None => return self.unread_action(action, depth),
             },
             Some("Action.ToggleVisibility") => ActionKind::ToggleVisibility(toggles(action)),
+            Some("Action.Submit") if let Some(link) = tab_link(action) => ActionKind::OpenTab(link),
             Some("Action.Submit" | "Action.Execute") => ActionKind::Submit(bot_action(action)),
             _ => return self.unread_action(action, depth),
         };
@@ -941,6 +1127,18 @@ impl Reader {
             icon_url: None,
         })
     }
+}
+
+/// The `websiteUrl` of an `Action.Submit` whose `msteams` invoke is a `tab/tabInfoAction`, when it is a link.
+fn tab_link(action: &Value) -> Option<String> {
+    let msteams = action.get("data")?.get("msteams")?;
+    let value = msteams.get("value")?;
+    if str_of(msteams, "type") != Some("invoke") || str_of(value, "type") != Some("tab/tabInfoAction") {
+        return None;
+    }
+    str_of(value.get("tabInfo")?, "websiteUrl")
+        .filter(|url| is_link(url))
+        .map(str::to_owned)
 }
 
 /// An `Action.Submit`'s or `Action.Execute`'s [`BotAction`].
@@ -1551,7 +1749,7 @@ fn collect_words(elements: &[Element], words: &mut Vec<String>) {
                     collect_words(cell, words);
                 }
             }
-            Kind::Image(_) | Kind::ImageSet { .. } | Kind::Actions(_) | Kind::Input(_) => {}
+            Kind::Image(_) | Kind::ImageSet { .. } | Kind::Actions(_) | Kind::Input(_) | Kind::Media(_) => {}
         }
     }
 }
