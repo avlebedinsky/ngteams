@@ -252,6 +252,13 @@ impl PictureSource {
     pub fn engine(&self) -> &dyn PictureEngine {
         self.0.as_ref()
     }
+
+    /// The streams of the file whose sharing link is `share_url`, as its engine reads them.
+    #[must_use]
+    pub fn file_opener(&self, share_url: String) -> crate::recording_download::Opener {
+        let engine = Arc::clone(&self.0);
+        Arc::new(move |offset, len| engine.file_stream(share_url.clone(), offset, len))
+    }
 }
 
 impl fmt::Debug for PictureSource {

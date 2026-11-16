@@ -1,6 +1,6 @@
-//! A meeting recording downloaded to a file: the recap's More options → Download, offered only when the recording's
-//! item says the account may download it (Teams' Stream page, which the recap's Watch in browser opens, offers its
-//! Download the same way).
+//! A file downloaded through the engine: a meeting recording (the recap's More options → Download, offered only when
+//! the recording's item says the account may download it, as Teams' Stream page offers its Download), or a file on an
+//! own server (its card's Download and Open in desktop app: such a server has no page a browser opens a file at).
 //!
 //! - **The bytes** are read by the engine at the download link Graph hands out for the recording's sharing link
 //!   ([`Core::file_stream`], as a chat's video is played), [`CHUNK`] at a time, each written as it arrives. A link that
@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use gpui::{App, AppContext as _, Context, Entity, Global, Task};
-use teams_core::EngineError;
+use teams_core::{EngineError, FileStream, Reply};
 
 use crate::bridge::Core;
 
@@ -106,13 +106,25 @@ impl Progress {
     }
 }
 
-/// One recording's download (see the module docs).
+/// Opens a stream of the file at an offset, of at most a length: the engine's [`Core::file_stream`] of its link.
+pub type Opener = Arc<dyn Fn(u64, u64) -> Reply<FileStream> + Send + Sync>;
+
+/// What happens to the file once it is saved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Then {
+    Keep,
+    /// It is opened in the system's app for it (an own server's file: Open in desktop app).
+    Open,
+}
+
+/// One file's download (see the module docs).
 pub struct RecordingDownload {
-    core: Arc<dyn Core>,
-    /// The recording's sharing link.
+    open: Opener,
+    /// The file's sharing link.
     link: String,
     /// Where it is saved.
     target: PathBuf,
+    then: Then,
     progress: Progress,
     running: Option<Task<()>>,
 }
@@ -144,6 +156,12 @@ impl RecordingDownload {
         &self.progress
     }
 
+    /// What happens to the file once it is saved.
+    #[must_use]
+    pub const fn then(&self) -> Then {
+        self.then
+    }
+
     /// Starts (or, after a failure, starts again) writing the recording to its file.
     pub fn start(&mut self, cx: &mut Context<Self>) {
         self.progress = Progress::Running {
@@ -155,8 +173,7 @@ impl RecordingDownload {
         let (wake, woken) = async_channel::bounded::<()>(1);
         let executor = cx.background_executor().clone();
         let job = cx.background_spawn(save(
-            Arc::clone(&self.core),
-            self.link.clone(),
+            Arc::clone(&self.open),
             self.target.clone(),
             Told {
                 latest: Arc::clone(&latest),
@@ -181,13 +198,25 @@ impl RecordingDownload {
             let saved = job.await;
             let _ = this.update(cx, |this, cx| {
                 this.progress = match saved {
-                    Ok(()) => Progress::Saved,
+                    Ok(()) => {
+                        this.opened(cx);
+                        Progress::Saved
+                    }
                     Err(failure) => Progress::Failed(failure),
                 };
                 cx.notify();
             });
         }));
         cx.notify();
+    }
+
+    /// Opens the saved file in the system's app for it (its `file://` link), when that is what follows the save.
+    fn opened(&self, cx: &App) {
+        if self.then == Then::Open
+            && let Ok(link) = url::Url::from_file_path(&self.target)
+        {
+            cx.open_url(link.as_str());
+        }
     }
 
     /// Stops a running download; what it wrote is removed.
@@ -218,14 +247,22 @@ pub fn download_of(link: &str, cx: &App) -> Option<Entity<RecordingDownload>> {
 /// Starts downloading the recording whose sharing link is `link` to `target`, in place of an earlier one of it that
 /// ended (one still running is kept and handed back).
 pub fn start(core: Arc<dyn Core>, link: String, target: PathBuf, cx: &mut App) -> Entity<RecordingDownload> {
+    let opened = link.clone();
+    let open: Opener = Arc::new(move |offset, len| core.file_stream(opened.clone(), offset, len));
+    start_with(open, link, target, Then::Keep, cx)
+}
+
+/// As [`start`], the file's streams opened by `open`, and `then` done once it is saved.
+pub fn start_with(open: Opener, link: String, target: PathBuf, then: Then, cx: &mut App) -> Entity<RecordingDownload> {
     if let Some(running) = download_of(&link, cx).filter(|download| download.read(cx).progress.running()) {
         return running;
     }
     let download = cx.new(|cx| {
         let mut download = RecordingDownload {
-            core,
+            open,
             link: link.clone(),
             target,
+            then,
             progress: Progress::Saved,
             running: None,
         };
@@ -262,11 +299,10 @@ struct Told {
     wake: async_channel::Sender<()>,
 }
 
-/// Writes the recording to `target` (through its [`part_path`]), telling `told` how far it got (every [`TELL_EVERY`]
+/// Writes the file to `target` (through its [`part_path`]), telling `told` how far it got (every [`TELL_EVERY`]
 /// bytes, and once the whole file came); what it wrote is removed when it fails.
 async fn save<F: Future<Output = ()>>(
-    core: Arc<dyn Core>,
-    link: String,
+    open: Opener,
     target: PathBuf,
     told: Told,
     sleep: impl FnMut(Duration) -> F,
@@ -280,7 +316,7 @@ async fn save<F: Future<Output = ()>>(
     let file = fs::File::create(&part).map_err(disk)?;
     let mut sink = BufWriter::with_capacity(WRITE_BUFFER, file);
     let mut said = 0;
-    let fetched = fetch(core.as_ref(), &link, &mut sink, sleep, |written, total| {
+    let fetched = fetch_from(open.as_ref(), &mut sink, sleep, |written, total| {
         *told.latest.lock().unwrap_or_else(PoisonError::into_inner) = (written, total);
         if written.saturating_sub(said) >= TELL_EVERY || written >= total {
             said = written;
@@ -314,6 +350,22 @@ pub async fn fetch<F: Future<Output = ()>>(
     core: &dyn Core,
     link: &str,
     sink: &mut impl Write,
+    sleep: impl FnMut(Duration) -> F,
+    told: impl FnMut(u64, u64),
+) -> Result<(), Failure> {
+    fetch_from(
+        &|offset, len| core.file_stream(link.to_owned(), offset, len),
+        sink,
+        sleep,
+        told,
+    )
+    .await
+}
+
+/// As [`fetch`], each stream opened by `open`.
+async fn fetch_from<F: Future<Output = ()>>(
+    open: &(dyn Fn(u64, u64) -> Reply<FileStream> + Send + Sync),
+    sink: &mut impl Write,
     mut sleep: impl FnMut(Duration) -> F,
     mut told: impl FnMut(u64, u64),
 ) -> Result<(), Failure> {
@@ -322,7 +374,7 @@ pub async fn fetch<F: Future<Output = ()>>(
     let mut idle = 0_u32;
     while total.is_none_or(|total| written < total) {
         let before = written;
-        match core.file_stream(link.to_owned(), written, CHUNK).await {
+        match open(written, CHUNK).await {
             Ok(mut stream) if stream.offset == written => {
                 total = Some(stream.total);
                 while let Some(piece) = stream.next().await {

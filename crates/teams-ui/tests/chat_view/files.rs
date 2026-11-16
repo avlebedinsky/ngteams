@@ -245,3 +245,96 @@ fn an_image_whose_preview_cant_be_had_is_drawn_as_its_card() {
     assert!(bounds(cx, &format!("file-card-{ID}-0")).is_some(), "its card instead");
     assert!(bounds(cx, &format!("file-name-{ID}-0")).is_some());
 }
+
+/// A made-up own server's sharing link of a document, as its drive names it.
+const OWN_SHARE: &str = "https://chat.example:8443/sp/personal/lab_b/Documents/made-up%20notes.pdf";
+
+/// Made-up bytes standing for the own server's document.
+const OWN_BYTES: &[u8] = b"%PDF-1.7 made-up notes, every byte synthetic";
+
+/// A message of one document on an own server, from b.
+fn own_file_message() -> Message {
+    let entry = serde_json::json!({"@type": teams_proto::chat::FILE_TYPE, "fileName": "made-up notes.pdf",
+        "fileType": "pdf", "state": "active", "objectUrl": OWN_SHARE, "fileInfo": {"shareUrl": OWN_SHARE}});
+    let mut stored = message(ID, LAB_B, "<p>the notes</p>", NOON);
+    stored.properties = Some(serde_json::json!({"files": Value::Array(vec![entry]).to_string()}).to_string());
+    stored
+}
+
+/// The chat with the own server's document, the engine holding its bytes when `bytes`.
+fn own_file_chat(bytes: bool) -> (Rig, &'static mut VisualTestContext) {
+    let rig = rig_with(vec![own_file_message()]);
+    if bytes {
+        rig.core
+            .file_bytes
+            .lock()
+            .unwrap()
+            .insert(OWN_SHARE.to_owned(), OWN_BYTES.to_vec());
+    }
+    let (written_trace, _) = trace();
+    let (_view, cx) = chat_window(&rig, written_trace);
+    (rig, cx)
+}
+
+#[test]
+fn a_click_on_an_own_servers_file_reads_it_through_the_engine_and_opens_it_in_its_app() {
+    let (rig, cx) = own_file_chat(true);
+    assert!(bounds(cx, &format!("file-card-{ID}-0")).is_some(), "the file's card");
+    click(cx, &format!("file-name-{ID}-0"));
+    // never the server's link in a browser, which holds no token for it: the engine's bytes, opened as a local file
+    let opened = cx.opened_url().expect("the file is opened");
+    assert!(opened.starts_with("file://"), "{opened}");
+    let path = url::Url::parse(&opened).unwrap().to_file_path().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), OWN_BYTES);
+    assert_eq!(path.file_name().unwrap(), "made-up notes.pdf");
+    assert!(rig.core.asked().contains(&"file_stream"));
+    assert!(bounds(cx, &format!("file-download-{ID}-0 saved")).is_some());
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn more_options_of_an_own_servers_file_downloads_it_through_the_engine_where_chosen() {
+    let (_rig, cx) = own_file_chat(true);
+    click(cx, &format!("file-more-{ID}-0"));
+    assert!(
+        bounds(cx, &format!("file-menu-open-{ID}-0")).is_some(),
+        "Open in desktop app"
+    );
+    click(cx, &format!("file-menu-download-{ID}-0"));
+    assert!(cx.did_prompt_for_new_path());
+    let folder = tempfile::tempdir().unwrap();
+    let target = folder.path().join("notes.pdf");
+    cx.simulate_new_path_selection(|_| Some(target.clone()));
+    draw(cx);
+    assert_eq!(std::fs::read(&target).unwrap(), OWN_BYTES);
+    assert_eq!(cx.opened_url(), None, "saved, not opened");
+    assert!(bounds(cx, &format!("file-download-{ID}-0 saved")).is_some());
+    // the link to copy is still the file's own
+    click(cx, &format!("file-more-{ID}-0"));
+    click(cx, &format!("file-menu-copy-{ID}-0"));
+    let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
+    assert_eq!(copied.as_deref(), Some(OWN_SHARE));
+}
+
+#[test]
+fn an_own_servers_file_the_engine_cant_read_says_so_under_its_card() {
+    let (_rig, cx) = own_file_chat(false);
+    click(cx, &format!("file-more-{ID}-0"));
+    click(cx, &format!("file-menu-download-{ID}-0"));
+    let folder = tempfile::tempdir().unwrap();
+    let target = folder.path().join("notes.pdf");
+    cx.simulate_new_path_selection(|_| Some(target.clone()));
+    draw(cx);
+    assert!(bounds(cx, &format!("file-download-{ID}-0 failed")).is_some());
+    assert!(!target.exists());
+    assert!(!teams_ui::recording_download::part_path(&target).exists());
+}
+
+#[test]
+fn a_file_name_from_a_message_is_never_a_path() {
+    use teams_ui::files::safe_name;
+    assert_eq!(safe_name("made-up notes.pdf"), "made-up notes.pdf");
+    assert_eq!(safe_name("../../.bashrc"), "_.._.bashrc");
+    assert_eq!(safe_name("a\\b:c\u{7}.txt"), "a_b_c_.txt");
+    assert_eq!(safe_name(" .. "), "file");
+}

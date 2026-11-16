@@ -16,6 +16,10 @@
 //!   browser (GPUI's `open_url`); "More options" offers "Open in browser", "Download" (the sharing link with
 //!   `download=1`: the browser downloads it) and "Copy link". Share offers the file's link to copy, the way to share it
 //!   that reaches nobody by itself (sharing it with people from the app would be a contacting write it doesn't make).
+//! - **An own server's file** ([`OwnFile`]) is read through its account's engine, never in a browser: the server has
+//!   no page that shows a file, and a browser holds no token for it. A click and "Open in desktop app" save it in a
+//!   folder of the user's alone and open it in the system's app for it (its `file://` link); "Download" saves it where the user chooses (the
+//!   downloads folder without a chooser) (`crate::recording_download`). A line under the card tells how far it got.
 //! - Colours come from the palette but for the file types' own, fixed in every theme as Teams' file icons are.
 
 use gpui::{
@@ -29,6 +33,7 @@ use teams_proto::chat::{FileKind, SharedFile};
 
 use crate::icons::{Glyph, icon_button, selected_by};
 use crate::inline::{PictureSource, PictureState, picture, thumbnail};
+use crate::recording_download::{self, Failure, Progress, Then, download_of};
 use crate::rich_text::tint;
 use crate::theme::Palette;
 use crate::video_player::{player_of, plays_inline};
@@ -47,6 +52,7 @@ const PREVIEW_UNKNOWN: (u32, u32) = (252, 252);
 
 /// What "More options" offers, in Teams' words.
 pub const OPEN_IN_BROWSER: &str = "Open in browser";
+pub const OPEN_IN_APP: &str = "Open in desktop app";
 pub const DOWNLOAD: &str = "Download";
 pub const COPY_LINK: &str = "Copy link";
 
@@ -151,6 +157,7 @@ impl RenderOnce for FileCard {
             .bg(tint(self.palette.foreground, 0.04))
             .child(self.header(kind))
             .children(picture)
+            .children(self.status(cx))
             .into_any_element()
     }
 }
@@ -206,25 +213,35 @@ impl FileCard {
                 .size_full()
                 .child(shown),
             &self.file,
+            self.own(),
         );
-        Some(
-            div()
-                .id(SharedString::from(format!("file-preview-box-{id}")))
-                .debug_selector(move || format!("{selector}-{id}"))
-                .group(group)
-                .relative()
-                .w(px(size.0))
-                .h(px(size.1))
-                .max_w_full()
-                .flex_none()
-                .rounded_lg()
-                .overflow_hidden()
-                .border_1()
-                .border_color(rgb(self.palette.border))
-                .child(picture)
-                .children(more)
+        let status = self.status(cx);
+        let preview = div()
+            .id(SharedString::from(format!("file-preview-box-{id}")))
+            .debug_selector(move || format!("{selector}-{id}"))
+            .group(group)
+            .relative()
+            .w(px(size.0))
+            .h(px(size.1))
+            .max_w_full()
+            .flex_none()
+            .rounded_lg()
+            .overflow_hidden()
+            .border_1()
+            .border_color(rgb(self.palette.border))
+            .child(picture)
+            .children(more)
+            .into_any_element();
+        Some(match status {
+            Some(status) => div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(preview)
+                .child(status)
                 .into_any_element(),
-        )
+            None => preview,
+        })
     }
 
     /// The icon, the name and "More options".
@@ -264,6 +281,7 @@ impl FileCard {
                         .child(name),
                 ),
             &self.file,
+            self.own(),
         );
         div()
             .h(px(48.0))
@@ -296,6 +314,9 @@ impl FileCard {
     /// "More options": the file's local actions, when it has a link to act on.
     fn more(&self) -> Option<AnyElement> {
         let open = self.file.open_link()?.to_owned();
+        if let Some(own) = self.own() {
+            return Some(self.own_more(own, open));
+        }
         let download = self.file.download_link();
         let id = self.id.clone();
         let button = icon_button(
@@ -324,6 +345,75 @@ impl FileCard {
             )
         });
         Some(selected_by(format!("file-more-{}", self.id), button).into_any_element())
+    }
+
+    /// "More options" of an own server's file: opened and downloaded through its engine (see the module docs).
+    fn own_more(&self, own: OwnFile, link: String) -> AnyElement {
+        let id = self.id.clone();
+        let button = icon_button(
+            SharedString::from(format!("file-more-{id}")),
+            Glyph::MORE,
+            "More options",
+        )
+        .small()
+        .dropdown_menu(move |menu, _, _| {
+            let (opened, downloaded, copied) = (own.clone(), own.clone(), link.clone());
+            menu.item(
+                menu_item(&id, "open", Glyph::EXTERNAL_LINK, OPEN_IN_APP).on_click(move |_, _, cx| opened.open(cx)),
+            )
+            .item(
+                menu_item(&id, "download", Glyph::DOWNLOAD, DOWNLOAD).on_click(move |_, _, cx| downloaded.download(cx)),
+            )
+            .item(
+                menu_item(&id, "copy", Glyph::LINK, COPY_LINK)
+                    .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))),
+            )
+        });
+        selected_by(format!("file-more-{}", self.id), button).into_any_element()
+    }
+
+    /// The file as its own server's, read through `source`'s engine: when it has an engine and its links aren't on
+    /// Microsoft's file service.
+    fn own(&self) -> Option<OwnFile> {
+        let source = self.source.clone()?;
+        let link = self.file.share_url.clone()?;
+        (!teams_proto::chat::is_file_link(&link)).then(|| OwnFile {
+            link,
+            name: self.file.name.clone(),
+            source,
+        })
+    }
+
+    /// How far the own server's file's download got, as a line under its card; none without one this run.
+    fn status(&self, cx: &App) -> Option<AnyElement> {
+        let own = self.own()?;
+        let download = download_of(&own.link, cx)?;
+        let download = download.read(cx);
+        let name = &own.name;
+        let (state, words) = match download.progress() {
+            Progress::Running { .. } => (
+                "running",
+                match download.progress().fraction() {
+                    Some(fraction) => format!("Downloading {name}… {:.0}%", fraction * 100.0),
+                    None => format!("Downloading {name}…"),
+                },
+            ),
+            Progress::Saved if download.then() == Then::Open => ("saved", format!("Opened {name}")),
+            Progress::Saved => ("saved", format!("Saved to {}", download.target().display())),
+            Progress::Failed(Failure::Cancelled) => return None,
+            Progress::Failed(failure) => ("failed", format!("Couldn't download {name}. {}", failed_words(failure))),
+        };
+        let selector = format!("file-download-{} {state}", self.id);
+        Some(
+            div()
+                .debug_selector(move || selector.clone())
+                .px_3()
+                .pb_2()
+                .text_xs()
+                .text_color(rgb(self.palette.muted_foreground))
+                .child(words)
+                .into_any_element(),
+        )
     }
 
     /// The picture of the file under its header: its thumbnail, a tinted box while it is read, its placeholder.
@@ -365,21 +455,113 @@ impl FileCard {
                 .bg(tint(palette.foreground, 0.06))
                 .child(shown),
             &self.file,
+            self.own(),
         )
     }
 }
 
-/// `element` opening `file` in the browser when clicked (its sharing link, else its own), with the pointer's hand; as
-/// it was when the file has no link to open.
-fn open_on_click(element: gpui::Stateful<gpui::Div>, file: &SharedFile) -> AnyElement {
+/// `element` opening `file` when clicked, with the pointer's hand: an own server's through its engine ([`OwnFile::open`]),
+/// any other in the browser (its sharing link, else its own); as it was when the file has no link to open.
+fn open_on_click(element: gpui::Stateful<gpui::Div>, file: &SharedFile, own: Option<OwnFile>) -> AnyElement {
     let Some(link) = file.open_link().map(str::to_owned) else {
         return element.into_any_element();
     };
     element
         .cursor_pointer()
         .hover(|style| style.opacity(0.85))
-        .on_click(move |_, _, cx| cx.open_url(&link))
+        .on_click(move |_, _, cx| match &own {
+            Some(own) => own.open(cx),
+            None => cx.open_url(&link),
+        })
         .into_any_element()
+}
+
+/// Why an own server's file couldn't be downloaded, as its card's line says it.
+fn failed_words(failure: &Failure) -> String {
+    match failure {
+        Failure::Refused => "You may no longer have access to the file.".to_owned(),
+        other => other.words(),
+    }
+}
+
+/// An own server's file, read through its account's engine (see the module docs).
+#[derive(Clone)]
+pub struct OwnFile {
+    /// Its sharing link: what the engine reads it by, and what its download is known by.
+    link: String,
+    name: String,
+    source: PictureSource,
+}
+
+impl OwnFile {
+    /// Open in desktop app: saved in a folder of the user's alone (the runtime one, else the temporary one; the
+    /// downloads folder when it can't be had), then opened in the system's app for it.
+    pub fn open(&self, cx: &mut App) {
+        let base = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(std::path::PathBuf::from)
+            .filter(|dir| dir.is_dir())
+            .unwrap_or_else(std::env::temp_dir);
+        let private = base.join("ngteams-files");
+        let folder = teams_platform::private::create_dir_all(&private)
+            .and_then(|()| teams_platform::private::restrict_dir(&private))
+            .map(|()| private)
+            .or_else(|_| crate::picture_viewer::downloads())
+            .unwrap_or_else(|_| std::env::temp_dir());
+        let target = crate::picture_viewer::free_name(&folder, &safe_name(&self.name));
+        recording_download::start_with(
+            self.source.file_opener(self.link.clone()),
+            self.link.clone(),
+            target,
+            Then::Open,
+            cx,
+        );
+    }
+
+    /// Download: saved where the user chooses (the downloads folder without a chooser).
+    pub fn download(&self, cx: &mut App) {
+        let folder = crate::picture_viewer::downloads().unwrap_or_else(|_| std::env::temp_dir());
+        let name = safe_name(&self.name);
+        let chosen = cx.prompt_for_new_path(&folder, Some(&name));
+        let own = self.clone();
+        cx.spawn(async move |cx| {
+            let target = match chosen.await {
+                Ok(Ok(Some(path))) => path,
+                Ok(Ok(None)) => return,
+                Ok(Err(_)) | Err(_) => crate::picture_viewer::free_name(&folder, &name),
+            };
+            cx.update(|cx| {
+                recording_download::start_with(
+                    own.source.file_opener(own.link.clone()),
+                    own.link.clone(),
+                    target,
+                    Then::Keep,
+                    cx,
+                );
+            });
+        })
+        .detach();
+    }
+}
+
+/// `name` as a file name in a folder: the sender's words, so never a path or a name the system refuses.
+#[must_use]
+pub fn safe_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim_matches(|c: char| c == '.' || c.is_whitespace());
+    if cleaned.is_empty() {
+        "file".to_owned()
+    } else {
+        cleaned.to_owned()
+    }
 }
 
 /// A "More options" row: its icon and words, its test selector `file-menu-<what>-<card>`.
