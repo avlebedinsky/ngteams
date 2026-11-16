@@ -854,11 +854,12 @@ impl Walk<'_> {
     fn long(&mut self) -> SandboxResult {
         let service = self.service;
         self.open_card(&service.chats.long, &service.ids.long, "long")?;
-        // a form card is at most 448 px wide from the avatar's column: right of it is the chat's empty background
+        // a form card is at most 448 px wide from the avatar's column: right of it is the chat's empty background,
+        // up to the window's frame at x 1272
         let right = Rect {
             x0: 965,
             y0: PANE.y0,
-            x1: 1280,
+            x1: 1272,
             y1: PANE.y1,
         };
         let outside = dark_in(&self.run.last, right);
