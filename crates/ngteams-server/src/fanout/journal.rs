@@ -483,8 +483,10 @@ impl Fanout for Keeping {
             && let Err(error) = self.journal.append(topic, payload.clone()).await
         {
             tracing::warn!(%error, "a payload wasn't kept for replay");
-            if let Some((topic, word)) = (self.unkept)(topic) {
-                self.fanout.publish(&topic, word).await?;
+            if let Some((topic, word)) = (self.unkept)(topic)
+                && let Err(error) = self.fanout.publish(&topic, word).await
+            {
+                tracing::warn!(%error, "the word that a payload wasn't kept wasn't published");
             }
         }
         self.fanout.publish(topic, payload).await
@@ -612,5 +614,40 @@ mod tests {
         assert!(Refusing.tail("kept:a").await.unwrap() > none);
         Refusing.set_cursor("kept:a", "reader", none).await.unwrap();
         assert_eq!(Refusing.cursor("kept:a", "reader").await.unwrap(), None);
+    }
+
+    /// A fan-out that publishes nothing on the topics of the word.
+    #[derive(Debug)]
+    struct Wordless(crate::fanout::Local);
+
+    #[async_trait]
+    impl Fanout for Wordless {
+        async fn publish(&self, topic: &str, payload: Bytes) -> Result<(), FanoutError> {
+            if topic.starts_with("word:") {
+                return Err(FanoutError::Unavailable("refused".to_owned()));
+            }
+            self.0.publish(topic, payload).await
+        }
+        async fn subscribe(&self, topic: &str) -> Result<Subscription, FanoutError> {
+            self.0.subscribe(topic).await
+        }
+        async fn ready(&self) -> Result<(), FanoutError> {
+            self.0.ready().await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_word_that_fails_does_not_hold_back_the_payload() {
+        let keeping = Keeping::new(
+            Arc::new(Wordless(crate::fanout::Local::new())),
+            Arc::new(Refusing),
+            |_, _| true,
+            |topic| Some((format!("word:{topic}"), Bytes::from_static(b"unkept"))),
+        );
+        let mut payloads = keeping.subscribe("kept:a").await.unwrap();
+        keeping.publish("kept:a", Bytes::from_static(b"one")).await.unwrap();
+        assert_eq!(payloads.recv().await.unwrap(), Bytes::from_static(b"one"));
+        assert!(keeping.publish("word:a", Bytes::from_static(b"two")).await.is_err());
+        keeping.ready().await.unwrap();
     }
 }
