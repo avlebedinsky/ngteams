@@ -79,7 +79,9 @@ pub struct Seeded {
 
 async fn password_hash(db: &Db, upn: &str) -> String {
     use diesel::ExpressionMethods as _;
-    let query = users::table.filter(users::upn.eq(upn.to_owned())).select(users::password_hash);
+    let query = users::table
+        .filter(users::upn.eq(upn.to_owned()))
+        .select(users::password_hash);
     let hash: Result<String, ngteams_server::db::DbError> =
         async { ngteams_server::with_conn!(db, |conn| Ok(query.first(conn).await?)) }.await;
     hash.unwrap()
@@ -267,7 +269,12 @@ async fn events(first: &User, srv: &[Mri]) {
     for (n, (subject, start, minutes, all_day)) in [
         ("Planning 🗓️", monday + 9 * HOUR, 30, false),
         ("All day: offsite", monday + DAY, 24 * 60, true),
-        ("Late night <b>sync</b>", monday + 2 * DAY + 23 * HOUR + 30 * 60_000, 90, false),
+        (
+            "Late night <b>sync</b>",
+            monday + 2 * DAY + 23 * HOUR + 30 * 60_000,
+            90,
+            false,
+        ),
         ("ابن سينا review", monday + 3 * DAY + 13 * HOUR, 45, false),
     ]
     .into_iter()
@@ -301,7 +308,13 @@ async fn seed_team(owner: &User, srv: &[Mri], accounts: &[String]) -> String {
     let (team, group) = written.created.unwrap();
     let group = group.unwrap();
     let mut members: Vec<(Mri, TeamRole)> = srv.iter().map(|mri| (mri.clone(), TeamRole::Member)).collect();
-    members.extend(accounts.iter().skip(2).take(30).map(|mri| (Mri::new(mri), TeamRole::Member)));
+    members.extend(
+        accounts
+            .iter()
+            .skip(2)
+            .take(30)
+            .map(|mri| (Mri::new(mri), TeamRole::Member)),
+    );
     let add = TeamWrite::AddMembers {
         team: team.clone(),
         group: group.clone(),

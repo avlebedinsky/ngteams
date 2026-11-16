@@ -297,13 +297,17 @@ impl Front {
             .iter()
             .map(|endpoint| endpoint.trim_start_matches("http://").to_owned())
             .collect();
-        let sent: Arc<[std::sync::atomic::AtomicUsize]> =
-            backends.iter().map(|_| std::sync::atomic::AtomicUsize::new(0)).collect();
+        let sent: Arc<[std::sync::atomic::AtomicUsize]> = backends
+            .iter()
+            .map(|_| std::sync::atomic::AtomicUsize::new(0))
+            .collect();
         let closed = Arc::new(AtomicBool::new(false));
         let counts = Arc::clone(&sent);
         let task = tokio::spawn(async move {
             loop {
-                let Ok((client, _)) = listener.accept().await else { return };
+                let Ok((client, _)) = listener.accept().await else {
+                    return;
+                };
                 tokio::spawn(forward(client, backends.clone(), Arc::clone(&counts)));
             }
         });
@@ -386,11 +390,7 @@ pub async fn stored_text(to: &Phone, chat: &str, id: &str) -> String {
         if let Some(message) = to.engine().message(chat, id).await.unwrap() {
             return message.content;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "{}: {id} never stored",
-            to.upn
-        );
+        assert!(tokio::time::Instant::now() < deadline, "{}: {id} never stored", to.upn);
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
@@ -478,5 +478,7 @@ pub async fn download(reader: &Phone, share: &str) -> Vec<u8> {
 /// The picture at `src` as `reader`'s engine reads it for the message view.
 pub async fn picture(reader: &Phone, src: &str) -> Vec<u8> {
     let read = reader.engine().message_picture(src.to_owned()).await.unwrap();
-    read.unwrap_or_else(|| panic!("{}: no picture at {src}", reader.upn)).bytes.clone()
+    read.unwrap_or_else(|| panic!("{}: no picture at {src}", reader.upn))
+        .bytes
+        .clone()
 }

@@ -75,7 +75,10 @@ async fn two_clients_on_two_nodes_chat_both_ways_and_each_push_comes_in_under_tw
     let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
     loop {
         let teams = a.engine().teams().await.unwrap().unwrap_or_default();
-        if teams.iter().any(|team| team.id == seeded.team && team.channels.len() == 3) {
+        if teams
+            .iter()
+            .any(|team| team.id == seeded.team && team.channels.len() == 3)
+        {
             break;
         }
         assert!(tokio::time::Instant::now() < deadline, "a's teams: {teams:?}");
@@ -160,9 +163,11 @@ async fn reactions_edits_an_accounts_read_and_presence_cross_the_nodes() {
         },
     )
     .await;
-    a2.since(read, "the account's read", |event| {
-        matches!(event, Event::ReadHorizon { conversation } if *conversation == chat)
-    })
+    a2.since(
+        read,
+        "the account's read",
+        |event| matches!(event, Event::ReadHorizon { conversation } if *conversation == chat),
+    )
     .await;
     assert_eq!(a2.engine().unread_count(&chat).await.unwrap(), 0);
 
@@ -191,9 +196,11 @@ async fn presence_crosses(a: &super::calls::support::Phone, b: &mut super::calls
         let mark = b.mark();
         a.engine().own_availability(OwnStatus::Manual(status)).await.unwrap();
         let of = a.mri.clone();
-        b.since(mark, &format!("a as {shown:?}"), |event| {
-            matches!(event, Event::Presence { mri, availability } if *mri == of && *availability == shown)
-        })
+        b.since(
+            mark,
+            &format!("a as {shown:?}"),
+            |event| matches!(event, Event::Presence { mri, availability } if *mri == of && *availability == shown),
+        )
         .await;
     }
 }
@@ -316,7 +323,10 @@ async fn a_killed_nodes_clients_reconnect_to_the_other_node_and_catch_up() {
     for id in &missed {
         stored_text(&a, &chat, id).await;
     }
-    assert!(cluster.front(0).counts()[1] > 0, "a's client never reached the other node");
+    assert!(
+        cluster.front(0).counts()[1] > 0,
+        "a's client never reached the other node"
+    );
     // and the push and a's own writes work again, both ways
     let there = round(&mut a, &mut b, &chat, 3).await;
     let back = round(&mut b, &mut a, &chat, 3).await;
@@ -399,10 +409,7 @@ async fn no_open_calls(cluster: &Cluster) {
         if open.is_empty() {
             return;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "calls left open: {open:?}"
-        );
+        assert!(tokio::time::Instant::now() < deadline, "calls left open: {open:?}");
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
