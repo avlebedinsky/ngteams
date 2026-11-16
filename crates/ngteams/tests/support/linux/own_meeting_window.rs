@@ -715,7 +715,7 @@ fn channel_meet_now(rig: &mut Rig<'_>, people: &mut People<'_>, a_mri: &str) -> 
     thread::sleep(SETTLE * 3);
     rig.main_window();
     rig.shots("channel-post")?;
-    // a joins from the channel: its header's Join while the meeting runs (the post itself offers none)
+    // a joins from the channel: its header's Join while the meeting runs (the post's card has a Join too)
     rig.resize(WIDTHS[0])?;
     rig.click_header_join()?;
     thread::sleep(SETTLE * 2);
