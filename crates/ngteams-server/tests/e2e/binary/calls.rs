@@ -9,21 +9,21 @@ mod call_log;
 mod coturn_log;
 mod flows;
 mod group;
-mod group_video;
+pub(super) mod group_video;
 mod meetings;
 mod nodes;
 mod own_relay;
 mod qa_net;
 mod qa_ring_cancel;
 mod relay;
-mod support;
+pub(super) mod support;
 
 use teams_core::{CallAction, CallId, CallStatus, CallView, End};
 
 use self::support::{A_TONE, B_TONE, FRAMES, HEARD, Phone, Rig, TALK, wait_until};
 
 /// a's client at the first node and b's at the other one, with their chat (a made it, b has it).
-async fn pair(rig: &Rig) -> (Phone, Phone, String) {
+pub(super) async fn pair(rig: &Rig) -> (Phone, Phone, String) {
     let a = rig.phone(&rig.first, "a@own.test", "Ada", A_TONE).await;
     let b = rig.phone(rig.other(), "b@own.test", "Bert", B_TONE).await;
     let chat = a.chat_with(&b.mri).await;
@@ -33,17 +33,17 @@ async fn pair(rig: &Rig) -> (Phone, Phone, String) {
 
 /// A call that is up: the caller's id of it and the callee's.
 #[derive(Clone, Copy)]
-struct Talk {
-    call: CallId,
-    answered: CallId,
+pub(super) struct Talk {
+    pub(super) call: CallId,
+    pub(super) answered: CallId,
 }
 
-fn shows(who: &str) -> impl Fn(&CallView) -> bool + '_ {
+pub(super) fn shows(who: &str) -> impl Fn(&CallView) -> bool + '_ {
     move |view| view.participants.iter().any(|party| party.mri == who)
 }
 
 /// `caller` calls in `chat`, `answerer` answers: both are connected, with media, and see each other.
-async fn connect(caller: &mut Phone, answerer: &mut Phone, chat: &str) -> Talk {
+pub(super) async fn connect(caller: &mut Phone, answerer: &mut Phone, chat: &str) -> Talk {
     let (placed, rang) = (caller.mark(), answerer.mark());
     let call = caller.act(CallAction::Call { chat: chat.to_owned() }).await;
     caller.status(placed, call, &CallStatus::Ringing).await;
@@ -63,7 +63,7 @@ async fn connect(caller: &mut Phone, answerer: &mut Phone, chat: &str) -> Talk {
 }
 
 /// `leaver` hangs up its `left` call: it ends there as hung up, and at `other` as ended by the far end.
-async fn hang_up(leaver: &mut Phone, left: CallId, other: &mut Phone, others: CallId) {
+pub(super) async fn hang_up(leaver: &mut Phone, left: CallId, other: &mut Phone, others: CallId) {
     let (leaver_seen, other_seen) = (leaver.mark(), other.mark());
     leaver.act(CallAction::HangUp { call: left }).await;
     assert_eq!(leaver.ended(leaver_seen, left).await, End::HungUp);
@@ -77,7 +77,7 @@ const DIP_WINDOWS: u32 = 3;
 /// How loud each `(listener, far tone)` heard that tone in the last [`TALK`]. While one heard it at [`HEARD`] or less,
 /// measured again over the next [`TALK`], up to [`DIP_WINDOWS`] times: a heavily loaded host starves the media for
 /// seconds, which passes; media that isn't there stays away.
-async fn loudness(sides: &[(&Phone, teams_media::tone::Tone)]) -> Vec<f32> {
+pub(super) async fn loudness(sides: &[(&Phone, teams_media::tone::Tone)]) -> Vec<f32> {
     let measure = || {
         sides
             .iter()
@@ -98,7 +98,7 @@ async fn loudness(sides: &[(&Phone, teams_media::tone::Tone)]) -> Vec<f32> {
 
 /// Each side's speaker played the other's tone in the last [`TALK`] of the call, or in a later one after a loaded
 /// host's dip ([`loudness`]).
-async fn heard_each_other(a: &Phone, a_tone: teams_media::tone::Tone, b: &Phone, b_tone: teams_media::tone::Tone) {
+pub(super) async fn heard_each_other(a: &Phone, a_tone: teams_media::tone::Tone, b: &Phone, b_tone: teams_media::tone::Tone) {
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     let heard = loudness(&[(a, b_tone), (b, a_tone)]).await;
     let (a_heard, b_heard) = (heard[0], heard[1]);
@@ -117,7 +117,7 @@ async fn heard_each_other(a: &Phone, a_tone: teams_media::tone::Tone, b: &Phone,
 }
 
 /// The camera of `sender`'s call goes on: `viewer` sees its picture.
-async fn camera_shows(sender: &Phone, call: CallId, viewer: &Phone) {
+pub(super) async fn camera_shows(sender: &Phone, call: CallId, viewer: &Phone) {
     let before = viewer.video.remote.counts().frames;
     sender.act(CallAction::Camera { call, on: true }).await;
     wait_until("the far end's video", || {

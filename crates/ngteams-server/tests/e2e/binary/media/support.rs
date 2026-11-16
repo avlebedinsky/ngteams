@@ -55,6 +55,16 @@ impl Blobs {
         }
     }
 
+    /// The configuration's root key naming the store (`storage_url`).
+    pub fn root(&self) -> &str {
+        &self.root
+    }
+
+    /// The configuration's `[storage_options]` table.
+    pub fn tables(&self) -> &str {
+        &self.tables
+    }
+
     /// The keys the store holds for this deployment, below its prefix, in order.
     pub async fn keys(&self) -> Vec<String> {
         let found: Vec<_> = self.store.list(Some(&self.prefix)).try_collect().await.unwrap();

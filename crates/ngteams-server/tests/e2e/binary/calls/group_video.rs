@@ -47,14 +47,14 @@ const fn tone(hz: f32, amplitude: f32) -> Tone {
 }
 
 /// Four people's tones: none a low harmonic of another's (a clipped mix has odd harmonics).
-const TONES: [Tone; 4] = [tone(440.0, 0.5), tone(660.0, 0.5), tone(880.0, 0.5), tone(1170.0, 0.5)];
+pub(in crate::binary) const TONES: [Tone; 4] = [tone(440.0, 0.5), tone(660.0, 0.5), tone(880.0, 0.5), tone(1170.0, 0.5)];
 
 const fn camera(width: u32, height: u32, fps: u32) -> PatternCamera {
     PatternCamera { width, height, fps }
 }
 
 /// The cameras' shapes, each far enough from the others' (more than 12 %) to tell after libwebrtc's scaling.
-const SHAPES: [PatternCamera; 11] = [
+pub(in crate::binary) const SHAPES: [PatternCamera; 11] = [
     camera(640, 360, 15), // 1.78
     camera(480, 360, 15), // 1.33
     camera(360, 360, 15), // 1.00
@@ -283,7 +283,7 @@ impl Group {
 
 /// The group chat `first` makes with `others` and `quiet` (members with no client), topic `topic`, once every other
 /// client has it.
-async fn group_chat(first: &Phone, others: &[&Phone], quiet: &[String], topic: &str) -> String {
+pub(in crate::binary) async fn group_chat(first: &Phone, others: &[&Phone], quiet: &[String], topic: &str) -> String {
     let mut members: Vec<Mri> = others.iter().map(|phone| Mri::new(phone.mri.clone())).collect();
     members.extend(quiet.iter().map(Mri::new));
     let create = Action::CreateChat {
@@ -300,7 +300,7 @@ async fn group_chat(first: &Phone, others: &[&Phone], quiet: &[String], topic: &
 }
 
 /// `caller` starts the call in `chat`; each of `answerers` answers its ring. Each one's call id, the caller's first.
-async fn start_and_answer(caller: &mut Phone, answerers: &mut [&mut Phone], chat: &str) -> Vec<CallId> {
+pub(in crate::binary) async fn start_and_answer(caller: &mut Phone, answerers: &mut [&mut Phone], chat: &str) -> Vec<CallId> {
     let marks: Vec<usize> = answerers.iter().map(|phone| phone.mark()).collect();
     let placed = caller.mark();
     let call = caller.act(CallAction::Call { chat: chat.to_owned() }).await;
@@ -446,7 +446,7 @@ async fn stays_still(phone: &mut Phone, line: usize, what: &str) {
 
 /// Each `(listener, tones it hears, tones it doesn't)`: measured over the last [`TALK`], again over the next ones
 /// while a heard tone is too quiet (a loaded host starves a client's media for a second now and then).
-async fn judge(sides: &[(&Phone, &[Tone], &[Tone])], what: &str) {
+pub(in crate::binary) async fn judge(sides: &[(&Phone, &[Tone], &[Tone])], what: &str) {
     let measure = || {
         sides
             .iter()
@@ -479,7 +479,7 @@ async fn judge(sides: &[(&Phone, &[Tone], &[Tone])], what: &str) {
 }
 
 /// `leaver` hangs up: its call ends as hung up.
-async fn hang_up(leaver: &mut Phone, call: CallId) {
+pub(in crate::binary) async fn hang_up(leaver: &mut Phone, call: CallId) {
     let mark = leaver.mark();
     leaver.act(CallAction::HangUp { call }).await;
     assert_eq!(leaver.ended(mark, call).await, End::HungUp, "{}", leaver.upn);
@@ -504,7 +504,7 @@ fn faces(phones: &[Phone]) -> Vec<(String, PatternCamera)> {
 
 /// The first three's cameras on: each sees the other two, each on a line of its own, never itself, and the audio is
 /// still mixed. The lines each shows the others on.
-async fn three_cameras_seen(phones: &mut [Phone], calls: &[CallId]) -> Vec<Vec<usize>> {
+pub(in crate::binary) async fn three_cameras_seen(phones: &mut [Phone], calls: &[CallId]) -> Vec<Vec<usize>> {
     let faces = faces(phones);
     for (phone, call) in phones.iter().zip(calls) {
         phone.act(CallAction::Camera { call: *call, on: true }).await;

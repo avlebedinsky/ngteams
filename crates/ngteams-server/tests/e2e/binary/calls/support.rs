@@ -11,7 +11,7 @@ use teams_auth::secrets::MemorySecretStore;
 use teams_auth::session::Session;
 use teams_call::{Identity, RemoteEnd, Tracker};
 use teams_core::account::{
-    CALL_LANGUAGE, CSA_GTM, MIDDLE_TIER_GTM, PROVISIONING_GTM, USER_PROFILE_GTM, web_client_info,
+    AMS_GTM, CALL_LANGUAGE, CSA_GTM, MIDDLE_TIER_GTM, PRESENCE_GTM, PROVISIONING_GTM, USER_PROFILE_GTM, web_client_info,
 };
 use teams_core::engine::{self, Action, EngineHandle, EngineOptions, Event, Parts, Push, Source};
 use teams_core::{
@@ -368,6 +368,8 @@ pub struct Phone {
     catch_up_retry: Duration,
     /// Its requests also reach the calendar, CSA, provisioning and the profiles ([`Self::served`]).
     served: bool,
+    /// Its requests also reach pictures (AMS) and presence, as the app's do ([`Self::whole`]).
+    whole: bool,
     dir: TempDir,
 }
 
@@ -403,6 +405,7 @@ impl Phone {
             socket: None,
             catch_up_retry: Duration::from_secs(2),
             served: false,
+            whole: false,
             dir,
         }
     }
@@ -416,6 +419,13 @@ impl Phone {
     /// names, from its next start on.
     pub fn served(&mut self) {
         self.served = true;
+    }
+
+    /// As [`Self::served`], and its requests reach pictures (AMS) and presence too: every service the app's account
+    /// reaches on an own server, from its next start on.
+    pub fn whole(&mut self) {
+        self.served = true;
+        self.whole = true;
     }
 
     /// Its push sockets connect to `socket` (`ws://127.0.0.1:<port>`) from its next start on.
@@ -465,6 +475,15 @@ impl Phone {
             self.session
                 .service_base(gtm)
                 .unwrap_or_else(|| panic!("authz names no {gtm}"))
+        };
+        let chats = if self.whole {
+            chats
+                .with_ams(&base(AMS_GTM))
+                .unwrap()
+                .with_presence(&base(PRESENCE_GTM))
+                .unwrap()
+        } else {
+            chats
         };
         chats
             .with_middle_tier(&base(MIDDLE_TIER_GTM))

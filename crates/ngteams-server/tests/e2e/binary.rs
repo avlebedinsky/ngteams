@@ -5,6 +5,7 @@ mod bots;
 mod calendar;
 mod calls;
 mod chats;
+mod cluster;
 mod directory;
 mod media;
 mod namespaces;
