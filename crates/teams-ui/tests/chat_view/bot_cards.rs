@@ -821,3 +821,69 @@ fn a_sign_in_button_opens_its_page_and_a_dialog_button_teams_on_the_web() {
     );
     assert!(rig.core.bot_asks.lock().unwrap().is_empty());
 }
+
+/// A made-up label of about 150 characters, longer than a card is wide.
+const LONG: &str = "A made-up question with a very long label that goes on past the width of the card, so that it must \
+                    wrap onto a second and maybe a third line without cutting a word";
+
+#[test]
+fn a_long_label_placeholder_and_error_wrap_inside_the_card() {
+    let card = json!({
+        "type": "AdaptiveCard",
+        "body": [
+            {"type": "Input.Text", "id": "said", "label": LONG, "isRequired": true, "errorMessage": LONG,
+             "placeholder": LONG},
+            {"type": "Input.ChoiceSet", "id": "pick", "label": LONG, "placeholder": LONG, "choices": [
+                {"title": "Soup", "value": "soup"}
+            ]}
+        ],
+        "actions": [{"type": "Action.Submit", "title": "Send"}]
+    });
+    let rig = bots_rig(vec![card_message(ID, &card)]);
+    let (_view, cx) = tall_window(&rig);
+    click(cx, &format!("card-{ID}-c0a0"));
+    let card = bounds(cx, &format!("card-{ID}-c0")).unwrap();
+    for part in ["said-label", "said-error-text", "said", "pick-label", "pick"] {
+        let drawn = bounds(cx, &input(part)).unwrap_or_else(|| panic!("{part} is drawn"));
+        assert!(
+            drawn.right() <= card.right(),
+            "{part} {drawn:?} stays in the card {card:?}"
+        );
+        assert!(drawn.size.height > px(0.0), "{part} {drawn:?}");
+    }
+    // the label wraps: it is taller than one line of its input under it
+    let label = bounds(cx, &input("said-label")).unwrap();
+    assert!(label.size.height > px(30.0), "{label:?}");
+}
+
+#[test]
+fn a_narrow_cards_answer_line_wraps_under_it_and_the_card_keeps_its_width() {
+    let card = json!({
+        "type": "AdaptiveCard",
+        "body": [{"type": "TextBlock", "text": "Ask"}],
+        "actions": [{"type": "Action.Execute", "title": "Go", "verb": "go"}]
+    });
+    let rig = bots_rig(vec![card_message(ID, &card)]);
+    rig.core.bot_answers.lock().unwrap().extend([
+        Ok(InvokeAnswer::Error {
+            code: Some("BadRequest".to_owned()),
+            message: LONG.to_owned(),
+        }),
+        Ok(InvokeAnswer::SignIn(Value::Null)),
+    ]);
+    let (_view, cx) = tall_window(&rig);
+    let surface = format!("card-{ID}-c0");
+    let before = bounds(cx, &surface).unwrap();
+    assert!(before.size.width < px(300.0), "a narrow card: {before:?}");
+    for _ in 0..2 {
+        click(cx, &format!("card-{ID}-c0a0"));
+        let after = bounds(cx, &surface).unwrap();
+        let line = bounds(cx, &format!("card-{ID}-c0answer")).unwrap();
+        assert_eq!(after.size.width, before.size.width, "the card keeps its width");
+        assert!(
+            line.right() <= after.right(),
+            "the line {line:?} wraps under the card {after:?}"
+        );
+        assert!(line.size.height > px(20.0), "the line wraps: {line:?}");
+    }
+}

@@ -3,8 +3,8 @@
 //! message's [`CardBot`].
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, Entity, InteractiveElement as _, IntoElement, ParentElement as _, SharedString, Styled, div, px,
-    rgb,
+    AnyElement, App, Entity, HighlightStyle, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
+    Styled, StyledText, div, px, rgb,
 };
 use gpui_component::Disableable as _;
 use gpui_component::button::Button;
@@ -49,41 +49,57 @@ pub(super) fn view(draw: &Draw<'_>, input: &Input) -> AnyElement {
     };
     let control = control(&place, input, bot.shown.fields.get(&place.key));
     let invalid = bot.shown.invalid.contains(&place.key);
+    let label_selector = format!("{}-label", place.selector);
     div()
         .key_context(super::INPUT_CONTEXT)
         .w_full()
         .flex()
         .flex_col()
         .gap_1()
-        .when_some(input.label.clone(), |field, label| {
+        .when_some(input.label.as_deref(), |field, label| {
             field.child(
                 div()
-                    .flex()
-                    .gap_0p5()
+                    .debug_selector(move || label_selector)
                     .text_sm()
                     .text_color(rgb(draw.palette.foreground))
-                    .child(label)
-                    .when(input.required, |label| {
-                        label.child(div().text_color(rgb(theme::DANGER)).child("*"))
-                    }),
+                    .child(label_text(label, input.required)),
             )
         })
         .child(control)
         .when(invalid, |field| {
             let selector = format!("{}-error", place.selector);
+            let text_selector = format!("{selector}-text");
             field.child(
                 div()
                     .debug_selector(move || selector)
                     .flex()
-                    .items_center()
+                    .items_start()
                     .gap_1()
                     .text_xs()
                     .text_color(rgb(theme::DANGER))
-                    .child(Glyph::CIRCLE_ALERT.icon().size(px(12.0)))
-                    .child(error_of(input)),
+                    .child(div().pt_0p5().child(Glyph::CIRCLE_ALERT.icon().size(px(12.0))))
+                    .child(
+                        div()
+                            .debug_selector(move || text_selector)
+                            .flex_1()
+                            .min_w_0()
+                            .child(error_of(input)),
+                    ),
             )
         })
         .into_any_element()
+}
+
+/// An input's label, wrapped in the card's width, a required one's red mark after its last word.
+fn label_text(label: &str, required: bool) -> StyledText {
+    if !required {
+        return StyledText::new(label.to_owned());
+    }
+    let mark = HighlightStyle {
+        color: Some(rgb(theme::DANGER).into()),
+        ..HighlightStyle::default()
+    };
+    StyledText::new(format!("{label} *")).with_highlights([(label.len() + 1..label.len() + 2, mark)])
 }
 
 fn control(place: &Place<'_>, input: &Input, field: Option<&Field>) -> AnyElement {

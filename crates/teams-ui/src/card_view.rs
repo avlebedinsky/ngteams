@@ -467,7 +467,8 @@ fn card_surface(draw: &Draw<'_>, at: usize, shown: &Card, cx: &mut App) -> AnyEl
             .flex_col()
             .gap_1()
             .child(surface)
-            .child(line)
+            // no width of its own, so the card's width sets the line's and a long line wraps under the card
+            .child(div().w_0().min_w_full().child(line))
             .into_any_element(),
         None => surface.into_any_element(),
     }
