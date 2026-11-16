@@ -4,11 +4,13 @@
 
 use std::fmt::Write as _;
 
-use serde_json::json;
+use serde_json::{Map, json};
 
+use super::service::Post;
 use super::{Caller, events, message_repo, repo, wire};
 use crate::app::App;
 use crate::db::DbError;
+use crate::db::users::User;
 
 /// One participant of an ended call, as its end lists it.
 pub(crate) struct Part<'a> {
@@ -56,13 +58,13 @@ pub(crate) async fn started(
     post(app, chat, (id, name), &content).await
 }
 
-/// A channel's meeting `call` began, organized by `organizer` (its id and name), at `conversation`: its post in the
-/// channel, which names the meeting (`properties.meeting`: its organizer and tenant, its title once its organizer
-/// titles it) and where it runs, as the service posts a channel's Meet now. The post's id, when it was posted.
+/// A channel's meeting `call` began, organized by `organizer`, at `conversation`: its post in the channel, which
+/// names the meeting (`properties.meeting`: its organizer and tenant, its title once its organizer titles it) and
+/// where it runs, as the service posts a channel's Meet now. The post's id, when it was posted.
 pub(crate) async fn meeting_started(
     app: &App,
     channel: &str,
-    organizer: (&str, &str),
+    organizer: &User,
     (call, conversation): (&str, &str),
 ) -> Result<Option<i64>, DbError> {
     let content = format!(
@@ -72,10 +74,19 @@ pub(crate) async fn meeting_started(
     );
     let meeting = json!({
         "@type": "http://schema.skype.com/ScheduledMeetingCreated", "meetingtitle": null,
-        "organizerId": organizer.0, "tenantId": app.issuer.tenant(),
+        "organizerId": organizer.id, "tenantId": app.issuer.tenant(),
     });
-    let properties = json!({"meeting": meeting.to_string()});
-    post_with(app, channel, organizer, &content, properties).await
+    let mut properties = Map::new();
+    properties.insert("meeting".into(), meeting.to_string().into());
+    let post = Post {
+        thread: channel,
+        author: organizer,
+        kind: "Event/Call",
+        content: &content,
+        properties,
+        under: None,
+    };
+    super::service::post(app, post).await
 }
 
 /// The call `call` ended with `parts` in it: one part (its caller alone) reads as a missed call.
@@ -103,17 +114,7 @@ pub(crate) async fn ended(
     post(app, chat, caller, &content).await
 }
 
-async fn post(app: &App, chat: &str, caller: (&str, &str), content: &str) -> Result<(), DbError> {
-    post_with(app, chat, caller, content, json!({})).await.map(|_| ())
-}
-
-async fn post_with(
-    app: &App,
-    chat: &str,
-    (id, name): (&str, &str),
-    content: &str,
-    properties: serde_json::Value,
-) -> Result<Option<i64>, DbError> {
+async fn post(app: &App, chat: &str, (id, name): (&str, &str), content: &str) -> Result<(), DbError> {
     let caller = Caller {
         id: id.to_owned(),
         tenant: String::new(),
@@ -124,10 +125,8 @@ async fn post_with(
         "conversationLink": format!("{}/v1/users/ME/conversations/{chat}", wire::base(app)),
         "from": format!("{}/v1/users/ME/contacts/{}", wire::base(app), caller.mri()),
         "fromDisplayNameInToken": name, "imdisplayname": name,
-        "messagetype": "Event/Call", "contenttype": "text", "content": content, "properties": properties,
+        "messagetype": "Event/Call", "contenttype": "text", "content": content, "properties": {},
     });
-    // a channel's posts are each the root of a thread of replies
-    let in_channel = super::channels::place(&app.db, chat).await?.is_some();
     let draft = message_repo::Message {
         chat_id: chat.to_owned(),
         id: 0,
@@ -135,11 +134,11 @@ async fn post_with(
         client_id: None,
         version: 0,
         body: body.to_string(),
-        root_id: in_channel.then_some(0),
+        root_id: super::channels::root(&app.db, chat, None).await?,
     };
     let Some(posted) = message_repo::insert(&app.db, &draft, &wire::base(app)).await? else {
-        return Ok(None);
+        return Ok(());
     };
     events::tell(app, "NewMessage", &posted.row.value()?, &posted.readers, &posted.told).await;
-    Ok(Some(posted.row.id))
+    Ok(())
 }

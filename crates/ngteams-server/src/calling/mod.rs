@@ -11,7 +11,8 @@
 //! - **A party's callbacks** are taken only on calling endpoints the account itself registered, so no request makes
 //!   the server deliver to someone else's socket.
 //! - **Who may do what** is the token's account against the call's parties, and for a group call the members of its
-//!   chat too (a join, a roster-only subscription, an add); anyone else gets 404.
+//!   chat too (a join, a roster-only subscription, an add); anyone else gets 404. A meeting's call also takes whom
+//!   its lobby option lets in, and only its hosts let in, remove and mute (others get 403) ([`meeting`]).
 //! - **The sweeper** ([`sweep`]) ends a ring nobody answered and a call whose keep-alives stopped, on whichever
 //!   serving node looks first, and drops the rows of calls that are over.
 //! - **A call's events in its chat** (`Event/Call`: started, ended with its length, missed) are written through the
@@ -21,9 +22,11 @@
 //!
 //! - **A group call** ([`group`]) is a group chat's: every member it names rings with the call's media node's offer,
 //!   the caller is in it at once with the node's answer, and each party answers, declines, joins and leaves alone;
-//!   the call ends when nobody is in it. Its media goes through the node ([`media::MediaNodes`]), which the
-//!   operation asks first and the step then records. Until a node is installed ([`Mixers`]) a group call's start is
-//!   answered 501; a meeting and the test call are never served.
+//!   the call ends when nobody is in it (a meeting's call also stays while someone waits in its lobby). Its media
+//!   goes through the node ([`media::MediaNodes`]), which the operation asks first and the step then records. Until a
+//!   node is installed ([`Mixers`]) a group call's start is answered 501; the test call is never served.
+//! - **A meeting's call** ([`meeting`]) is a group call in the meeting's chat or a channel that nobody rings, with a
+//!   lobby, hosts and the organizer's options.
 
 pub mod config;
 mod group;

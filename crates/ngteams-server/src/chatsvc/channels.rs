@@ -31,6 +31,12 @@ pub(crate) async fn place(db: &Db, thread: &str) -> Result<Option<Place>, DbErro
         .map(|team| Place { channel, team }))
 }
 
+/// The root a new message of `thread` is kept under: in a channel, the post `under` replies to, or none for a post
+/// of its own (each post is the root of its thread of replies); in a chat, no root.
+pub(crate) async fn root(db: &Db, thread: &str, under: Option<i64>) -> Result<Option<i64>, DbError> {
+    Ok(place(db, thread).await?.map(|_| under.unwrap_or(0)))
+}
+
 /// A conversation path's thread and, for a post's reply chain, the post.
 pub(super) fn split(target: &str) -> Result<(&str, Option<i64>), Error> {
     match target.split_once(";messageid=") {

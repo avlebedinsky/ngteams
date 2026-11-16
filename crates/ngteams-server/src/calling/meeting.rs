@@ -127,7 +127,8 @@ pub(super) async fn start(app: &App, caller: &Caller, asked: Start<'_>, body: &V
     Ok(Json(wire::conversation(&origin, &app.config.region, &call)).into_response())
 }
 
-/// Into the running meeting's call `call`: a join, or a wait in its lobby.
+/// Into the running meeting's call `call`: a join, or a wait in its lobby. A plain group call in the chat is no
+/// meeting's: it is refused, not joined without a lobby or hosts.
 async fn enter(
     app: &App,
     caller: &Caller,
@@ -135,6 +136,9 @@ async fn enter(
     admitted: Admission,
     body: &Value,
 ) -> Result<Response, Failure> {
+    if call.meeting.is_none() {
+        return Err(Refusal::Forbidden.into());
+    }
     let key = Key::Id(&call.id);
     match admitted {
         Admission::In => group::join(app, caller, key, call, body).await,
@@ -293,7 +297,8 @@ pub(super) async fn remove(app: &App, caller: &Caller, key: Key<'_>, body: &Valu
 
 /// `POST epconv` of a channel's Meet now (its subscription: the conversation's callbacks, no call invitation): the
 /// channel's meeting is made with its caller its organizer, nobody in it yet, and answered; the organizer then enters
-/// it at its conversation ([`enter_at_conversation`]). A meeting that runs in the channel is answered instead.
+/// it at its conversation ([`enter_at_conversation`]). A meeting that runs in the channel is answered instead. A chat
+/// that isn't a channel (a scheduled meeting's has its own organizer) is refused.
 pub(super) async fn meet_now(
     app: &App,
     caller: &Caller,
@@ -304,6 +309,9 @@ pub(super) async fn meet_now(
     let members = call_events::members(app, channel).await?.ok_or(Refusal::Missing)?;
     if !members.contains(&caller.id) {
         return Err(Refusal::Forbidden.into());
+    }
+    if crate::chatsvc::channels::place(&app.db, channel).await?.is_none() {
+        return Err(Refusal::Bad.into());
     }
     let origin = app.config.origin();
     let region = &app.config.region;
@@ -373,7 +381,7 @@ async fn post_meeting(app: &App, call: &Call) {
 
 /// Posts the channel's meeting and keeps its post with its call. One not posted is logged.
 async fn announce(app: &App, key: Key<'_>, call: &Call) {
-    // `None`: its organizer isn't in its channel (any more)
+    // `None`: its organizer has no account or isn't in its channel (any more)
     match posted(app, call).await.transpose() {
         Some(Ok(post)) => keep_post(app, key, post).await,
         failed => tracing::warn!(?failed, "a channel meeting wasn't posted to its channel"),
@@ -401,10 +409,12 @@ async fn posted(app: &App, call: &Call) -> Result<Option<i64>, DbError> {
         .as_ref()
         .map(|meeting| meeting.organizer.as_str())
         .unwrap_or_default();
-    let user = users::by_id(&app.db, organizer).await?.ok_or(DbError::Conflict)?;
+    let Some(user) = users::by_id(&app.db, organizer).await? else {
+        return Ok(None);
+    };
     let channel = call.chat.as_deref().unwrap_or_default();
     let conversation = wire::conversation_url(&app.config.origin(), &call.conversation, None);
-    call_events::meeting_started(app, channel, (&user.id, &user.display_name), (&call.id, &conversation)).await
+    call_events::meeting_started(app, channel, &user, (&call.id, &conversation)).await
 }
 
 /// Keeps the channel meeting's post `post` with its call.

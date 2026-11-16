@@ -80,13 +80,10 @@ fn leg_of(call: &Call, seat: Seat) -> Result<&Leg, Failure> {
 
 /// `POST epconv` in a group chat: the call is made on a media node, the caller accepted with the node's answer, each
 /// other member it names rung with the node's offer to its own leg, and the chat told where the call runs. A chat
-/// whose call still runs refuses it, naming that call.
+/// whose call still runs refuses it, naming that call; a meeting's chat refuses it (its call is the meeting's).
 pub(super) async fn start(app: &App, caller: &Caller, asked: Start<'_>, body: &Value) -> Result<Response, Failure> {
     let nodes = nodes(app)?;
-    let members = call_events::members(app, asked.chat).await?.ok_or(Refusal::Missing)?;
-    if !members.contains(&caller.id) {
-        return Err(Refusal::Forbidden.into());
-    }
+    let members = starter_in(app, caller, asked.chat).await?;
     let offer = sdp(Some(asked.offer))?;
     let (endpoint, links) = needed_links(app, caller, body).await?;
     if !["acceptance", "end"].iter().all(|name| links.contains_key(*name)) {
@@ -125,6 +122,18 @@ pub(super) async fn start(app: &App, caller: &Caller, asked: Start<'_>, body: &V
         seed_leg(app, home, &call.id, &leg.id, Some(asked.offer)).await;
     }
     Ok(Json(wire::conversation(&origin, region, &call)).into_response())
+}
+
+/// The people of `chat`, where `caller` may start a group call: it is one of them, and the chat is no meeting's.
+async fn starter_in(app: &App, caller: &Caller, chat: &str) -> Result<Vec<String>, Failure> {
+    let members = call_events::members(app, chat).await?.ok_or(Refusal::Missing)?;
+    if !members.contains(&caller.id) {
+        return Err(Refusal::Forbidden.into());
+    }
+    if crate::calendar::meeting_of(&app.db, chat).await?.is_some() {
+        return Err(Refusal::Bad.into());
+    }
+    Ok(members)
 }
 
 /// Seats the members of the chat `to` names (once each, the caller aside, each whose account is enabled) as the
@@ -355,8 +364,9 @@ pub(super) async fn parameters(app: &App, caller: &Caller, key: Key<'_>, body: &
     Ok(StatusCode::OK.into_response())
 }
 
-/// `POST conv/<id>` on a group call: with a `callInvitation` a chat member joins it; without, a party that rings or is
-/// in it hands out more callbacks, or a chat member follows the roster. Anyone else finds no call.
+/// `POST conv/<id>` on a group call: with a `callInvitation` a chat member joins it (a meeting's call: its lobby decides,
+/// [`super::meeting::enter_at_conversation`]); without, a party that rings or is in it hands out more callbacks, or a
+/// chat member follows the roster. Anyone else finds no call.
 pub(super) async fn subscribe(
     app: &App,
     caller: &Caller,
@@ -399,8 +409,8 @@ pub(super) async fn subscribe(
     Ok(Json(answer).into_response())
 }
 
-/// A chat member's join with its offer: its seat reserved, its leg made with the node (the node's answer), then it is
-/// in the call.
+/// A join with its offer of an account the caller already let in (a chat member, or one a meeting's lobby lets in):
+/// its seat reserved, its leg made with the node (the node's answer), then it is in the call.
 pub(super) async fn join(
     app: &App,
     caller: &Caller,
@@ -454,9 +464,9 @@ pub(super) async fn join(
     }
 }
 
-/// `POST conv/<id>/add` of a party in a group call: a member of the call's chat rings as a callee, with the node's
-/// offer to a leg of its own. Someone with no calling endpoint isn't brought in, and the adder is told at its
-/// `addParticipantFailure` callback.
+/// `POST conv/<id>/add` of a party in a group call (a meeting's: of a host): a member of the call's chat rings as a
+/// callee, with the node's offer to a leg of its own. Someone with no calling endpoint isn't brought in, and the adder
+/// is told at its `addParticipantFailure` callback.
 pub(super) async fn add(app: &App, caller: &Caller, key: Key<'_>, body: &Value) -> Result<Response, Failure> {
     let kept = repo::find(&app.db, key).await?.ok_or(Refusal::Missing)?;
     let call = kept.call;
@@ -465,6 +475,9 @@ pub(super) async fn add(app: &App, caller: &Caller, key: Key<'_>, body: &Value) 
         return Err(Refusal::Missing.into());
     }
     call.in_call(seat)?;
+    if call.meeting.is_some() {
+        call.hosts(seat)?;
+    }
     let named = body
         .pointer("/participants/to/0")
         .filter(|to| to.is_object())

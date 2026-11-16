@@ -340,11 +340,13 @@ impl Call {
     }
 
     /// [`Self::reserve`] for an add: a party that still rings is left ringing as it is (`None`), its invitation's offer
-    /// being the one its answer is made for.
+    /// being the one its answer is made for. One waiting in a meeting's lobby is refused: a host lets it in instead.
     pub(crate) fn reserve_added(&mut self, account: &Party, leg: &str) -> Result<Option<Reserved>, Refusal> {
-        let ringing = self
-            .seat_of(&account.id)
-            .is_some_and(|seat| self.party(seat).status == Status::Ringing);
+        let status = self.seat_of(&account.id).map(|seat| self.party(seat).status);
+        if status == Some(Status::Lobby) {
+            return Err(Refusal::Forbidden);
+        }
+        let ringing = status == Some(Status::Ringing);
         if ringing && self.phase != Phase::Ended {
             return Ok(None);
         }

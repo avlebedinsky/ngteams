@@ -143,7 +143,7 @@ async fn keep(app: &App, post: Post<'_>) -> Result<Option<message_repo::Posted>,
         "messagetype": post.kind, "contenttype": "Text", "content": post.content,
         "properties": post.properties,
     });
-    let in_channel = super::channels::place(&app.db, post.thread).await?.is_some();
+    let root_id = super::channels::root(&app.db, post.thread, post.under).await?;
     let draft = message_repo::Message {
         chat_id: post.thread.to_owned(),
         id: 0,
@@ -151,7 +151,7 @@ async fn keep(app: &App, post: Post<'_>) -> Result<Option<message_repo::Posted>,
         client_id: None,
         version: 0,
         body: body.to_string(),
-        root_id: in_channel.then_some(post.under.unwrap_or(0)),
+        root_id,
     };
     message_repo::insert(&app.db, &draft, &base).await
 }
