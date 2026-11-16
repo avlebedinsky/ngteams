@@ -521,6 +521,23 @@ impl Leg {
         }
     }
 
+    /// The payload parameters of the leg's main video line (a test's frame takes them).
+    #[cfg(test)]
+    pub(crate) fn video_params(&mut self) -> Option<str0m::format::PayloadParams> {
+        let main = self.video.first()?.mid;
+        self.rtc.writer(main)?.payload_params().next().copied()
+    }
+
+    /// Whether `stream` names a line the leg receives video on: a receiving line, or its sharing line.
+    pub(crate) fn receives_on(&self, stream: u32) -> bool {
+        let kind = if stream == self.sources.sharing {
+            LineKind::Sharing
+        } else {
+            LineKind::Slot(stream)
+        };
+        self.video.iter().any(|line| line.kind == kind)
+    }
+
     /// Asks the participant for a keyframe of its source `source` (its camera's or its screen's); whether it went.
     pub(crate) fn request_keyframe(&mut self, source: u32) -> bool {
         let kind = if source == self.sources.video {
@@ -572,17 +589,17 @@ impl Leg {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
-    const SOURCES: Sources = Sources {
+    pub(in crate::mixer) const SOURCES: Sources = Sources {
         audio: 1000,
         video: 1001,
         sharing: 1002,
         data: 1003,
     };
 
-    fn making() -> Making {
+    pub(in crate::mixer) fn making() -> Making {
         super::super::install_crypto();
         Making {
             candidates: vec![SocketAddr::from(([192, 0, 2, 10], 3480))],
@@ -708,7 +725,7 @@ mod tests {
 
     /// A client's group offer in str0m: audio, the main video line, nine receiving lines, the sharing line and its
     /// control plane's channel, in the dialect.
-    fn group_client() -> Sdp {
+    pub(in crate::mixer) fn group_client() -> Sdp {
         let mut rtc = RtcConfig::new().build(Instant::now());
         rtc.add_local_candidate(Candidate::host(SocketAddr::from(([192, 0, 2, 20], 50_000)), "udp").unwrap());
         let mut change = rtc.sdp_api();
@@ -773,6 +790,13 @@ mod tests {
         assert!(!leg.request_keyframe(1021));
         assert_eq!(leg.slot_of(leg.video[1].mid), Some(1004));
         assert_eq!(leg.slot_of(main), None);
+    }
+
+    #[test]
+    fn a_leg_receives_on_its_receiving_lines_and_its_sharing_line_only() {
+        let leg = Leg::new(&making(), SOURCES, Some(&group_client()), Instant::now()).unwrap();
+        assert!(leg.receives_on(1004) && leg.receives_on(SOURCES.sharing));
+        assert!(!leg.receives_on(SOURCES.video) && !leg.receives_on(99_999));
     }
 
     #[test]

@@ -821,7 +821,7 @@ receiving lines). The camera and the screen go on as the party describes its lin
 other than the sharing line sending is the camera, the sharing line sending is the screen); the roster then says so
 (`main-video` `sendrecv`, an `applicationsharing-video` stream `sendonly` with the sharing source) and the others ask
 the node for it with source requests on the control plane (`sr`: a receiving line's stream id and the source to show,
-`-1` for none; each is answered `sr_res` `ok`). The node writes each frame of a camera or a screen onto every line
+`-1` for none; each is answered `sr_res` `ok`, and one naming no receiving line of the party's changes nothing). The node writes each frame of a camera or a screen onto every line
 whose last request named it, from that source's next keyframe on (it asks the source for one by PLI, or FIR where
 the line takes no PLI, at most every 300 ms per source), its RTP time going on from where the line was when it changes
 source. A receiver's PLI or FIR on a line is passed to the source it shows. No video goes to a party before it

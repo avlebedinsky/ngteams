@@ -78,7 +78,11 @@ impl Room {
     }
 
     /// The leg `id`'s line `request.stream` is to show `request.source`: from that source's next keyframe, asked for.
+    /// A request naming no line the leg receives on is nothing.
     fn request(&mut self, id: &str, request: SourceRequest, now: Instant) {
+        if !self.legs.get(id).is_some_and(|leg| leg.receives_on(request.stream)) {
+            return;
+        }
         let slot = self.slots.entry((id.to_owned(), request.stream)).or_default();
         if slot.show(request.source)
             && let Some(source) = slot.source()
@@ -171,5 +175,98 @@ impl Room {
         for leg in self.legs.values_mut() {
             leg.tell_speakers(&self.told);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::calling::Sources;
+    use crate::mixer::leg::tests::{SOURCES, group_client, making};
+
+    const B: Sources = Sources {
+        audio: 1020,
+        video: 1021,
+        sharing: 1022,
+        data: 1023,
+    };
+
+    /// A room of a and b, each from a client's group offer.
+    fn room(now: Instant) -> Room {
+        let mut room = Room::new(now);
+        for (id, sources) in [("a", SOURCES), ("b", B)] {
+            let leg = Leg::new(&making(), sources, Some(&group_client()), now).unwrap();
+            room.legs.insert(id.to_owned(), leg);
+        }
+        room
+    }
+
+    fn requested(stream: u32, source: i64) -> Driven {
+        Driven {
+            requests: vec![SourceRequest { stream, source }],
+            ..Driven::default()
+        }
+    }
+
+    fn shows(room: &Room, leg: &str, stream: u32) -> Option<u32> {
+        room.slots.get(&(leg.to_owned(), stream)).and_then(Slot::source)
+    }
+
+    #[test]
+    fn a_line_shows_what_its_leg_asked_and_its_decoders_wish_reaches_the_source() {
+        let now = Instant::now();
+        let mut room = room(now);
+        // b asks its first receiving line for a's camera; a line of nobody's, or of a's, is nothing
+        room.driven("b", requested(1024, 1001), now);
+        room.driven("b", requested(99_999, 1001), now);
+        room.driven("b", requested(1004, 1001), now);
+        room.driven("nobody", requested(1024, 1001), now);
+        assert_eq!(shows(&room, "b", 1024), Some(1001));
+        assert_eq!(room.slots.len(), 1);
+        assert!(!room.asked.due(1001, now), "a was asked for a keyframe");
+        // b's decoder wants a keyframe on that line: a is asked again, once the last ask is old enough
+        let later = now + super::super::video::KEYFRAME_EVERY;
+        let wish = Driven {
+            keyframes: vec![1024, 1025],
+            ..Driven::default()
+        };
+        room.driven("b", wish, later);
+        assert!(!room.asked.due(1001, later));
+    }
+
+    #[test]
+    fn a_frame_reaches_a_seeded_line_from_a_keyframe_on() {
+        let later = Instant::now();
+        let mut room = room(later);
+        room.driven("b", requested(1024, 1001), later);
+        // a's frames: none to b before it seeded, then from a keyframe on
+        let params = room.legs.get_mut("a").unwrap().video_params().unwrap();
+        let frame = |keyframe| Frame {
+            source: 1001,
+            time: 90_000,
+            keyframe,
+            params,
+            data: Arc::from(&[0_u8, 0, 0, 1, 0x65][..]),
+        };
+        let sent = |keyframe| Driven {
+            frames: vec![frame(keyframe)],
+            ..Driven::default()
+        };
+        room.driven("a", sent(true), later);
+        assert!(
+            room.slots.values().all(|slot| slot.clone().pass(false, 1).is_none()),
+            "still waiting"
+        );
+        room.legs.get_mut("b").unwrap().seed = Some(4_000_000);
+        room.driven("a", sent(false), later);
+        room.driven("a", sent(true), later);
+        assert!(
+            room.slots.values().all(|slot| slot.clone().pass(false, 1).is_some()),
+            "showing"
+        );
+        room.remove("b");
+        assert!(room.slots.is_empty());
     }
 }
