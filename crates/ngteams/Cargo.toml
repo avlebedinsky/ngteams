@@ -147,6 +147,11 @@ name = "qa_narrow_compose_window"
 harness = false
 
 [[test]]
+# QA of task 406: the AI correction keeps a missing final dot missing, in the UI sandbox
+name = "qa_final_dot_window"
+harness = false
+
+[[test]]
 name = "deferred_devices_window"
 harness = false
 
