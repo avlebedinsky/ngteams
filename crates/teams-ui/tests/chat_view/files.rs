@@ -577,8 +577,8 @@ fn a_download_whose_part_file_another_writer_replaced_fails_and_keeps_that_file(
     );
 }
 
-/// The second place is the first one by another path (a link to its folder, as a name in another case is on a file
-/// system that ignores case): the two `.part` files are one file, which the first download has locked.
+/// The second place is the first one by another path (a link to its folder): its job finds the place of the first one
+/// with the links of their folders resolved, and fails before it opens the `.part` file of the first one.
 #[cfg(unix)]
 #[test]
 fn a_download_of_another_file_to_where_one_runs_by_another_path_fails_and_the_first_saves() {
@@ -618,12 +618,49 @@ fn a_download_of_another_file_to_where_one_runs_by_another_path_fails_and_the_fi
             teams_ui::recording_download::Failure::Busy
         ))
     );
-    // one stream only: the second download never wrote the locked `.part` file
+    // one stream only: the second download never wrote the `.part` file of the first one
     answer_held(&rig, &[OWN_BYTES]);
     draw(cx);
     assert_eq!(std::fs::read(&target).unwrap(), OWN_BYTES, "the first file, whole");
     assert!(!teams_ui::recording_download::part_path(&target).exists());
     assert!(bounds(cx, &format!("file-download-{ID}-0 saved")).is_some());
+}
+
+/// Another writer that the app can't see (another ngteams, or a path to the same place that the app does not find)
+/// has the `.part` file locked: the download fails before it writes, and that file and its bytes stay.
+#[test]
+fn a_download_whose_part_file_another_writer_has_locked_fails_and_keeps_that_file() {
+    let (rig, _opened, cx) = own_file_chat(true);
+    *rig.core.hold_streams_from.lock().unwrap() = Some(0);
+    let chosen = tempfile::tempdir().unwrap();
+    let target = chosen.path().join("made-up notes.pdf");
+    let staging = teams_ui::recording_download::part_path(&target);
+    let theirs: &[u8] = b"the other writer's bytes";
+    std::fs::write(&staging, theirs).unwrap();
+    let locked = std::fs::OpenOptions::new().write(true).open(&staging).unwrap();
+    locked.try_lock().unwrap();
+    click(cx, &format!("file-more-{ID}-0"));
+    click(cx, &format!("file-menu-download-{ID}-0"));
+    let place = target.clone();
+    cx.simulate_new_path_selection(move |_| Some(place));
+    draw(cx);
+    let failed = cx.update(|_, cx| {
+        teams_ui::recording_download::download_of(OWN_SHARE, cx).map(|download| download.read(cx).progress().clone())
+    });
+    assert_eq!(
+        failed,
+        Some(teams_ui::recording_download::Progress::Failed(
+            teams_ui::recording_download::Failure::Busy
+        ))
+    );
+    assert!(bounds(cx, &format!("file-download-{ID}-0 failed")).is_some());
+    assert!(!target.exists(), "not saved to its place");
+    assert_eq!(
+        std::fs::read(&staging).unwrap(),
+        theirs,
+        "the other writer's file stays"
+    );
+    drop(locked);
 }
 
 #[test]

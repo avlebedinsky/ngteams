@@ -7,8 +7,10 @@
 //!   expired is read again by the engine; a stream that broke off is opened again where the file stands, a few times
 //!   ([`RETRIES`]) while nothing more arrives. A recording refused is not asked again.
 //! - **The file** is written beside its place as `<name>.part`, then renamed over it once whole; a download that failed
-//!   or was cancelled leaves nothing behind. The download locks its `.part` file while it writes it, so a second
-//!   writer of that file (another download to the same place, also by another path to it) fails ([`Failure::Busy`]).
+//!   or was cancelled leaves nothing behind. A download whose place is the place of another running download of the
+//!   app, or the `.part` file of it, or the reverse, fails before it writes ([`Places`]). The download locks its
+//!   `.part` file while it writes it, so a second writer of that file (another download to the same place by a path
+//!   that the app does not find, or one in another ngteams) fails ([`Failure::Busy`]).
 //! - **It runs apart from the view**: the downloads are the app's ([`Downloads`]), so leaving the recap or the chat
 //!   doesn't stop one, and the recap shows the ones of its recordings again when it is shown. Writing happens off the
 //!   UI thread; the recording keeps playing meanwhile.
@@ -22,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use gpui::{App, AppContext as _, Context, Entity, EntityId, Global, Task};
+use gpui::{App, AppContext as _, Context, Entity, Global, Task};
 use same_file::Handle;
 use teams_core::{EngineError, FileStream, Reply};
 
@@ -173,13 +175,14 @@ impl RecordingDownload {
         self.then
     }
 
-    /// Starts (or, after a failure, starts again) writing the recording to its file. When the job of another
-    /// download that the app keeps, or of an earlier start of this one, still writes to the same place (its `.part`
-    /// file), to the `.part` file of this one, or the reverse (see `target_busy`), this one fails at once
-    /// ([`Failure::Busy`]): two writers of one file would overwrite each other's bytes. Its job also fails so when
-    /// another writer holds the lock of the `.part` file, or put another file at its path before the rename.
+    /// Starts (or, after a failure, starts again) writing the recording to its file. When the job of an earlier start
+    /// of this one did not end yet, this one fails at once ([`Failure::Busy`]). When the job of another download of
+    /// the app still writes to the same place (its `.part` file), to the `.part` file of this one, or the reverse,
+    /// the job of this one fails so before it writes ([`Places`]): two writers of one file would overwrite each
+    /// other's bytes. Its job also fails so when another writer holds the lock of the `.part` file, or put another
+    /// file at its path before the rename.
     pub fn start(&mut self, cx: &mut Context<Self>) {
-        if self.writing.load(Ordering::Acquire) || target_busy(&self.target, cx.entity_id(), cx) {
+        if self.writing.load(Ordering::Acquire) {
             self.running = None;
             self.progress = Progress::Failed(Failure::Busy);
             cx.notify();
@@ -195,6 +198,8 @@ impl RecordingDownload {
         self.writing = Arc::new(AtomicBool::new(true));
         let job = Job {
             writing: Arc::clone(&self.writing),
+            places: cx.default_global::<Downloads>().places.clone(),
+            place: None,
             part: None,
         };
         let executor = cx.background_executor().clone();
@@ -264,42 +269,55 @@ pub struct Downloads {
     latest: HashMap<String, Entity<RecordingDownload>>,
     /// The ones still running that a later download of their link took the place of: kept until they end.
     earlier: Vec<Entity<RecordingDownload>>,
+    /// The places that the jobs of the app write to.
+    places: Places,
 }
 
 impl Global for Downloads {}
 
-/// Whether the job of a download other than `except` still writes to `target` or to its `.part` file, whatever its
-/// link: the same place, a place that is the `.part` file of the other (`report.part` while `report` is written), or
-/// the reverse, also through a link to a folder ([`places_collide`]). A rename of one over the other would replace the
-/// file that the other job writes. It sees only the downloads the app keeps ([`Downloads`]): not a dismissed one whose
-/// job did not end yet, and not one in another ngteams. For one of those to the same place, the lock of the `.part`
-/// file stops it. For one to the `.part` file of the other, `save` finds another file at its `.part` path before the
-/// rename and fails ([`Failure::Busy`]), whichever one started first.
-fn target_busy(target: &Path, except: EntityId, cx: &App) -> bool {
-    let Some(downloads) = cx.try_global::<Downloads>() else {
-        return false;
-    };
-    downloads
-        .latest
-        .values()
-        .chain(&downloads.earlier)
-        .filter(|download| download.entity_id() != except)
-        .any(|download| {
-            let download = download.read(cx);
-            download.writing.load(Ordering::Acquire) && places_collide(&download.target, target)
-        })
+/// The places that the jobs of the app write to, with the links of their folders resolved ([`resolved`]): one for each
+/// job, from before it opens its `.part` file until it ends ([`Job`]), also of a download that was dismissed. A job
+/// takes its place only when no other job writes to the same place, to the `.part` file of its place, or the reverse
+/// ([`places_collide`]), else it fails ([`Failure::Busy`]): a rename of one over the other would replace the file
+/// that the other job writes. The job resolves its place, off the UI thread, after it made the folder.
+///
+/// It does not find another path to the same place that the resolution of folder links does not find (a name in
+/// another case on a file system that ignores case, a bind mount), and not a download in another ngteams. For one of
+/// those to the same place, the lock of the `.part` file stops it. For a download to the `.part` file of the other, a
+/// rename over the `.part` file that this one writes makes `save` fail ([`Failure::Busy`]) before its own rename, and
+/// that file stays. When this one renames first, the app saves the two files.
+#[derive(Clone, Default)]
+struct Places(Arc<Mutex<Vec<PathBuf>>>);
+
+impl Places {
+    /// Takes `place` (resolved) for a job, unless another job writes to it or to a place that collides with it.
+    fn take(&self, place: &Path) -> bool {
+        let mut places = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if places.iter().any(|taken| places_collide(taken, place)) {
+            return false;
+        }
+        places.push(place.to_owned());
+        true
+    }
+
+    /// Lets `place` go, as the job that took it ends.
+    fn release(&self, place: &Path) {
+        let mut places = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(at) = places.iter().position(|taken| taken == place) {
+            places.swap_remove(at);
+        }
+    }
 }
 
-/// Whether downloads to `one` and to `other` write the same file: the same place, or one place is the `.part` file of
-/// the other, after the links in their folders are resolved (`alias/report.part` collides with `folder/report` when
-/// `alias` is a link to `folder`).
+/// Whether downloads to `one` and to `other` (both [`resolved`]) write the same file: the same place, or one place is
+/// the `.part` file of the other.
 fn places_collide(one: &Path, other: &Path) -> bool {
-    let (one, other) = (resolved(one), resolved(other));
-    one == other || part_path(&one) == other || one == part_path(&other)
+    one == other || part_path(one) == other || one == part_path(other)
 }
 
-/// `place` in its folder's real path (its links resolved), or `place` as it is when its folder can't be resolved (it
-/// is not there yet).
+/// `place` in its folder's real path (the links in it resolved, so `alias/report.part` is `folder/report.part` when
+/// `alias` is a link to `folder`), or `place` as it is when its folder can't be resolved. It reads the disk: never on
+/// the UI thread.
 fn resolved(place: &Path) -> PathBuf {
     place
         .parent()
@@ -327,7 +345,7 @@ pub fn start(core: Arc<dyn Core>, link: String, target: PathBuf, cx: &mut App) -
 /// again, only when it does the same (the same `then`, and for [`Then::Keep`] the same `target`, whose `.part` file it
 /// writes). One that does another (an Open while a Download runs, or the reverse) runs on to its end beside the new
 /// one, which the card then shows. A new download to a place that a running download of another link writes to fails
-/// at once (see [`RecordingDownload::start`]).
+/// before it writes (see [`RecordingDownload::start`]).
 pub fn start_with(open: Opener, link: String, target: PathBuf, then: Then, cx: &mut App) -> Entity<RecordingDownload> {
     let latest = download_of(&link, cx).filter(|download| download.read(cx).progress.running());
     let mut earlier = cx
@@ -394,9 +412,13 @@ struct Told {
 
 /// A download's job, from its start until it ends or is dropped (cancelled): it clears the download's `writing` as it
 /// ends, and before that removes the `.part` file it took, unless the file was saved or is no longer at its path
-/// (another writer put its own file there, which stays).
+/// (another writer put its own file there, which stays), and then lets its place go.
 struct Job {
     writing: Arc<AtomicBool>,
+    /// The places that the jobs of the app write to.
+    places: Places,
+    /// The place (resolved) that the job took in [`Places`], until it ends.
+    place: Option<PathBuf>,
     /// The `.part` file the job locked and writes (its path, and the file that holds the lock), until it is renamed
     /// over its place.
     part: Option<(PathBuf, fs::File)>,
@@ -410,6 +432,9 @@ impl Drop for Job {
                 let _ = fs::remove_file(part);
             }
             drop(file);
+        }
+        if let Some(place) = self.place.take() {
+            self.places.release(&place);
         }
         self.writing.store(false, Ordering::Release);
     }
@@ -429,7 +454,8 @@ fn still_at(file: &fs::File, path: &Path) -> io::Result<bool> {
 /// bytes, and once the whole file came); what it wrote is removed when it fails or is dropped (by `job`). The
 /// `.part` file is locked while it is written: when another writer has it locked, or the file it locked is no longer
 /// the one at its path (another writer saved or removed it in the meantime), this fails ([`Failure::Busy`]) and does
-/// not change it. It also fails so when, before the rename, another file is at its path: that file stays.
+/// not change it. It also fails so when, before the rename, another file is at its path: that file stays. Before it
+/// opens the `.part` file, it takes its place in the app's [`Places`], or fails ([`Failure::Busy`]).
 async fn save<F: Future<Output = ()>>(
     open: Opener,
     target: PathBuf,
@@ -443,6 +469,12 @@ async fn save<F: Future<Output = ()>>(
     if let Some(folder) = part.parent() {
         fs::create_dir_all(folder).map_err(disk)?;
     }
+    // the folder is there now: its links resolve
+    let place = resolved(&target);
+    if !job.places.take(&place) {
+        return Err(Failure::Busy);
+    }
+    job.place = Some(place);
     // not emptied before it is locked: it may be the file of another writer
     let file = fs::OpenOptions::new()
         .write(true)
@@ -613,11 +645,33 @@ mod tests {
         fs::create_dir(&folder).unwrap();
         let alias = chosen.path().join("alias");
         std::os::unix::fs::symlink(&folder, &alias).unwrap();
-        let report = folder.join("report");
-        assert!(places_collide(&report, &alias.join("report")));
-        assert!(places_collide(&report, &alias.join("report.part")));
-        assert!(places_collide(&alias.join("report.part"), &report));
-        assert!(!places_collide(&report, &alias.join("other")));
+        let report = resolved(&folder.join("report"));
+        assert!(places_collide(&report, &resolved(&alias.join("report"))));
+        assert!(places_collide(&report, &resolved(&alias.join("report.part"))));
+        assert!(places_collide(&resolved(&alias.join("report.part")), &report));
+        assert!(!places_collide(&report, &resolved(&alias.join("other"))));
+    }
+
+    #[test]
+    fn a_place_is_taken_by_one_job_until_that_job_ends() {
+        let places = Places::default();
+        let report = Path::new("/saved/report");
+        assert!(places.take(report));
+        assert!(!places.take(report), "the same place");
+        assert!(!places.take(Path::new("/saved/report.part")), "its `.part` file");
+        assert!(places.take(Path::new("/saved/other")));
+        let job = Job {
+            writing: Arc::new(AtomicBool::new(true)),
+            places: places.clone(),
+            place: Some(report.to_owned()),
+            part: None,
+        };
+        drop(job);
+        assert!(places.take(Path::new("/saved/report.part")), "let go as the job ended");
+        assert!(
+            !places.take(Path::new("/saved/other")),
+            "the other job still has its place"
+        );
     }
 
     #[test]
@@ -628,6 +682,8 @@ mod tests {
         file.try_lock().unwrap();
         let job = Job {
             writing: Arc::new(AtomicBool::new(true)),
+            places: Places::default(),
+            place: None,
             part: Some((part.clone(), file)),
         };
         // another download saved its own file over it (a rename, which a lock does not stop)
@@ -648,6 +704,8 @@ mod tests {
         let writing = Arc::new(AtomicBool::new(true));
         let job = Job {
             writing: Arc::clone(&writing),
+            places: Places::default(),
+            place: None,
             part: Some((part.clone(), file)),
         };
         let other = fs::OpenOptions::new().write(true).open(&part).unwrap();
