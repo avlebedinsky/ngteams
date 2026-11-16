@@ -142,6 +142,11 @@ name = "qa_bot_cards_window"
 harness = false
 
 [[test]]
+# QA of task 429: the message box in a narrow call chat, a narrow window and a thread, in the UI sandbox
+name = "qa_narrow_compose_window"
+harness = false
+
+[[test]]
 name = "deferred_devices_window"
 harness = false
 
