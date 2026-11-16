@@ -104,7 +104,23 @@ impl BotKeys {
     /// # Errors
     /// A database failure, or a key that can't be made.
     pub async fn load(db: Db, config: &Config) -> Result<Self, KeyError> {
-        let keys = Self {
+        let keys = Self::new(db, config);
+        keys.rotate_if_due().await?;
+        Ok(keys)
+    }
+
+    /// Reads the keys as they are, on a node that serves no bot route: it makes, rotates or deletes none.
+    ///
+    /// # Errors
+    /// A database failure, or a stored key that can't sign.
+    pub async fn read(db: Db, config: &Config) -> Result<Self, KeyError> {
+        let keys = Self::new(db, config);
+        keys.reload().await?;
+        Ok(keys)
+    }
+
+    fn new(db: Db, config: &Config) -> Self {
+        Self {
             db,
             signer: RwLock::default(),
             published: Mutex::default(),
@@ -113,9 +129,7 @@ impl BotKeys {
             lead: PRE_PUBLISH.min(config.bots.key_rotation()),
             lifetime: config.bots.activity_token_lifetime(),
             keep: retention(config),
-        };
-        keys.rotate_if_due().await?;
-        Ok(keys)
+        }
     }
 
     /// Makes the first key, or publishes the next one when the signer is the newest key and was made one rotation

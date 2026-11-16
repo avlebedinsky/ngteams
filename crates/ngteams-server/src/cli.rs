@@ -287,7 +287,7 @@ async fn serve(
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<(), CliError> {
     let listener = role.serves_api().then(|| Listener::bind(config.listen)).transpose()?;
-    let app = App::start(config).await?;
+    let app = App::start_for(config, role).await?;
     let media = if role.serves_media() {
         Some(crate::mixer::MediaNode::start(&app).await?)
     } else {

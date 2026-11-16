@@ -90,16 +90,29 @@ fn key_retention(config: &Config) -> Duration {
 }
 
 impl App {
-    /// Connects to the database (migrating it), Redis (when configured) and the file store, and loads the keys.
+    /// Starts a node that runs every role: see [`App::start_for`].
     ///
     /// # Errors
     /// See [`StartError`].
     pub async fn start(config: Config) -> Result<Arc<Self>, StartError> {
+        Self::start_for(config, crate::mixer::Role::All).await
+    }
+
+    /// Connects to the database (migrating it), Redis (when configured) and the file store, and loads the keys.
+    /// Only a node that serves the API makes or rotates the bot keys.
+    ///
+    /// # Errors
+    /// See [`StartError`].
+    pub async fn start_for(config: Config, role: crate::mixer::Role) -> Result<Arc<Self>, StartError> {
         let db = Db::connect(&config.database_url, config.database_pool).await?;
         let tenant = crate::db::meta::tenant(&db).await?;
         let keys = KeyRing::load(db.clone(), config.tokens.rotation(), key_retention(&config)).await?;
         let issuer = Issuer::new(keys, &config.origin(), &tenant, &config.region, config.tokens.access());
-        let bot_keys = crate::apps::keys::BotKeys::load(db.clone(), &config).await?;
+        let bot_keys = if role.serves_api() {
+            crate::apps::keys::BotKeys::load(db.clone(), &config).await?
+        } else {
+            crate::apps::keys::BotKeys::read(db.clone(), &config).await?
+        };
         let setup_limits = LoginConfig {
             max_failures: config.setup.max_attempts,
             window: config.setup.window,

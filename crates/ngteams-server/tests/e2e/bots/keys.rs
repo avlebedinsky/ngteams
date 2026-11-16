@@ -325,3 +325,63 @@ async fn housekeeping_publishes_the_next_bot_key_before_it_signs_and_drops_one_n
     );
     registry.server.stop().await;
 }
+
+/// Deletes every bot signing key.
+async fn forget_keys(server: &TestServer) -> Result<usize, ngteams_server::db::DbError> {
+    use diesel_async::RunQueryDsl as _;
+    let query = diesel::delete(bot_signing_keys::table);
+    let db = &server.app.db;
+    ngteams_server::with_conn!(db, |conn| Ok(query.execute(conn).await?))
+}
+
+/// The `kid` of each published bot key.
+async fn kids(server: &TestServer) -> Vec<String> {
+    get(server, "/bot/v1/.well-known/keys").await["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|key| key["kid"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_a_node_that_serves_the_api_makes_or_rotates_the_bot_keys_at_its_start() {
+    use ngteams_server::app::App;
+    use ngteams_server::mixer::Role;
+    let registry = Registry::open_with(crate::support::Backend::Sqlite, |config| {
+        config.bots.key_rotation = 1;
+    })
+    .await;
+    let server = &registry.server;
+    let config = server.app.config.clone();
+    let first = kids(server).await;
+    assert_eq!(first.len(), 1, "{first:?}");
+
+    // due: a media node starts on the keys as they are, and signs with the same key
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let media = App::start_for(config.clone(), Role::Media).await.unwrap();
+    assert_eq!(kids(server).await, first);
+    let token = media
+        .bot_keys
+        .activity_token("28:bot", "https://example.test/")
+        .unwrap();
+    assert_eq!(jsonwebtoken::decode_header(&token).unwrap().kid, first.first().cloned());
+
+    // an api node publishes the next key at its start
+    App::start_for(config.clone(), Role::Api).await.unwrap();
+    assert_eq!(kids(server).await.len(), 2);
+
+    // no key yet: a media node makes none; an api node makes the first
+    assert_eq!(forget_keys(server).await.unwrap(), 2);
+    let media = App::start_for(config.clone(), Role::Media).await.unwrap();
+    assert!(kids(server).await.is_empty());
+    assert!(
+        media
+            .bot_keys
+            .activity_token("28:bot", "https://example.test/")
+            .is_err()
+    );
+    App::start_for(config, Role::Api).await.unwrap();
+    assert_eq!(kids(server).await.len(), 1);
+    registry.server.stop().await;
+}
