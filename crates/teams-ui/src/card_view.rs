@@ -50,7 +50,7 @@ use teams_proto::LinkPreviewPicture;
 use teams_proto::chat::card::{
     self, Action, ActionKind, BotAction, Card, CardApp, CardMessage, Column, ColumnSet, Container, ContainerStyle,
     DateFormat, Element, Frame, HAlign, Image, ImageSize, Input, Kind, Media, RichTextBlock, Spacing, Table, TextBlock,
-    TextColor, TextLook, TextPart, TextSize, TextWeight, VAlign, Via, Width,
+    TextColor, TextLook, TextPart, TextSize, TextWeight, VAlign, Width,
 };
 use teams_proto::chat::parse_html;
 
@@ -365,7 +365,7 @@ struct BotDraw<'a> {
 impl BotDraw<'_> {
     /// A button that sends asks the bot (else it opens in Teams on the web).
     fn asks(&self, action: &BotAction) -> bool {
-        self.shown.reaches && !self.read_only && action.via != Via::TaskFetch
+        bot_card::asks(self.shown.reaches, self.read_only, action)
     }
 }
 
@@ -1291,7 +1291,7 @@ fn action_button(draw: &Draw<'_>, key: &str, action: &Action, set: &[String]) ->
     match (&action.kind, asks, draw.bot) {
         (ActionKind::Submit(_), false, _) => button = button.tooltip(RUNS_IN_TEAMS),
         (_, true, Some(bot)) => {
-            let busy = bot.shown.busy.as_deref();
+            let busy = bot.shown.busy.get(&draw.at).map(String::as_str);
             button = button.spinning(busy == Some(key)).disabled(busy.is_some());
         }
         _ => {}

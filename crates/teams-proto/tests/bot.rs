@@ -131,6 +131,7 @@ fn documented_invokes_match_their_fixtures() {
         verb: Some("approve".to_owned()),
         data: json!({"request": "synthetic-request-1", "comment": "Looks fine"}),
         automatic: false,
+        text: None,
     });
     assert_eq!(invoke("Lab B", execute, AB_CHAT), fixture(INVOKES, "execute"));
 

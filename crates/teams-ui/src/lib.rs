@@ -176,6 +176,7 @@ pub mod team_menu;
 pub mod teams_list;
 pub mod teams_page;
 pub mod theme;
+mod time_picker;
 pub mod trace;
 pub mod translate;
 pub mod tray;

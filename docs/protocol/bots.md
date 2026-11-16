@@ -64,7 +64,7 @@ audience to the app) and any on-behalf-of token for an app.
 | `adaptiveCard/action` | a card's `Action.Execute` is pressed, or its `refresh` runs | `{"action": {"type": "Action.Execute", "id", "verb", "data"}, "trigger": "manual" \| "automatic"}` | unseen |
 | `task/fetch` | a card button whose `msteams.type` is `task/fetch` | `{"data": <the button's data>, "context"}` | unseen |
 | `task/submit` | a card dialog's submit | `{"data": <its data and answers>, "context"}` | unseen |
-| `message` | a card's plain `Action.Submit` or `messageBack`: the bot gets a message activity carrying `value` | the data merged with the answers | **own design**, unseen |
+| `message` | a card's plain `Action.Submit` or `messageBack`: the bot gets a message activity carrying `value` | the data merged with the answers; a `messageBack`'s `text` goes as the body's `text` | **own design**, unseen |
 
 `messagePayload` describes the message an action command runs on: `id`, `replyToId` (a channel post's id; none in a
 chat), `createdDateTime`, `deleted` false, `importance` `normal`, `locale` `en-us`, `from` (`{"user":
@@ -76,13 +76,14 @@ What a card's buttons carry (`teams_proto::chat::card::BotAction`): an `Action.S
 `msteams.type` (`messageBack` with `text`, `displayText` and `value`; `imBack` with its text; `invoke`; `signin`;
 `task/fetch`), its `id` and `associatedInputs` (`none` sends no answers); an `Action.Execute`'s `verb`; a hero card
 button's type and `value`; and a card's `refresh` (its `Action.Execute` and the `userIds` it runs for by itself).
-`imBack` and `messageBack`'s `displayText` post a visible message as the user, through the ordinary message write.
+`imBack` and `messageBack`'s `displayText` post a visible message as the user, through the ordinary message write;
+`messageBack`'s `text` goes to the bot only, with its value.
 
 The answers go as Adaptive Cards gives them: a card's `Action.Submit` or `Action.Execute` sends the answers of its own
 card and of the cards a `ShowCard` opened it from, each input's by its `id`, merged into the action's `data` when that
 is an object (none becomes the answers; any other `data` goes as it is, without them). An input left empty goes as no
 key. Nothing goes while an answer fails its card's checks (`isRequired`, `regex`, `maxLength`, `min` and `max`); the
-input shows its `errorMessage`.
+input shows its `errorMessage`. A typed time that can't be read as one fails too, required or not.
 
 **Suggested actions** (own design, unseen): a bot's message offers them in its activity's
 `suggestedActions.actions` (the Bot Framework's shape: `imBack`, `messageBack`, `postBack` buttons), carried in the

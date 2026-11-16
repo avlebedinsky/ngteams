@@ -59,7 +59,8 @@ pub enum InvokeKind {
     TaskFetch(CardInvoke),
     /// `task/submit`: a card dialog's submit (unseen).
     TaskSubmit(CardInvoke),
-    /// A card's plain `Action.Submit` or `messageBack`: the bot gets a message carrying `value` (own design, unseen).
+    /// A card's plain `Action.Submit` or `messageBack`: the bot gets a message carrying `value`, and a `messageBack`'s
+    /// `text` as its `text` (own design, unseen).
     Submit(CardInvoke),
 }
 
@@ -75,6 +76,8 @@ pub struct CardInvoke {
     pub data: Value,
     /// An `Action.Execute` sent by a `refresh` rather than pressed.
     pub automatic: bool,
+    /// A `messageBack`'s `text`: what the bot reads as the message's text ([`InvokeKind::Submit`] only).
+    pub text: Option<String>,
 }
 
 /// Where a message extension's command runs.
@@ -347,6 +350,9 @@ impl BotInvoke {
         if let Some(message) = self.kind.card_message() {
             body.insert("messageId".to_owned(), json!(message));
         }
+        if let InvokeKind::Submit(CardInvoke { text: Some(text), .. }) = &self.kind {
+            body.insert("text".to_owned(), json!(text));
+        }
         Value::Object(body)
     }
 
@@ -607,6 +613,7 @@ mod tests {
             verb: Some("approve".to_owned()),
             data: json!({"x": 1}),
             automatic: true,
+            text: None,
         };
         let execute = invoke(InvokeKind::Execute(card.clone())).with_theme(Theme::Dark);
         let body = execute.body_without_token();
@@ -653,6 +660,24 @@ mod tests {
         );
         assert_eq!(CommandContext::CommandBox.wire(), "commandbox");
         assert_eq!(CommandContext::Compose.fetch_commands_wire(), "Compose");
+    }
+
+    #[test]
+    fn a_message_backs_text_goes_beside_its_value() {
+        let card = CardInvoke {
+            data: json!({"x": 1}),
+            ..CardInvoke::default()
+        };
+        let submit = invoke(InvokeKind::Submit(card.clone())).body_without_token();
+        assert_eq!(submit["value"], json!({"x": 1}));
+        assert!(submit.get("text").is_none());
+        let message_back = invoke(InvokeKind::Submit(CardInvoke {
+            text: Some("join".to_owned()),
+            ..card
+        }))
+        .body_without_token();
+        assert_eq!(message_back["text"], "join");
+        assert_eq!(message_back["value"], json!({"x": 1}));
     }
 
     #[test]

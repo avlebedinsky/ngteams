@@ -7,13 +7,17 @@
 //!   `errorMessage`; nothing goes until all pass.
 //! - **A button that sends**: `Action.Submit` (plain, `messageBack`, `invoke`, a hero card's `postBack`) and
 //!   `Action.Execute` ask the bot through the engine (`Core::bot_invoke`), its data merged with the answers by input id;
-//!   `imBack` and `messageBack`'s `displayText` post a message as the user, through the ordinary write. While one goes,
-//!   the card's buttons wait. `signin` opens its page in the browser. `task/fetch` (a dialog) opens the message in Teams
+//!   `imBack` and `messageBack`'s `displayText` post a message as the user, through the ordinary write; `messageBack`'s
+//!   `text` goes to the bot with its value. While one goes, the buttons and inputs of its card wait; the other cards of
+//!   the message don't. `signin` opens its page in the browser. `task/fetch` (a dialog) opens the message in Teams
 //!   on the web until the app's dialogs are built.
 //! - **The answer**: a card takes the pressed card's place; a message, an error or a sign-in request shows as a line
 //!   under the card; a bot that wasn't reached is said there too, and nothing is sent again.
 //! - **Refresh**: a card's `refresh` runs by itself, once while the view lives, for a user it names
-//!   ([`CardBot::refreshes_for`]); anyone may run it by hand ("Refresh card").
+//!   ([`CardBot::refreshes_for`]); anyone may run it by hand ("Refresh card"). It is the `refresh` of the card shown:
+//!   the bot's card when it put one in the place.
+//! - **An edit**: when the message's cards change, its state starts again ([`CardBot::renewed`]): answers, the bot's
+//!   cards and lines go, and an answer to an ask of the old cards is not shown.
 //!
 //! The view asks the engine; it builds no request ([`crate::bridge::Core`]).
 use std::collections::{HashMap, HashSet};
@@ -107,7 +111,8 @@ pub struct CardBot {
     invalid: HashSet<String>,
     replaced: HashMap<usize, Arc<Card>>,
     lines: HashMap<usize, Line>,
-    busy: Option<String>,
+    /// Per card, the key of the button whose ask is on its way.
+    busy: HashMap<usize, String>,
     refreshed: HashSet<usize>,
 }
 
@@ -117,8 +122,8 @@ pub struct Shown {
     pub fields: HashMap<String, Field>,
     pub invalid: HashSet<String>,
     pub lines: HashMap<usize, Line>,
-    /// The key of the button whose ask is on its way.
-    pub busy: Option<String>,
+    /// Per card, the key of the button whose ask is on its way.
+    pub busy: HashMap<usize, String>,
     /// The bot is known: a button that sends asks it.
     pub reaches: bool,
 }
@@ -136,8 +141,18 @@ impl CardBot {
             invalid: HashSet::new(),
             replaced: HashMap::new(),
             lines: HashMap::new(),
-            busy: None,
+            busy: HashMap::new(),
             refreshed: HashSet::new(),
+        }
+    }
+
+    /// The same message's state started again, for its changed cards: only which cards refreshed by themselves stays,
+    /// so that a card does that once while the view lives.
+    #[must_use]
+    pub fn renewed(&self) -> Self {
+        Self {
+            refreshed: self.refreshed.clone(),
+            ..Self::new(Arc::clone(&self.core), self.message.clone(), self.target.clone())
         }
     }
 
@@ -164,10 +179,10 @@ impl CardBot {
         }
     }
 
-    /// Whether an ask is on its way.
+    /// Whether an ask of card `at` is on its way.
     #[must_use]
-    pub fn busy(&self) -> bool {
-        self.busy.is_some()
+    pub fn busy(&self, at: usize) -> bool {
+        self.busy.contains_key(&at)
     }
 
     /// The controls of card `at`'s inputs, made for those that have none yet.
@@ -261,6 +276,13 @@ impl CardBot {
         cx.notify();
     }
 
+    /// A time chosen from the list of a time field.
+    pub fn picked(&mut self, key: &str, cx: &mut Context<Self>) {
+        if self.invalid.remove(key) {
+            cx.notify();
+        }
+    }
+
     /// A choice chosen (in a set of many, chosen or taken back).
     pub fn choose(&mut self, key: &str, value: &str, multi: bool, cx: &mut Context<Self>) {
         let mut chosen = match self.fields.get(key) {
@@ -286,7 +308,17 @@ impl CardBot {
         let mut failed = HashSet::new();
         for input in inputs {
             let key = field_key(at, &input.id);
-            let answer = self.answer_of(&key, input, cx);
+            let answer = match (&input.kind, self.answer_of(&key, input, cx)) {
+                // a time typed that can't be read as one fails, whether it is required or not
+                (InputKind::Time { .. }, Some(typed)) => {
+                    let Some(time) = crate::time_picker::parse_time(&typed) else {
+                        failed.insert(key);
+                        continue;
+                    };
+                    Some(time.format("%H:%M").to_string())
+                }
+                (_, answer) => answer,
+            };
             if !passes(input, answer.as_deref()) {
                 failed.insert(key);
                 continue;
@@ -300,7 +332,7 @@ impl CardBot {
     }
 
     /// An input's answer as its control holds it (as the card starts it, before its control is made); `None` when
-    /// empty, or a time that can't be read as one.
+    /// empty. A time is as typed.
     fn answer_of(&self, key: &str, input: &Input, cx: &gpui::App) -> Option<String> {
         let answer = match self.fields.get(key) {
             Some(Field::Text(state)) => state.read(cx).value().trim().to_owned(),
@@ -315,16 +347,7 @@ impl CardBot {
             Some(Field::Choice(chosen)) => chosen.join(","),
             None => input.initial_answer().unwrap_or_default(),
         };
-        if answer.is_empty() {
-            return None;
-        }
-        match input.kind {
-            // an unreadable time is an empty one that fails its check
-            InputKind::Time { .. } => crate::workflow_run::card::parse_time(&answer)
-                .map(|time| time.format("%H:%M").to_string())
-                .or(Some(String::new())),
-            _ => Some(answer),
-        }
+        (!answer.is_empty()).then_some(answer)
     }
 
     /// `action`, a button of card `at` (the button `key`) pressed, its answers those of `inputs` (see the module docs).
@@ -332,7 +355,7 @@ impl CardBot {
         let Some(target) = self.target.clone() else {
             return;
         };
-        if self.busy.is_some() {
+        if self.busy.contains_key(&at) {
             return;
         }
         let answers = if action.inputs {
@@ -349,7 +372,7 @@ impl CardBot {
             id: action.id.clone(),
             verb,
             data: merged(data, &answers),
-            automatic: false,
+            ..CardInvoke::default()
         };
         let kind = match &action.via {
             Via::Execute { verb } => InvokeKind::Execute(card(action.data.as_ref(), verb.clone())),
@@ -357,11 +380,14 @@ impl CardBot {
                 self.post(&target, text, cx);
                 return;
             }
-            Via::MessageBack { display_text, .. } => {
+            Via::MessageBack { text, display_text, .. } => {
                 if let Some(shown) = display_text.as_deref().filter(|shown| !shown.trim().is_empty()) {
                     self.post(&target, shown, cx);
                 }
-                InvokeKind::Submit(card(action.data.as_ref(), None))
+                InvokeKind::Submit(CardInvoke {
+                    text: text.clone().filter(|text| !text.is_empty()),
+                    ..card(action.data.as_ref(), None)
+                })
             }
             Via::Submit | Via::Invoke(_) | Via::PostBack(_) => InvokeKind::Submit(card(action.data.as_ref(), None)),
             Via::SignIn(page) => {
@@ -377,7 +403,7 @@ impl CardBot {
 
     /// Card `at`'s `refresh` run: by itself (`automatic`, once while the view lives) or by hand.
     pub fn refresh(&mut self, at: usize, refresh: &Refresh, automatic: bool, cx: &mut Context<Self>) {
-        if self.target.is_none() || self.busy.is_some() || (automatic && !self.refreshed.insert(at)) {
+        if self.target.is_none() || self.busy.contains_key(&at) || (automatic && !self.refreshed.insert(at)) {
             return;
         }
         let kind = InvokeKind::Execute(CardInvoke {
@@ -389,6 +415,7 @@ impl CardBot {
             },
             data: refresh.action.data.clone().unwrap_or_else(|| Value::Object(Map::new())),
             automatic,
+            ..CardInvoke::default()
         });
         self.ask(at, &format!("refresh-{at}"), kind, automatic, cx);
     }
@@ -413,13 +440,13 @@ impl CardBot {
             conversation: Some(target.conversation.clone()),
             kind,
         });
-        self.busy = Some(key.to_owned());
+        self.busy.insert(at, key.to_owned());
         self.lines.remove(&at);
         cx.notify();
         cx.spawn(async move |this, cx| {
             let answer = reply.await;
             let _ = this.update(cx, |this, cx| {
-                this.busy = None;
+                this.busy.remove(&at);
                 this.apply(at, answer, quiet);
                 cx.notify();
             });
@@ -473,6 +500,13 @@ pub fn post_message<T>(core: &Arc<dyn Core>, conversation: &str, text: &str, cx:
         let _ = reply.await;
     })
     .detach();
+}
+
+/// Whether a button that sends (`action`) asks the bot: the bot is known (`reaches`), the app isn't `read_only`, and
+/// the button opens no dialog. Else it opens the message in Teams on the web.
+#[must_use]
+pub fn asks(reaches: bool, read_only: bool, action: &BotAction) -> bool {
+    reaches && !read_only && action.via != Via::TaskFetch
 }
 
 /// The key of card `at`'s input `id`.

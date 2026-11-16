@@ -6,18 +6,18 @@ use gpui::{
     AnyElement, App, Entity, InteractiveElement as _, IntoElement, ParentElement as _, SharedString, Styled, div, px,
     rgb,
 };
-use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::Disableable as _;
+use gpui_component::button::Button;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::date_picker::DatePicker;
 use gpui_component::input::{Input as TextInput, InputState, Textarea};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::radio::Radio;
-use gpui_component::{Disableable as _, Sizable as _};
 use teams_proto::chat::card::{Choice, ChoiceStyle, Input, InputKind};
 
 use super::Draw;
 use crate::bot_card::{CardBot, Field, error_of, field_key};
-use crate::icons::{Glyph, icon_button, selected_by};
+use crate::icons::{Glyph, selected_by};
 use crate::theme::{self, Palette};
 
 /// How tall a multi-line text input is, px.
@@ -43,7 +43,7 @@ pub(super) fn view(draw: &Draw<'_>, input: &Input) -> AnyElement {
     let place = Place {
         bot: bot.entity,
         selector: draw.selector(&format!("c{}-in-{}", draw.at, input.id)),
-        off: bot.read_only || bot.shown.busy.is_some(),
+        off: bot.read_only || bot.shown.busy.contains_key(&draw.at),
         palette: draw.palette,
         key,
     };
@@ -283,37 +283,14 @@ fn face_of(face: String, faint: bool, palette: Palette) -> gpui::Div {
         )
 }
 
-/// A time: typed, or chosen from the half hours under its chevron, as Teams' time picker offers them.
+/// A time: typed, or chosen from the half hours under its chevron, as Teams' time picker offers them. A chosen time
+/// clears the field's error mark.
 fn time_field(place: &Place<'_>, state: &Entity<InputState>) -> AnyElement {
-    let target = state.clone();
-    let times = format!("{}-times", place.selector);
-    selected_by(
-        place.selector.clone(),
-        TextInput::new(state).disabled(place.off).suffix(selected_by(
-            times.clone(),
-            icon_button(SharedString::from(times.clone()), Glyph::CHEVRON_DOWN, "Choose a time")
-                .ghost()
-                .xsmall()
-                .disabled(place.off)
-                .dropdown_menu(move |mut menu, _, _| {
-                    for half in 0..48_u32 {
-                        let shown = crate::workflow_run::card::clock(half * 30);
-                        let (target, words) = (target.clone(), shown.clone());
-                        let row = format!("{times}-{}", shown.replace([' ', ':'], ""));
-                        menu = menu.item(
-                            PopupMenuItem::element(move |_, _| {
-                                let row = row.clone();
-                                div().debug_selector(move || row.clone()).child(shown.clone())
-                            })
-                            .on_click(move |_, window, cx| {
-                                target.update(cx, |state, cx| state.set_value(words.clone(), window, cx));
-                            }),
-                        );
-                    }
-                    menu.scrollable(true).max_h(px(240.0))
-                }),
-        )),
-    )
+    let (bot, key) = (place.bot.clone(), place.key.clone());
+    let rows = format!("{}-times", place.selector);
+    crate::time_picker::time_field(state, &place.selector, &rows, place.off, move |cx| {
+        bot.update(cx, |bot, cx| bot.picked(&key, cx));
+    })
     .w_full()
     .into_any_element()
 }

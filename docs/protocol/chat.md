@@ -673,8 +673,9 @@ for its shape only.
   Microsoft account's invoke carries its Teams service token for that service, never a token for the app. The
   native client reads what each button carries (its `data`, `verb`, `msteams` kind) and a card's inputs and
   `refresh`. With the bots shown (`NGTEAMS_BOTS=1`, until the bots work is done) it draws the inputs and its buttons
-  ask the bot, as [bots.md](bots.md) says; without them, or in read-only mode, the button opens the message in Teams
-  on the web, and a card with an input says it has content it can't show.
+  ask the bot, as [bots.md](bots.md) says. In read-only mode the inputs are drawn but take nothing, and a button opens
+  the message in Teams on the web. Without the bots shown, a button opens the message in Teams on the web, and a card
+  with an input says it has content it can't show.
 
 ## Forwarded messages
 

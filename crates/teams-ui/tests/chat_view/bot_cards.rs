@@ -8,7 +8,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use gpui::{Bounds, Entity, Modifiers, Pixels, VisualTestContext, px, size};
 use serde_json::{Value, json};
-use teams_core::{Action, EngineError};
+use teams_core::{Action, EngineError, Event};
 use teams_proto::bot::TaskDialog;
 use teams_proto::{InvokeAnswer, InvokeKind};
 use teams_store::Message;
@@ -464,15 +464,196 @@ fn a_message_back_posts_its_display_text_and_asks_the_bot() {
     let rig = bots_rig(vec![card_message(ID, &card)]);
     let (_view, cx) = tall_window(&rig);
     click(cx, &format!("card-{ID}-c0a0"));
-    assert!(rig.core.actions.lock().unwrap().iter().any(|action| matches!(
-        action,
-        Action::Send { text, .. } if text.html().contains("in")
-    )));
-    let asks = rig.core.bot_asks.lock().unwrap().clone();
+    let posted: Vec<String> = rig
+        .core
+        .actions
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|action| match action {
+            Action::Send { text, .. } => Some(text.html().to_owned()),
+            _ => None,
+        })
+        .collect();
+    // its displayText is posted ("I'm in", its apostrophe maybe escaped), never its text for the bot
     assert!(
-        matches!(&asks[..], [ask] if matches!(&ask.kind, InvokeKind::Submit(_))),
-        "{asks:?}"
+        matches!(&posted[..], [html] if html.contains("m in") && !html.contains("join")),
+        "{posted:?}"
     );
+    let asks = rig.core.bot_asks.lock().unwrap().clone();
+    let [ask] = &asks[..] else {
+        panic!("one ask: {asks:?}");
+    };
+    let InvokeKind::Submit(sent) = &ask.kind else {
+        panic!("a submit: {:?}", ask.kind);
+    };
+    assert_eq!(sent.text.as_deref(), Some("join"));
+    assert_eq!(sent.data["msteams"]["value"], json!({"join": true}));
+}
+
+/// Two messageBack buttons with one value and different texts send different texts.
+#[test]
+fn a_hero_message_back_sends_its_text_with_its_value() {
+    let activity = json!({"type": "message/card", "attachments": [{
+        "contentType": "application/vnd.microsoft.card.hero",
+        "content": {"title": "Vote", "buttons": [
+            {"type": "messageBack", "title": "Up", "text": "up", "value": {"poll": 1}},
+            {"type": "messageBack", "title": "Down", "text": "down", "value": {"poll": 1}}
+        ]}
+    }]});
+    let rig = bots_rig(vec![bot_message(ID, &activity)]);
+    let (_view, cx) = tall_window(&rig);
+    click(cx, &format!("card-{ID}-c0a0"));
+    click(cx, &format!("card-{ID}-c0a1"));
+    let asks = rig.core.bot_asks.lock().unwrap().clone();
+    let sent: Vec<(Option<String>, Value)> = asks
+        .iter()
+        .filter_map(|ask| match &ask.kind {
+            InvokeKind::Submit(sent) => Some((sent.text.clone(), sent.data.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sent,
+        [
+            (Some("up".to_owned()), json!({"poll": 1})),
+            (Some("down".to_owned()), json!({"poll": 1}))
+        ]
+    );
+}
+
+/// A typed time that can't be read as one fails, though the input is optional: nothing goes, and it is marked.
+#[test]
+fn an_unreadable_optional_time_stops_the_send() {
+    let card = json!({
+        "type": "AdaptiveCard",
+        "body": [{"type": "Input.Time", "id": "at"}],
+        "actions": [{"type": "Action.Submit", "title": "Send"}]
+    });
+    let rig = bots_rig(vec![card_message(ID, &card)]);
+    let (_view, cx) = tall_window(&rig);
+    click(cx, &input("at"));
+    cx.simulate_input("abc");
+    click(cx, &format!("card-{ID}-c0a0"));
+    assert!(bounds(cx, &format!("{}-error", input("at"))).is_some());
+    assert!(rig.core.bot_asks.lock().unwrap().is_empty(), "nothing goes");
+}
+
+/// A message of cards, each a card of its own.
+fn cards_message(id: &str, cards: &[Value]) -> Message {
+    let attachments: Vec<Value> = cards
+        .iter()
+        .map(|card| json!({"contentType": "application/vnd.microsoft.card.adaptive", "content": card}))
+        .collect();
+    bot_message(id, &json!({"type": "message/card", "attachments": attachments}))
+}
+
+/// A card that refreshes with `verb` for the account.
+fn refreshing(verb: &str) -> Value {
+    json!({
+        "type": "AdaptiveCard",
+        "body": [{"type": "TextBlock", "text": "Status"}],
+        "refresh": {"action": {"type": "Action.Execute", "verb": verb}, "userIds": [LAB_A]}
+    })
+}
+
+/// The verbs of the `Action.Execute`s asked so far, in order.
+fn verbs(rig: &Rig) -> Vec<String> {
+    rig.core
+        .bot_asks
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|ask| match &ask.kind {
+            InvokeKind::Execute(sent) => sent.verb.clone(),
+            _ => None,
+        })
+        .collect()
+}
+
+/// An ask of one card doesn't hold back the others of its message.
+#[test]
+fn each_card_of_a_message_refreshes_by_itself_and_by_hand() {
+    let rig = bots_rig(vec![cards_message(ID, &[refreshing("one"), refreshing("two")])]);
+    let (view, cx) = tall_window(&rig);
+    draw(cx);
+    assert_eq!(verbs(&rig), ["one", "two"]);
+    view.update(cx, |view, cx| view.toggle_options(ID, cx));
+    click(cx, "action-refresh-card");
+    assert_eq!(verbs(&rig), ["one", "two", "one", "two"]);
+}
+
+/// A card the bot put in a card's place: its own `refresh` is the one offered and run by hand.
+#[test]
+fn refresh_card_runs_the_refresh_of_the_bots_card() {
+    let card = json!({
+        "type": "AdaptiveCard",
+        "body": [{"type": "TextBlock", "text": "Ask"}],
+        "actions": [{"type": "Action.Execute", "title": "Go", "verb": "go"}]
+    });
+    let rig = bots_rig(vec![card_message(ID, &card)]);
+    rig.core
+        .bot_answers
+        .lock()
+        .unwrap()
+        .push_back(Ok(InvokeAnswer::Card(json!({
+            "type": "AdaptiveCard",
+            "body": [{"type": "TextBlock", "text": "Going"}],
+            "refresh": {"action": {"type": "Action.Execute", "verb": "status"}, "userIds": []}
+        }))));
+    let (view, cx) = tall_window(&rig);
+    click(cx, &format!("card-{ID}-c0a0"));
+    view.update(cx, |view, cx| view.toggle_options(ID, cx));
+    click(cx, "action-refresh-card");
+    assert_eq!(verbs(&rig), ["go", "status"]);
+}
+
+/// The bot edits its message: the card it put in the place and the answers typed go, the new card shows.
+#[test]
+fn an_edit_of_the_message_drops_the_bots_card_and_the_answers() {
+    let first = json!({
+        "type": "AdaptiveCard",
+        "body": [{"type": "Input.Text", "id": "said"}],
+        "actions": [{"type": "Action.Execute", "title": "Approve", "verb": "approve"}]
+    });
+    let rig = bots_rig(vec![card_message(ID, &first)]);
+    rig.core
+        .bot_answers
+        .lock()
+        .unwrap()
+        .push_back(Ok(InvokeAnswer::Card(json!({
+            "type": "AdaptiveCard",
+            "body": [{"type": "TextBlock", "text": "Approved by A"}]
+        }))));
+    let (_view, cx) = tall_window(&rig);
+    click(cx, &input("said"));
+    cx.simulate_input("typed");
+    click(cx, &format!("card-{ID}-c0a0"));
+    assert!(bounds(cx, &input("said")).is_none(), "the bot's card is shown");
+    let edited = json!({
+        "type": "AdaptiveCard",
+        "body": [{"type": "Input.Text", "id": "said"}],
+        "actions": [{"type": "Action.Execute", "title": "Reopen", "verb": "reopen"}]
+    });
+    {
+        let mut stored = card_message(ID, &edited);
+        stored.version = 2;
+        let mut messages = rig.core.messages.lock().unwrap();
+        messages.get_mut(AB).unwrap()[0] = stored;
+    }
+    rig.send(Event::ConversationChanged {
+        conversation: AB.to_owned(),
+    });
+    draw(cx);
+    // the edited card shows, its input empty again
+    assert!(bounds(cx, &input("said")).is_some());
+    click(cx, &format!("card-{ID}-c0a0"));
+    let asks = rig.core.bot_asks.lock().unwrap().clone();
+    let Some(InvokeKind::Execute(sent)) = asks.last().map(|ask| &ask.kind) else {
+        panic!("an execute: {asks:?}");
+    };
+    assert_eq!(sent.verb.as_deref(), Some("reopen"));
+    assert_eq!(sent.data, json!({}), "the answer typed in the old card is gone");
 }
 
 #[test]
