@@ -274,3 +274,459 @@ impl Call {
 
 /// What everyone in a meeting its organizer ended is told.
 const ENDED_FOR_ALL: &str = "ConversationEndForAllInitiated";
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::calling::media::MediaHome;
+    use crate::calling::state::{Leg, Meeting};
+
+    const ORIGIN: &str = "https://own.example.test";
+    const NAMES: [&str; 6] = [
+        "acceptance",
+        "end",
+        "rosterUpdate",
+        "receiveMessage",
+        "conversationUpdate",
+        "clientCallback",
+    ];
+
+    fn link(endpoint: &str, name: &str) -> String {
+        format!("{ORIGIN}/trouter/v4/f/{endpoint}/callAgent/agent/1/call/{name}/")
+    }
+
+    fn links(endpoint: &str) -> Links {
+        NAMES
+            .iter()
+            .map(|name| ((*name).to_owned(), link(endpoint, name)))
+            .collect()
+    }
+
+    fn party(id: &str) -> Party {
+        Party {
+            id: id.to_owned(),
+            name: id.to_uppercase(),
+            participant: json!({"id": format!("8:orgid:{id}"), "endpointId": format!("ep-{id}"),
+                "participantId": format!("p-{id}")}),
+            ..Party::default()
+        }
+    }
+
+    fn at(now: i64) -> At<'static> {
+        At { origin: ORIGIN, now }
+    }
+
+    fn sdp(blob: &str) -> Value {
+        json!({"blob": blob, "contentType": "application/sdp-ngc-1.0"})
+    }
+
+    /// A meeting a organizes, its call started by a at second 1000; b and c joined it.
+    fn meeting() -> Call {
+        let mut organizer = party("a");
+        organizer.keep("A", links("A"));
+        organizer.active = Some("A".to_owned());
+        let mut call = Call {
+            id: "call".to_owned(),
+            conversation: "conversation".to_owned(),
+            phase: Phase::Connected,
+            parties: vec![organizer],
+            offer: Value::Null,
+            started_at: 1_000_000,
+            connected_at: None,
+            ended_at: None,
+            due_at: 0,
+            roster_sequence: 0,
+            negotiation: None,
+            negotiations: 0,
+            answered: None,
+            held_by: None,
+            chat: Some("19:meeting_x@thread.v2".to_owned()),
+            accepted_as: None,
+            kind: Kind::Group,
+            media: Some(MediaHome {
+                node: "n".into(),
+                url: "http://n.invalid".into(),
+                epoch: 1,
+            }),
+            next_source: 0,
+            watchers: Vec::new(),
+            alive_due: 0,
+            meeting: Some(Meeting {
+                organizer: "a".to_owned(),
+                ..Meeting::default()
+            }),
+        };
+        let sources = call.next_sources();
+        call.party_mut(Seat::CALLER).leg = Some(Leg {
+            id: "leg-a".to_owned(),
+            sources,
+            before: None,
+        });
+        call.started_group(at(1_000_000), 0);
+        for id in ["b", "c"] {
+            joined(&mut call, id);
+        }
+        call
+    }
+
+    fn joined(call: &mut Call, id: &str) -> Seat {
+        let leg = format!("leg-{id}");
+        let endpoint = id.to_uppercase();
+        let reserved = call.reserve(&party(id), &leg).unwrap();
+        call.join(
+            reserved.seat,
+            (&leg, &endpoint, links(&endpoint)),
+            &sdp("answer"),
+            at(1_001_000),
+            &mut Out::default(),
+        )
+        .unwrap();
+        reserved.seat
+    }
+
+    fn waits(call: &mut Call, id: &str) -> (Seat, Out) {
+        let mut out = Out::default();
+        let endpoint = id.to_uppercase();
+        let seat = call
+            .wait(
+                &party(id),
+                (&endpoint, links(&endpoint)),
+                &sdp("offer"),
+                at(1_002_000),
+                &mut out,
+            )
+            .unwrap();
+        (seat, out)
+    }
+
+    /// Each delivery's endpoint and the callback it went to.
+    fn paths(out: &Out) -> Vec<(&str, &str)> {
+        out.deliveries
+            .iter()
+            .map(|delivery| {
+                let kind = delivery.path.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+                (delivery.endpoint.as_str(), kind)
+            })
+            .collect()
+    }
+
+    const B: Seat = Seat(1);
+    const C: Seat = Seat(2);
+
+    #[test]
+    fn the_organizer_and_presenters_host_attendees_and_whoever_waits_dont() {
+        let mut call = meeting();
+        assert_eq!(call.hosts(Seat::CALLER), Ok(()));
+        assert_eq!(call.hosts(B), Ok(()));
+        let (d, _) = waits(&mut call, "d");
+        assert_eq!(call.hosts(d), Err(Refusal::Forbidden));
+        call.set_controls(
+            Controls {
+                presenters: "OrganizerOnly".to_owned(),
+                ..Controls::default()
+            },
+            at(1_003_000),
+            &mut Out::default(),
+        );
+        assert_eq!(call.hosts(B), Err(Refusal::Forbidden));
+        assert_eq!(call.hosts(Seat::CALLER), Ok(()));
+        assert_eq!(call.role_of(call.party(B)), Some("attendee"));
+        let mut group = call.clone();
+        group.meeting = None;
+        assert_eq!(group.hosts(Seat::CALLER), Err(Refusal::Forbidden));
+        assert_eq!(group.role_of(group.party(B)), None);
+    }
+
+    #[test]
+    fn someone_waits_with_its_offer_listed_in_the_lobby_and_turned_away_is_told_and_gone() {
+        let mut call = meeting();
+        let (d, out) = waits(&mut call, "d");
+        assert_eq!(call.party(d).status, Status::Lobby);
+        assert_eq!(call.party(d).waiting, Some(sdp("offer")));
+        // the one that waits gets the whole roster, everyone in the call its entry
+        assert_eq!(
+            paths(&out),
+            [
+                ("A", "rosterUpdate"),
+                ("B", "rosterUpdate"),
+                ("C", "rosterUpdate"),
+                ("D", "rosterUpdate")
+            ]
+        );
+        let entry = &out.deliveries[0].body["participants"]["8:orgid:d"];
+        assert_eq!(entry["state"], "active");
+        assert_eq!(entry["endpoints"]["ep-d"]["modalityJoined"], "Lobby");
+        assert!(entry["endpoints"]["ep-d"]["lobby"].is_object());
+        assert!(entry["endpoints"]["ep-d"].get("call").is_none());
+        assert_eq!(out.deliveries[3].body["participants"].as_object().unwrap().len(), 4);
+        // in the call already: no wait
+        let refused = call.wait(
+            &party("b"),
+            ("B", links("B")),
+            &sdp("offer"),
+            at(1_002_000),
+            &mut Out::default(),
+        );
+        assert_eq!(refused, Err(Refusal::Forbidden));
+        // b, a presenter, turns d away
+        let mut out = Out::default();
+        call.remove(B, d, at(1_003_000), &mut out).unwrap();
+        assert_eq!(out.deliveries[0].endpoint, "D");
+        assert_eq!(out.deliveries[0].body["callEnd"]["code"], 403);
+        assert_eq!(out.deliveries[0].body["callEnd"]["sender"]["id"], "8:orgid:b");
+        assert_eq!(
+            (call.party(d).status, call.party(d).waiting.as_ref()),
+            (Status::Left, None)
+        );
+        assert_eq!(out.deliveries[1].body["participants"]["8:orgid:d"]["state"], "inactive");
+        // turning away someone who doesn't wait, or oneself, changes nothing
+        let mut out = Out::default();
+        call.remove(B, d, at(1_004_000), &mut out).unwrap();
+        call.remove(B, B, at(1_004_000), &mut out).unwrap();
+        assert!(out.deliveries.is_empty());
+        // it may try again, in the same seat
+        assert_eq!(waits(&mut call, "d").0, d);
+    }
+
+    #[test]
+    fn a_host_takes_someone_out_of_the_call_and_the_others_are_told() {
+        let mut call = meeting();
+        let mut out = Out::default();
+        call.remove(Seat::CALLER, C, at(1_003_000), &mut out).unwrap();
+        assert_eq!(call.party(C).status, Status::Left);
+        assert_eq!(out.released, ["leg-c"]);
+        assert_eq!(out.deliveries[0].endpoint, "C");
+        assert_eq!(out.deliveries[0].body["callEnd"]["code"], 0);
+        assert!(
+            out.deliveries.iter().any(|delivery| delivery.path.is_empty()),
+            "116 to the others"
+        );
+        let (d, _) = waits(&mut call, "d");
+        assert_eq!(
+            call.remove(d, B, at(1_004_000), &mut Out::default()),
+            Err(Refusal::Forbidden)
+        );
+    }
+
+    #[test]
+    fn whoever_waits_alone_keeps_the_call_until_it_leaves() {
+        let mut call = meeting();
+        call.parties.truncate(1);
+        call.party_mut(Seat::CALLER).leg = None;
+        call.party_mut(Seat::CALLER).joined = None;
+        let mut out = Out::default();
+        call.started_waiting(&sdp("offer"), at(1_000_000), &mut out);
+        assert_eq!(call.party(Seat::CALLER).status, Status::Lobby);
+        assert_eq!(paths(&out), [("A", "rosterUpdate")]);
+        assert_eq!(call.alive_due, 1_000 + KEEP_ALIVE + KEEP_ALIVE_SLACK);
+        let mut out = Out::default();
+        call.leave(Seat::CALLER, &json!({}), at(1_005_000), &mut out);
+        assert_eq!(call.phase, Phase::Ended);
+        assert!(out.room_over);
+    }
+
+    #[test]
+    fn a_host_mutes_everyone_else_or_whom_it_names_and_an_own_unmute_takes_it_back() {
+        let mut call = meeting();
+        let mut out = Out::default();
+        let named = json!({"scope": "specified", "muteParticipants": [{"id": "8:orgid:b"}], "operationId": "op"});
+        let callback = link("A", "clientCallback");
+        call.mute_others(Seat::CALLER, &named, Some(&callback), at(1_003_000), &mut out)
+            .unwrap();
+        assert!(call.party(B).server_muted && !call.party(C).server_muted);
+        assert_eq!(call.party(B).mute_version, 2);
+        let told = &out.deliveries.last().unwrap().body;
+        assert_eq!(told["operationId"], "op");
+        assert_eq!(told["muteUnmuteResponseAsync"]["8:orgid:b"][0]["serverMuteVersion"], 2);
+        assert!(told["muteUnmuteResponseAsync"].get("8:orgid:c").is_none());
+        let roster = &out.deliveries[0].body["participants"]["8:orgid:b"]["endpoints"]["ep-b"]["call"];
+        assert_eq!(roster["mediaStreams"][0]["serverMuted"], true);
+        assert_eq!(roster["serverMuteVersion"], 2);
+        // everyone else, the host aside
+        let all = json!({"scope": "all", "muteParticipants": []});
+        call.mute_others(B, &all, None, at(1_004_000), &mut Out::default())
+            .unwrap();
+        assert!(call.party(C).server_muted && call.party(Seat::CALLER).server_muted);
+        assert_eq!(call.party(B).mute_version, 2);
+        // b's own unmute takes its mute back and tells everyone
+        let mut out = Out::default();
+        let unmute = json!({"endpointState": {"endpointStateSequenceNumber": 2, "state": {"isMuted": false}}});
+        call.endpoint_state(B, &unmute, at(1_005_000), &mut out).unwrap();
+        assert!(!call.party(B).server_muted);
+        assert_eq!(out.deliveries.len(), 3);
+        // an attendee may not
+        call.set_controls(
+            Controls {
+                presenters: "OrganizerOnly".to_owned(),
+                ..Controls::default()
+            },
+            at(1_006_000),
+            &mut Out::default(),
+        );
+        assert_eq!(
+            call.mute_others(B, &all, None, at(1_007_000), &mut Out::default()),
+            Err(Refusal::Forbidden)
+        );
+    }
+
+    #[test]
+    fn hands_go_up_in_the_order_raised_and_come_down_by_their_state() {
+        let mut call = meeting();
+        let raise = json!({"publishedState": {"stateType": "raiseHands", "content": {"skinTone": 2}}});
+        let mut out = Out::default();
+        let answer = call.raise_hand(B, "h-b", &raise, at(1_003_000), &mut out).unwrap();
+        assert_eq!(answer["publishStateResponse"], json!({"typeRank": 1, "stateId": "h-b"}));
+        let state = &out.deliveries[0].body["participants"]["8:orgid:b"]["publishedStates"][0];
+        assert_eq!(state["stateType"], "raiseHands");
+        assert_eq!(state["content"]["skinTone"], 2);
+        let answer = call
+            .raise_hand(C, "h-c", &raise, at(1_003_000), &mut Out::default())
+            .unwrap();
+        assert_eq!(answer["publishStateResponse"]["typeRank"], 2);
+        // raised again: as it was, nobody told
+        let mut out = Out::default();
+        let answer = call.raise_hand(B, "other", &raise, at(1_004_000), &mut out).unwrap();
+        assert_eq!(answer["publishStateResponse"]["stateId"], "h-b");
+        assert!(out.deliveries.is_empty());
+        let other = json!({"publishedState": {"stateType": "spotlight"}});
+        assert_eq!(
+            call.raise_hand(B, "x", &other, at(1_004_000), &mut out),
+            Err(Refusal::Bad)
+        );
+        assert_eq!(
+            call.raise_hand(B, "x", &json!({}), at(1_004_000), &mut out),
+            Err(Refusal::Bad)
+        );
+        // lowered by its state; another's state isn't the party's to lower
+        let lower = json!({"stateIds": ["h-c", "h-b"]});
+        let answer = call.lower_hand(B, &lower, at(1_005_000), &mut out).unwrap();
+        let results = &answer["removeStateResponse"]["results"];
+        assert_eq!(
+            (
+                results[0]["result"]["code"].clone(),
+                results[1]["result"]["code"].clone()
+            ),
+            (json!(404), json!(200))
+        );
+        assert!(call.party(B).hand.is_none() && call.party(C).hand.is_some());
+        assert_eq!(
+            call.lower_hand(B, &json!({}), at(1_005_000), &mut out),
+            Err(Refusal::Bad)
+        );
+        // a hand goes with its party
+        call.leave(C, &json!({}), at(1_006_000), &mut Out::default());
+        assert!(call.party(C).hand.is_none());
+        let mut one = call.clone();
+        one.kind = Kind::OneToOne;
+        assert_eq!(
+            one.raise_hand(B, "x", &raise, at(1_007_000), &mut out),
+            Err(Refusal::Missing)
+        );
+    }
+
+    #[test]
+    fn a_reaction_reaches_everyone_in_the_call_named_by_its_sender() {
+        let mut call = meeting();
+        waits(&mut call, "d");
+        let body = json!({"messageContent": [
+            {"type": "Reaction", "operationId": "o1", "payload": {"values": [{"name": "heart", "count": 1}]}},
+            {"type": "Other"},
+        ]});
+        let mut out = Out::default();
+        call.react(C, &body, at(1_003_000), &mut out).unwrap();
+        assert_eq!(
+            paths(&out),
+            [
+                ("A", "receiveMessage"),
+                ("B", "receiveMessage"),
+                ("C", "receiveMessage")
+            ]
+        );
+        let told = &out.deliveries[0].body;
+        assert_eq!(told["from"]["id"], "8:orgid:c");
+        assert_eq!(told["payload"]["values"][0]["name"], "heart");
+        assert_eq!(told["operationId"], "o1");
+        assert_eq!(call.react(C, &json!({}), at(1_003_000), &mut out), Err(Refusal::Bad));
+    }
+
+    #[test]
+    fn the_organizers_end_ends_it_for_everyone_and_anyone_elses_is_a_leave() {
+        let mut call = meeting();
+        let (d, _) = waits(&mut call, "d");
+        let mut out = Out::default();
+        call.end_meeting(B, &json!({}), at(1_003_000), &mut out);
+        assert_eq!((call.phase, call.party(B).status), (Phase::Connected, Status::Left));
+        let mut out = Out::default();
+        call.end_meeting(Seat::CALLER, &json!({}), at(1_004_000), &mut out);
+        assert_eq!(call.phase, Phase::Ended);
+        assert!(out.room_over);
+        let ends: Vec<&str> = out
+            .deliveries
+            .iter()
+            .filter(|delivery| delivery.body["callEnd"]["phrase"] == ENDED_FOR_ALL)
+            .map(|delivery| delivery.endpoint.as_str())
+            .collect();
+        assert_eq!(ends, ["A", "C", "D"]);
+        assert_eq!(call.party(d).status, Status::Left);
+    }
+
+    #[test]
+    fn the_saved_options_make_attendees_mute_them_and_tell_everyone() {
+        let mut call = meeting();
+        waits(&mut call, "d");
+        let restricted = Controls {
+            lobby: "OrganizerOnly".to_owned(),
+            presenters: "OrganizerOnly".to_owned(),
+            restrictions: "DisableAudio,DisableVideo".to_owned(),
+        };
+        let mut out = Out::default();
+        call.set_controls(restricted.clone(), at(1_003_000), &mut out);
+        assert!(call.audio_blocked(call.party(B)) && !call.audio_blocked(call.party(Seat::CALLER)));
+        assert_eq!(
+            (call.party(B).mute_version, call.party(Seat::CALLER).mute_version),
+            (2, 0)
+        );
+        let updates: Vec<&Value> = out
+            .deliveries
+            .iter()
+            .filter(|delivery| delivery.path.ends_with("conversationUpdate/"))
+            .map(|delivery| &delivery.body)
+            .collect();
+        assert_eq!(updates.len(), 4);
+        assert_eq!(
+            updates[0]["meetingDetails"]["meetingCapability"],
+            json!({"autoAdmittedUsers": "OrganizerOnly", "presenterOption": "OrganizerOnly",
+                "attendeeRestrictions": "DisableAv"})
+        );
+        let entry = &out.deliveries[0].body["participants"]["8:orgid:b"];
+        assert_eq!(entry["meetingRole"], "attendee");
+        assert_eq!(
+            entry["endpoints"]["ep-b"]["call"]["mediaStreams"][0]["serverMuted"],
+            true
+        );
+        // the same options again tell nothing
+        let mut out = Out::default();
+        call.set_controls(restricted, at(1_004_000), &mut out);
+        assert!(out.deliveries.is_empty());
+        // a conversation names the options in effect; a group call's names none
+        let answered = wire::conversation(ORIGIN, "emea", &call);
+        assert_eq!(
+            answered["meetingDetails"]["meetingCapability"]["presenterOption"],
+            "OrganizerOnly"
+        );
+        assert_eq!(answered["state"]["conversationType"], "scheduledMeeting");
+        call.set_controls(Controls::default(), at(1_005_000), &mut Out::default());
+        let answered = wire::conversation(ORIGIN, "emea", &call);
+        assert_eq!(
+            answered["meetingDetails"]["meetingCapability"],
+            json!({"autoAdmittedUsers": "EveryoneInCompany", "presenterOption": "Everyone",
+                "attendeeRestrictions": "UnRestricted"})
+        );
+        assert_eq!(call.party(B).mute_version, 4);
+        call.meeting = None;
+        assert!(wire::conversation(ORIGIN, "emea", &call)["meetingDetails"].is_null());
+        call.set_controls(Controls::default(), at(1_006_000), &mut out);
+    }
+}
