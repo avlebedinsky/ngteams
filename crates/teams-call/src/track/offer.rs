@@ -122,7 +122,17 @@ impl Offer {
 
     /// Whether its ring ended by its end's delivery, and `url` is one of its links.
     pub(crate) fn ended_with(&self, url: &str) -> bool {
-        self.end_delivered && self.links.iter().any(|(_, link)| link == url)
+        self.end_delivered && self.has_link(url)
+    }
+
+    /// Whether its ring was not ended, and `url` is one of its links.
+    pub(crate) fn rings_with(&self, url: &str) -> bool {
+        self.state != OfferState::Ended && self.has_link(url)
+    }
+
+    /// Whether `url` is one of its links, for any operation.
+    fn has_link(&self, url: &str) -> bool {
+        self.links.iter().any(|(_, link)| link == url)
     }
 
     /// Whether it holds exactly `url` for `operation`.

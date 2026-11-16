@@ -89,8 +89,8 @@ pub struct HeldProgress {
 
 type Sending = Pin<Box<dyn Future<Output = Outcome> + Send>>;
 
-/// The next `progress` write's hold: who is told when the write is reached, when it may go, and who is told when the
-/// service answered it.
+/// The next `progress` write's hold: who is told when the write is reached, when it may go, and who is told when its
+/// attempt is over (the service answered it, or the client refused it before it went).
 type Gate = Arc<Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>, oneshot::Sender<()>)>>>;
 
 struct Sink {
@@ -258,7 +258,8 @@ impl Client {
     }
 
     /// Holds the client's next `progress` write until `release` is used: `reached` is told when the write is reached,
-    /// `answered` when the service answered it. The client does nothing else meanwhile, as it awaits each write in turn.
+    /// `answered` when its attempt is over (the service answered it, or the client refused it before it went). The client
+    /// does nothing else meanwhile, as it awaits each write in turn.
     pub fn hold_progress(&self) -> HeldProgress {
         let (reached, at_hold) = oneshot::channel();
         let (release, released) = oneshot::channel();

@@ -81,6 +81,7 @@ pub use health::{CallHealth, MediaHealth, NetworkHealth, StreamHealth};
 mod controls;
 pub(crate) use controls::Options;
 mod media;
+mod outcome;
 mod people;
 mod share;
 
@@ -889,21 +890,7 @@ where
             writing.id.get(),
             tried.summary()
         );
-        let outcome = match tried {
-            CallTried::Answered(answer) => Outcome::Answered {
-                status: answer.status(),
-                body: answer.body().to_vec(),
-            },
-            CallTried::NotSent(_)
-                if writing
-                    .url
-                    .as_ref()
-                    .is_some_and(|url| self.outbox.tracker().ring_ended(url)) =>
-            {
-                Outcome::RingOver
-            }
-            _ => Outcome::Failed,
-        };
+        let outcome = outcome::outcome(tried, writing.url.as_deref(), self.outbox.tracker());
         self.calls.on_outcome(writing.id, &outcome, now);
     }
 

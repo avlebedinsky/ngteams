@@ -392,10 +392,7 @@ impl Tracker {
     pub fn ring_ended(&self, url: &str) -> bool {
         let inner = self.lock();
         inner.offers.iter().any(|offer| offer.ended_with(url))
-            && !inner
-                .offers
-                .iter()
-                .any(|offer| offer.state != offer::OfferState::Ended && offer.links.iter().any(|(_, link)| link == url))
+            && !inner.offers.iter().any(|offer| offer.rings_with(url))
     }
     /// Whether this write enters a call, for the cross-account floor.
     #[must_use]
