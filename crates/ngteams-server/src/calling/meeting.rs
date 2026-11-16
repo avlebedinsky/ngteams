@@ -21,6 +21,7 @@ use super::wire;
 use super::{Caller, Failure, call_events, carry_out, needed_links, now_ms, step, step_any};
 use crate::app::App;
 use crate::db::DbError;
+use crate::db::users;
 
 /// Where a joiner goes, as the meeting's lobby option says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -253,4 +254,119 @@ pub(super) async fn remove(app: &App, caller: &Caller, key: Key<'_>, body: &Valu
     })
     .await?;
     Ok(StatusCode::ACCEPTED.into_response())
+}
+
+/// `POST epconv` of a channel's Meet now (its subscription: the conversation's callbacks, no call invitation): the
+/// channel's meeting is made with its caller its organizer, nobody in it yet, and answered; the organizer then enters
+/// it at its conversation ([`enter_at_conversation`]). A meeting that runs in the channel is answered instead.
+pub(super) async fn meet_now(
+    app: &App,
+    caller: &Caller,
+    (from, channel): (&Value, &str),
+    body: &Value,
+) -> Result<Response, Failure> {
+    let nodes = group::nodes(app)?;
+    let members = call_events::members(app, channel).await?.ok_or(Refusal::Missing)?;
+    if !members.contains(&caller.id) {
+        return Err(Refusal::Forbidden.into());
+    }
+    let origin = app.config.origin();
+    let region = &app.config.region;
+    if let Some(running) = repo::running_in(&app.db, channel).await? {
+        return Ok(Json(wire::conversation(&origin, region, &running.call)).into_response());
+    }
+    let mut organizer = super::ops::party(&caller.id, &caller.name, from);
+    if let Some((endpoint, links)) = super::own_links(app, caller, body).await? {
+        organizer.keep(&endpoint, links);
+    }
+    organizer.status = Status::Left;
+    let mut call = group::new_call(channel, organizer);
+    call.meeting = Some(Meeting {
+        organizer: caller.id.clone(),
+        channel: true,
+        post: None,
+    });
+    call.alive_due = now_ms() / 1000 + super::state::KEEP_ALIVE;
+    call.reschedule();
+    call.media = Some(nodes.pick().await?);
+    match repo::insert(&app.db, &call).await {
+        Ok(()) => Ok(Json(wire::conversation(&origin, region, &call)).into_response()),
+        Err(DbError::Conflict) => {
+            let running = repo::running_in(&app.db, channel).await?.ok_or(Failure::Busy)?;
+            Ok(Json(wire::conversation(&origin, region, &running.call)).into_response())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// `POST conv/<id>` with a call invitation on a meeting's call: a channel's meeting takes the people of its channel, a
+/// scheduled one whom its lobby lets in (the others wait). The first one in a channel's meeting has the service post
+/// the meeting to the channel.
+pub(super) async fn enter_at_conversation(
+    app: &App,
+    caller: &Caller,
+    call: &Call,
+    body: &Value,
+) -> Result<Response, Failure> {
+    let meeting = call.meeting.as_ref().ok_or(Refusal::Missing)?;
+    let chat = call.chat.as_deref().ok_or(Refusal::Missing)?;
+    let admitted = if meeting.channel {
+        let members = call_events::members(app, chat).await?.unwrap_or_default();
+        if !members.contains(&caller.id) {
+            return Err(Refusal::Missing.into());
+        }
+        Admission::In
+    } else {
+        admission(app, chat, &meeting.organizer, &caller.id).await?
+    };
+    let entered = enter(app, caller, call, admitted, body).await?;
+    if meeting.channel && meeting.post.is_none() {
+        post_meeting(app, call).await;
+    }
+    Ok(entered)
+}
+
+/// Posts a channel's meeting to its channel as its organizer's, once: the first entry claims the post, so two entries
+/// at once don't post it twice. One not posted is logged.
+async fn post_meeting(app: &App, call: &Call) {
+    let key = Key::Id(&call.id);
+    let claimed = step_any(app, key, |call, _, _| {
+        let meeting = call.meeting.as_mut().ok_or(Refusal::Gone)?;
+        if meeting.post.is_some() {
+            return Ok(false);
+        }
+        meeting.post = Some(String::new());
+        Ok(true)
+    })
+    .await;
+    if !matches!(claimed, Ok(true)) {
+        return;
+    }
+    let posted = async {
+        let organizer = call
+            .meeting
+            .as_ref()
+            .map(|meeting| meeting.organizer.as_str())
+            .unwrap_or_default();
+        let user = users::by_id(&app.db, organizer).await?.ok_or(DbError::Conflict)?;
+        let channel = call.chat.as_deref().unwrap_or_default();
+        let conversation = wire::conversation_url(&app.config.origin(), &call.conversation, None);
+        call_events::meeting_started(app, channel, (&user.id, &user.display_name), (&call.id, &conversation)).await
+    };
+    match posted.await {
+        Ok(Some(post)) => {
+            let kept = step_any(app, key, |call, _, _| {
+                if let Some(meeting) = call.meeting.as_mut() {
+                    meeting.post = Some(post.to_string());
+                }
+                Ok(())
+            })
+            .await;
+            if let Err(Failure::Database(error)) = kept {
+                tracing::warn!(%error, "a channel meeting's post wasn't kept with its call");
+            }
+        }
+        Ok(None) => tracing::warn!("a channel meeting's organizer isn't in its channel: nothing was posted"),
+        Err(error) => tracing::warn!(%error, "a channel meeting wasn't posted to its channel"),
+    }
 }

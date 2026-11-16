@@ -39,6 +39,9 @@ pub(super) async fn react(
     if name == Some("isread") && method == Method::PUT && matches!(chat, streams::FEED | streams::MENTIONS) {
         return mark_read(&app, &caller, &path, body).await;
     }
+    if name == Some("meeting") && method == Method::PUT {
+        return title_meeting(&app, &caller, chat, &path, body).await;
+    }
     if name != Some("emotions") {
         return Err(Error::BadRequest);
     }
@@ -89,6 +92,61 @@ pub(super) async fn react(
     )
     .await;
     Ok(if remove { "null" } else { "200" })
+}
+
+/// The longest meeting title a post takes.
+const LONGEST_TITLE: usize = 255;
+
+/// `PUT …/messages/<post>/properties?name=meeting` with `{"meeting": {"meetingtitle"}}`: the author of a post that
+/// names a meeting (a channel's Meet now, posted as its organizer's) titles it, as the web client titles it from its
+/// pre-join. A post that names no meeting is left as it is.
+async fn title_meeting(
+    app: &App,
+    caller: &Caller,
+    chat: &str,
+    path: &Params,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Result<&'static str, Error> {
+    let (found, _) = member_of(app, caller, chat).await?;
+    let id = mutations::message_id(path)?;
+    let Json(body) = body.map_err(|_| Error::BadRequest)?;
+    let title = body["meeting"]["meetingtitle"]
+        .as_str()
+        .map(str::trim)
+        .filter(|title| !title.is_empty() && title.chars().count() <= LONGEST_TITLE)
+        .ok_or(Error::BadRequest)?;
+    let change = message_repo::Change {
+        chat: &found.id,
+        id,
+        actor: &caller.id,
+        who: message_repo::Who::Owner,
+        effect: message_repo::Effect::None,
+        base: &super::wire::base(app),
+    };
+    let result = message_repo::update(&app.db, change, |current, _| {
+        let meeting = current["properties"]["meeting"]
+            .as_str()
+            .map(serde_json::from_str::<Value>);
+        let Some(Ok(mut meeting)) = meeting else {
+            return Ok(false);
+        };
+        meeting["meetingtitle"] = json!(title);
+        current["properties"]["meeting"] = json!(meeting.to_string());
+        Ok(true)
+    })
+    .await?;
+    let changed = mutations::updated(result)?;
+    if !changed.told.is_empty() {
+        events::tell(
+            app,
+            "MessageUpdate",
+            &changed.row.value()?,
+            &changed.readers,
+            &changed.told,
+        )
+        .await;
+    }
+    Ok("200")
 }
 
 /// `PUT …/48:notifications/messages/<item>/properties?name=isread`: the account's own item read or unread. Its

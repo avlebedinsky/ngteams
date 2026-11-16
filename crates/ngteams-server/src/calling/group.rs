@@ -367,6 +367,9 @@ pub(super) async fn subscribe(
     let joins = body
         .get("callInvitation")
         .is_some_and(|invitation| !invitation.is_null());
+    if joins && call.meeting.is_some() {
+        return super::meeting::enter_at_conversation(app, caller, call, body).await;
+    }
     let present = call
         .seat_of(&caller.id)
         .is_some_and(|seat| matches!(call.party(seat).status, Status::Ringing | Status::InCall));

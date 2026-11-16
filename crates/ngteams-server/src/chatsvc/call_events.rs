@@ -56,6 +56,28 @@ pub(crate) async fn started(
     post(app, chat, (id, name), &content).await
 }
 
+/// A channel's meeting `call` began, organized by `organizer` (its id and name), at `conversation`: its post in the
+/// channel, which names the meeting (`properties.meeting`: its organizer and tenant, its title once its organizer
+/// titles it) and where it runs, as the service posts a channel's Meet now. The post's id, when it was posted.
+pub(crate) async fn meeting_started(
+    app: &App,
+    channel: &str,
+    organizer: (&str, &str),
+    (call, conversation): (&str, &str),
+) -> Result<Option<i64>, DbError> {
+    let content = format!(
+        "<partlist alt =\"\"></partlist><callEventType>callStarted</callEventType>\
+         <conversationUrl>{}</conversationUrl><callId>{call}</callId>",
+        escaped(conversation)
+    );
+    let meeting = json!({
+        "@type": "http://schema.skype.com/ScheduledMeetingCreated", "meetingtitle": null,
+        "organizerId": organizer.0, "tenantId": app.issuer.tenant(),
+    });
+    let properties = json!({"meeting": meeting.to_string()});
+    post_with(app, channel, organizer, &content, properties).await
+}
+
 /// The call `call` ended with `parts` in it: one part (its caller alone) reads as a missed call.
 pub(crate) async fn ended(
     app: &App,
@@ -81,7 +103,17 @@ pub(crate) async fn ended(
     post(app, chat, caller, &content).await
 }
 
-async fn post(app: &App, chat: &str, (id, name): (&str, &str), content: &str) -> Result<(), DbError> {
+async fn post(app: &App, chat: &str, caller: (&str, &str), content: &str) -> Result<(), DbError> {
+    post_with(app, chat, caller, content, json!({})).await.map(|_| ())
+}
+
+async fn post_with(
+    app: &App,
+    chat: &str,
+    (id, name): (&str, &str),
+    content: &str,
+    properties: serde_json::Value,
+) -> Result<Option<i64>, DbError> {
     let caller = Caller {
         id: id.to_owned(),
         tenant: String::new(),
@@ -92,8 +124,10 @@ async fn post(app: &App, chat: &str, (id, name): (&str, &str), content: &str) ->
         "conversationLink": format!("{}/v1/users/ME/conversations/{chat}", wire::base(app)),
         "from": format!("{}/v1/users/ME/contacts/{}", wire::base(app), caller.mri()),
         "fromDisplayNameInToken": name, "imdisplayname": name,
-        "messagetype": "Event/Call", "contenttype": "text", "content": content, "properties": {},
+        "messagetype": "Event/Call", "contenttype": "text", "content": content, "properties": properties,
     });
+    // a channel's posts are each the root of a thread of replies
+    let in_channel = super::channels::place(&app.db, chat).await?.is_some();
     let draft = message_repo::Message {
         chat_id: chat.to_owned(),
         id: 0,
@@ -101,11 +135,11 @@ async fn post(app: &App, chat: &str, (id, name): (&str, &str), content: &str) ->
         client_id: None,
         version: 0,
         body: body.to_string(),
-        root_id: None,
+        root_id: in_channel.then_some(0),
     };
     let Some(posted) = message_repo::insert(&app.db, &draft, &wire::base(app)).await? else {
-        return Ok(());
+        return Ok(None);
     };
     events::tell(app, "NewMessage", &posted.row.value()?, &posted.readers, &posted.told).await;
-    Ok(())
+    Ok(Some(posted.row.id))
 }

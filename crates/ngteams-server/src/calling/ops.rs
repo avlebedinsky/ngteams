@@ -51,11 +51,13 @@ async fn party_of(app: &App, key: Key<'_>, caller: &Caller) -> Result<(Call, Sea
     Ok((kept.call, seat))
 }
 
-/// What a start names: a 1:1 call, a group chat's call, or a meeting's.
+/// What a start names: a 1:1 call, a group chat's call, a meeting's, or a channel's new meeting (its Meet now's
+/// subscription: the channel, nobody named, no call invitation).
 enum Asked<'a> {
     OneToOne(OneToOne<'a>),
     Group(super::group::Start<'a>),
     Meeting(super::group::Start<'a>),
+    MeetNow { from: &'a Value, channel: &'a str },
 }
 
 /// What a 1:1 call's start names: the caller as it names itself, and its one callee.
@@ -69,6 +71,23 @@ struct OneToOne<'a> {
 /// Reads a start; a meeting's by its code alone and the test call's aren't served.
 fn asked<'a>(caller: &Caller, body: &'a Value) -> Result<Asked<'a>, Failure> {
     let from = body.pointer("/participants/from").ok_or(Refusal::Bad)?;
+    if from.get("id").and_then(Value::as_str) != Some(caller.mri().as_str()) {
+        return Err(Refusal::Forbidden.into());
+    }
+    let posts_meetup = body
+        .pointer("/conversationRequest/properties/enableGroupCallMeetupGeneration")
+        .and_then(Value::as_bool)
+        == Some(true);
+    let invites = body
+        .get("callInvitation")
+        .is_some_and(|invitation| !invitation.is_null());
+    if posts_meetup && !invites {
+        let channel = body
+            .pointer("/groupChat/threadId")
+            .and_then(Value::as_str)
+            .ok_or(Refusal::Bad)?;
+        return Ok(Asked::MeetNow { from, channel });
+    }
     let callees = body
         .pointer("/participants/to")
         .and_then(Value::as_array)
@@ -140,6 +159,9 @@ pub(super) async fn start(State(app): State<Arc<App>>, caller: Caller, body: Byt
     let asked = match asked(&caller, &body)? {
         Asked::Group(start) => return super::group::start(&app, &caller, start, &body).await,
         Asked::Meeting(start) => return super::meeting::start(&app, &caller, start, &body).await,
+        Asked::MeetNow { from, channel } => {
+            return super::meeting::meet_now(&app, &caller, (from, channel), &body).await;
+        }
         Asked::OneToOne(asked) => asked,
     };
     let invited = users::by_id(&app.db, asked.callee)

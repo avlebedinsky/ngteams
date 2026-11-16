@@ -417,3 +417,103 @@ async fn the_organizer_ends_the_meeting_for_everyone_in_it_and_its_chat_tells_th
         shut_down(vec![ada, bert, cora], mixed).await;
     }
 }
+
+/// A team `organizer` makes with `others` in it, and a channel of it, once each person's engine has them: the channel.
+async fn channel_of(mixed: &Mixed, organizer: &Person, others: &[&Person]) -> String {
+    let id = organizer.id().to_owned();
+    let maker = crate::teams::Seat::of(mixed.server(), &organizer.upn, id).await;
+    let mut members = Vec::new();
+    for other in others {
+        members.push(crate::teams::Seat::of(mixed.server(), &other.upn, other.id().to_owned()).await);
+    }
+    let (team, group) = maker.make_team("Rocket", false).await;
+    maker.add(&team, &group, &members.iter().collect::<Vec<_>>()).await;
+    let channel = maker.make_channel(&team, &group, "Launch", true).await;
+    for person in std::iter::once(organizer).chain(others.iter().copied()) {
+        assert!(person.engine.handle.sync().await.unwrap().failed.is_empty());
+    }
+    maker.stop();
+    for member in members {
+        member.stop();
+    }
+    channel
+}
+
+/// The channel's posts `reader` reads, newest first: (its kind, its text, its meeting's title).
+async fn posts(mixed: &Mixed, reader: &Person, channel: &str) -> Vec<(String, String, Option<String>)> {
+    let client = reader.engine.account.client(mixed.server());
+    let page = ChatReads::new(&client).messages(channel, 20).await.unwrap();
+    page.messages
+        .iter()
+        .map(|message| {
+            let meeting = match message.properties.get("meeting") {
+                Some(serde_json::Value::String(text)) => serde_json::from_str(text).ok(),
+                other => other.cloned(),
+            };
+            let title = meeting
+                .as_ref()
+                .and_then(|meeting: &serde_json::Value| meeting.get("meetingtitle")?.as_str())
+                .map(str::to_owned);
+            (message.message_type.as_str().to_owned(), message.content.clone(), title)
+        })
+        .collect()
+}
+
+/// The `<callId>` an `Event/Call` post names.
+fn call_id(text: &str) -> Option<String> {
+    let rest = text.split("<callId>").nth(1)?;
+    Some(rest.split('<').next()?.to_owned())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_channels_meet_now_is_posted_titled_joined_from_its_post_and_told_ended() {
+    for backend in backends() {
+        let mixed = Mixed::start(backend).await;
+        let mut ada = Person::new(&mixed, "Ada", A_TONE).await;
+        let mut bert = Person::new(&mixed, "Bert", B_TONE).await;
+        let channel = channel_of(&mixed, &ada, &[&bert]).await;
+        let a_call = ada
+            .engine
+            .call(CallAction::MeetNow {
+                channel: channel.clone(),
+            })
+            .await;
+        ada.engine.status(a_call, &CallStatus::Connected).await;
+        // the pre-join's title goes to the post the service makes, as Teams' web client titles it
+        ada.engine
+            .handle
+            .requests()
+            .title_meet_now(channel.clone(), "Sprint review")
+            .await
+            .unwrap();
+        let listed = posts(&mixed, &bert, &channel).await;
+        let started = listed
+            .iter()
+            .find(|(kind, text, _)| kind == "Event/Call" && text.contains("callStarted"))
+            .unwrap_or_else(|| panic!("{listed:?}"));
+        assert_eq!(started.2.as_deref(), Some("Sprint review"), "{listed:?}");
+        let b_call = joined(
+            &mut bert,
+            &CallAction::JoinChannel {
+                channel: channel.clone(),
+            },
+        )
+        .await;
+        let id = mixed.open_call().await;
+        mixed.connected(&id, 2).await;
+        let organizer = ada.engine.mri.clone();
+        bert.engine
+            .view(b_call, |view| {
+                view.participants
+                    .iter()
+                    .any(|party| party.mri == organizer && party.organizer)
+            })
+            .await;
+        leave_all(&mut [&mut bert, &mut ada], &[b_call, a_call]).await;
+        let listed = posts(&mixed, &bert, &channel).await;
+        let (_, ended, _) = &listed[0];
+        assert!(ended.contains("callEnded"), "{listed:?}");
+        assert_eq!(call_id(ended), call_id(&started.1), "{listed:?}");
+        shut_down(vec![ada, bert], mixed).await;
+    }
+}
