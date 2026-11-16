@@ -7,7 +7,8 @@
 //!   expired is read again by the engine; a stream that broke off is opened again where the file stands, a few times
 //!   ([`RETRIES`]) while nothing more arrives. A recording refused is not asked again.
 //! - **The file** is written beside its place as `<name>.part`, then renamed over it once whole; a download that failed
-//!   or was cancelled leaves nothing behind.
+//!   or was cancelled leaves nothing behind. The download locks its `.part` file while it writes it, so a second
+//!   writer of that file (another download to the same place, also by another path to it) fails ([`Failure::Busy`]).
 //! - **It runs apart from the view**: the downloads are the app's ([`Downloads`]), so leaving the recap or the chat
 //!   doesn't stop one, and the recap shows the ones of its recordings again when it is shown. Writing happens off the
 //!   UI thread; the recording keeps playing meanwhile.
@@ -17,6 +18,7 @@ use std::fs;
 use std::future::Future;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -64,9 +66,7 @@ impl Failure {
             Self::Network => "Check your connection and try again.".to_owned(),
             Self::Disk(error) => format!("The file couldn't be saved: {error}"),
             Self::Cancelled => "The download was cancelled.".to_owned(),
-            Self::Busy => {
-                "Another download is saving to the same place. Wait for it to end, or save to another place.".to_owned()
-            }
+            Self::Busy => "Another download is saving to the same place. Save it to another place.".to_owned(),
         }
     }
 }
@@ -132,6 +132,9 @@ pub struct RecordingDownload {
     then: Then,
     progress: Progress,
     running: Option<Task<()>>,
+    /// Whether the job of the last start still has its `.part` file: set at the start, cleared by the job as it ends
+    /// (see [`Job`]). A cancelled download still has it until its job is dropped.
+    writing: Arc<AtomicBool>,
 }
 
 impl RecordingDownload {
@@ -167,11 +170,11 @@ impl RecordingDownload {
         self.then
     }
 
-    /// Starts (or, after a failure, starts again) writing the recording to its file. When another running download
-    /// writes to the same place (its `.part` file), this one fails at once ([`Failure::Busy`]): two writers of one
-    /// file would overwrite each other's bytes.
+    /// Starts (or, after a failure, starts again) writing the recording to its file. When the job of another
+    /// download, or of an earlier start of this one, still writes to the same place (its `.part` file), this one
+    /// fails at once ([`Failure::Busy`]): two writers of one file would overwrite each other's bytes.
     pub fn start(&mut self, cx: &mut Context<Self>) {
-        if target_busy(&self.target, cx.entity_id(), cx) {
+        if self.writing.load(Ordering::Acquire) || target_busy(&self.target, cx.entity_id(), cx) {
             self.running = None;
             self.progress = Progress::Failed(Failure::Busy);
             cx.notify();
@@ -184,6 +187,11 @@ impl RecordingDownload {
         // the latest progress, and a wake for the view when it moved on (wakes not taken yet fold into one)
         let latest = Arc::new(Mutex::new((0, 0)));
         let (wake, woken) = async_channel::bounded::<()>(1);
+        self.writing = Arc::new(AtomicBool::new(true));
+        let job = Job {
+            writing: Arc::clone(&self.writing),
+            part: None,
+        };
         let executor = cx.background_executor().clone();
         let job = cx.background_spawn(save(
             Arc::clone(&self.open),
@@ -193,6 +201,7 @@ impl RecordingDownload {
                 wake,
             },
             move |wait| executor.timer(wait),
+            job,
         ));
         self.running = Some(cx.spawn(async move |this, cx| {
             while woken.recv().await.is_ok() {
@@ -232,15 +241,14 @@ impl RecordingDownload {
         }
     }
 
-    /// Stops a running download; what it wrote is removed.
+    /// Stops a running download; what it wrote is removed by its job as the job ends ([`Job`]).
     pub fn cancel(&mut self, cx: &mut Context<Self>) {
         if !self.progress.running() {
             return;
         }
-        // dropping the task drops its stream (the engine stops reading) and its file
+        // dropping the task drops its stream (the engine stops reading), its file and its `.part` file
         self.running = None;
         self.progress = Progress::Failed(Failure::Cancelled);
-        let _ = fs::remove_file(part_path(&self.target));
         cx.notify();
     }
 }
@@ -255,7 +263,7 @@ pub struct Downloads {
 
 impl Global for Downloads {}
 
-/// Whether a running download other than `except` writes to `target`, whatever its link.
+/// Whether the job of a download other than `except` still writes to `target`, whatever its link.
 fn target_busy(target: &Path, except: EntityId, cx: &App) -> bool {
     let Some(downloads) = cx.try_global::<Downloads>() else {
         return false;
@@ -267,7 +275,7 @@ fn target_busy(target: &Path, except: EntityId, cx: &App) -> bool {
         .filter(|download| download.entity_id() != except)
         .any(|download| {
             let download = download.read(cx);
-            download.progress.running() && download.target == target
+            download.writing.load(Ordering::Acquire) && download.target == target
         })
 }
 
@@ -316,6 +324,7 @@ pub fn start_with(open: Opener, link: String, target: PathBuf, then: Then, cx: &
                 then,
                 progress: Progress::Saved,
                 running: None,
+                writing: Arc::default(),
             };
             download.start(cx);
             download
@@ -354,13 +363,33 @@ struct Told {
     wake: async_channel::Sender<()>,
 }
 
+/// A download's job, from its start until it ends or is dropped (cancelled): it clears the download's `writing` as it
+/// ends, and before that removes the `.part` file it took, unless the file was saved.
+struct Job {
+    writing: Arc<AtomicBool>,
+    /// The `.part` file the job locked and writes, until it is renamed over its place.
+    part: Option<PathBuf>,
+}
+
+impl Drop for Job {
+    fn drop(&mut self) {
+        if let Some(part) = self.part.take() {
+            let _ = fs::remove_file(part);
+        }
+        self.writing.store(false, Ordering::Release);
+    }
+}
+
 /// Writes the file to `target` (through its [`part_path`]), telling `told` how far it got (every [`TELL_EVERY`]
-/// bytes, and once the whole file came); what it wrote is removed when it fails.
+/// bytes, and once the whole file came); what it wrote is removed when it fails or is dropped (by `job`). The
+/// `.part` file is locked while it is written: when another writer has it locked, this fails ([`Failure::Busy`]) and
+/// does not change it.
 async fn save<F: Future<Output = ()>>(
     open: Opener,
     target: PathBuf,
     told: Told,
     sleep: impl FnMut(Duration) -> F,
+    mut job: Job,
 ) -> Result<(), Failure> {
     let part = part_path(&target);
     let disk = |error: io::Error| Failure::Disk(error.to_string());
@@ -368,7 +397,21 @@ async fn save<F: Future<Output = ()>>(
     if let Some(folder) = part.parent() {
         fs::create_dir_all(folder).map_err(disk)?;
     }
-    let file = fs::File::create(&part).map_err(disk)?;
+    // not emptied before it is locked: it may be the file of another writer
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&part)
+        .map_err(disk)?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(fs::TryLockError::WouldBlock) => return Err(Failure::Busy),
+        Err(fs::TryLockError::Error(error)) => return Err(disk(error)),
+    }
+    job.part = Some(part.clone());
+    // what an earlier run left in it
+    file.set_len(0).map_err(disk)?;
     let mut sink = BufWriter::with_capacity(WRITE_BUFFER, file);
     let mut said = 0;
     let fetched = fetch_from(open.as_ref(), &mut sink, sleep, |written, total| {
@@ -381,16 +424,14 @@ async fn save<F: Future<Output = ()>>(
     })
     .await;
     drop(told);
-    let saved = fetched.and_then(|()| {
-        let file = sink.into_inner().map_err(|error| disk(error.into_error()))?;
-        file.sync_all().map_err(disk)?;
-        drop(file);
-        fs::rename(&part, &target).map_err(disk)
-    });
-    if saved.is_err() {
-        let _ = fs::remove_file(&part);
-    }
-    saved
+    fetched?;
+    let file = sink.into_inner().map_err(|error| disk(error.into_error()))?;
+    file.sync_all().map_err(disk)?;
+    // renamed while it is still locked, so that no other writer takes it before
+    fs::rename(&part, &target).map_err(disk)?;
+    job.part = None;
+    drop(file);
+    Ok(())
 }
 
 /// Reads the recording whose sharing link is `link` into `sink` from its start, stream after stream ([`CHUNK`] each),

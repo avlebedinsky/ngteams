@@ -75,7 +75,7 @@ use crate::recap::{
     row_of, sessions, transcript_file_name,
 };
 use crate::recap_summary::RecapSummary;
-use crate::recording_download::{self, Progress, RecordingDownload, byte_size, download_of};
+use crate::recording_download::{self, Failure, Progress, RecordingDownload, byte_size, download_of};
 use crate::settings::SettingsModel;
 use crate::theme::{self, Palette};
 use crate::video_player::{Captions, Recording, VideoPlayer, clock as offset};
@@ -1217,7 +1217,8 @@ impl RecapView {
             .into_any_element()
     }
 
-    /// A download's buttons: Cancel while it runs; Show in folder once saved; Try again once failed; Dismiss once ended.
+    /// A download's buttons: Cancel while it runs; Show in folder once saved; Try again once failed (not when another
+    /// download saved to the same place: Try again would replace that file without a question); Dismiss once ended.
     fn download_actions(
         index: usize,
         link: &str,
@@ -1250,6 +1251,7 @@ impl RecapView {
                     .on_click(move |_, _, cx| cx.reveal_path(&target));
                 actions.push(selected_by(id, show).into_any_element());
             }
+            Progress::Failed(Failure::Busy) => {}
             Progress::Failed(_) => {
                 let id = format!("recap-download-retry-{index}");
                 let link = link.to_owned();

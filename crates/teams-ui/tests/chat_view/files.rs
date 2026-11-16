@@ -485,6 +485,55 @@ fn a_download_of_another_file_to_where_one_still_runs_fails_and_the_first_saves(
     assert!(bounds(cx, &format!("file-download-{ID}-0 saved")).is_some());
 }
 
+/// The second place is the first one by another path (a link to its folder, as a name in another case is on a file
+/// system that ignores case): the two `.part` files are one file, which the first download has locked.
+#[cfg(unix)]
+#[test]
+fn a_download_of_another_file_to_where_one_runs_by_another_path_fails_and_the_first_saves() {
+    let entry = |share: &str| {
+        serde_json::json!({"@type": teams_proto::chat::FILE_TYPE, "fileName": "made-up notes.pdf",
+            "fileType": "pdf", "state": "active", "objectUrl": share, "fileInfo": {"shareUrl": share}})
+    };
+    let mut stored = message(ID, LAB_B, "<p>the notes, twice</p>", NOON);
+    stored.properties = Some(
+        serde_json::json!({"files": Value::Array(vec![entry(OWN_SHARE), entry(OWN_SHARE_OTHER)]).to_string()})
+            .to_string(),
+    );
+    let other: &[u8] = b"%PDF-1.7 the older made-up notes";
+    let (rig, _opened, cx) = own_files_chat(stored, &[(OWN_SHARE, OWN_BYTES), (OWN_SHARE_OTHER, other)]);
+    *rig.core.hold_streams_from.lock().unwrap() = Some(0);
+    let chosen = tempfile::tempdir().unwrap();
+    let folder = chosen.path().join("folder");
+    std::fs::create_dir(&folder).unwrap();
+    let alias = chosen.path().join("alias");
+    std::os::unix::fs::symlink(&folder, &alias).unwrap();
+    let target = folder.join("made-up notes.pdf");
+    for (file, place) in [(0, folder.clone()), (1, alias.clone())] {
+        click(cx, &format!("file-more-{ID}-{file}"));
+        click(cx, &format!("file-menu-download-{ID}-{file}"));
+        let place = place.join("made-up notes.pdf");
+        cx.simulate_new_path_selection(move |_| Some(place));
+        draw(cx);
+    }
+    assert!(bounds(cx, &format!("file-download-{ID}-1 failed")).is_some());
+    let failed = cx.update(|_, cx| {
+        teams_ui::recording_download::download_of(OWN_SHARE_OTHER, cx)
+            .map(|download| download.read(cx).progress().clone())
+    });
+    assert_eq!(
+        failed,
+        Some(teams_ui::recording_download::Progress::Failed(
+            teams_ui::recording_download::Failure::Busy
+        ))
+    );
+    // one stream only: the second download never wrote the locked `.part` file
+    answer_held(&rig, &[OWN_BYTES]);
+    draw(cx);
+    assert_eq!(std::fs::read(&target).unwrap(), OWN_BYTES, "the first file, whole");
+    assert!(!teams_ui::recording_download::part_path(&target).exists());
+    assert!(bounds(cx, &format!("file-download-{ID}-0 saved")).is_some());
+}
+
 #[test]
 fn more_options_of_an_own_servers_file_downloads_it_through_the_engine_where_chosen() {
     let (_rig, _opened, cx) = own_file_chat(true);

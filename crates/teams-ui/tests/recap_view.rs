@@ -897,6 +897,58 @@ fn a_download_shows_how_far_it_got_and_cancelling_leaves_nothing() {
     assert!(cx.update(|_, cx| view.read(cx).downloadable(cx)).is_some());
 }
 
+/// A cancelled download's job can still be in its last write (a long sync to the disk): until the job ends, a new
+/// start to its place does not write a second `.part` file beside it, and the recap offers no Try again, which would
+/// replace the file of another download without a question.
+#[test]
+fn a_download_started_again_before_its_cancelled_job_ended_is_busy_and_offers_no_try_again() {
+    let bytes = recording_bytes(200_000);
+    let rig = downloadable(true, &bytes);
+    *locked(&rig.core.stream_limit) = Some(50_000);
+    *locked(&rig.core.hold_streams_from) = Some(50_000);
+    let (shell, cx) = shell_window(&rig, fixtures::MEETING);
+    click(cx, "chat-tab-recap");
+    let view = recap(&shell, cx);
+    let folder = tempfile::tempdir().unwrap();
+    let target = folder.path().join("recording.mp4");
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            view.save_recording(fixtures::sharing_link("ITEM1"), target.clone(), cx);
+        });
+    });
+    draw(cx);
+    let download = cx
+        .update(|_, cx| teams_ui::recording_download::download_of(&fixtures::sharing_link("ITEM1"), cx))
+        .expect("the download");
+    assert!(teams_ui::recording_download::part_path(&target).exists());
+    // cancelled, and started again before its job was dropped
+    let progress = cx.update(|_, cx| {
+        download.update(cx, |download, cx| {
+            download.cancel(cx);
+            download.start(cx);
+            download.progress().clone()
+        })
+    });
+    assert_eq!(
+        progress,
+        teams_ui::recording_download::Progress::Failed(teams_ui::recording_download::Failure::Busy)
+    );
+    draw(cx);
+    assert!(cx.debug_bounds("recap-download-0 failed").is_some());
+    assert!(cx.debug_bounds("recap-download-retry-0").is_none(), "no Try again");
+    // the job removed its `.part` file as it ended
+    assert!(!teams_ui::recording_download::part_path(&target).exists());
+    assert!(!target.exists());
+    // the job ended: the next start runs
+    let running = cx.update(|_, cx| {
+        download.update(cx, |download, cx| {
+            download.start(cx);
+            download.progress().running()
+        })
+    });
+    assert!(running);
+}
+
 #[test]
 fn a_recording_the_account_may_not_download_offers_no_download() {
     let rig = downloadable(false, b"made-up bytes");

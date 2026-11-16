@@ -733,14 +733,16 @@ pub fn user_dir(dirs: &str, key: &str, home: &Path) -> Option<PathBuf> {
 
 /// `name` in `folder`, or with " (n)" before its extension when a file has it.
 pub(crate) fn free_name(folder: &Path, name: &str) -> PathBuf {
+    // a download to a name writes `<name>.part` until it is whole: that name is taken too
+    let taken = |path: &Path| path.exists() || crate::recording_download::part_path(path).exists();
     let first = folder.join(name);
-    if !first.exists() {
+    if !taken(&first) {
         return first;
     }
     let (stem, extension) = name.rsplit_once('.').unwrap_or((name, ""));
     (1..1000)
         .map(|n| folder.join(format!("{stem} ({n}).{extension}")))
-        .find(|path| !path.exists())
+        .find(|path| !taken(path))
         .unwrap_or(first)
 }
 
@@ -1123,5 +1125,27 @@ mod native_downloads {
         let folder = super::downloads().unwrap();
         assert!(folder.is_absolute());
         assert_eq!(folder, expected);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::free_name;
+
+    #[test]
+    fn a_name_that_a_download_writes_to_is_not_free() {
+        let folder = tempfile::tempdir().unwrap();
+        let name = "made-up notes.pdf";
+        assert_eq!(free_name(folder.path(), name), folder.path().join(name));
+        std::fs::write(folder.path().join("made-up notes.pdf.part"), b"").unwrap();
+        assert_eq!(
+            free_name(folder.path(), name),
+            folder.path().join("made-up notes (1).pdf")
+        );
+        std::fs::write(folder.path().join("made-up notes (1).pdf"), b"").unwrap();
+        assert_eq!(
+            free_name(folder.path(), name),
+            folder.path().join("made-up notes (2).pdf")
+        );
     }
 }
