@@ -1285,10 +1285,20 @@ static-auth-secret=<the same secret as calling.turn.secret>
 cert=/etc/coturn/fullchain.pem
 pkey=/etc/coturn/privkey.pem
 no-multicast-peers
+no-tcp-relay
 denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=100.64.0.0-100.127.255.255
 denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.0.0.0-192.0.0.255
 denied-peer-ip=192.168.0.0-192.168.255.255
+denied-peer-ip=169.254.0.0-169.254.255.255
+denied-peer-ip=198.18.0.0-198.19.255.255
+denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
 ```
+
+These are the limits of the coturn in `packaging/server/compose.yaml`: it relays UDP only, and never to a private,
+CGNAT, benchmark or link-local address.
 
 Clients relay everything, so the relay needs its UDP range (`min-port`, `max-port`) open and enough bandwidth for
 every call's media twice. Several coturn instances with one secret serve any number of nodes.
