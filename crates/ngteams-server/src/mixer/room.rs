@@ -102,7 +102,7 @@ impl Room {
             let Some(leg) = self.legs.get_mut(id).filter(|leg| leg.seed.is_some()) else {
                 continue;
             };
-            match slot.pass(frame.keyframe, frame.time) {
+            match slot.pass(frame.keyframe, frame.time, now) {
                 Some(time) => {
                     leg.write_video(*stream, time, frame, now);
                 }
@@ -265,14 +265,18 @@ mod tests {
         };
         room.driven("a", sent(true), later);
         assert!(
-            room.slots.values().all(|slot| slot.clone().pass(false, 1).is_none()),
+            room.slots
+                .values()
+                .all(|slot| slot.clone().pass(false, 1, later).is_none()),
             "still waiting"
         );
         room.legs.get_mut("b").unwrap().seed = Some(4_000_000);
         room.driven("a", sent(false), later);
         room.driven("a", sent(true), later);
         assert!(
-            room.slots.values().all(|slot| slot.clone().pass(false, 1).is_some()),
+            room.slots
+                .values()
+                .all(|slot| slot.clone().pass(false, 1, later).is_some()),
             "showing"
         );
         room.remove("b");

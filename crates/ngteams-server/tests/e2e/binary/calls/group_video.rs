@@ -733,33 +733,30 @@ async fn sees_share(viewer: &mut Phone, call: CallId, sharer: &str) {
     );
 }
 
-/// `viewer` sees that `sharer` shares no more, and its sharing line goes still.
+/// `viewer` sees that `sharer` shares no more, and its sharing line goes still: what was on its way may still come in
+/// the second after, then nothing.
 async fn sees_share_end(viewer: &mut Phone, call: CallId, sharer: &str) {
     shows(viewer, call, &format!("{sharer}'s share over"), |view| {
         party(view, sharer).is_some_and(|p| !p.sharing)
     })
     .await;
-    // what was on its way may still come: the line goes still within a few seconds, and stays still
-    let mut windows = Vec::new();
-    for _ in 0..5 {
-        let shown = viewer.video.line(SHARING_LINE).frames;
-        let mark = viewer.mark();
-        viewer.quiet(mark, Duration::from_secs(1), |_| false).await;
-        windows.push(viewer.video.line(SHARING_LINE).frames - shown);
-        if windows.last().is_some_and(|frames| *frames <= 2) {
-            break;
-        }
-    }
+    let ended = viewer.video.line(SHARING_LINE).frames;
+    let mark = viewer.mark();
+    viewer.quiet(mark, Duration::from_secs(1), |_| false).await;
+    let shown = viewer.video.line(SHARING_LINE).frames;
+    let mark = viewer.mark();
+    viewer.quiet(mark, Duration::from_secs(1), |_| false).await;
+    let late = viewer.video.line(SHARING_LINE).frames - shown;
     eprintln!(
-        "{}: {sharer}'s share over: frames a second after it {windows:?}",
+        "{}: {sharer}'s share over: frames in the second after it {}, in the next second {late}",
+        viewer.upn,
+        shown - ended
+    );
+    assert_eq!(
+        late, 0,
+        "{}: {sharer}'s screen still comes a second after Stop sharing",
         viewer.upn
     );
-    assert!(
-        windows.last().is_some_and(|frames| *frames <= 2),
-        "{}: {sharer}'s screen still comes after Stop sharing: frames a second {windows:?}",
-        viewer.upn
-    );
-    stays_still(viewer, SHARING_LINE, "the share is over").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

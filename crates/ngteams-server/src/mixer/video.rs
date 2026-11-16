@@ -5,8 +5,10 @@
 //!   on it). Which is which is read from the exchange the leg made: str0m's SDP and the dialect's, line for line.
 //! - **What a receiving line shows** is what the leg's last source request for its stream id named ([`Slot`]): a
 //!   participant's camera or screen by its source id, or nothing (`-1`). A line starts showing a source at the
-//!   source's next keyframe, which the room asks the source for, and its RTP time goes on from where the line was, so
-//!   a line that changes source is one stream to the client's decoder.
+//!   source's next keyframe, which the room asks the source for, and its RTP time goes on from where the line was, by
+//!   the time since its last frame, so a line that changes source is one stream to the client's decoder. A line that
+//!   went on by one frame after a pause (a second share on the same line) made the receiver take the pause as jitter
+//!   and hold its frames for a second, past the share's end.
 //! - **Keyframes**: a receiver's PLI or FIR on a line, and a line that starts a source, ask that source's leg for one;
 //!   a source is asked at most every [`KEYFRAME_EVERY`].
 
@@ -20,8 +22,10 @@ use teams_sdp::sdp::SHARING_LABEL;
 
 /// A source is asked for a keyframe at most this often.
 pub(crate) const KEYFRAME_EVERY: Duration = Duration::from_millis(300);
-/// One frame's step in RTP time (90 kHz at 30 fps), where a line goes on with another source.
+/// One frame's step in RTP time (90 kHz at 30 fps): the least a line goes on by with another source.
 const FRAME_STEP: i64 = 3000;
+/// RTP time's ticks a second (90 kHz).
+const TICKS: i64 = 90_000;
 
 /// What a video line of a leg carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,7 +111,8 @@ pub(crate) struct Slot {
     waiting: bool,
     /// What the source's RTP time is moved by on this line.
     offset: i64,
-    last_out: Option<u64>,
+    /// The RTP time of the line's last frame, and when it went.
+    last_out: Option<(u64, Instant)>,
 }
 
 impl Slot {
@@ -126,22 +131,23 @@ impl Slot {
         self.source
     }
 
-    /// The RTP time a frame of the source at `time` goes out at on this line; none while the line waits for a keyframe
-    /// and this isn't one.
-    pub(crate) fn pass(&mut self, keyframe: bool, time: u64) -> Option<u64> {
+    /// The RTP time a frame of the source at `time` goes out at on this line at `now`; none while the line waits for a
+    /// keyframe and this isn't one.
+    pub(crate) fn pass(&mut self, keyframe: bool, time: u64, now: Instant) -> Option<u64> {
         let time = i64::try_from(time).ok()?;
         if self.waiting {
             if !keyframe {
                 return None;
             }
             self.waiting = false;
-            self.offset = self
-                .last_out
-                .and_then(|last| i64::try_from(last).ok())
-                .map_or(0, |last| last + FRAME_STEP - time);
+            self.offset = self.last_out.map_or(0, |(last, at)| {
+                let since = i64::try_from(now.duration_since(at).as_millis()).unwrap_or(i64::MAX / TICKS);
+                let last = i64::try_from(last).unwrap_or_default();
+                last.saturating_add(since.saturating_mul(TICKS / 1000).max(FRAME_STEP)) - time
+            });
         }
         let out = u64::try_from(time + self.offset).unwrap_or_default();
-        self.last_out = Some(out);
+        self.last_out = Some((out, now));
         Some(out)
     }
 }
@@ -199,22 +205,37 @@ mod tests {
 
     #[test]
     fn a_line_shows_its_source_from_a_keyframe_on_and_goes_on_in_time() {
+        let now = Instant::now();
         let mut slot = Slot::default();
         assert!(!slot.show(-1), "nothing was shown before");
         assert!(slot.show(1001));
         assert!(!slot.show(1001));
         assert_eq!(slot.source(), Some(1001));
-        assert_eq!(slot.pass(false, 90_000), None);
-        assert_eq!(slot.pass(true, 93_000), Some(93_000));
-        assert_eq!(slot.pass(false, 96_000), Some(96_000));
-        // another source, its own clock: the line goes on one frame after where it was
+        assert_eq!(slot.pass(false, 90_000, now), None);
+        assert_eq!(slot.pass(true, 93_000, now), Some(93_000));
+        assert_eq!(slot.pass(false, 96_000, now), Some(96_000));
+        // another source, its own clock, at once: the line goes on one frame after where it was
         assert!(slot.show(1021));
-        assert_eq!(slot.pass(false, 5_000), None);
-        assert_eq!(slot.pass(true, 8_000), Some(99_000));
-        assert_eq!(slot.pass(false, 11_000), Some(102_000));
+        assert_eq!(slot.pass(false, 5_000, now), None);
+        assert_eq!(slot.pass(true, 8_000, now), Some(99_000));
+        assert_eq!(slot.pass(false, 11_000, now), Some(102_000));
         assert!(slot.show(-1));
         assert_eq!(slot.source(), None);
-        assert_eq!(slot.pass(false, u64::MAX), None, "a time past i64 is no time");
+        assert_eq!(slot.pass(false, u64::MAX, now), None, "a time past i64 is no time");
+    }
+
+    #[test]
+    fn a_line_that_shows_a_source_again_after_a_pause_goes_on_by_the_pause() {
+        let now = Instant::now();
+        let mut slot = Slot::default();
+        slot.show(1022);
+        assert_eq!(slot.pass(true, 90_000, now), Some(90_000));
+        // the share ends, and starts again four seconds later: its RTP time went on meanwhile, and so does the line's
+        slot.show(-1);
+        slot.show(1022);
+        let later = now + Duration::from_secs(4);
+        assert_eq!(slot.pass(true, 500_000, later), Some(90_000 + 4 * 90_000));
+        assert_eq!(slot.pass(false, 506_000, later), Some(456_000));
     }
 
     #[test]
