@@ -26,6 +26,15 @@ pub(super) async fn of_chat(db: &Db, chat: &str) -> Result<Option<Meeting>, DbEr
         .optional()?))
 }
 
+pub(super) async fn of_code(db: &Db, code: &str) -> Result<Option<Meeting>, DbError> {
+    with_conn!(db, |conn| Ok(meetings::table
+        .filter(meetings::code.eq(code))
+        .select(Meeting::as_select())
+        .first(conn)
+        .await
+        .optional()?))
+}
+
 pub(super) async fn of_chats(db: &Db, chats: &[String]) -> Result<Vec<Meeting>, DbError> {
     with_conn!(db, |conn| Ok(meetings::table
         .filter(meetings::chat_id.eq_any(chats))

@@ -575,3 +575,31 @@ async fn the_organizers_controls_bind_everyone_in_the_meeting_while_it_runs() {
         shut_down(vec![ada, bert, cora], mixed).await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_meeting_is_joined_by_its_id_and_passcode_and_a_wrong_passcode_finds_none() {
+    for backend in backends() {
+        let mixed = Mixed::start(backend).await;
+        let mut ada = Person::new(&mixed, "Ada", A_TONE).await;
+        let mut bert = Person::new(&mixed, "Bert", B_TONE).await;
+        let event = schedule(&ada, &[&bert]).await;
+        let code = event
+            .meeting_code
+            .clone()
+            .expect("a Teams meeting has an id and passcode");
+        // the first one by its id starts the meeting's one call; the next by its chat joins it
+        let b_call = joined(&mut bert, &CallAction::JoinMeetingCode(code.clone())).await;
+        let a_call = joined(&mut ada, &join_of(&event)).await;
+        let id = mixed.open_call().await;
+        mixed.connected(&id, 2).await;
+        let mut wrong = code.clone();
+        wrong.passcode = "wrong0passcode".to_owned();
+        let mut cora = Person::new(&mixed, "Cora", C_TONE).await;
+        let c_call = cora.engine.call(CallAction::JoinMeetingCode(wrong)).await;
+        let end = cora.engine.ended(c_call).await;
+        assert!(matches!(end, End::Failed(_)), "{end:?}");
+        assert_eq!(mixed.open_call().await, id);
+        leave_all(&mut [&mut ada, &mut bert], &[a_call, b_call]).await;
+        shut_down(vec![ada, bert, cora], mixed).await;
+    }
+}

@@ -406,3 +406,23 @@ async fn post_meeting(app: &App, call: &Call) {
         Err(error) => tracing::warn!(%error, "a channel meeting wasn't posted to its channel"),
     }
 }
+
+/// `POST epconv` naming a meeting by its id and passcode alone (Join with an ID): the meeting they name is joined as
+/// by its chat. An id and passcode that name no meeting find none.
+pub(super) async fn by_code(
+    app: &App,
+    caller: &Caller,
+    (from, (code, passcode), offer): (&Value, (&str, &str), &Value),
+    body: &Value,
+) -> Result<Response, Failure> {
+    let meeting = crate::calendar::meeting_by_code(&app.db, code, passcode)
+        .await?
+        .ok_or(Refusal::Missing)?;
+    let asked = Start {
+        from,
+        chat: &meeting.chat_id,
+        to: &[],
+        offer,
+    };
+    start(app, caller, asked, body).await
+}

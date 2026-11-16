@@ -57,7 +57,16 @@ enum Asked<'a> {
     OneToOne(OneToOne<'a>),
     Group(super::group::Start<'a>),
     Meeting(super::group::Start<'a>),
-    MeetNow { from: &'a Value, channel: &'a str },
+    MeetNow {
+        from: &'a Value,
+        channel: &'a str,
+    },
+    /// A meeting named by its id and passcode alone (Join with an ID).
+    ByCode {
+        from: &'a Value,
+        code: (&'a str, &'a str),
+        offer: &'a Value,
+    },
 }
 
 /// What a 1:1 call's start names: the caller as it names itself, and its one callee.
@@ -68,7 +77,7 @@ struct OneToOne<'a> {
     offer: &'a Value,
 }
 
-/// Reads a start; a meeting's by its code alone and the test call's aren't served.
+/// Reads a start; the test call's isn't served.
 fn asked<'a>(caller: &Caller, body: &'a Value) -> Result<Asked<'a>, Failure> {
     let from = body.pointer("/participants/from").ok_or(Refusal::Bad)?;
     if from.get("id").and_then(Value::as_str) != Some(caller.mri().as_str()) {
@@ -97,8 +106,13 @@ fn asked<'a>(caller: &Caller, body: &'a Value) -> Result<Asked<'a>, Failure> {
     }
     let set = |pointer: &str| body.pointer(pointer).is_some_and(|value| !value.is_null());
     let meeting = set("/meetingInfo");
-    let other_kind = ["/meetingData", "/conversationRequest/scenario"].into_iter().any(set);
-    if other_kind || (meeting && !set("/groupChat")) {
+    if set("/meetingData") && !meeting && !set("/groupChat") {
+        let text = |pointer: &str| body.pointer(pointer).and_then(Value::as_str).ok_or(Refusal::Bad);
+        let offer = body.pointer("/callInvitation/mediaContent").ok_or(Refusal::Bad)?;
+        let code = (text("/meetingData/meetingCode")?, text("/meetingData/passcode")?);
+        return Ok(Asked::ByCode { from, code, offer });
+    }
+    if set("/conversationRequest/scenario") || (meeting && !set("/groupChat")) {
         return Err(Failure::NotServed);
     }
     if set("/groupChat") {
@@ -159,6 +173,9 @@ pub(super) async fn start(State(app): State<Arc<App>>, caller: Caller, body: Byt
     let asked = match asked(&caller, &body)? {
         Asked::Group(start) => return super::group::start(&app, &caller, start, &body).await,
         Asked::Meeting(start) => return super::meeting::start(&app, &caller, start, &body).await,
+        Asked::ByCode { from, code, offer } => {
+            return super::meeting::by_code(&app, &caller, (from, code, offer), &body).await;
+        }
         Asked::MeetNow { from, channel } => {
             return super::meeting::meet_now(&app, &caller, (from, channel), &body).await;
         }

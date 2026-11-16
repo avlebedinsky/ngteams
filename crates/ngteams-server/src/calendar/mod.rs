@@ -53,6 +53,15 @@ pub(crate) async fn meeting_of(db: &Db, chat: &str) -> Result<Option<Meeting>, D
     meeting::of_chat(db, chat).await
 }
 
+/// The meeting whose id (its numeric code) is `code`, when `passcode` is its own.
+///
+/// # Errors
+/// A database failure.
+pub(crate) async fn meeting_by_code(db: &Db, code: &str, passcode: &str) -> Result<Option<Meeting>, DbError> {
+    let meeting = meeting_repo::of_code(db, code).await?;
+    Ok(meeting.filter(|meeting| meeting.passcode == passcode))
+}
+
 /// The largest JSON body a calendar request takes: an event's text can be long.
 const BODY_LIMIT: usize = 1024 * 1024;
 
