@@ -733,6 +733,25 @@ impl ChatServiceMock {
         roster::sharing(&mut state, index, mri, on)
     }
 
+    /// `mri`, someone in group call `id` with no client of its own (made up, or the caller the mock plays), raises its
+    /// hand (`up`) or lowers it, as its `publishState` or `removeState` does: everyone is told. `false` when it isn't
+    /// in such a call.
+    #[must_use = "false says no hand changed"]
+    pub fn hand_made_up(&self, id: &str, mri: &str, up: bool) -> bool {
+        let mut state = self.lock();
+        let Some(index) = state
+            .calling
+            .calls
+            .iter()
+            .position(|call| call.id == id && call.roster.iter().any(|party| party.mri == mri && party.active))
+        else {
+            return false;
+        };
+        let hand = up.then(|| format!("made-up-hand-{mri}"));
+        roster::hand(&mut state, index, mri, hand.as_deref());
+        true
+    }
+
     /// Call `id`'s ring ends with `code` and `phrase` (its caller cancelled, it timed out: see [`TIMED_OUT`]). `false`
     /// when there is no such call.
     #[must_use = "false says there was no such call"]

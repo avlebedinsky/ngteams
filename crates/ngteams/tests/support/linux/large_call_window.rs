@@ -27,6 +27,7 @@
 //! - The share strip and the speaker strip page with their own pagers, the account's own tile last in the share strip,
 //!   the speaker staying large; a call of 2-9 shows everyone on one page, no pager; in a 1:1 call the account's own
 //!   tile floats at the stage's bottom right.
+//! - QA of task 447: each tile shows its raised hand with its place in the line of hands (`large_call_qa_hands.rs`).
 //! - Each ring's banner on the sandbox's bus carries the caller's (b's) picture, round, as the mock's Graph gives it
 //!   (#114).
 //! - Screenshots of each under `target/ui-shots/large-call-*.png` (and `$LARGE_CALL_EVIDENCE`, if set), in Teams Light
@@ -80,6 +81,8 @@ use support::{Alias, display_name};
 mod meet_now;
 #[path = "call_pixels.rs"]
 mod pixels;
+#[path = "large_call_qa_hands.rs"]
+mod qa_hands;
 use pixels::{Rect, Stage};
 
 const CHILD_ENV: &str = "NGTEAMS_LARGE_CALL_TEST";
@@ -215,7 +218,7 @@ fn b_picture() -> SandboxResult<Vec<u8>> {
 /// Everything the user does, in order.
 fn scenarios(rig: &mut Rig<'_>) -> SandboxResult {
     type Step = fn(&mut Rig<'_>) -> SandboxResult;
-    let steps: [(&str, Step); 12] = [
+    let steps: [(&str, Step); 13] = [
         ("small", small_calls),
         ("mic-10", |rig| every_size(rig, 10)),
         ("mic-25", |rig| every_size(rig, 25)),
@@ -228,6 +231,7 @@ fn scenarios(rig: &mut Rig<'_>) -> SandboxResult {
         ("toolbar", whole_toolbar),
         ("leave", share_and_leave),
         ("one-to-one", one_to_one),
+        ("qa-hands", qa_hands::qa_hands),
     ];
     // a run of some steps alone (`LARGE_CALL_STEPS=sizes,strips`), each setting up the call it needs
     let only = std::env::var(STEPS_ENV).ok();
