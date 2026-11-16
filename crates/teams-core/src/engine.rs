@@ -2016,7 +2016,7 @@ where
         .spawn(move || {
             // a `LocalSet`, so the calling runs as a task of its own on this thread (`crate::calling`)
             let local = tokio::task::LocalSet::new();
-            local.block_on(&runtime, Core::new(parts, events, received).run());
+            local.block_on(&runtime, Core::running(parts, events, received));
             // its tasks (the push channel's) and the store are gone before another engine may start
             drop(local);
             // a blocking task that never ends (a call's media setup stuck in libwebrtc) is left to itself: dropping the
@@ -2041,6 +2041,12 @@ where
         ended,
         runtime: handle,
     })
+}
+
+/// The future `make` makes, on the heap. In a debug build a poll frame holds every future made in it by value and
+/// shares no slot between them; made here instead, they cost the caller's frame a pointer each.
+fn on_heap<F: Future>(make: impl FnOnce() -> F) -> Pin<Box<F>> {
+    Box::pin(make())
 }
 
 /// The engine's state on its thread.
@@ -2162,6 +2168,16 @@ where
             calling,
             calls: None,
         }
+    }
+
+    /// The engine's run, on the heap. In a debug build every poll frame holds its child future by value, so a run
+    /// handed down the runtime's calls by value took a quarter of the thread's stack before the run began.
+    fn running(
+        parts: Parts<C, T>,
+        events: mpsc::UnboundedSender<Event>,
+        requests: mpsc::UnboundedReceiver<Request>,
+    ) -> Pin<Box<impl Future<Output = ()>>> {
+        Box::pin(Self::new(parts, events, requests).run())
     }
 
     async fn run(mut self) {
@@ -2330,36 +2346,37 @@ where
             Request::RecordingSegment(part, reply) => self.recaps.segment(part, reply),
             Request::RecordingFile(file, reply) => self.recaps.file(file, reply),
             Request::Write(action, reply) => {
-                let _ = reply.send(self.logged_write(action).await);
+                let _ = reply.send(on_heap(|| self.logged_write(action)).await);
             }
             Request::SendQueued(id, reply) => {
-                let _ = reply.send(self.send_row(id).await);
+                let _ = reply.send(on_heap(|| self.send_row(id)).await);
             }
             Request::Sync(reply) => {
                 log::info!("action: a catch-up asked for");
                 self.gaps.missed();
-                let report = self
-                    .catch_up_due()
+                let report = on_heap(|| self.catch_up_due())
                     .await
                     .unwrap_or_else(|| Ok(CatchUpReport::default()));
                 let _ = reply.send(report.map_err(EngineError::from));
             }
             Request::Resend(id, reply) => {
                 log::info!("action: resend of row {id}");
-                let _ = reply.send(logged(self.resend(id).await, || format!("resend of row {id}")));
+                let _ = reply.send(logged(on_heap(|| self.resend(id)).await, || {
+                    format!("resend of row {id}")
+                }));
             }
             Request::Transient(transient, reply) => {
-                let _ = reply.send(self.transient(transient).await);
+                let _ = reply.send(on_heap(|| self.transient(transient)).await);
             }
             Request::Call(action, asked, reply) => self.call(action, asked, reply),
             Request::CallHealth(call, reply) => self.call_health(call, reply),
             Request::CallMeetingOptions(call, reply) => self.call_meeting_options(call, reply),
             Request::OwnAvailability(status, reply) => {
                 log::info!("action: own availability {status:?}");
-                let _ = reply.send(self.own_availability(status).await);
+                let _ = reply.send(on_heap(|| self.own_availability(status)).await);
             }
-            Request::LoadOlder(conversation, reply) => self.older_asked(&conversation, reply).await,
-            Request::SyncConversation(conversation, reply) => self.sync_asked(&conversation, reply).await,
+            Request::LoadOlder(conversation, reply) => on_heap(|| self.older_asked(&conversation, reply)).await,
+            Request::SyncConversation(conversation, reply) => on_heap(|| self.sync_asked(&conversation, reply)).await,
             Request::Query(query) => self.answer(query),
             Request::KeepTranslations(translations, reply) => {
                 let _ = reply.send(self.store.put_translations(&translations).map_err(EngineError::from));
@@ -2672,7 +2689,7 @@ where
 
     async fn write(&mut self, action: Action) -> Result<OutboxEntry, EngineError> {
         if matches!(action, Action::ActivitySeen | Action::ActivityAllRead) {
-            return self.activity_write(&action).await;
+            return on_heap(|| self.activity_write(&action)).await;
         }
         if let Action::Read {
             conversation,
@@ -2680,17 +2697,17 @@ where
         } = action
         {
             let row = self.inbox.queue_read(&mut self.store, conversation, message_id)?;
-            return self.send_row(row.id).await;
+            return on_heap(|| self.send_row(row.id)).await;
         }
         let command = if let Action::ActivityTurnOffApp { item } = action {
-            self.activity_app_command(&item).await?
+            on_heap(|| self.activity_app_command(&item)).await?
         } else {
             self.command(action)?
         }
         .for_cloud(self.outbox.cloud())
         .map_err(|error| EngineError::Attachment { why: error.to_string() })?;
         if let Command::Send { conversation, text } = &command {
-            let mut sharing = std::pin::pin!(self.uploads.share(conversation, text.files()));
+            let mut sharing = on_heap(|| self.uploads.share(conversation, text.files()));
             tokio::select! {
                 biased;
                 result = &mut sharing => result?,
@@ -2705,7 +2722,7 @@ where
         }
         let row = enqueue(&mut self.store, &command)?;
         self.emit(Event::Queued(row.clone()));
-        self.send_row(row.id).await
+        on_heap(|| self.send_row(row.id)).await
     }
 
     /// The explicit resend of a row ([`EngineRequests::resend`]): adopted into this run by the store, then sent as a
