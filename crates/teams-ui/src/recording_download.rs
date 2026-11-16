@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use gpui::{App, AppContext as _, Context, Entity, Global, Task};
+use gpui::{App, AppContext as _, Context, Entity, EntityId, Global, Task};
 use teams_core::{EngineError, FileStream, Reply};
 
 use crate::bridge::Core;
@@ -51,6 +51,8 @@ pub enum Failure {
     Disk(String),
     /// The user cancelled it.
     Cancelled,
+    /// Another running download (of another file) writes to the same place.
+    Busy,
 }
 
 impl Failure {
@@ -62,6 +64,9 @@ impl Failure {
             Self::Network => "Check your connection and try again.".to_owned(),
             Self::Disk(error) => format!("The file couldn't be saved: {error}"),
             Self::Cancelled => "The download was cancelled.".to_owned(),
+            Self::Busy => {
+                "Another download is saving to the same place. Wait for it to end, or save to another place.".to_owned()
+            }
         }
     }
 }
@@ -162,8 +167,16 @@ impl RecordingDownload {
         self.then
     }
 
-    /// Starts (or, after a failure, starts again) writing the recording to its file.
+    /// Starts (or, after a failure, starts again) writing the recording to its file. When another running download
+    /// writes to the same place (its `.part` file), this one fails at once ([`Failure::Busy`]): two writers of one
+    /// file would overwrite each other's bytes.
     pub fn start(&mut self, cx: &mut Context<Self>) {
+        if target_busy(&self.target, cx.entity_id(), cx) {
+            self.running = None;
+            self.progress = Progress::Failed(Failure::Busy);
+            cx.notify();
+            return;
+        }
         self.progress = Progress::Running {
             written: 0,
             total: None,
@@ -242,6 +255,22 @@ pub struct Downloads {
 
 impl Global for Downloads {}
 
+/// Whether a running download other than `except` writes to `target`, whatever its link.
+fn target_busy(target: &Path, except: EntityId, cx: &App) -> bool {
+    let Some(downloads) = cx.try_global::<Downloads>() else {
+        return false;
+    };
+    downloads
+        .latest
+        .values()
+        .chain(&downloads.earlier)
+        .filter(|download| download.entity_id() != except)
+        .any(|download| {
+            let download = download.read(cx);
+            download.progress.running() && download.target == target
+        })
+}
+
 /// The download of the recording whose sharing link is `link`, when one was started this run (and not dismissed).
 #[must_use]
 pub fn download_of(link: &str, cx: &App) -> Option<Entity<RecordingDownload>> {
@@ -260,7 +289,8 @@ pub fn start(core: Arc<dyn Core>, link: String, target: PathBuf, cx: &mut App) -
 /// link (the one the card shows, or one that a later one took the place of) is handed back, and the card shows it
 /// again, only when it does the same (the same `then`, and for [`Then::Keep`] the same `target`, whose `.part` file it
 /// writes). One that does another (an Open while a Download runs, or the reverse) runs on to its end beside the new
-/// one, which the card then shows.
+/// one, which the card then shows. A new download to a place that a running download of another link writes to fails
+/// at once (see [`RecordingDownload::start`]).
 pub fn start_with(open: Opener, link: String, target: PathBuf, then: Then, cx: &mut App) -> Entity<RecordingDownload> {
     let latest = download_of(&link, cx).filter(|download| download.read(cx).progress.running());
     let mut earlier = cx

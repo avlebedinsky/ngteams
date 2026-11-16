@@ -444,6 +444,48 @@ fn two_own_servers_files_of_one_name_opened_together_are_saved_apart() {
 }
 
 #[test]
+fn a_download_of_another_file_to_where_one_still_runs_fails_and_the_first_saves() {
+    let entry = |share: &str| {
+        serde_json::json!({"@type": teams_proto::chat::FILE_TYPE, "fileName": "made-up notes.pdf",
+            "fileType": "pdf", "state": "active", "objectUrl": share, "fileInfo": {"shareUrl": share}})
+    };
+    let mut stored = message(ID, LAB_B, "<p>the notes, twice</p>", NOON);
+    stored.properties = Some(
+        serde_json::json!({"files": Value::Array(vec![entry(OWN_SHARE), entry(OWN_SHARE_OTHER)]).to_string()})
+            .to_string(),
+    );
+    let other: &[u8] = b"%PDF-1.7 the older made-up notes";
+    let (rig, _opened, cx) = own_files_chat(stored, &[(OWN_SHARE, OWN_BYTES), (OWN_SHARE_OTHER, other)]);
+    *rig.core.hold_streams_from.lock().unwrap() = Some(0);
+    let chosen = tempfile::tempdir().unwrap();
+    let target = chosen.path().join("made-up notes.pdf");
+    for file in 0..2 {
+        click(cx, &format!("file-more-{ID}-{file}"));
+        click(cx, &format!("file-menu-download-{ID}-{file}"));
+        let target = target.clone();
+        cx.simulate_new_path_selection(move |_| Some(target));
+        draw(cx);
+    }
+    // the second file's download never writes the first one's `.part` file: it fails and says why
+    assert!(bounds(cx, &format!("file-download-{ID}-1 failed")).is_some());
+    let failed = cx.update(|_, cx| {
+        teams_ui::recording_download::download_of(OWN_SHARE_OTHER, cx)
+            .map(|download| download.read(cx).progress().clone())
+    });
+    assert_eq!(
+        failed,
+        Some(teams_ui::recording_download::Progress::Failed(
+            teams_ui::recording_download::Failure::Busy
+        ))
+    );
+    answer_held(&rig, &[OWN_BYTES]);
+    draw(cx);
+    assert_eq!(std::fs::read(&target).unwrap(), OWN_BYTES, "the first file, whole");
+    assert!(!teams_ui::recording_download::part_path(&target).exists());
+    assert!(bounds(cx, &format!("file-download-{ID}-0 saved")).is_some());
+}
+
+#[test]
 fn more_options_of_an_own_servers_file_downloads_it_through_the_engine_where_chosen() {
     let (_rig, _opened, cx) = own_file_chat(true);
     click(cx, &format!("file-more-{ID}-0"));
