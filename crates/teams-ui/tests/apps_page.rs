@@ -171,7 +171,10 @@ fn an_own_server_without_apps_offers_no_store_and_no_chat_apps() {
     assert!(bounds(cx, "chat-apps").is_none(), "no Apps in this chat");
     *rig.core.capabilities.lock().unwrap() = None;
     cx.update(|_, cx| shell.update(cx, |_, cx| cx.notify()));
-    assert!(bounds(cx, "rail-apps").is_some(), "the Store once the server serves apps");
+    assert!(
+        bounds(cx, "rail-apps").is_some(),
+        "the Store once the server serves apps"
+    );
     assert!(bounds(cx, "chat-apps").is_some());
 }
 
@@ -192,6 +195,65 @@ fn the_store_lists_the_org_s_and_popular_apps_and_searches_them() {
     assert!(bounds(cx, "apps-none").is_some());
     click(cx, "rail-chats");
     assert_ne!(cx.update(|_, cx| shell.read(cx).main().clone()), Main::Apps);
+}
+
+/// A section with more apps than its row shows (Teams' "Popular on Teams" holds up to a hundred) has "See all", which
+/// shows every one of them, and a way back.
+#[test]
+fn see_all_shows_every_app_of_a_section() {
+    let rig = Rig::start();
+    let (shell, cx) = shell_window(&rig, true);
+    let many: Vec<serde_json::Value> = (0..30)
+        .map(|at| json!({"id": format!("made-up-{at:02}"), "name": format!("Made-up App {at:02}")}))
+        .collect();
+    let apps = teams_proto::AppDefinitions::read_answer(serde_json::Value::Array(many).to_string().as_bytes());
+    let popular: Vec<serde_json::Value> = apps.iter().map(|store| json!({"id": store.app.id})).collect();
+    let sections = StoreSections::read(
+        json!({"appCategoriesDictionary": {
+            "adminPreInstalledApps": {"apps": [{"id": HELPER}]},
+            "popularApps": {"apps": popular},
+        }})
+        .to_string()
+        .as_bytes(),
+    );
+    let mut all = apps;
+    all.extend(self::apps());
+    *rig.core.app_listing.lock().unwrap() = AppListing { sections, apps: all };
+    open_store(&shell, cx);
+    assert!(bounds(cx, "apps-tile-popular-23").is_some());
+    assert!(bounds(cx, "apps-tile-popular-24").is_none(), "the row shows 24");
+    assert!(
+        bounds(cx, "apps-org-see-all").is_some(),
+        "as Teams, every section has it"
+    );
+    click(cx, "apps-popular-see-all");
+    assert!(bounds(cx, "apps-all").is_some());
+    assert!(bounds(cx, "apps-popular").is_none());
+    assert!(bounds(cx, "apps-tile-all-29").is_some(), "the 30th app");
+    click(cx, "apps-tile-all-0");
+    assert!(bounds(cx, "app-details").is_some());
+    click(cx, "app-details-close");
+    click(cx, "apps-all-back");
+    assert!(bounds(cx, "apps-popular").is_some());
+    assert!(bounds(cx, "apps-all").is_none());
+}
+
+/// An app nobody rated keeps the facts row, "Works in Teams" too, with "No ratings yet", as its tile says.
+#[test]
+fn an_unrated_app_s_details_say_no_ratings_yet() {
+    let rig = Rig::start();
+    let (shell, cx) = shell_window(&rig, true);
+    open_store(&shell, cx);
+    click(cx, "apps-tile-popular-1");
+    assert!(bounds(cx, "app-details").is_some());
+    assert!(bounds(cx, "app-details-stats").is_some(), "the facts row");
+    assert!(bounds(cx, "app-details-works-in").is_some());
+    assert!(bounds(cx, "app-details-no-ratings").is_some());
+    assert!(bounds(cx, "app-details-rating").is_none());
+    click(cx, "app-details-close");
+    click(cx, "apps-org-0");
+    assert!(bounds(cx, "app-details-rating").is_some(), "a rated app's rating");
+    assert!(bounds(cx, "app-details-no-ratings").is_none());
 }
 
 #[test]

@@ -54,7 +54,7 @@ use teams_trouter::{Options, Trouter, TrouterCredentials};
 use teams_ui::apps_page::chat_apps::ChatAppsDialog;
 use teams_ui::apps_page::details::AppDetailsDialog;
 use teams_ui::apps_page::place::AddToPlaceDialog;
-use teams_ui::apps_page::{AppsPage, AppsView};
+use teams_ui::apps_page::{AppsPage, AppsView, StoreSection};
 use teams_ui::manage_team::ManageTab;
 use teams_ui::shell::Shell;
 use teams_ui::view::Root;
@@ -88,6 +88,8 @@ const HELPER: &str = "00000000-0000-4000-8000-00000000a004";
 const POLLS: &str = "00000000-0000-4000-8000-00000000a005";
 /// The mock's tab app, on the team before the run.
 const PLANNER: &str = "00000000-0000-4000-8000-00000000a001";
+/// The mock's app that the account has as `PreConsented`, as the lab account has Approvals.
+const PRE_CONSENTED: &str = teams_mock::PRE_CONSENTED;
 /// The odd store's app with a long name and no picture.
 const LONG: &str = "00000000-0000-4000-8000-00000000c001";
 /// The odd store's app whose picture is on a host that is not Microsoft's CDN.
@@ -485,6 +487,9 @@ fn manage_lists_it(qa: &mut Qa<'_>) -> SandboxResult {
     ensure(!holds(&state["store"]["mine"], POLLS), || {
         format!("Polls among mine: {}", state["store"])
     })?;
+    ensure(holds(&state["store"]["mine"], PRE_CONSENTED), || {
+        format!("the pre-consented app not among mine: {}", state["store"])
+    })?;
     qa.act(&format!("row {HELPER}"))?;
     qa.shots("manage")
 }
@@ -563,19 +568,16 @@ fn add_to_a_team(qa: &mut Qa<'_>) -> SandboxResult {
 fn remove_from_the_team(qa: &mut Qa<'_>) -> SandboxResult {
     qa.act("close")?;
     qa.act("manage-team")?;
-    let state = qa.state_until("Manage team's Apps", |state| {
-        holds(&state["manage_team"]["apps"], PLANNER)
+    qa.state_until("Manage team's Apps listing the added Made-up Polls", |state| {
+        holds(&state["manage_team"]["apps"], PLANNER) && holds(&state["manage_team"]["apps"], POLLS)
     })?;
     qa.shot("manage-team-apps")?;
-    // the mock's team read is fixed (`teams-mock`'s `team_apps.rs`): an app added to the team is not in it
-    say(&format!(
-        "note: Manage team's Apps after the add lists {}",
-        state["manage_team"]["apps"]
-    ));
     qa.act(&format!("team-ask-remove {PLANNER}"))?;
     qa.shot("manage-team-remove-ask")?;
     qa.act("team-remove")?;
-    // the tab reads the team again after the write, and the mock's team read is fixed: only the write is checked
+    qa.state_until("Made-up Planner gone from Manage team's Apps", |state| {
+        !holds(&state["manage_team"]["apps"], PLANNER) && holds(&state["manage_team"]["apps"], POLLS)
+    })?;
     let path = format!("teams/{TEAM}/apps/entitlements/{PLANNER}");
     let mut sent = Value::Null;
     wait_until(WAIT, || {
@@ -583,11 +585,6 @@ fn remove_from_the_team(qa: &mut Qa<'_>) -> SandboxResult {
         (sent["count"] == 1).then_some(())
     })
     .ok_or_else(|| format!("the team's DELETE of {path}: {sent}"))?;
-    let state = qa.state()?;
-    say(&format!(
-        "note: after the remove Manage team's Apps lists {}",
-        state["manage_team"]["apps"]
-    ));
     qa.shot("manage-team-removed").map(|_| ())
 }
 
@@ -610,6 +607,19 @@ fn remove_mine(qa: &mut Qa<'_>) -> SandboxResult {
         !holds(&state["store"]["mine"], HELPER) && state["store"]["removing"].is_null()
     })?;
     qa.shot("manage-removed")?;
+    // the pre-consented app, as Teams removes Approvals: the same DELETE, no body
+    qa.act(&format!("row {PRE_CONSENTED}"))?;
+    qa.act(&format!("ask-remove {PRE_CONSENTED}"))?;
+    qa.state_until("Remove of the pre-consented app asking", |state| {
+        state["store"]["removing"] == PRE_CONSENTED
+    })?;
+    qa.act("remove")?;
+    qa.state_until("the pre-consented app gone from Manage your apps", |state| {
+        !holds(&state["store"]["mine"], PRE_CONSENTED) && state["store"]["removing"].is_null()
+    })?;
+    let path = format!("users/apps/entitlements/{PRE_CONSENTED}");
+    let sent = qa.ask(&format!("requests DELETE {path}"))?;
+    ensure(sent["count"] == 1, || format!("the DELETE of {path}: {sent}"))?;
     // the store's tile has no check any more
     qa.plain_store()?;
     let state = qa.state_until("the store read again", |state| state["store"]["added"][HELPER] == false)?;
@@ -742,6 +752,18 @@ fn odd_store(qa: &mut Qa<'_>) -> SandboxResult {
         qa.input.scroll(STORE_MIDDLE.0, STORE_MIDDLE.1, 5)?;
     }
     qa.shots("odd-store-bottom")?;
+    // the row shows 24 of the 30; "See all" shows every one
+    qa.act("see-all popular")?;
+    qa.state_until("Popular on Teams' See all", |state| {
+        state["store"]["see_all"] == "Some(Popular)"
+    })?;
+    qa.hover(STORE_MIDDLE)?;
+    qa.shots("odd-see-all")?;
+    for _ in 0..12 {
+        qa.input.scroll(STORE_MIDDLE.0, STORE_MIDDLE.1, 5)?;
+    }
+    qa.shots("odd-see-all-bottom")?;
+    qa.act("see-all")?;
     qa.act(&format!("details {LONG}"))?;
     qa.hover(AWAY)?;
     qa.shots("odd-details-long")?;
@@ -1119,6 +1141,14 @@ fn act(what: &str, arg: &str, shell: &Entity<Shell>, window: &mut Window, cx: &m
         "refresh" => page_of(shell, cx)?.update(cx, AppsPage::refresh),
         "search" => page_of(shell, cx)?.update(cx, |page, cx| page.set_search(arg, window, cx)),
         "manage" => page_of(shell, cx)?.update(cx, |page, cx| page.show(AppsView::Manage, window, cx)),
+        "see-all" => {
+            let section = match arg {
+                "org" => Some(StoreSection::Org),
+                "popular" => Some(StoreSection::Popular),
+                _ => None,
+            };
+            page_of(shell, cx)?.update(cx, |page, cx| page.see_all(section, cx));
+        }
         "row" => page_of(shell, cx)?.update(cx, |page, cx| page.toggle_row(arg, cx)),
         "ask-remove" => {
             let page = page_of(shell, cx)?;
@@ -1235,6 +1265,7 @@ fn store_state(page: &Entity<AppsPage>, cx: &App) -> Value {
         .map_or((Value::Null, false), |(store, failed)| (json!(store.app.id), failed));
     json!({
         "view": format!("{:?}", page.view()),
+        "see_all": format!("{:?}", page.seeing_all()),
         "loaded": page.listing().is_some(),
         "org": org,
         "popular": popular,

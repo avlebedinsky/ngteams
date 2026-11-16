@@ -239,28 +239,39 @@ impl AppDetailsDialog {
             ))
     }
 
-    fn stats(&self, palette: Palette) -> Option<gpui::Div> {
-        let rating = self.known.rating.filter(|rating| rating.count > 0)?;
-        let stat = |big: String, small: String| {
+    /// The facts row: the rating, or "No ratings yet" as the app's tile says, and where it works.
+    fn stats(&self, palette: Palette) -> gpui::Div {
+        let stat = |selector: &'static str, big: String, small: Option<String>| {
             div()
+                .debug_selector(move || selector.to_owned())
                 .flex_1()
                 .flex()
                 .flex_col()
                 .items_center()
                 .child(div().font_weight(gpui::FontWeight::BOLD).child(big))
-                .child(div().text_xs().text_color(rgb(palette.muted_foreground)).child(small))
+                .children(small.map(|small| div().text_xs().text_color(rgb(palette.muted_foreground)).child(small)))
         };
-        Some(
-            div()
-                .debug_selector(|| "app-details-stats".to_owned())
-                .py_3()
-                .flex()
-                .border_t_1()
-                .border_b_1()
-                .border_color(rgb(palette.border))
-                .child(stat(format!("★ {}", stars(rating)), ratings_count(rating.count)))
-                .child(stat("Works in".to_owned(), "Teams".to_owned())),
-        )
+        let rating = match self.known.rating.filter(|rating| rating.count > 0 || rating.tenths > 0) {
+            Some(rating) => stat(
+                "app-details-rating",
+                format!("★ {}", stars(rating)),
+                Some(ratings_count(rating.count)),
+            ),
+            None => stat("app-details-no-ratings", "No ratings yet".to_owned(), None),
+        };
+        div()
+            .debug_selector(|| "app-details-stats".to_owned())
+            .py_3()
+            .flex()
+            .border_t_1()
+            .border_b_1()
+            .border_color(rgb(palette.border))
+            .child(rating)
+            .child(stat(
+                "app-details-works-in",
+                "Works in".to_owned(),
+                Some("Teams".to_owned()),
+            ))
     }
 
     fn capabilities(&self, palette: Palette) -> Option<gpui::Div> {
@@ -444,7 +455,7 @@ impl Render for AppDetailsDialog {
             .flex()
             .flex_col()
             .gap_4()
-            .children(self.stats(palette))
+            .child(self.stats(palette))
             .child(about)
             .children(self.capabilities(palette))
             .children(self.permissions(palette))

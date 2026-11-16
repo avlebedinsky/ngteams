@@ -12,7 +12,8 @@ native client: reads in `crates/teams-proto/src/apps.rs` and `team_apps.rs`, wri
 The rail's item is **Store** (the plus in a square). The page: "Store" with Home, Featured, Categories, Devices; a gear
 for "Manage your apps"; "Do more in Teams" / "Discover agents and apps that can help you tackle any task." over a
 search box ("Search agents and apps"); "Added by your org" / "Made available by your organization's technology team"
-with its tiles and "See all"; then curated rows ("Agents we love", topic rows) whose lists come from a service the
+with its tiles and "See all" (on each section, whatever its count; the native page's "See all" shows every app of
+the section, its row on the front page shows 24); then curated rows ("Agents we love", topic rows) whose lists come from a service the
 middle tier doesn't carry and the native client doesn't read.
 
 - **Its apps**: `POST beta/users/apps/store` on the middle tier (the body as `AppStore` sends it), answered
@@ -31,7 +32,8 @@ middle tier doesn't carry and the native client doesn't read.
 ## An app's details
 
 A dialog: the picture, the name, the maker, **Add** (or **Open** once added) and a share button; a row of facts (the
-rating and how many rated, installs in the last month, "Works in Teams", "Free"); screenshots; the short and the long
+rating and how many rated, installs in the last month, "Works in Teams", "Free"; the native row shows "No ratings yet"
+for an app nobody rated, as its tile does); screenshots; the short and the long
 description; "Capabilities in Teams" (Bot "Chat using prompts to complete simple tasks.", Messaging "Insert app content
 in messages to send more than just text.", Personal app "Use the app privately outside of a chat, channel, or
 meeting.", Tab "Collaborate in a chat or channel by adding a tab for the app."); Reviews (from AppSource); "Permissions
@@ -66,8 +68,9 @@ The account's apps: `POST beta/users/apps/aggregatedEntitlements?appbarview=user
 (`[]` for none), answered `{"value": {"userEntitlements": {<own object id>: [{"id", "state", "installedVersion"?,
 "installerIdentity"?, "isAppBarPinned"?, …}]}, "teamsEntitlements"?, "definitions": {<app id>: <definition>},
 "userEntitlementsHash"}}`. `Installed` are the ones the account added; `InstalledAndPermanent` and
-`InstalledAndDeprecated` are Teams' own. The browser's list also showed apps the organization pinned; the native list
-shows `Installed` only.
+`InstalledAndDeprecated` are Teams' own, `Featured` the store's offers. The browser's list showed the `PreConsented`
+ones too (Approvals first, `PreConsented` only, in the lab capture), and its Remove sends the same `DELETE`: the native
+list shows `Installed` and `PreConsented`, by name.
 
 ## A chat's apps
 
@@ -90,4 +93,5 @@ apps", Sort, "Find by name", and a row per app with a "..." of Copy link and **R
 An own-server account's definitions name their pictures on the server's own origin under `/teamsappdata/` (the CDN's
 folder): the native client reads them from there with no token (`AppPicture::of_in`), and never reads a tile off that
 origin for such an account. The store, entitlement reads and writes go to the account's own middle tier, as every
-middle-tier request does (the server's side is plan 214's part 9).
+middle-tier request does (the server's side is plan 214's part 9). The client offers the Store, an app's details and
+a chat's apps only while the server names `appsService` (`teams_core::Capabilities`), as Manage team's Apps tab.

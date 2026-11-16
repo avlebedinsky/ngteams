@@ -189,7 +189,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 305 + 8 + 5 + 11] = [
+const STEPS: [Step; 5 + 305 + 8 + 5 + 15] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -2319,10 +2319,24 @@ const STEPS: [Step; 5 + 305 + 8 + 5 + 11] = [
     ("apps-store-dark", |shell, _, cx| {
         fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
     }),
+    // "Popular on Teams"' See all: every app of the section
+    ("apps-see-all-dark", |shell, _, cx| {
+        if let Some(page) = shell.read(cx).apps().cloned() {
+            page.update(cx, |page, cx| {
+                page.see_all(Some(teams_ui::apps_page::StoreSection::Popular), cx);
+            });
+        }
+    }),
+    ("apps-see-all", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
+    }),
     ("apps-search", |shell, window, cx| {
         fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
         if let Some(page) = shell.read(cx).apps().cloned() {
-            page.update(cx, |page, cx| page.set_search("made-up p", window, cx));
+            page.update(cx, |page, cx| {
+                page.see_all(None, cx);
+                page.set_search("made-up p", window, cx);
+            });
         }
     }),
     // the organization's app's details: what it does, its permissions, Add
@@ -2405,10 +2419,31 @@ const STEPS: [Step; 5 + 305 + 8 + 5 + 11] = [
         let Some(page) = shell.read(cx).apps().cloned() else {
             return;
         };
-        let helper = page.read(cx).mine_shown(cx).into_iter().next();
+        let helper = page
+            .read(cx)
+            .mine_shown(cx)
+            .into_iter()
+            .find(|store| store.app.id == APPS_HELPER);
         if let Some(helper) = helper {
             page.update(cx, |page, cx| page.ask_remove(helper, cx));
         }
+    }),
+    // an app nobody rated: its facts row says "No ratings yet"
+    ("apps-details-unrated-dark", |shell, window, cx| {
+        let Some(page) = shell.read(cx).apps().cloned() else {
+            return;
+        };
+        page.update(cx, teams_ui::apps_page::AppsPage::keep);
+        let polls = page
+            .read(cx)
+            .listing()
+            .and_then(|listing| listing.app(APPS_POLLS).cloned());
+        if let Some(polls) = polls {
+            shell.update(cx, |shell, cx| shell.open_app_details(polls, window, cx));
+        }
+    }),
+    ("apps-details-unrated", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
     }),
     // the a–b chat's apps, from its header's "Apps in this chat"
     ("apps-chat", |shell, window, cx| {

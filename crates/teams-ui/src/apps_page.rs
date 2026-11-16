@@ -2,7 +2,7 @@
 //!
 //! - **Store**: "Do more in Teams" with "Search agents and apps", then "Added by your org" (the organization's apps)
 //!   and "Popular on Teams", each app a tile (its picture, name, maker, a line about it, its rating; an app the
-//!   account added carries a check). A search lists the store's apps whose name, maker or line holds the words, as
+//!   account added carries a check). Each section's "See all" opens all of its apps. A search lists the store's apps whose name, maker or line holds the words, as
 //!   "Search results for …". A tile opens the app's details ([`details::AppDetailsDialog`]).
 //! - **Manage your apps** (the header's gear): the apps the account added, Find by name, and a row per app that opens
 //!   to where it is added ("Personal app") with Remove, which asks first, in Teams' words.
@@ -52,6 +52,38 @@ pub enum AppsView {
     Manage,
 }
 
+/// A section of the store's front page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoreSection {
+    /// "Added by your org".
+    Org,
+    /// "Popular on Teams".
+    Popular,
+}
+
+impl StoreSection {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Org => "Added by your org",
+            Self::Popular => "Popular on Teams",
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::Org => "org",
+            Self::Popular => "popular",
+        }
+    }
+
+    fn ids(self, listing: &AppListing) -> &[String] {
+        match self {
+            Self::Org => &listing.sections.org,
+            Self::Popular => &listing.sections.popular,
+        }
+    }
+}
+
 /// What the page asks of the shell.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppsPageEvent {
@@ -63,6 +95,8 @@ pub enum AppsPageEvent {
 pub struct AppsPage {
     core: Arc<dyn Core>,
     view: AppsView,
+    /// The section whose "See all" shows all of its apps.
+    see_all: Option<StoreSection>,
     search: Entity<InputState>,
     find: Entity<InputState>,
     listing: Option<AppListing>,
@@ -95,6 +129,7 @@ impl AppsPage {
         let mut page = Self {
             core,
             view: AppsView::Store,
+            see_all: None,
             search,
             find,
             listing: None,
@@ -137,12 +172,25 @@ impl AppsPage {
     /// Shows the store, or "Manage your apps".
     pub fn show(&mut self, view: AppsView, window: &mut Window, cx: &mut Context<Self>) {
         self.view = view;
+        self.see_all = None;
         self.removing = None;
         match view {
             AppsView::Store => self.search.update(cx, |search, cx| search.focus(window, cx)),
             AppsView::Manage => self.find.update(cx, |find, cx| find.focus(window, cx)),
         }
         cx.notify();
+    }
+
+    /// A section's "See all" (`Some`), or back to the store's front page (`None`).
+    pub fn see_all(&mut self, section: Option<StoreSection>, cx: &mut Context<Self>) {
+        self.see_all = section;
+        cx.notify();
+    }
+
+    /// The section whose apps all show.
+    #[must_use]
+    pub fn seeing_all(&self) -> Option<StoreSection> {
+        self.see_all
     }
 
     /// The search's words set to `words`, as typed.
@@ -175,15 +223,17 @@ impl AppsPage {
         self.search.read(cx).value().trim().to_lowercase()
     }
 
-    /// The apps of a section, in the store's order.
-    fn section(&self, ids: impl Fn(&AppListing) -> &[String]) -> Vec<StoreApp> {
+    /// The apps of a section, in the store's order: all of them, or as many as its row on the front page shows.
+    fn section(&self, section: StoreSection, all: bool) -> Vec<StoreApp> {
         let Some(listing) = &self.listing else {
             return Vec::new();
         };
-        ids(listing)
+        let most = if all { usize::MAX } else { SECTION_MOST };
+        section
+            .ids(listing)
             .iter()
             .filter_map(|id| listing.app(id).cloned())
-            .take(SECTION_MOST)
+            .take(most)
             .collect()
     }
 
@@ -516,6 +566,89 @@ impl AppsPage {
         tiles: Vec<AnyElement>,
         palette: Palette,
     ) -> gpui::Div {
+        Self::section_with(
+            div().text_xl().font_weight(gpui::FontWeight::BOLD).child(title.into()),
+            caption,
+            selector,
+            tiles,
+            palette,
+        )
+    }
+
+    /// A section of the front page: its title with "See all" on the right, as Teams has it, over its row of tiles.
+    fn front_section(
+        section: StoreSection,
+        caption: Option<&'static str>,
+        tiles: Vec<AnyElement>,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let key = section.key();
+        let see_all = selected_by(
+            format!("apps-{key}-see-all"),
+            Button::new(SharedString::from(format!("apps-{key}-see-all")))
+                .ghost()
+                .label("See all")
+                .text_color(rgb(palette.brand))
+                .on_click(cx.listener(move |this, _, _, cx| this.see_all(Some(section), cx))),
+        );
+        let title = div()
+            .flex()
+            .items_center()
+            .child(
+                div()
+                    .flex_1()
+                    .text_xl()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .child(section.title()),
+            )
+            .child(see_all);
+        let selector = match section {
+            StoreSection::Org => "apps-org",
+            StoreSection::Popular => "apps-popular",
+        };
+        Self::section_with(title, caption, selector, tiles, palette)
+    }
+
+    /// All the apps of `section`, under its title and a way back to the store's front page.
+    fn all_of(
+        &self,
+        body: gpui::Stateful<gpui::Div>,
+        section: StoreSection,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let tiles: Vec<AnyElement> = self
+            .section(section, true)
+            .iter()
+            .enumerate()
+            .map(|(at, store)| self.tile(&format!("all-{at}"), store, palette, cx))
+            .collect();
+        let title = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(selected_by(
+                "apps-all-back",
+                icon_button("apps-all-back", Glyph::ARROW_LEFT, "Back to the store")
+                    .on_click(cx.listener(|this, _, _, cx| this.see_all(None, cx))),
+            ))
+            .child(div().text_xl().font_weight(gpui::FontWeight::BOLD).child(format!(
+                "{} ({})",
+                section.title(),
+                tiles.len()
+            )));
+        body.child(Self::section_with(title, None, "apps-all", tiles, palette))
+            .into_any_element()
+    }
+
+    fn section_with(
+        title: gpui::Div,
+        caption: Option<&'static str>,
+        selector: &'static str,
+        tiles: Vec<AnyElement>,
+        palette: Palette,
+    ) -> gpui::Div {
         div()
             .debug_selector(move || selector.to_owned())
             .w_full()
@@ -525,7 +658,7 @@ impl AppsPage {
             .flex()
             .flex_col()
             .gap_1()
-            .child(div().text_xl().font_weight(gpui::FontWeight::BOLD).child(title.into()))
+            .child(title)
             .children(caption.map(|caption| div().text_sm().text_color(rgb(palette.muted_foreground)).child(caption)))
             .child(div().pt_2().flex().flex_wrap().gap_2().children(tiles))
     }
@@ -595,14 +728,17 @@ impl AppsPage {
         if !query.is_empty() {
             return self.results(body, palette, cx);
         }
+        if let Some(section) = self.see_all {
+            return self.all_of(body, section, palette, cx);
+        }
         let org: Vec<AnyElement> = self
-            .section(|listing| &listing.sections.org)
+            .section(StoreSection::Org, false)
             .iter()
             .enumerate()
             .map(|(at, store)| self.org_tile(at, store, palette, cx))
             .collect();
         let popular: Vec<AnyElement> = self
-            .section(|listing| &listing.sections.popular)
+            .section(StoreSection::Popular, false)
             .iter()
             .enumerate()
             .map(|(at, store)| self.tile(&format!("popular-{at}"), store, palette, cx))
@@ -618,25 +754,18 @@ impl AppsPage {
                 )
                 .into_any_element();
         }
-        body.when(!org.is_empty(), |body| {
-            body.child(Self::section_view(
-                "Added by your org",
+        let org = (!org.is_empty()).then(|| {
+            Self::front_section(
+                StoreSection::Org,
                 Some("Made available by your organization's technology team"),
-                "apps-org",
                 org,
                 palette,
-            ))
-        })
-        .when(!popular.is_empty(), |body| {
-            body.child(Self::section_view(
-                "Popular on Teams",
-                None,
-                "apps-popular",
-                popular,
-                palette,
-            ))
-        })
-        .into_any_element()
+                cx,
+            )
+        });
+        let popular =
+            (!popular.is_empty()).then(|| Self::front_section(StoreSection::Popular, None, popular, palette, cx));
+        body.children(org).children(popular).into_any_element()
     }
 
     fn remove_question(&self, palette: Palette, cx: &mut Context<Self>) -> Option<gpui::Div> {
