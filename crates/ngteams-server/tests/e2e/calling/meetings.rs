@@ -540,6 +540,20 @@ async fn posts(mixed: &Mixed, reader: &Person, channel: &str) -> Vec<(String, St
         .collect()
 }
 
+/// The channel's call start post and the post its end replies under, as the client reads the chain of each: Teams
+/// writes a channel meeting's end into its post's chain, not as a post of its own.
+async fn end_chain(mixed: &Mixed, reader: &Person, channel: &str) -> (Option<String>, Option<String>) {
+    let client = reader.engine.account.client(mixed.server());
+    let page = ChatReads::new(&client).messages(channel, 20).await.unwrap();
+    let of = |event: &str| {
+        page.messages
+            .iter()
+            .find(|message| message.message_type.as_str() == "Event/Call" && message.content.contains(event))
+    };
+    let started = of("callStarted").map(|message| message.id.clone());
+    (started, of("callEnded").and_then(|message| message.reply_root(channel)))
+}
+
 /// A hand-made plain group start by `caller` in `chat`, ringing `to`, with its callbacks on its own calling endpoint
 /// as the engine sends them: only where the call may run decides its answer.
 async fn plain_start(mixed: &Mixed, caller: &Person, chat: &str, to: &[&Person]) -> serde_json::Value {
@@ -620,6 +634,8 @@ async fn a_channels_meet_now_is_posted_titled_joined_from_its_post_and_told_ende
         let (_, ended, _) = &listed[0];
         assert!(ended.contains("callEnded"), "{listed:?}");
         assert_eq!(call_id(ended), call_id(&started.1), "{listed:?}");
+        let (post, under) = end_chain(&mixed, &bert, &channel).await;
+        assert!(post.is_some() && under == post, "{post:?} {under:?} {listed:?}");
         shut_down(vec![ada, bert], mixed).await;
     }
 }

@@ -305,7 +305,7 @@ async fn tell_chat_ended(app: &App, call: &Call, outcome: Outcome) {
     };
     let caller = call.party(Seat::CALLER);
     let caller = (caller.id.as_str(), caller.name.as_str());
-    if let Err(error) = call_events::ended(app, chat, caller, &call.id, &parts).await {
+    if let Err(error) = call_events::ended(app, (chat, call.end_under()), caller, &call.id, &parts).await {
         tracing::warn!(%error, "a call's end wasn't written to its chat");
     }
 }

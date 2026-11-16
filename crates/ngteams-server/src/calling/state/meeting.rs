@@ -24,6 +24,13 @@ impl Call {
             .is_some_and(|meeting| meeting.channel && meeting.post.is_none())
     }
 
+    /// The channel meeting's post its end replies under, as Teams writes a channel meeting's end into its post's
+    /// chain: the channel then shows the post alone, ended. `None` for any other call.
+    pub(crate) fn end_under(&self) -> Option<i64> {
+        let meeting = self.meeting.as_ref().filter(|meeting| meeting.channel)?;
+        meeting.post.as_deref()?.parse().ok()
+    }
+
     /// Whether the party at `seat` hosts the meeting: it is in the call as its organizer or a presenter, who let people
     /// in from the lobby, turn them away and mute the others.
     pub(crate) fn hosts(&self, seat: Seat) -> Result<(), Refusal> {

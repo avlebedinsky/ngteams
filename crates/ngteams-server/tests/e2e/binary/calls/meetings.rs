@@ -1230,6 +1230,17 @@ async fn ended_post(reader: &Phone, channel: &str, started: &str) {
         .filter(|(kind, text, _)| kind == "Event/Call" && text.contains("callEnded"))
         .count();
     assert_eq!(ends, 1, "{listed:?}");
+    // Teams writes a channel meeting's end into its post's chain: the channel shows the post alone, "… ended"
+    let client = reader.client();
+    let page = ChatReads::new(&client).messages(channel, 30).await.unwrap();
+    let of = |event: &str| {
+        page.messages
+            .iter()
+            .find(|message| message.message_type.as_str() == "Event/Call" && message.content.contains(event))
+    };
+    let post = of("callStarted").map(|message| message.id.clone());
+    let under = of("callEnded").and_then(|message| message.reply_root(channel));
+    assert!(post.is_some() && under == post, "{post:?} {under:?} {listed:?}");
 }
 
 async fn channel_meet_now(layout: Layout) {

@@ -1061,8 +1061,8 @@ the calendar's ([above](#the-calendar-and-meetings)); its organizer is the meeti
   entry posts the meeting to the channel as its organizer's: an `Event/Call` `callStarted`
   naming where it runs, whose `properties.meeting` names its organizer and tenant and, once the organizer titles it
   (`PUT …/messages/<post>/properties?name=meeting`, the post's author only), its title. The channel's people join from
-  that post at the conversation; the call's end is posted to the channel under the same call id (a meeting
-  nobody entered has no post and posts no end). One meeting runs in a channel at a time.
+  that post at the conversation; the call's end, under the same call id, is a reply in that post's chain, so the
+  channel shows the post alone, ended (a meeting nobody entered has no post and posts no end). One meeting runs in a channel at a time.
 
 Not served yet: the test call, transfer, voicemail; for meetings, CSA's `activeMeetups` (the client finds a channel's
 meeting by its post), a scheduled channel meeting's call (only a Meet now's runs in a channel), co-organizers, a lobby

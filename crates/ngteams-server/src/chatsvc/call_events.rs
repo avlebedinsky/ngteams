@@ -55,7 +55,7 @@ pub(crate) async fn started(
     let content = format!(
         "<partlist alt =\"\"></partlist><callEventType>callStarted</callEventType>{url}<callId>{call}</callId>"
     );
-    post(app, chat, (id, name), &content).await
+    post(app, (chat, None), (id, name), &content).await
 }
 
 /// A channel's meeting `call` began, organized by `organizer`, at `conversation`: its post in the channel, which
@@ -89,10 +89,11 @@ pub(crate) async fn meeting_started(
     super::service::post(app, post).await
 }
 
-/// The call `call` ended with `parts` in it: one part (its caller alone) reads as a missed call.
+/// The call `call` ended with `parts` in it: one part (its caller alone) reads as a missed call. In `chat`, or in the
+/// chain of its post `under` (a channel meeting's).
 pub(crate) async fn ended(
     app: &App,
-    chat: &str,
+    (chat, under): (&str, Option<i64>),
     caller: (&str, &str),
     call: &str,
     parts: &[Part<'_>],
@@ -111,10 +112,15 @@ pub(crate) async fn ended(
         "<ended/><partlist alt=\"\" count=\"{}\">{listed}</partlist><callEventType>callEnded</callEventType><callId>{call}</callId>",
         parts.len()
     );
-    post(app, chat, caller, &content).await
+    post(app, (chat, under), caller, &content).await
 }
 
-async fn post(app: &App, chat: &str, (id, name): (&str, &str), content: &str) -> Result<(), DbError> {
+async fn post(
+    app: &App,
+    (chat, under): (&str, Option<i64>),
+    (id, name): (&str, &str),
+    content: &str,
+) -> Result<(), DbError> {
     let caller = Caller {
         id: id.to_owned(),
         tenant: String::new(),
@@ -134,7 +140,7 @@ async fn post(app: &App, chat: &str, (id, name): (&str, &str), content: &str) ->
         client_id: None,
         version: 0,
         body: body.to_string(),
-        root_id: super::channels::root(&app.db, chat, None).await?,
+        root_id: super::channels::root(&app.db, chat, under).await?,
     };
     let Some(posted) = message_repo::insert(&app.db, &draft, &wire::base(app)).await? else {
         return Ok(());
