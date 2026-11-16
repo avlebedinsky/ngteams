@@ -51,7 +51,10 @@ impl Mixed {
         Self::start_with(backend, |_| {}).await
     }
 
-    async fn start_with(backend: Backend, configure: impl FnOnce(&mut ngteams_server::config::Config)) -> Self {
+    pub(super) async fn start_with(
+        backend: Backend,
+        configure: impl FnOnce(&mut ngteams_server::config::Config),
+    ) -> Self {
         let turn = TurnServer::start().unwrap();
         let server = TestServer::start_with(backend, |config| {
             relayed(turn.udp)(config);
@@ -74,6 +77,15 @@ impl Mixed {
 
     pub(super) fn node(&self) -> &MediaNode {
         self.node.as_ref().unwrap()
+    }
+
+    pub(super) fn server(&self) -> &TestServer {
+        &self.server
+    }
+
+    /// Where the engines' recordings go.
+    pub(super) fn dir(&self) -> &std::path::Path {
+        self.dir.path()
     }
 
     /// A new account's engine, its microphone `tone`.

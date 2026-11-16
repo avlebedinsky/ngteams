@@ -51,10 +51,11 @@ async fn party_of(app: &App, key: Key<'_>, caller: &Caller) -> Result<(Call, Sea
     Ok((kept.call, seat))
 }
 
-/// What a start names: a 1:1 call, or a group chat's call.
+/// What a start names: a 1:1 call, a group chat's call, or a meeting's.
 enum Asked<'a> {
     OneToOne(OneToOne<'a>),
     Group(super::group::Start<'a>),
+    Meeting(super::group::Start<'a>),
 }
 
 /// What a 1:1 call's start names: the caller as it names itself, and its one callee.
@@ -65,7 +66,7 @@ struct OneToOne<'a> {
     offer: &'a Value,
 }
 
-/// Reads a start; a meeting's and the test call's aren't served.
+/// Reads a start; a meeting's by its code alone and the test call's aren't served.
 fn asked<'a>(caller: &Caller, body: &'a Value) -> Result<Asked<'a>, Failure> {
     let from = body.pointer("/participants/from").ok_or(Refusal::Bad)?;
     let callees = body
@@ -76,10 +77,9 @@ fn asked<'a>(caller: &Caller, body: &'a Value) -> Result<Asked<'a>, Failure> {
         return Err(Refusal::Forbidden.into());
     }
     let set = |pointer: &str| body.pointer(pointer).is_some_and(|value| !value.is_null());
-    let other_kind = ["/meetingInfo", "/meetingData", "/conversationRequest/scenario"]
-        .into_iter()
-        .any(set);
-    if other_kind {
+    let meeting = set("/meetingInfo");
+    let other_kind = ["/meetingData", "/conversationRequest/scenario"].into_iter().any(set);
+    if other_kind || (meeting && !set("/groupChat")) {
         return Err(Failure::NotServed);
     }
     if set("/groupChat") {
@@ -88,12 +88,17 @@ fn asked<'a>(caller: &Caller, body: &'a Value) -> Result<Asked<'a>, Failure> {
             .and_then(Value::as_str)
             .ok_or(Refusal::Bad)?;
         let offer = body.pointer("/callInvitation/mediaContent").ok_or(Refusal::Bad)?;
-        return Ok(Asked::Group(super::group::Start {
+        let start = super::group::Start {
             from,
             chat,
             to: callees,
             offer,
-        }));
+        };
+        return Ok(if meeting {
+            Asked::Meeting(start)
+        } else {
+            Asked::Group(start)
+        });
     }
     let [to] = callees.as_slice() else {
         return Err(Failure::NotServed);
@@ -134,6 +139,7 @@ pub(super) async fn start(State(app): State<Arc<App>>, caller: Caller, body: Byt
     let body = json(&body)?;
     let asked = match asked(&caller, &body)? {
         Asked::Group(start) => return super::group::start(&app, &caller, start, &body).await,
+        Asked::Meeting(start) => return super::meeting::start(&app, &caller, start, &body).await,
         Asked::OneToOne(asked) => asked,
     };
     let invited = users::by_id(&app.db, asked.callee)
@@ -174,6 +180,7 @@ pub(super) async fn start(State(app): State<Arc<App>>, caller: Caller, body: Byt
         next_source: 0,
         watchers: Vec::new(),
         alive_due: 0,
+        meeting: None,
     };
     repo::insert(&app.db, &call).await?;
     // before anyone can end the call: the chat orders its events by when they were written

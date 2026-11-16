@@ -122,13 +122,40 @@ impl Engine {
     pub(super) async fn start_filmed(
         account: &Account,
         name: &str,
+        nodes: (&TestServer, &TestServer),
+        (tone, dir, camera): (Tone, &Path, PatternCamera),
+    ) -> Self {
+        let transports = (account.transport(nodes.1), account.transport(nodes.1));
+        Self::start_on(account, name, nodes, transports, (tone, dir, camera)).await
+    }
+
+    /// [`Engine::start`] with every service base the account's authz names, as the account's bring-up sets them: the
+    /// middle tier and CSA too (the calendar, a channel's meeting).
+    pub(super) async fn start_served(
+        account: &Account,
+        name: &str,
+        nodes: (&TestServer, &TestServer),
+        (tone, dir): (Tone, &Path),
+    ) -> Self {
+        let id = account.mri.trim_start_matches("8:orgid:");
+        let transports = (
+            crate::teams::transport(&account.session, nodes.1, id).await,
+            crate::teams::transport(&account.session, nodes.1, id).await,
+        );
+        Self::start_on(account, name, nodes, transports, (tone, dir, PatternCamera::default())).await
+    }
+
+    async fn start_on(
+        account: &Account,
+        name: &str,
         (socket, http): (&TestServer, &TestServer),
+        (transport, reads): (crate::trouter::Transport, crate::trouter::Transport),
         (tone, dir, camera): (Tone, &Path, PatternCamera),
     ) -> Self {
         let cloud = Cloud::own(ORIGIN).unwrap();
         let mri = Mri::new(account.mri.clone());
         let tracker = Arc::new(teams_call::Tracker::for_cloud(mri.clone(), cloud));
-        let transport = Arc::new(account.transport(http).with_call_state(tracker.clone()));
+        let transport = Arc::new(transport.with_call_state(tracker.clone()));
         let trouter = || {
             Trouter::with_mock_origin(
                 Arc::clone(&transport),
@@ -165,7 +192,7 @@ impl Engine {
         let handle = engine::start(Parts {
             calls: Some(calls),
             store: Store::open(&store.path().join("store.sqlite")).unwrap(),
-            client: Arc::new(Client::new(account.transport(http))),
+            client: Arc::new(Client::new(reads)),
             outbox,
             push: Some(Push::new(trouter())),
             options: EngineOptions {

@@ -110,6 +110,17 @@ pub(crate) struct Watcher {
     pub links: Links,
 }
 
+/// What makes a group call a meeting's: who organizes the meeting (the account the organizer's controls are for), and
+/// whether it is a channel's meeting, with its post in the channel once it has one.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Meeting {
+    pub organizer: String,
+    #[serde(default)]
+    pub channel: bool,
+    #[serde(default)]
+    pub post: Option<String>,
+}
+
 /// One of a party's endpoints: its Trouter endpoint and the callbacks it handed out, by name.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Endpoint {
@@ -266,6 +277,9 @@ pub(crate) struct Call {
     /// When a group call is given up without a keep-alive (Unix seconds).
     #[serde(default)]
     pub alive_due: i64,
+    /// A meeting's call: its meeting.
+    #[serde(default)]
+    pub meeting: Option<Meeting>,
 }
 
 /// A delivery to one calling endpoint: `body` at `path` under its push URL (empty: its root).
@@ -880,6 +894,7 @@ mod tests {
             next_source: 0,
             watchers: Vec::new(),
             alive_due: 0,
+            meeting: None,
         }
     }
 

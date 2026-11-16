@@ -29,6 +29,7 @@ pub mod config;
 mod group;
 mod history;
 mod media;
+mod meeting;
 mod ops;
 mod repo;
 mod state;

@@ -30,6 +30,17 @@ impl Call {
         }
     }
 
+    /// The role `party` has in a meeting's call, as its roster names it: the meeting's organizer, everyone else a
+    /// presenter. `None` in a call that is no meeting's.
+    pub(crate) fn role_of(&self, party: &Party) -> Option<&'static str> {
+        let meeting = self.meeting.as_ref()?;
+        Some(if party.id == meeting.organizer {
+            "organizer"
+        } else {
+            "presenter"
+        })
+    }
+
     /// The seats of the parties in the call.
     fn in_call_seats(&self) -> Vec<Seat> {
         (0..self.parties.len())
@@ -649,6 +660,7 @@ mod tests {
             next_source: 0,
             watchers: Vec::new(),
             alive_due: 0,
+            meeting: None,
         };
         for seat in 0..4 {
             let sources = call.next_sources();

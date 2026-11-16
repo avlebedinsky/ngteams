@@ -37,12 +37,21 @@ use crate::app::App;
 use crate::auth::extract::Spaces;
 use crate::db::{Db, DbError};
 use crate::teams::Actor;
-pub(crate) use meeting::describe_thread;
+pub(crate) use meeting::{Meeting, describe_thread};
+pub(crate) use options::option;
 use repo::{Event, Seen};
 use wire::{Book, Shown};
 
 type Me = Actor<Spaces>;
 type Params = HashMap<String, String>;
+
+/// The meeting whose chat is `chat`, if it is a meeting's.
+///
+/// # Errors
+/// A database failure.
+pub(crate) async fn meeting_of(db: &Db, chat: &str) -> Result<Option<Meeting>, DbError> {
+    meeting::of_chat(db, chat).await
+}
 
 /// The largest JSON body a calendar request takes: an event's text can be long.
 const BODY_LIMIT: usize = 1024 * 1024;

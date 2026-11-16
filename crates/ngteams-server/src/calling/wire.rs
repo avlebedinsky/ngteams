@@ -138,9 +138,22 @@ fn conversation_links(origin: &str, call: &Call) -> Value {
 fn conversation_state(call: &Call) -> Value {
     match call.kind {
         Kind::OneToOne => json!({"isMultiParty": false, "groupCallInitiator": null, "isBroadcast": false}),
-        Kind::Group => json!({
-            "isMultiParty": true, "groupCallInitiator": call.party(Seat::CALLER).mri(), "isBroadcast": false,
-        }),
+        Kind::Group => {
+            let mut state = json!({
+                "isMultiParty": true, "groupCallInitiator": call.party(Seat::CALLER).mri(), "isBroadcast": false,
+            });
+            if let Some(meeting) = &call.meeting {
+                let kind = if meeting.channel {
+                    "adHocMeeting"
+                } else {
+                    "scheduledMeeting"
+                };
+                state["conversationType"] = json!(kind);
+                state["isHostless"] = json!(true);
+                state["isMeetingActivated"] = json!(true);
+            }
+            state
+        }
     }
 }
 
@@ -486,8 +499,9 @@ pub(crate) fn seed(parameters: &Value) -> Option<u64> {
     parameter.pointer("/sendSideBWSeed/seedValueBitsPerSec")?.as_u64()
 }
 
-/// One party as the roster lists it.
-fn roster_entry(kind: Kind, party: &Party, version: u64) -> Value {
+/// One party as the roster lists it: in a meeting's call, with its role there.
+fn roster_entry(call: &Call, party: &Party, version: u64) -> Value {
+    let kind = call.kind;
     let endpoint = party.participant["endpointId"].as_str().unwrap_or_default();
     let endpoints = if party.active.is_some() {
         json!({endpoint: {
@@ -503,12 +517,17 @@ fn roster_entry(kind: Kind, party: &Party, version: u64) -> Value {
     } else {
         json!({})
     };
-    json!({
+    let mut entry = json!({
         "version": version,
         "state": if party.active.is_some() { "active" } else { "inactive" },
         "details": {"id": party.mri(), "displayName": party.name},
         "endpoints": endpoints,
-    })
+    });
+    if let Some(role) = call.role_of(party) {
+        entry["meetingRole"] = json!(role);
+        entry["advancedMeetingRole"] = json!(role);
+    }
+    entry
 }
 
 /// The roster update of `seats`' entries, at the call's current sequence.
@@ -516,7 +535,7 @@ pub(crate) fn roster(call: &Call, seats: &[Seat]) -> Value {
     let participants: Map<String, Value> = seats
         .iter()
         .map(|seat| call.party(*seat))
-        .map(|party| (party.mri(), roster_entry(call.kind, party, call.roster_sequence)))
+        .map(|party| (party.mri(), roster_entry(call, party, call.roster_sequence)))
         .collect();
     json!({"participants": participants, "type": "Delta", "sequenceNumber": call.roster_sequence})
 }

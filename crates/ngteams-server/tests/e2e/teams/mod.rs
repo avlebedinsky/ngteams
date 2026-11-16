@@ -43,7 +43,7 @@ pub(crate) async fn server(backend: Backend) -> TestServer {
 }
 
 /// The transport as the account bring-up builds it: every base from authz's GTMs.
-async fn transport(
+pub(crate) async fn transport(
     session: &Arc<Session<MemorySecretStore>>,
     server: &TestServer,
     id: &str,

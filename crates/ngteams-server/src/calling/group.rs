@@ -31,12 +31,12 @@ pub(super) struct Start<'a> {
 }
 
 /// The media nodes this node reaches; none, and a group call isn't served.
-fn nodes(app: &App) -> Result<&Arc<dyn MediaNodes>, Failure> {
+pub(super) fn nodes(app: &App) -> Result<&Arc<dyn MediaNodes>, Failure> {
     app.mixers.get().ok_or(Failure::NotServed)
 }
 
 /// The offer or answer a request's `mediaContent` carries.
-fn sdp(media: Option<&Value>) -> Result<Sdp, Failure> {
+pub(super) fn sdp(media: Option<&Value>) -> Result<Sdp, Failure> {
     media
         .filter(|media| media.is_object())
         .and_then(|media| serde_json::from_value(media.clone()).ok())
@@ -44,7 +44,7 @@ fn sdp(media: Option<&Value>) -> Result<Sdp, Failure> {
 }
 
 /// An offer or answer of the media node's, as a delivery's `mediaContent` starts from it.
-fn content(sdp: &Sdp) -> Value {
+pub(super) fn content(sdp: &Sdp) -> Value {
     json!({"blob": sdp.blob, "contentType": sdp.content_type})
 }
 
@@ -57,7 +57,7 @@ async fn member(app: &App, chat: Option<&str>, account: &str) -> Result<bool, Db
 
 /// Hands the node the bandwidth a party seeded in `content` (a `mediaContent`'s `applyChannelParameters`) for its leg
 /// `leg`, if it seeded any: no video goes to the leg before. One not handed on is logged.
-async fn seed_leg(app: &App, home: &MediaHome, call: &str, leg: &str, content: Option<&Value>) {
+pub(super) async fn seed_leg(app: &App, home: &MediaHome, call: &str, leg: &str, content: Option<&Value>) {
     let Some(seed) = content
         .and_then(|content| content.get("applyChannelParameters"))
         .and_then(wire::seed)
@@ -155,7 +155,7 @@ async fn callees(
 }
 
 /// What [`open`] made of a start.
-enum Opened {
+pub(super) enum Opened {
     /// The call is stored; `out` tells the caller, `offers` are the node's to each callee rung.
     Made { out: Out, offers: Vec<Sdp> },
     /// Another start in the chat was first: its call.
@@ -164,7 +164,7 @@ enum Opened {
 
 /// Gives every party its leg on a media node (the caller's answering its `offer`), then stores the call. A room whose
 /// call isn't stored is dropped.
-async fn open(
+pub(super) async fn open(
     app: &App,
     nodes: &dyn MediaNodes,
     call: &mut Call,
@@ -209,7 +209,7 @@ async fn open(
 }
 
 /// A group call in `chat` placed by `from`, before its legs are made.
-fn new_call(chat: &str, from: Party) -> Call {
+pub(super) fn new_call(chat: &str, from: Party) -> Call {
     let now = now_ms();
     Call {
         id: uuid::Uuid::new_v4().to_string(),
@@ -233,6 +233,7 @@ fn new_call(chat: &str, from: Party) -> Call {
         next_source: 0,
         watchers: Vec::new(),
         alive_due: 0,
+        meeting: None,
     }
 }
 
@@ -397,7 +398,13 @@ pub(super) async fn subscribe(
 
 /// A chat member's join with its offer: its seat reserved, its leg made with the node (the node's answer), then it is
 /// in the call.
-async fn join(app: &App, caller: &Caller, key: Key<'_>, call: &Call, body: &Value) -> Result<Response, Failure> {
+pub(super) async fn join(
+    app: &App,
+    caller: &Caller,
+    key: Key<'_>,
+    call: &Call,
+    body: &Value,
+) -> Result<Response, Failure> {
     let nodes = nodes(app)?;
     let offer = sdp(body.pointer("/callInvitation/mediaContent"))?;
     let (endpoint, links) = needed_links(app, caller, body).await?;

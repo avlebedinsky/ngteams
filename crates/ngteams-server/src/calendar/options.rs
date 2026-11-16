@@ -73,6 +73,19 @@ async fn kept(db: &Db, chat: &str) -> Result<Map<String, Value>, DbError> {
         .unwrap_or_default())
 }
 
+/// The value of the option `name` kept for the chat `chat`: the one its organizer saved, else a new meeting's.
+///
+/// # Errors
+/// A database failure.
+pub(crate) async fn option(db: &Db, chat: &str, name: &str) -> Result<String, DbError> {
+    let set = kept(db, chat).await?;
+    let first = OPTIONS
+        .iter()
+        .find(|(known, _, _)| *known == name)
+        .map_or("", |(_, _, values)| values[0]);
+    Ok(set.get(name).and_then(Value::as_str).unwrap_or(first).to_owned())
+}
+
 fn entry(name: &str, kind: &str, values: &[&str], set: &Map<String, Value>) -> Value {
     let current = set.get(name).and_then(Value::as_str).unwrap_or(values[0]);
     json!({"name": name, "type": kind, "currentValue": current, "values": values})
