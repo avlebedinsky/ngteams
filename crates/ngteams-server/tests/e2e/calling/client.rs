@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use teams_auth::secrets::MemorySecretStore;
@@ -17,7 +17,7 @@ use teams_call::{
 };
 use teams_proto::{CallLink, ClientInfo, Cloud, HttpTransport, MediaContent, Mri, Transport as _};
 use teams_trouter::{CallResponder, CallResponse, CallStack, Options, PushEvent, RegistrationReport, Trouter};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::support::TestServer;
@@ -63,6 +63,7 @@ pub struct Client {
     participants: Vec<Participant>,
     /// How many deliveries came at the endpoint's root (invitations, each redelivery too).
     invitations: Arc<AtomicUsize>,
+    progress: Gate,
     task: JoinHandle<()>,
 }
 
@@ -72,22 +73,51 @@ impl Drop for Client {
     }
 }
 
+/// A held `progress` write ([`Client::hold_progress`]).
+pub struct HeldProgress {
+    pub reached: oneshot::Receiver<()>,
+    pub release: oneshot::Sender<()>,
+    pub answered: oneshot::Receiver<()>,
+}
+
 type Sending = Pin<Box<dyn Future<Output = Outcome> + Send>>;
+
+/// The next `progress` write's hold: who is told when the write is reached, when it may go, and who is told when the
+/// service answered it.
+type Gate = Arc<Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>, oneshot::Sender<()>)>>>;
 
 struct Sink {
     tracker: Arc<Tracker>,
     transport: Arc<Http>,
     queued: Vec<(WriteId, Sending)>,
+    progress: Gate,
 }
 
 impl WriteSink for Sink {
     fn submit<R: teams_proto::Request + Clone + Send + 'static>(&mut self, id: WriteId, write: R) {
         let (tracker, transport) = (Arc::clone(&self.tracker), Arc::clone(&self.transport));
+        let held = write
+            .call_url()
+            .is_some_and(|url| url.path().ends_with("/progress"))
+            .then(|| self.progress.lock().unwrap_or_else(PoisonError::into_inner).take())
+            .flatten();
         self.queued.push((
             id,
             Box::pin(async move {
+                let answered = match held {
+                    Some((reached, release, answered)) => {
+                        let _ = reached.send(());
+                        let _ = release.await;
+                        Some(answered)
+                    }
+                    None => None,
+                };
                 let attempt = tracker.before(&write);
-                match transport.deliver(write).await {
+                let delivered = transport.deliver(write).await;
+                if let Some(answered) = answered {
+                    let _ = answered.send(());
+                }
+                match delivered {
                     Ok(answer) => {
                         tracker.answered(attempt, &answer);
                         Outcome::Answered {
@@ -142,29 +172,36 @@ impl Client {
         (socket, http): (&TestServer, &TestServer),
         held: usize,
     ) -> Self {
+        Self::start_at(account, name, (&socket.origin.replace("http://", "ws://"), http), held).await
+    }
+
+    /// [`Self::start`], its calling socket opened at `socket` (a `ws://` origin, a proxy's).
+    pub async fn start_through(account: &Account, name: &str, socket: &str, http: &TestServer) -> Self {
+        Self::start_at(account, name, (socket, http), 0).await
+    }
+
+    async fn start_at(account: &Account, name: &str, (socket, http): (&str, &TestServer), held: usize) -> Self {
         let cloud = Cloud::own(ORIGIN).unwrap();
         let tracker = Arc::new(Tracker::for_cloud(Mri::new(account.mri.clone()), cloud.clone()));
         let transport = Arc::new(account.transport(http).with_call_state(tracker.clone()));
-        let trouter = Trouter::with_mock_origin(
-            Arc::clone(&transport),
-            Arc::clone(&account.session),
-            &socket.origin.replace("http://", "ws://"),
-        )
-        .unwrap()
-        .with_options(options())
-        .for_calls(CallStack::new(Arc::clone(&tracker)));
+        let trouter = Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&account.session), socket)
+            .unwrap()
+            .with_options(options())
+            .for_calls(CallStack::new(Arc::clone(&tracker)));
         let tenant = ngteams_server::db::meta::tenant(&http.app.db).await.unwrap();
         let identity = identity(&account.mri, name, &tenant, trouter.endpoint_id());
         let (commands, commanded) = mpsc::unbounded_channel();
         let (told, events) = mpsc::unbounded_channel();
         let (ready, up) = tokio::sync::oneshot::channel();
         let invitations = Arc::new(AtomicUsize::new(0));
+        let progress = Gate::default();
         let driver = Driver {
             calls: Calls::for_cloud(identity, cloud),
             sink: Sink {
                 tracker,
                 transport,
                 queued: Vec::new(),
+                progress: Arc::clone(&progress),
             },
             responders: HashMap::new(),
             told,
@@ -182,7 +219,22 @@ impl Client {
             events,
             participants: Vec::new(),
             invitations,
+            progress,
             task,
+        }
+    }
+
+    /// Holds the client's next `progress` write until `release` is used: `reached` is told when the write is reached,
+    /// `answered` when the service answered it. The client does nothing else meanwhile, as it awaits each write in turn.
+    pub fn hold_progress(&self) -> HeldProgress {
+        let (reached, at_hold) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        let (answered, at_answer) = oneshot::channel();
+        *self.progress.lock().unwrap_or_else(PoisonError::into_inner) = Some((reached, released, answered));
+        HeldProgress {
+            reached: at_hold,
+            release,
+            answered: at_answer,
         }
     }
 

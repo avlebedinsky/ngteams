@@ -5,6 +5,7 @@
 mod client;
 mod engines;
 mod group_signaling;
+mod held_socket;
 mod history;
 mod mixer;
 mod qa_group_log;

@@ -764,8 +764,10 @@ callee's answer in the caller's acceptance; `ngteams` takes an own-server accoun
   else's socket.
 - **Who may do what**: the token's account must be one of the call's two parties; anyone else gets `404` for every
   link of the call. Only the callee attaches, answers and declines. A call controller operation on a call that is over gets
-  `410`; the conversation's own (`leave`, the endpoint's state and metadata) are answered `200` and change nothing,
-  as a write that was on its way when the far end hung up must not read as a failure.
+  `410`, except a `progress` (`200`, nothing changes): the client reads a refusal of it as a failed call, while the
+  ring's end (`487`) is still on its way to it. The conversation's own (`leave`, the endpoint's state and metadata)
+  are answered `200` and change nothing, as a write that was on its way when the far end hung up must not read as a
+  failure.
 - **The chat** of the two parties, when they have one, gets the call's `Event/Call` messages from the caller:
   its start, and its end listing who was in it and for how long. An end with the caller alone is a missed call
   (unanswered, declined or cancelled).

@@ -391,9 +391,13 @@ impl Call {
         self.in_call(seat)
     }
 
-    /// The callee's endpoint says it rings.
+    /// The callee's endpoint says it rings. One whose ring is over already is taken and changes nothing: its client
+    /// reads a refusal as a failed call, while the ring's end (a cancel, an answer elsewhere) is on its way to it.
     pub(crate) fn progress(&self, seat: Seat) -> Result<(), Refusal> {
-        self.ringing(seat)
+        match self.ringing(seat) {
+            Err(Refusal::Gone) => Ok(()),
+            rung => rung,
+        }
     }
 
     /// The callee's endpoint answers: the call is up, the caller gets the acceptance with the callee's answer, the
@@ -923,7 +927,7 @@ mod tests {
         assert_eq!(call.progress(Seat::CALLEE), Ok(()));
         assert_eq!(call.progress(Seat::CALLER), Err(Refusal::Forbidden));
         let call = connected();
-        assert_eq!(call.progress(Seat::CALLEE), Err(Refusal::Gone));
+        assert_eq!(call.progress(Seat::CALLEE), Ok(()), "a late progress");
         assert_eq!(
             connected().attach(Seat::CALLEE, "B", end, at(1_011_000)).unwrap_err(),
             Refusal::Gone

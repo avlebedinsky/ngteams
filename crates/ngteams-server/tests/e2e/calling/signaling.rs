@@ -8,7 +8,8 @@ use serde_json::{Value, json};
 use teams_call::{CallState, End};
 
 use super::Pair;
-use super::client::{answer, offer};
+use super::client::{Client, WAIT, answer, offer};
+use super::held_socket::HeldSocket;
 use crate::support::{TestServer, backends};
 
 fn mri(id: &str) -> String {
@@ -105,6 +106,41 @@ async fn the_callers_cancel_ends_the_ring() {
     let (status, _) = raw(&pair.server, "b@own.test", reqwest::Method::POST, &accept, &acceptance).await;
     assert_eq!(status, 410, "an answer to a cancelled ring");
     pair.server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancel_that_comes_before_the_callees_progress_ends_its_ring_as_cancelled() {
+    for backend in backends() {
+        let server = crate::trouter::server_with(backend, |_| {}).await;
+        let a_id = server.add_user("a@own.test", "Ada").await;
+        let b_id = server.add_user("b@own.test", "Bert").await;
+        let mut a = super::client(&server, &server, "a@own.test", &a_id, "Ada").await;
+        // Bert's socket goes through a proxy that can hold what the server sends him
+        let proxy = HeldSocket::start(&server.origin).await;
+        let account = crate::trouter::Account::sign_in(&server, "b@own.test", &b_id).await;
+        let mut b = Client::start_through(&account, "Bert", &proxy.origin, &server).await;
+        let held = b.hold_progress();
+        a.call(&mri(&b_id));
+        let call = a.state(CallState::Ringing).await;
+        tokio::time::timeout(WAIT, held.reached)
+            .await
+            .expect("the callee's progress never went")
+            .unwrap();
+        // Ada cancels before Bert's progress reaches the server, and the cancel's end reaches Bert after it
+        proxy.hold();
+        a.hang_up(call);
+        assert_eq!(a.ended().await, End::HungUp);
+        held.release.send(()).unwrap();
+        tokio::time::timeout(WAIT, held.answered)
+            .await
+            .expect("the progress was never answered")
+            .unwrap();
+        proxy.release();
+        b.incoming().await;
+        let end = b.ring_ended().await;
+        assert_eq!(end.code, Some(487), "{end:?}");
+        server.stop().await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

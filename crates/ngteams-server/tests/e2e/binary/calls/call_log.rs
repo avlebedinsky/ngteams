@@ -150,7 +150,8 @@ async fn cancelled(placer: &mut Phone, rung: &mut Phone, chat: &str) {
     let (from, to) = (placer.mark(), rung.mark());
     let call = placer.act(CallAction::Call { chat: chat.to_owned() }).await;
     let rings = rung.incoming(to).await;
-    // it rings a moment, as a person's cancel comes (one at once can race the callee's `progress`: QA 288 Q4)
+    // it rings a moment, as a person's cancel comes: an end that reaches the callee's client before it sent its
+    // `progress` makes the client refuse its own write and end the ring as failed
     tokio::time::sleep(Duration::from_secs(1)).await;
     placer.act(CallAction::HangUp { call }).await;
     assert_eq!(placer.ended(from, call).await, End::HungUp);
