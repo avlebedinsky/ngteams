@@ -2,7 +2,10 @@
 //! file on Microsoft's CDN, which the web client's `<img>` loads with no credential. [`AppPicture`] is that read, a
 //! `GET` of the same path and version on [`Service::AppPictures`] (`https://res.cdn.office.net/teamsappdata/`) or
 //! [`Service::StaticAppPictures`] (`https://statics.teams.cdn.office.net/`), with no token. The CDN answers
-//! `application/octet-stream`, so the answer is taken by its bytes' signature.
+//! `application/octet-stream`, so the answer is taken by its bytes' signature. An own-server account's definitions
+//! name their tiles on the server's own origin, under the same folder (`<origin>/teamsappdata/…`), read with no token
+//! ([`AppPicture::of_in`]); a tile off that origin is never read for such an account, nor one on it for a Microsoft
+//! account.
 
 use url::Url;
 
@@ -28,6 +31,8 @@ const MAX_VERSION: usize = 64;
 /// `GET` of an app's tile on Microsoft's CDN. Its answer is read with [`AppPicture::read_answer`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct AppPicture {
+    /// The own server's host and port, for an own-server account's tile; `None` on Microsoft's CDN.
+    own: Option<String>,
     service: Service,
     segments: Vec<String>,
     version: Option<String>,
@@ -65,7 +70,39 @@ impl AppPicture {
             return None;
         }
         Some(Self {
+            own: None,
             service,
+            segments: path.iter().map(|segment| (*segment).to_owned()).collect(),
+            version: version(&url).ok()?,
+        })
+    }
+
+    /// The read of the tile `src` names for an account of `cloud`: [`AppPicture::of`] for a Microsoft account; for an
+    /// own-server account, `https://<its origin>/teamsappdata/…` with the same rules for the path and the query, and
+    /// `None` for any other host.
+    #[must_use]
+    pub fn of_in(cloud: &crate::Cloud, src: &str) -> Option<Self> {
+        if cloud.is_microsoft() {
+            return Self::of(src);
+        }
+        let url = Url::parse(src.trim()).ok()?;
+        if !cloud.contains(&url) {
+            return None;
+        }
+        let segments: Vec<&str> = url.path_segments()?.collect();
+        if segments.len() > MAX_SEGMENTS || !segments.iter().all(|segment| is_segment(segment)) {
+            return None;
+        }
+        let [APP_PICTURES_PATH, path @ ..] = &segments[..] else {
+            return None;
+        };
+        if !path.last().is_some_and(|file| is_picture_file(file)) {
+            return None;
+        }
+        let port = url.port().map(|port| format!(":{port}")).unwrap_or_default();
+        Some(Self {
+            own: Some(format!("{}{port}", url.host_str()?)),
+            service: Service::AppPictures,
             segments: path.iter().map(|segment| (*segment).to_owned()).collect(),
             version: version(&url).ok()?,
         })
@@ -84,7 +121,9 @@ impl AppPicture {
     /// What names this picture whichever run reads it: its service's host, path and version.
     #[must_use]
     pub fn key(&self) -> String {
-        let host = if self.service == Service::StaticAppPictures {
+        let host = if let Some(own) = &self.own {
+            own.as_str()
+        } else if self.service == Service::StaticAppPictures {
             STATIC_APP_PICTURES_HOST
         } else {
             APP_PICTURES_HOST

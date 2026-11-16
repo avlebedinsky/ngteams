@@ -454,12 +454,112 @@ async fn a_team_s_apps_the_store_and_templates_are_read() {
     let apps = requests.team_apps(TEAM).await.unwrap();
     assert_eq!(apps.len(), 2, "the app Teams keeps for itself isn't listed");
     let store = requests.app_store().await.unwrap();
-    assert_eq!(store.len(), 3);
+    assert_eq!(store.len(), 4);
     let templates = requests.team_templates().await.unwrap();
     assert!(!templates.is_empty());
     let template = requests.team_template(templates[0].id.clone()).await.unwrap();
     assert!(template.is_some());
     assert_eq!(requests.owned_groups().await.unwrap(), Some(0));
+}
+
+const HELPER: &str = "00000000-0000-4000-8000-00000000a004";
+const POLLS: &str = "00000000-0000-4000-8000-00000000a005";
+const CHAT: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces";
+
+#[tokio::test]
+async fn the_apps_page_reads_the_store_s_sections_and_what_was_added() {
+    let rig = setup().await;
+    let requests = rig.handle.requests();
+    let listing = requests.app_listing().await.unwrap();
+    assert_eq!(listing.sections.org, [HELPER]);
+    assert_eq!(listing.sections.popular.len(), 2);
+    assert_eq!(listing.sections.ratings.get(HELPER).map(|rating| rating.tenths), Some(43));
+    let helper = listing.app(HELPER).expect("the org's app is defined");
+    assert_eq!(helper.app.name, "Made-up Helper");
+    assert!(helper.definition.places().personal);
+    assert!(listing.app("not listed").is_none());
+    assert!(requests.user_apps().await.unwrap().is_empty());
+    assert!(requests.chat_apps(CHAT).await.unwrap().is_empty());
+    rig.mock.refuse_next("POST", "apps/store", 403).await;
+    assert_eq!(requests.app_listing().await.unwrap(), teams_core::AppListing::default());
+}
+
+#[tokio::test]
+async fn an_app_is_added_for_oneself_to_a_chat_and_to_a_team_and_removed_again() {
+    let rig = setup().await;
+    let requests = rig.handle.requests();
+    let listing = requests.app_listing().await.unwrap();
+    let definition = |id: &str| listing.app(id).expect("defined").definition.clone();
+    let write = |write: TeamWrite| requests.team_write(write, None);
+
+    write(TeamWrite::AddPersonalApp { app: definition(HELPER) }).await.unwrap();
+    let mine = requests.user_apps().await.unwrap();
+    assert_eq!(mine.iter().map(|app| app.app.id.as_str()).collect::<Vec<_>>(), [HELPER]);
+    write(TeamWrite::AddChatApp {
+        chat: CHAT.to_owned(),
+        app: definition(POLLS),
+    })
+    .await
+    .unwrap();
+    let in_chat = requests.chat_apps(CHAT).await.unwrap();
+    assert_eq!(in_chat.iter().map(|app| app.app.name.as_str()).collect::<Vec<_>>(), ["Made-up Polls"]);
+    write(TeamWrite::AddApp {
+        team: TEAM.to_owned(),
+        app: definition(POLLS),
+    })
+    .await
+    .unwrap();
+    assert_eq!(rig.mock.apps_added(&teams_mock::AppPlace::Team(TEAM.to_owned())), [POLLS]);
+
+    write(TeamWrite::RemovePersonalApp { app: HELPER.to_owned() }).await.unwrap();
+    write(TeamWrite::RemoveChatApp {
+        chat: CHAT.to_owned(),
+        app: POLLS.to_owned(),
+    })
+    .await
+    .unwrap();
+    write(TeamWrite::RemoveApp {
+        team: TEAM.to_owned(),
+        app: POLLS.to_owned(),
+    })
+    .await
+    .unwrap();
+    assert!(requests.user_apps().await.unwrap().is_empty());
+    assert!(requests.chat_apps(CHAT).await.unwrap().is_empty());
+    assert!(rig.mock.apps_added(&teams_mock::AppPlace::Team(TEAM.to_owned())).is_empty());
+
+    let writes = rig
+        .sent(|path| path.ends_with("/entitlements") || path.contains("/entitlements/"))
+        .await;
+    let writes: Vec<(String, String)> = writes
+        .into_iter()
+        .map(|(method, path, _)| (method, path.replace(MT_PATH, "")))
+        .collect();
+    assert_eq!(
+        writes,
+        [
+            ("POST".to_owned(), "/beta/users/apps/entitlements".to_owned()),
+            ("POST".to_owned(), format!("/beta/chats/{CHAT}/apps/entitlements")),
+            ("POST".to_owned(), format!("/beta/teams/{TEAM}/apps/entitlements")),
+            ("DELETE".to_owned(), format!("/beta/users/apps/entitlements/{HELPER}")),
+            ("DELETE".to_owned(), format!("/beta/chats/{CHAT}/apps/entitlements/{POLLS}")),
+            ("DELETE".to_owned(), format!("/beta/teams/{TEAM}/apps/entitlements/{POLLS}")),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn an_app_the_service_refuses_to_add_is_told_and_not_listed() {
+    let rig = setup().await;
+    let requests = rig.handle.requests();
+    let listing = requests.app_listing().await.unwrap();
+    let helper = listing.app(HELPER).expect("defined").definition.clone();
+    rig.mock.refuse_next("POST", "users/apps/entitlements", 403).await;
+    let refused = requests
+        .team_write(TeamWrite::AddPersonalApp { app: helper }, None)
+        .await;
+    assert!(matches!(refused, Err(EngineError::TeamNotChanged { .. })), "{refused:?}");
+    assert!(requests.user_apps().await.unwrap().is_empty());
 }
 
 #[tokio::test]

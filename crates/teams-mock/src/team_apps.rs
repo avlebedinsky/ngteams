@@ -84,8 +84,9 @@ fn requested_definitions(body: &[u8]) -> Vec<Value> {
         .collect()
 }
 
-/// Made-up apps: a tab app, one with a bot, one Teams keeps for itself.
-fn definitions() -> Vec<Value> {
+/// Made-up apps: a tab app, one with a bot, one Teams keeps for itself; the organization's app, with a bot to chat
+/// with and a page of its own; and one for chats and teams, with a bot and a message extension.
+pub(crate) fn definitions() -> Vec<Value> {
     vec![
         json!({ "id": "00000000-0000-4000-8000-00000000a001", "name": "Made-up Planner", "developerName": "Made-up Maker",
                 "shortDescription": "Plans made up", "accentColor": "#6264A7", "staticTabs": [] }),
@@ -96,6 +97,19 @@ fn definitions() -> Vec<Value> {
                 "bots": [{ "id": "00000000-0000-4000-8000-00000000b002", "scopes": ["Team"] }] }),
         json!({ "id": "00000000-0000-4000-8000-00000000a003", "name": "Made-up Pages", "developerName": "Made-up Maker",
                 "shortDescription": "Pages made up", "accentColor": "#133a3c" }),
+        json!({ "id": "00000000-0000-4000-8000-00000000a004", "name": "Made-up Helper", "developerName": "Made-up Maker",
+                "shortDescription": "Helps made up", "longDescription": "A made-up helper to chat with.",
+                "version": "1.0.0", "accentColor": "#4f52b2",
+                "largeImageUrl": "https://res.cdn.office.net/teamsappdata/evergreen-assets/apps/made-up-updates_largeImage.png?v=1",
+                "privacyUrl": "https://example.com/privacy", "termsOfUseUrl": "https://example.com/terms",
+                "permissions": ["Identity"], "supportedLanguages": ["en-us"],
+                "bots": [{ "id": "00000000-0000-4000-8000-00000000b004", "scopes": ["personal"] }],
+                "staticTabs": [{ "entityId": "home", "scopes": ["personal"] }] }),
+        json!({ "id": "00000000-0000-4000-8000-00000000a005", "name": "Made-up Polls", "developerName": "Made-up Maker",
+                "shortDescription": "Polls made up", "version": "2.0.0", "accentColor": "#038387",
+                "bots": [{ "id": "00000000-0000-4000-8000-00000000b005", "scopes": ["groupChat", "team"] }],
+                "inputExtensions": [{ "botId": "00000000-0000-4000-8000-00000000b005", "scopes": ["personal", "groupChat", "team"] }],
+                "configurableTabs": [{ "scopes": ["groupChat", "team"] }] }),
     ]
 }
 
@@ -117,7 +131,13 @@ fn entitlements() -> Value {
 
 fn store() -> Value {
     json!({ "appCategoriesDictionary": {
-        "popularApps": { "apps": [{ "id": "00000000-0000-4000-8000-00000000a001" }], "totalAppsCount": 1 },
+        "adminPreInstalledApps": { "apps": [
+            { "id": "00000000-0000-4000-8000-00000000a004", "rating": { "count": 1200, "average": 4.3 } },
+        ], "totalAppsCount": 1 },
+        "popularApps": { "apps": [
+            { "id": "00000000-0000-4000-8000-00000000a001", "rating": { "count": 881, "average": 4.0 } },
+            { "id": "00000000-0000-4000-8000-00000000a005" },
+        ], "totalAppsCount": 2 },
         "microsoft": { "apps": [
             { "id": "00000000-0000-4000-8000-00000000a002" }, { "id": "00000000-0000-4000-8000-00000000a003" },
         ], "totalAppsCount": 2 },

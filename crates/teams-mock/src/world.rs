@@ -117,6 +117,8 @@ pub(crate) struct State {
     pub(crate) holds: Vec<std::sync::Arc<crate::startup::Gate>>,
     /// The bots a test scripted and the invokes taken (`bots.rs`).
     pub(crate) bots: crate::bots::Bots,
+    /// The apps added for the account, to chats and to teams (`apps.rs`).
+    pub(crate) apps: crate::apps::Installs,
     clock: u64,
     groups_made: u64,
 }
@@ -253,6 +255,7 @@ impl State {
             list_page: None,
             holds: Vec::new(),
             bots: crate::bots::Bots::default(),
+            apps: crate::apps::Installs::default(),
             clock: CLOCK_START,
             groups_made: 0,
         })

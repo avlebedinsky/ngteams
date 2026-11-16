@@ -162,3 +162,57 @@ async fn the_tile_is_read_with_no_token_and_kept_only_when_it_is_a_picture() {
         .await;
     assert!(matches!(client.read(&read).await, Err(HttpError::Status(_))));
 }
+
+#[test]
+fn an_own_server_account_reads_tiles_on_its_own_origin_only() {
+    let own = teams_proto::Cloud::own("https://chat.example:8443").unwrap();
+    let on_origin = "https://chat.example:8443/teamsappdata/apps/made-up/icon.png?v=2";
+    let read = AppPicture::of_in(&own, on_origin).unwrap();
+    assert_eq!(read.service(), Service::AppPictures);
+    assert_eq!(read.endpoint().segments(), ["apps", "made-up", "icon.png"]);
+    assert_eq!(read.key(), "app/chat.example:8443/apps/made-up/icon.png?v=2");
+    for elsewhere in [
+        evergreen(),
+        "https://chat.example/teamsappdata/apps/icon.png".to_owned(),
+        "https://chat.example:8443/icons/icon.png".to_owned(),
+        "https://chat.example:8443/teamsappdata/apps/icon.svg".to_owned(),
+        "https://chat.example:8443/teamsappdata/apps/icon.png?v=1&x=2".to_owned(),
+    ] {
+        assert_eq!(AppPicture::of_in(&own, &elsewhere), None, "{elsewhere}");
+    }
+    assert_eq!(AppPicture::of_in(&teams_proto::Cloud::Microsoft, on_origin), None);
+    assert!(AppPicture::of_in(&teams_proto::Cloud::Microsoft, &evergreen()).is_some());
+}
+
+#[tokio::test]
+async fn an_own_server_tile_is_read_from_the_origin_with_no_token() {
+    let server = MockServer::start().await;
+    let tokens = Arc::new(FakeTokens::default());
+    let cloud = teams_proto::Cloud::own("https://chat.example:8443").unwrap();
+    let transport = HttpTransport::for_cloud_with_mock_origin(
+        Arc::clone(&tokens),
+        "https://chat.example:8443/api/chatsvc/amer",
+        cloud.clone(),
+        &server.uri(),
+    )
+    .unwrap();
+    let client = Client::new(transport);
+    let png = b"\x89PNG\r\n\x1a\nmade-up own tile".to_vec();
+    Mock::given(method("GET"))
+        .and(path("/teamsappdata/apps/made-up/icon.png"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(png.clone(), "image/png"))
+        .mount(&server)
+        .await;
+    let read = AppPicture::of_in(&cloud, "https://chat.example:8443/teamsappdata/apps/made-up/icon.png").unwrap();
+    let picture = read.read_answer(&client.read(&read).await.unwrap()).unwrap();
+    assert_eq!(picture.bytes, png);
+    assert!(
+        tokens
+            .audiences
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_empty()
+    );
+    let request = server.received_requests().await.unwrap().pop().unwrap();
+    assert!(request.headers.get("authorization").is_none());
+}

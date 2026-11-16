@@ -1620,6 +1620,22 @@ impl EngineRequests {
         self.ask(|reply| Request::TeamApps(Box::new(TeamAppsAsk::Store { reply })))
     }
 
+    /// The store's sections as the Apps page shows them, with their apps' definitions, read now.
+    pub fn app_listing(&self) -> Reply<crate::AppListing> {
+        self.ask(|reply| Request::TeamApps(Box::new(TeamAppsAsk::Listing { reply })))
+    }
+
+    /// The apps the account added for itself, by name, read now.
+    pub fn user_apps(&self) -> Reply<Vec<StoreApp>> {
+        self.ask(|reply| Request::TeamApps(Box::new(TeamAppsAsk::UserApps { reply })))
+    }
+
+    /// The apps added to `chat`, by name, read now.
+    pub fn chat_apps(&self, chat: impl Into<String>) -> Reply<Vec<StoreApp>> {
+        let chat = chat.into();
+        self.ask(|reply| Request::TeamApps(Box::new(TeamAppsAsk::ChatApps { chat, reply })))
+    }
+
     /// How a team's channel did over `period`, read now.
     pub fn channel_analytics(
         &self,

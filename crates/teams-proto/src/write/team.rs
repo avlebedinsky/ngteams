@@ -153,6 +153,14 @@ pub enum TeamWrite {
     RemoveApp { team: String, app: String },
     /// An app added to a team: its definition as the app catalogue gave it.
     AddApp { team: String, app: AppDefinition },
+    /// An app added for the account itself (the store's Add): its definition as the app catalogue gave it.
+    AddPersonalApp { app: AppDefinition },
+    /// An app the account added for itself taken off, by its app id.
+    RemovePersonalApp { app: String },
+    /// An app added to a chat: its definition as the app catalogue gave it.
+    AddChatApp { chat: String, app: AppDefinition },
+    /// An app taken off a chat, by its app id.
+    RemoveChatApp { chat: String, app: String },
     /// A new team from one of Teams' templates.
     FromTemplate(TemplateTeam),
     /// A new team copied from another.
@@ -185,6 +193,12 @@ impl AppDefinition {
             }
         }
         Some(Self(definition))
+    }
+
+    /// The value its definition holds under `key`.
+    #[must_use]
+    pub fn field(&self, key: &str) -> Option<&Value> {
+        self.0.get(key)
     }
 
     /// Its app id.
@@ -366,6 +380,26 @@ impl TeamWrite {
                 Method::Post,
                 ["beta", "teams", team.as_str(), "apps", "entitlements"],
                 Some(Value::Object(app.0.clone())),
+            ),
+            Self::AddPersonalApp { app } => middle_tier(
+                Method::Post,
+                ["beta", "users", "apps", "entitlements"],
+                Some(Value::Object(app.0.clone())),
+            ),
+            Self::RemovePersonalApp { app } => middle_tier(
+                Method::Delete,
+                ["beta", "users", "apps", "entitlements", app.as_str()],
+                None,
+            ),
+            Self::AddChatApp { chat, app } => middle_tier(
+                Method::Post,
+                ["beta", "chats", chat.as_str(), "apps", "entitlements"],
+                Some(Value::Object(app.0.clone())),
+            ),
+            Self::RemoveChatApp { chat, app } => middle_tier(
+                Method::Delete,
+                ["beta", "chats", chat.as_str(), "apps", "entitlements", app.as_str()],
+                None,
             ),
             Self::FromTemplate(team) => provisioning_with(Endpoint::new(["team"]), template_body(team)),
             Self::Copy(copy) => provisioning_with(
@@ -1101,5 +1135,38 @@ mod tests {
         });
         assert_eq!((method, path), ("POST", format!("beta/teams/{TEAM}/apps/entitlements")));
         assert_eq!(body, Some(json!({"id": "app-2", "name": "App"})));
+    }
+
+    #[test]
+    fn an_app_is_added_for_oneself_and_to_a_chat_with_its_definition_and_removed_by_id() {
+        const CHAT: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces";
+        let app = || definition(&json!({"id": "app-3", "name": "App", "bots": [{"id": "b3"}]}));
+        let (service, method, path, body) = sent(&TeamWrite::AddPersonalApp { app: app() });
+        assert_eq!(
+            (service, method, path.as_str()),
+            (Service::MiddleTier, "POST", "beta/users/apps/entitlements")
+        );
+        assert_eq!(body, Some(json!({"id": "app-3", "name": "App", "bots": [{"id": "b3"}]})));
+        let (_, method, path, body) = sent(&TeamWrite::RemovePersonalApp {
+            app: "app-3".to_owned(),
+        });
+        assert_eq!(
+            (method, path, body),
+            ("DELETE", "beta/users/apps/entitlements/app-3".to_owned(), None)
+        );
+        let (_, method, path, body) = sent(&TeamWrite::AddChatApp {
+            chat: CHAT.to_owned(),
+            app: app(),
+        });
+        assert_eq!((method, path), ("POST", format!("beta/chats/{CHAT}/apps/entitlements")));
+        assert_eq!(body.and_then(|body| body.get("id").cloned()), Some(json!("app-3")));
+        let (_, method, path, body) = sent(&TeamWrite::RemoveChatApp {
+            chat: CHAT.to_owned(),
+            app: "app-3".to_owned(),
+        });
+        assert_eq!(
+            (method, path, body),
+            ("DELETE", format!("beta/chats/{CHAT}/apps/entitlements/app-3"), None)
+        );
     }
 }

@@ -47,6 +47,8 @@
 //! same made-up working week for every account, repeated every week.
 //!
 //! **The team pages** (`team_pages.rs`): what Manage team and "Your teams and channels" read, made up.
+//! **The apps** (`apps.rs`): the apps added for the account, to chats and to teams, kept as the writes add and remove
+//! them ([`ChatServiceMock::apps_added`]).
 //!
 //! **A new channel** (`channels.rs`): the middle tier's standard channel, the provisioning service's private one under
 //! [`PROVISIONING_BASE`] (its status, its people added), the user profile service's search of a team's people under
@@ -98,6 +100,7 @@ mod chatsvc;
 mod csa;
 mod fixtures;
 mod front;
+mod apps;
 mod loki;
 #[cfg(feature = "media")]
 pub mod media;
@@ -121,6 +124,7 @@ use serde_json::Value;
 use wiremock::matchers::{any, method};
 use wiremock::{Match, Mock, MockServer, Request, Respond, ResponseTemplate};
 
+pub use apps::AppPlace;
 pub use bots::{BotInvokeRecord, BotReply, bot_answer};
 pub use calling::{ANSWERED_ELSEWHERE, CallPhase, Leg, MockCall, TIMED_OUT};
 pub use channels::{ChannelWrite, NOT_ADDED};
@@ -891,6 +895,12 @@ impl ChatServiceMock {
     #[must_use]
     pub fn close_peer(&self, id: &str, account: &str) -> Option<teams_media::session::SessionStats> {
         self.lock().peers.close(id, account)
+    }
+
+    /// The ids of the apps added at `place`, in the order they were added (`apps.rs`).
+    #[must_use]
+    pub fn apps_added(&self, place: &AppPlace) -> Vec<String> {
+        self.lock().apps.added.get(place).cloned().unwrap_or_default()
     }
 
     /// The channel writes the mock took, in order (`channels.rs`).

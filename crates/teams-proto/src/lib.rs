@@ -27,6 +27,8 @@ pub use write::{ChannelChange, ChannelData, ChannelRead, ChannelTarget, ChannelW
 pub use write::{CreatePicture, MAX_SENT_PICTURE, UploadPicture};
 mod activity_settings;
 mod app_picture;
+mod apps;
+pub use apps::{AppCapability, AppPlaces, ChatApps, PermissionOverview, Rating, StoreSections, UserApps};
 pub use app_picture::{APP_PICTURES_HOST, APP_PICTURES_PATH, AppPicture, STATIC_APP_PICTURES_HOST};
 pub mod chat;
 mod client;

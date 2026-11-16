@@ -1017,7 +1017,10 @@ impl<C: Credentials> HttpTransport<C> {
             Service::Relay => fixed(format!("https://{RELAY_HOST}/{RELAY_PATH}"), "/trap"),
             Service::Emoticons => public(format!("https://{EMOTICONS_HOST}/{EMOTICONS_PATH}")),
             Service::Giphy => public(format!("https://{GIPHY_HOST}/")),
-            Service::AppPictures => public(format!("https://{APP_PICTURES_HOST}/{APP_PICTURES_PATH}")),
+            Service::AppPictures => fixed(
+                format!("https://{APP_PICTURES_HOST}/{APP_PICTURES_PATH}"),
+                &format!("/{APP_PICTURES_PATH}"),
+            ),
             Service::StaticAppPictures => public(format!("https://{STATIC_APP_PICTURES_HOST}/")),
             Service::Substrate => fixed(format!("https://{SUBSTRATE_HOST}/"), "/search"),
             Service::Ams => self.ams.clone().ok_or(refused(Refusal::NoAms)),
@@ -1825,12 +1828,8 @@ fn service_headers(service: Service) -> &'static [(&'static str, &'static str)] 
 }
 
 fn on_base_in(cloud: &Cloud, service: Service, base: &Url, url: &Url, endpoint: &Endpoint) -> bool {
-    if cloud.is_microsoft()
-        || matches!(
-            service,
-            Service::Emoticons | Service::Giphy | Service::AppPictures | Service::StaticAppPictures
-        )
-    {
+    // an own server's tiles are on its own origin (`AppPicture::of_in`); the other public pictures are Microsoft's
+    if cloud.is_microsoft() || matches!(service, Service::Emoticons | Service::Giphy | Service::StaticAppPictures) {
         return on_base(service, base, url, endpoint);
     }
     if !cloud.contains(base) || !cloud.contains(url) || base.origin() != url.origin() {

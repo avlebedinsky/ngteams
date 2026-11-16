@@ -254,7 +254,7 @@ impl<C: Credentials + 'static> Pictures<C> {
     /// Answers `reply` with the app tile `url` names (a definition's `largeImageUrl`), as [`Self::picture`] does; a
     /// URL off the CDN's app folders is answered `None`.
     pub(crate) fn app_picture(&self, url: &str, reply: Responder<Option<PictureBytes>>) {
-        match AppPicture::of(url) {
+        match AppPicture::of_in(self.client.transport().cloud(), url) {
             Some(picture) => self.ask(&self.apps, picture, reply),
             None => {
                 let _ = reply.send(Ok(None));
@@ -265,7 +265,7 @@ impl<C: Credentials + 'static> Pictures<C> {
     /// Answers `reply` with the app tile `url` names only from what this run keeps or the cache on disk holds: nothing
     /// is read, and a tile whose read runs is answered `None` rather than waited for.
     pub(crate) fn cached_app_picture(&self, url: &str, reply: Responder<Option<PictureBytes>>) {
-        let Some(picture) = AppPicture::of(url) else {
+        let Some(picture) = AppPicture::of_in(self.client.transport().cloud(), url) else {
             let _ = reply.send(Ok(None));
             return;
         };

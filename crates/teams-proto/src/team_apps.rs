@@ -205,27 +205,26 @@ impl AppDefinitions {
         let Ok(answer) = serde_json::from_slice::<Value>(body) else {
             return Vec::new();
         };
-        answer
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|definition| {
-                let app = InstalledApp {
-                    id: text(definition, "id")?,
-                    name: text(definition, "name")?,
-                    developer: text(definition, "developerName").unwrap_or_default(),
-                    description: text(definition, "shortDescription").unwrap_or_default(),
-                    accent: definition.get("accentColor").and_then(Value::as_str).and_then(colour),
-                };
-                let definition = crate::AppDefinition::new(definition.as_object()?.clone())?;
-                Some(StoreApp {
-                    has_bot: !definition.bots().is_empty(),
-                    app,
-                    definition,
-                })
-            })
-            .collect()
+        answer.as_array().into_iter().flatten().filter_map(store_app).collect()
     }
+}
+
+/// The app `definition` defines, as the store lists it; `None` with no name, or a definition
+/// [`crate::AppDefinition`] doesn't take.
+pub(crate) fn store_app(definition: &Value) -> Option<StoreApp> {
+    let app = InstalledApp {
+        id: text(definition, "id")?,
+        name: text(definition, "name")?,
+        developer: text(definition, "developerName").unwrap_or_default(),
+        description: text(definition, "shortDescription").unwrap_or_default(),
+        accent: definition.get("accentColor").and_then(Value::as_str).and_then(colour),
+    };
+    let definition = crate::AppDefinition::new(definition.as_object()?.clone())?;
+    Some(StoreApp {
+        has_bot: !definition.bots().is_empty(),
+        app,
+        definition,
+    })
 }
 
 impl Request for AppDefinitions {

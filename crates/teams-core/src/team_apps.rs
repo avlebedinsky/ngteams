@@ -1,6 +1,7 @@
 //! What Manage team's Apps tab, Change picture, Analytics' "Select a channel" and "More create team options" read
-//! (`docs/protocol/teams.md`), each read when the page asks: a team's installed apps, the store's apps
-//! with their definitions, a channel's analytics, Teams' templates and one template's channels and apps, how many
+//! (`docs/protocol/teams.md`), and what the Apps page reads (`docs/protocol/apps.md`), each read when the page asks: a
+//! team's installed apps, the store's apps with their definitions, the store's sections, the apps the account added and
+//! a chat's apps, a channel's analytics, Teams' templates and one template's channels and apps, how many
 //! Microsoft 365 groups the account could make a team of, and the picture Teams makes for a team from its name.
 //! App definitions are cached per account by id for Activity preferences and icons. The writes these pages send go
 //! as every team write does ([`crate::team_admin`]).
@@ -9,7 +10,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use teams_proto::{
-    AnalyticsPeriod, AppDefinitions, AppStore, ChannelAnalyticsRead, Credentials, DEFINITIONS_PAGE, DefaultTeamPicture,
+    AnalyticsPeriod, AppDefinitions, AppStore, ChatApps, StoreSections, UserApps, ChannelAnalyticsRead, Credentials, DEFINITIONS_PAGE, DefaultTeamPicture,
     HttpError, InstalledApp, OwnedGroups, StoreApp, TeamAnalytics, TeamApps, TeamTemplateCard, TeamTemplateDetails,
     TeamTemplateRead, TeamTemplates, Transport, UserGraphSettingsRead,
 };
@@ -37,6 +38,16 @@ pub(crate) enum TeamAppsAsk {
         reply: Responder<Vec<InstalledApp>>,
     },
     Store {
+        reply: Responder<Vec<StoreApp>>,
+    },
+    Listing {
+        reply: Responder<AppListing>,
+    },
+    UserApps {
+        reply: Responder<Vec<StoreApp>>,
+    },
+    ChatApps {
+        chat: String,
         reply: Responder<Vec<StoreApp>>,
     },
     ChannelAnalytics {
@@ -89,14 +100,24 @@ where
                 let ids = send_body(client, &AppStore)
                     .await
                     .map_or_else(Vec::new, |body| AppStore::read_answer(&body));
-                let mut apps = Vec::new();
-                for page in ids.chunks(DEFINITIONS_PAGE) {
-                    let read = AppDefinitions { ids: page.to_vec() };
-                    if let Some(body) = send_body(client, &read).await {
-                        apps.extend(AppDefinitions::read_answer(&body));
-                    }
-                }
-                apps
+                definitions_of(client, &ids).await
+            }),
+            TeamAppsAsk::Listing { reply } => self.spawn_read(reply, async move |client| {
+                let sections = send_body(client, &AppStore)
+                    .await
+                    .map_or_else(StoreSections::default, |body| StoreSections::read(&body));
+                let apps = definitions_of(client, &sections.ids()).await;
+                AppListing { sections, apps }
+            }),
+            TeamAppsAsk::UserApps { reply } => self.spawn_read(reply, async move |client| {
+                send_body(client, &UserApps)
+                    .await
+                    .map_or_else(Vec::new, |body| UserApps::read_answer(&body))
+            }),
+            TeamAppsAsk::ChatApps { chat, reply } => self.spawn_read(reply, async move |client| {
+                read_body(client, &ChatApps { chat })
+                    .await
+                    .map_or_else(Vec::new, |body| ChatApps::read_answer(&body))
             }),
             TeamAppsAsk::ChannelAnalytics {
                 group,
@@ -130,6 +151,37 @@ where
             }),
         }
     }
+}
+
+/// The store as the Apps page shows it: its sections, and the definitions of the apps they list (an app without a
+/// readable one is left out of [`AppListing::apps`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AppListing {
+    pub sections: StoreSections,
+    pub apps: Vec<StoreApp>,
+}
+
+impl AppListing {
+    /// The app with `id`, when its definition was read.
+    #[must_use]
+    pub fn app(&self, id: &str) -> Option<&StoreApp> {
+        self.apps.iter().find(|store| store.app.id == id)
+    }
+}
+
+/// The definitions of `ids`, read a page at a time; a page that fails is left out.
+async fn definitions_of<C: Credentials + 'static>(
+    client: &teams_proto::Client<teams_proto::HttpTransport<C>>,
+    ids: &[String],
+) -> Vec<StoreApp> {
+    let mut apps = Vec::new();
+    for page in ids.chunks(DEFINITIONS_PAGE) {
+        let read = AppDefinitions { ids: page.to_vec() };
+        if let Some(body) = send_body(client, &read).await {
+            apps.extend(AppDefinitions::read_answer(&body));
+        }
+    }
+    apps
 }
 
 /// The account's app notification preferences, read now; `None` when they couldn't be read.

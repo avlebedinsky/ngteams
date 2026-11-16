@@ -98,6 +98,7 @@ pub use sync::{
     StoredMessage, Synced, Unreadable,
 };
 pub use team_admin::{TeamChange, TeamMember, TeamWritten};
+pub use team_apps::AppListing;
 pub use teams::{ChatListing, READING_TEAMS, TEAMS_MAX_AGE, TEAMS_RETRY, TeamsReadError};
 /// A call, how it ended and how its services ended it, as [`Event::Call`] and [`Event::RingEnded`] tell them.
 pub use teams_call::{CallError, CallId, End, Identity, RemoteEnd};
