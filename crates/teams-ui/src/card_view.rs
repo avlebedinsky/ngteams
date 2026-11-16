@@ -17,7 +17,8 @@
 //!   buttons, and hides it again; `Action.ToggleVisibility` shows, hides or flips the elements it names. Both change
 //!   only what this view shows ([`CardState`], held by the view per message). `Action.Submit`/`Execute` are bot
 //!   invokes (`docs/protocol/bots.md`). No view sends one yet, so such a button opens the message in Teams on the
-//!   web, where it runs, and its tooltip says so. A `selectAction` does what its action does on a click anywhere on its element.
+//!   web, where it runs, and its tooltip says so. A `selectAction` does what its action does on a click anywhere on
+//!   its element.
 //! - **What it can't show** (an input, an element or action of a type no capture showed, an attachment that isn't a
 //!   card) is never guessed at: the card says the message has content that can't be shown here
 //!   (`chat_view::UNSHOWN_CONTENT`), under what it does show.
