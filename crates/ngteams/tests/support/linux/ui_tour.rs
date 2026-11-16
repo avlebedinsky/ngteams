@@ -976,10 +976,10 @@ const STEPS: [Step; 5 + 305 + 8] = [
         show_page(shell, Page::Calls, cx);
     }),
     ("settings-calls-preparing-dark", |shell, _, cx| {
-        theme(shell, teams_ui::theme::DARK_KEY, cx);
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
     }),
     ("settings-calls-unavailable", |shell, _, cx| {
-        theme(shell, teams_ui::theme::LIGHT_KEY, cx);
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
         let model = shell.read(cx).settings().clone();
         let directory = FixedDirectory::default();
         directory.set_status(DeviceStatus::Unavailable);
@@ -1194,14 +1194,14 @@ const STEPS: [Step; 5 + 305 + 8] = [
         });
     }),
     ("new-chat-found", |shell, _, cx| {
-        theme(shell, teams_ui::theme::LIGHT_KEY, cx);
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
     }),
     // a group name typed: "Group name:" over To:, and a new group chat again
     ("new-chat-named", |shell, window, cx| {
         with_new_chat(shell, cx, |view, cx| view.set_group_name("Lab trio", window, cx));
     }),
     ("new-chat-named-dark", |shell, _, cx| {
-        theme(shell, teams_ui::theme::DARK_KEY, cx);
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
     }),
     // the a–b chat's people from its header (Teams Dark): "People", the account and b, "Start a group chat"
     ("chat-people-dark", |shell, window, cx| {
@@ -1218,7 +1218,7 @@ const STEPS: [Step; 5 + 305 + 8] = [
     }),
     // c taken as a chip, Create lit (Teams Light)
     ("chat-people-picker", |shell, window, cx| {
-        theme(shell, teams_ui::theme::LIGHT_KEY, cx);
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
         with_people(shell, cx, |people, cx| {
             let at = people
                 .suggestions()
@@ -1270,7 +1270,7 @@ const STEPS: [Step; 5 + 305 + 8] = [
         });
     }),
     ("chat-people-group-dark", |shell, _, cx| {
-        theme(shell, teams_ui::theme::DARK_KEY, cx);
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
     }),
     // the a–b chat in Teams Dark: the frame, the sheet, its own bubbles' tint and the reply's quote card
     ("chat-ab-dark", |shell, window, cx| {
@@ -1776,7 +1776,7 @@ const STEPS: [Step; 5 + 305 + 8] = [
     // a person's profile card (`seed_profile_cards`), in Teams Dark then Light: the compact card beside c's face in
     // the a–b–c chat, the full card's Overview, Profile and Organization, and the compact card beside b's channel post
     ("profile-card-compact-dark", |shell, window, cx| {
-        theme(shell, teams_ui::theme::DARK_KEY, cx);
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
         compact_card_in_group(shell, window, cx);
     }),
     ("profile-card-full-dark", |shell, window, cx| {
@@ -1790,7 +1790,7 @@ const STEPS: [Step; 5 + 305 + 8] = [
     }),
     ("profile-card-channel-dark", compact_card_in_channel),
     ("profile-card-compact", |shell, window, cx| {
-        theme(shell, teams_ui::theme::LIGHT_KEY, cx);
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
         compact_card_in_group(shell, window, cx);
     }),
     ("profile-card-full", |shell, window, cx| {
@@ -1927,12 +1927,12 @@ const STEPS: [Step; 5 + 305 + 8] = [
     }),
     // and in Teams Light
     ("call-window-held-by-far-end", |shell, _, cx| {
-        theme(shell, teams_ui::theme::LIGHT_KEY, cx);
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
     }),
     // the account sharing its screen in Teams Dark: the red Stop sharing in Share's place
     ("call-window-sharing-dark", |shell, _, cx| {
         held_by_far_end(shell, false, cx);
-        theme(shell, teams_ui::theme::DARK_KEY, cx);
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
         share(shell, (true, false), cx);
     }),
     // b sharing its screen: the share takes the stage, b's tile and the account's own in a strip on its right
@@ -1950,7 +1950,7 @@ const STEPS: [Step; 5 + 305 + 8] = [
         with_stage(cx, |stage, cx| {
             stage.set_layout(teams_ui::call_stage::Layout::Gallery, cx);
         });
-        theme(shell, teams_ui::theme::LIGHT_KEY, cx);
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
     }),
     ("call-window-sharing", |shell, _, cx| {
         share(shell, (true, false), cx);
@@ -1971,11 +1971,11 @@ const STEPS: [Step; 5 + 305 + 8] = [
     }),
     // and in Teams Dark
     ("call-window-transfer-picked-dark", |shell, _, cx| {
-        theme(shell, teams_ui::theme::DARK_KEY, cx);
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
     }),
     // People in the 1:1 call, someone typed in "Invite someone" and found
     ("call-window-invite", |shell, _, cx| {
-        theme(shell, teams_ui::theme::LIGHT_KEY, cx);
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
         held(shell, false, cx);
         with_stage_window(cx, |stage, window, cx| {
             stage.close_transfer(cx);
@@ -2011,13 +2011,13 @@ const STEPS: [Step; 5 + 305 + 8] = [
     }),
     // and in Teams Dark
     ("call-window-invited-dark", |shell, _, cx| {
-        theme(shell, teams_ui::theme::DARK_KEY, cx);
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
     }),
     // someone waiting in a meeting's lobby, as whoever may admit sees them: "Waiting in the lobby", Deny and Admit
     ("call-lobby-dark", |shell, _, cx| {
         share(shell, (false, false), cx);
         with_stage(cx, |stage, cx| stage.show_roster(false, cx));
-        theme(shell, teams_ui::theme::DARK_KEY, cx);
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
         lobby(
             shell,
             vec![("8:orgid:00000000-0000-4000-8000-00000000000c", "Lab Sea")],
@@ -2234,11 +2234,11 @@ const STEPS: [Step; 5 + 305 + 8] = [
     }),
     // and in Teams Dark
     ("call-group-people-added-dark", |shell, _, cx| {
-        theme(shell, teams_ui::theme::DARK_KEY, cx);
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
     }),
     // in Teams Light, the organizer's Controls: Lock meeting, Enable lobby, Allow all participants to …
     ("call-group-controls", |shell, _, cx| {
-        theme(shell, teams_ui::theme::LIGHT_KEY, cx);
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
         group_controls(shell, (true, true), teams_core::MeetingState::default(), cx);
         with_stage(cx, |stage, cx| {
             stage.hover_added(None, cx);
@@ -2248,7 +2248,7 @@ const STEPS: [Step; 5 + 305 + 8] = [
     }),
     // and in Teams Dark, with only the organizer presenting: the attendees' restrictions taken off greyness
     ("call-group-controls-dark", |shell, _, cx| {
-        theme(shell, teams_ui::theme::DARK_KEY, cx);
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
         let presenting = teams_core::MeetingState {
             options: teams_proto::MeetingOptions {
                 present: Some(false),
@@ -2268,7 +2268,7 @@ const STEPS: [Step; 5 + 305 + 8] = [
     }),
     // in Teams Light, muted anew by the organizer while attendees may unmute: the card's Unmute, the controls back
     ("call-group-muted", |shell, _, cx| {
-        theme(shell, teams_ui::theme::LIGHT_KEY, cx);
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
         let muted = teams_core::MeetingState {
             muted_by_organizer: Some(6),
             ..teams_core::MeetingState::default()
@@ -2695,13 +2695,6 @@ fn seed_activity(mock: &ChatServiceMock) -> SandboxResult {
         mock.add_activity(LAB_A, &activity, read).ok_or("no feed")?;
     }
     Ok(())
-}
-
-fn theme(shell: &Entity<Shell>, key: &'static str, cx: &mut App) {
-    let model = shell.read(cx).settings().clone();
-    model.update(cx, |model, cx| {
-        model.change(|settings| settings.appearance.theme = key, cx);
-    });
 }
 
 /// The made-up 1:1 call's shares as the engine tells them: the account's own (`sharing`), b's (`shown`).
