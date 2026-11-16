@@ -6,9 +6,15 @@
 //! `attachments` each carry a `contentType` and a `content`. An Adaptive Card
 //! (`application/vnd.microsoft.card.adaptive`) is read element by element ([`Element`]); a hero or thumbnail card
 //! (`application/vnd.microsoft.card.hero`, `…thumbnail`) is read as the Adaptive Card Teams draws for it (its title,
-//! subtitle, text, pictures and buttons). What the model can't draw is never guessed at: an input, an element or an
-//! action of a type it doesn't know (without a `fallback` to take its place), or an attachment of another kind marks
-//! the card [`Card::unshown`], and a view says the message has content it can't show.
+//! subtitle, text, pictures and buttons). What the model can't draw is never guessed at: an element or an action of a
+//! type it doesn't know (without a `fallback` to take its place), or an attachment of another kind marks the card
+//! [`Card::unshown`], and a view says the message has content it can't show. Inputs (`Input.*`, [`Input`]) are read
+//! into the model, and the same `Input` model serves a workflow's trigger card; a chat card with an input is still
+//! marked unshown, since the chat view doesn't draw inputs yet.
+//!
+//! A button that sends to the bot ([`ActionKind::Submit`]) keeps what an invoke needs (`docs/protocol/bots.md`): its
+//! `data` as given, its `Action.Execute` `verb`, its `msteams` kind ([`Via`]) and whether the card's answers go with
+//! it; a card's `refresh` keeps its `Action.Execute` and the users it refreshes for by itself.
 //!
 //! Nothing here reads the network: a picture is kept as its link, a view asks the engine for it. A link is kept only
 //! when it is `http`, `https`, `mailto` or `tel`.
@@ -53,6 +59,8 @@ pub struct Card {
     pub select_action: Option<Box<Action>>,
     /// It has a part this build can't show (an input, an unknown element or action).
     pub unshown: bool,
+    /// Its `refresh`: an `Action.Execute` sent for the card's current form.
+    pub refresh: Option<Refresh>,
     /// Its `fallbackText`, when it gave one.
     pub fallback_text: Option<String>,
     /// Its `speak` or its `summary`: what Teams reads out, kept for no view yet.
@@ -88,7 +96,107 @@ pub enum Kind {
     Facts(Vec<(String, String)>),
     Actions(Vec<Action>),
     Table(Table),
+    /// An `Input.*` element.
+    Input(Input),
 }
+
+/// An input of a card (`Input.*`): its answer goes with a button that sends to the bot.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Input {
+    pub id: String,
+    pub label: Option<String>,
+    pub required: bool,
+    /// The card's own words for a required one left empty (`errorMessage`).
+    pub error_message: Option<String>,
+    pub kind: InputKind,
+}
+
+/// What an input asks for, with its card's starting value.
+#[derive(Clone, Debug, PartialEq)]
+pub enum InputKind {
+    /// `Input.Text`.
+    Text {
+        placeholder: Option<String>,
+        multiline: bool,
+        max_length: Option<u32>,
+        /// Its `regex`, which a typed answer must match.
+        regex: Option<String>,
+        style: TextInputStyle,
+        value: Option<String>,
+    },
+    /// `Input.Number`.
+    Number {
+        placeholder: Option<String>,
+        min: Option<f64>,
+        max: Option<f64>,
+        value: Option<f64>,
+    },
+    /// `Input.Date` (`YYYY-MM-DD`).
+    Date {
+        placeholder: Option<String>,
+        min: Option<String>,
+        max: Option<String>,
+        value: Option<String>,
+    },
+    /// `Input.Time` (`HH:MM`).
+    Time {
+        placeholder: Option<String>,
+        min: Option<String>,
+        max: Option<String>,
+        value: Option<String>,
+    },
+    /// `Input.Toggle`: its answer is `value_on` or `value_off`.
+    Toggle {
+        title: String,
+        value_on: String,
+        value_off: String,
+        on: bool,
+    },
+    /// `Input.ChoiceSet`: its answer is the chosen values joined by commas.
+    ChoiceSet {
+        choices: Vec<Choice>,
+        multi: bool,
+        style: ChoiceStyle,
+        placeholder: Option<String>,
+        /// The values chosen at first.
+        chosen: Vec<String>,
+        /// Its `choices.data` dataset: choices the host finds itself (`graph.microsoft.com/users`: people).
+        dataset: Option<String>,
+    },
+}
+
+/// A choice of a choice set.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Choice {
+    pub title: String,
+    pub value: String,
+}
+
+/// How a choice set is drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ChoiceStyle {
+    /// A drop-down.
+    #[default]
+    Compact,
+    /// Its choices all shown.
+    Expanded,
+    /// A drop-down that filters as one types.
+    Filtered,
+}
+
+/// The kind of text a text input takes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TextInputStyle {
+    #[default]
+    Text,
+    Tel,
+    Url,
+    Email,
+    Password,
+}
+
+/// The dataset of a choice set whose choices are the directory's people.
+pub const PEOPLE_DATASET: &str = "graph.microsoft.com/users";
 
 /// The space above an element.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -341,7 +449,53 @@ pub enum ActionKind {
     ToggleVisibility(Vec<(String, Option<bool>)>),
     /// Sends to the bot (`Action.Submit`, `Action.Execute`, a hero card's `imBack`, `messageBack`, `postBack` or
     /// `invoke`): what only Teams' bot path runs.
+    Submit(BotAction),
+}
+
+/// A button that sends to the bot, and what it carries.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BotAction {
+    /// The action's `id`.
+    pub id: Option<String>,
+    pub via: Via,
+    /// Its `data` as the card gives it (`msteams` included); a hero button's `value`.
+    pub data: Option<Value>,
+    /// The card's answers go with it (`associatedInputs` `auto`, the default; `none` sends none).
+    pub inputs: bool,
+}
+
+/// How a [`BotAction`] reaches the bot: an `Action.Submit`'s `msteams.type`, an `Action.Execute`, a hero button's type.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Via {
+    /// A plain `Action.Submit`: the bot gets its data and the answers.
     Submit,
+    /// `Action.Execute`: an `adaptiveCard/action` invoke.
+    Execute { verb: Option<String> },
+    /// `messageBack`: `text` to the bot, `display_text` posted as the user's, `value` to the bot.
+    MessageBack {
+        text: Option<String>,
+        display_text: Option<String>,
+        value: Option<Value>,
+    },
+    /// `imBack`: its text posted as the user's message.
+    ImBack(String),
+    /// `invoke`: an invoke carrying its value.
+    Invoke(Option<Value>),
+    /// `signin`: a sign-in page to open.
+    SignIn(Option<String>),
+    /// `task/fetch`: the bot's dialog.
+    TaskFetch,
+    /// A hero card's `postBack`: its value to the bot, nothing posted.
+    PostBack(Option<Value>),
+}
+
+/// A card's `refresh`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Refresh {
+    /// Its `Action.Execute`.
+    pub action: BotAction,
+    /// The users (MRIs or object ids, as the card names them) for whom it runs by itself; others refresh by hand.
+    pub user_ids: Vec<String>,
 }
 
 /// An action's style.
@@ -394,7 +548,7 @@ pub fn card_message(content: &str) -> Option<CardMessage> {
     for attachment in attachments {
         let content = attachment.get("content");
         match (str_of(attachment, "contentType"), content) {
-            (Some(ADAPTIVE), Some(card)) => message.cards.push(adaptive(card, 0)),
+            (Some(ADAPTIVE), Some(card)) => message.cards.push(adaptive_card(card)),
             (Some(HERO), Some(card)) => message.cards.push(hero(card, ImageSize::Stretch)),
             (Some(THUMBNAIL), Some(card)) => message.cards.push(hero(card, ImageSize::Medium)),
             _ => message.unshown = true,
@@ -414,16 +568,24 @@ fn swift_b64(content: &str) -> Option<&str> {
     Some(&value[..value.find('"')?])
 }
 
+/// An Adaptive Card's JSON (an attachment's `content`, a dialog's card, an `Action.Execute`'s answer), read.
+#[must_use]
+pub fn adaptive_card(card: &Value) -> Card {
+    adaptive(card, 0)
+}
+
 /// An Adaptive Card `card` at `depth` (a shown card's own depth).
 fn adaptive(card: &Value, depth: usize) -> Card {
     let mut read = Reader::default();
     let body = read.elements(card.get("body"), depth);
     let actions = read.actions(card.get("actions"), depth);
     let select_action = read.select(card, depth);
+    let refresh = card.get("refresh").and_then(refresh_of);
     Card {
         body,
         actions,
         select_action,
+        refresh,
         unshown: read.unshown,
         fallback_text: string_of(card, "fallbackText"),
         summary: string_of(card, "speak").or_else(|| string_of(card, "summary")),
@@ -473,6 +635,7 @@ fn hero(card: &Value, size: ImageSize) -> Card {
         actions,
         select_action,
         unshown: read.unshown,
+        refresh: None,
         fallback_text: None,
         summary: None,
     }
@@ -587,6 +750,12 @@ impl Reader {
             ),
             "ActionSet" => Kind::Actions(self.actions(item.get("actions"), depth)),
             "Table" => Kind::Table(self.table(item, depth)),
+            kind if kind.starts_with("Input.") => {
+                let input = input(item)?;
+                // the chat view doesn't draw inputs yet: the card says it has content it can't show
+                self.unshown = true;
+                Kind::Input(input)
+            }
             _ => return None,
         })
     }
@@ -715,7 +884,7 @@ impl Reader {
                 None => return self.unread_action(action, depth),
             },
             Some("Action.ToggleVisibility") => ActionKind::ToggleVisibility(toggles(action)),
-            Some("Action.Submit" | "Action.Execute") => ActionKind::Submit,
+            Some("Action.Submit" | "Action.Execute") => ActionKind::Submit(bot_action(action)),
             _ => return self.unread_action(action, depth),
         };
         Some(Action {
@@ -751,7 +920,12 @@ impl Reader {
                 };
                 ActionKind::OpenUrl(url.to_owned())
             }
-            Some("imBack" | "messageBack" | "postBack" | "invoke") => ActionKind::Submit,
+            Some(kind @ ("imBack" | "messageBack" | "postBack" | "invoke")) => ActionKind::Submit(BotAction {
+                id: None,
+                via: hero_via(kind, button),
+                data: button.get("value").cloned(),
+                inputs: false,
+            }),
             _ => {
                 self.unshown = true;
                 return None;
@@ -763,6 +937,195 @@ impl Reader {
             style: ActionStyle::Default,
             icon_url: None,
         })
+    }
+}
+
+/// An `Action.Submit`'s or `Action.Execute`'s [`BotAction`].
+fn bot_action(action: &Value) -> BotAction {
+    let data = action.get("data").cloned();
+    let via = if str_of(action, "type") == Some("Action.Execute") {
+        Via::Execute {
+            verb: string_of(action, "verb"),
+        }
+    } else {
+        data.as_ref()
+            .and_then(|data| data.get("msteams"))
+            .map_or(Via::Submit, teams_via)
+    };
+    BotAction {
+        id: string_of(action, "id"),
+        via,
+        data,
+        inputs: !str_of(action, "associatedInputs").is_some_and(|inputs| inputs.eq_ignore_ascii_case("none")),
+    }
+}
+
+/// An `Action.Submit`'s `msteams` (`docs/protocol/bots.md`); a plain submit for a kind it doesn't name.
+fn teams_via(msteams: &Value) -> Via {
+    let text = |key: &str| str_of(msteams, key).map(str::to_owned);
+    match str_of(msteams, "type") {
+        Some("messageBack") => Via::MessageBack {
+            text: text("text"),
+            display_text: text("displayText"),
+            value: msteams.get("value").cloned(),
+        },
+        Some("imBack") => text("value").map_or(Via::Submit, Via::ImBack),
+        Some("invoke") => Via::Invoke(msteams.get("value").cloned()),
+        Some("signin") => Via::SignIn(text("value")),
+        Some("task/fetch") => Via::TaskFetch,
+        _ => Via::Submit,
+    }
+}
+
+/// A hero card button's [`Via`]; an `imBack` without its text sends its value as a `postBack` does.
+fn hero_via(kind: &str, button: &Value) -> Via {
+    let value = button.get("value").cloned();
+    match kind {
+        "imBack" if let Some(text) = str_of(button, "value") => Via::ImBack(text.to_owned()),
+        "messageBack" => Via::MessageBack {
+            text: str_of(button, "text").map(str::to_owned),
+            display_text: str_of(button, "displayText").map(str::to_owned),
+            value,
+        },
+        "invoke" => Via::Invoke(value),
+        _ => Via::PostBack(value),
+    }
+}
+
+/// A card's `refresh`, when its action is an `Action.Execute`.
+fn refresh_of(refresh: &Value) -> Option<Refresh> {
+    let action = refresh.get("action")?;
+    (str_of(action, "type") == Some("Action.Execute")).then(|| Refresh {
+        action: bot_action(action),
+        user_ids: array_of(refresh, "userIds")
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+    })
+}
+
+/// An `Input.*` element; `None` for one without an `id` or of a kind this build doesn't read.
+#[must_use]
+pub fn input(item: &Value) -> Option<Input> {
+    let text = |key: &str| str_of(item, key).map(str::to_owned);
+    let placeholder = text("placeholder");
+    let kind = match str_of(item, "type")? {
+        "Input.Text" => text_input(item, placeholder),
+        "Input.Number" => InputKind::Number {
+            placeholder,
+            min: item.get("min").and_then(Value::as_f64),
+            max: item.get("max").and_then(Value::as_f64),
+            value: item.get("value").and_then(Value::as_f64),
+        },
+        "Input.Date" => InputKind::Date {
+            placeholder,
+            min: text("min"),
+            max: text("max"),
+            value: text("value"),
+        },
+        "Input.Time" => InputKind::Time {
+            placeholder,
+            min: text("min"),
+            max: text("max"),
+            value: text("value"),
+        },
+        "Input.Toggle" => {
+            let value_on = text("valueOn").unwrap_or_else(|| "true".to_owned());
+            InputKind::Toggle {
+                title: text("title").unwrap_or_default(),
+                on: str_of(item, "value") == Some(value_on.as_str()),
+                value_on,
+                value_off: text("valueOff").unwrap_or_else(|| "false".to_owned()),
+            }
+        }
+        "Input.ChoiceSet" => choice_set(item, placeholder),
+        _ => return None,
+    };
+    Some(Input {
+        id: text("id")?,
+        label: text("label"),
+        required: bool_of(item, "isRequired"),
+        error_message: text("errorMessage"),
+        kind,
+    })
+}
+
+/// An `Input.Text`'s kind.
+fn text_input(item: &Value, placeholder: Option<String>) -> InputKind {
+    let text = |key: &str| str_of(item, key).map(str::to_owned);
+    InputKind::Text {
+        placeholder,
+        multiline: bool_of(item, "isMultiline"),
+        max_length: item
+            .get("maxLength")
+            .and_then(Value::as_u64)
+            .and_then(|length| u32::try_from(length).ok())
+            .filter(|length| *length > 0),
+        regex: string_of(item, "regex"),
+        style: match str_of(item, "style").map(str::to_ascii_lowercase).as_deref() {
+            Some("tel") => TextInputStyle::Tel,
+            Some("url") => TextInputStyle::Url,
+            Some("email") => TextInputStyle::Email,
+            Some("password") => TextInputStyle::Password,
+            _ => TextInputStyle::Text,
+        },
+        value: text("value"),
+    }
+}
+
+/// An `Input.ChoiceSet`'s kind.
+fn choice_set(item: &Value, placeholder: Option<String>) -> InputKind {
+    InputKind::ChoiceSet {
+        choices: array_of(item, "choices")
+            .iter()
+            .filter_map(|choice| {
+                Some(Choice {
+                    title: str_of(choice, "title")?.to_owned(),
+                    value: str_of(choice, "value")?.to_owned(),
+                })
+            })
+            .collect(),
+        multi: bool_of(item, "isMultiSelect"),
+        style: match str_of(item, "style").map(str::to_ascii_lowercase).as_deref() {
+            Some("expanded") => ChoiceStyle::Expanded,
+            Some("filtered") => ChoiceStyle::Filtered,
+            _ => ChoiceStyle::Compact,
+        },
+        placeholder,
+        chosen: str_of(item, "value")
+            .map(|value| value.split(',').map(str::to_owned).collect())
+            .unwrap_or_default(),
+        dataset: item
+            .pointer("/choices.data/dataset")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    }
+}
+
+impl Input {
+    /// Its answer as the card starts with it, as the card sends answers: a string, `None` when it starts empty.
+    #[must_use]
+    pub fn initial_answer(&self) -> Option<String> {
+        match &self.kind {
+            InputKind::Text { value, .. } | InputKind::Date { value, .. } | InputKind::Time { value, .. } => {
+                value.clone().filter(|value| !value.is_empty())
+            }
+            InputKind::Number { value, .. } => value.map(|number| number.to_string()),
+            InputKind::Toggle {
+                value_on,
+                value_off,
+                on,
+                ..
+            } => Some(if *on { value_on } else { value_off }.clone()),
+            InputKind::ChoiceSet { chosen, .. } => (!chosen.is_empty()).then(|| chosen.join(",")),
+        }
+    }
+
+    /// Its choices come from the directory's people ([`PEOPLE_DATASET`]).
+    #[must_use]
+    pub fn asks_for_people(&self) -> bool {
+        matches!(&self.kind, InputKind::ChoiceSet { dataset: Some(dataset), .. } if dataset == PEOPLE_DATASET)
     }
 }
 
@@ -1185,7 +1548,7 @@ fn collect_words(elements: &[Element], words: &mut Vec<String>) {
                     collect_words(cell, words);
                 }
             }
-            Kind::Image(_) | Kind::ImageSet { .. } | Kind::Actions(_) => {}
+            Kind::Image(_) | Kind::ImageSet { .. } | Kind::Actions(_) | Kind::Input(_) => {}
         }
     }
 }

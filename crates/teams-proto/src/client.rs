@@ -41,6 +41,17 @@ pub trait Transport: Sync {
         async { None }
     }
 
+    /// A typed bot invoke on the account's chat service ([`crate::bot`]), sent once: a Microsoft account's body gets
+    /// its Teams service token, an own-server account's none. A transport without this route answers `None` and
+    /// sends nothing.
+    fn deliver_bot_invoke(
+        &self,
+        invoke: crate::bot::BotInvoke,
+    ) -> impl Future<Output = Option<Result<Response, Self::Error>>> + Send {
+        let _ = invoke;
+        async { None }
+    }
+
     /// A typed Power Automate operation. Only the outbox issues mutations; unsupported transports fail closed.
     fn workflow(&self, request: &crate::WorkflowRequest) -> impl Future<Output = crate::WorkflowResponse> + Send {
         let _ = request;

@@ -16,7 +16,11 @@ The user's own client follows its [personal-build rules](personal-build.md).
 
 Apps and bots aren't people. Their presence in a target does not expand the set of people the lab may reach. ngteams
 sends a token only where Teams itself sends it, for the same user action, to the service it was issued for, and never
-to a non-Microsoft service (a third-party bot, an app's backend). So when the user starts a recording, transcription
+to a non-Microsoft service (a third-party bot, an app's backend). A bot invoke goes to the account's own chat service,
+which reaches the bot; a Microsoft account's invoke carries its Teams service token for that service, as Teams sends
+it, and never a token for the app ([bots.md](protocol/bots.md#the-token-rule)). Lab runs invoke only Microsoft's own
+apps (Workflows, Approvals, Praise, Updates) in lab-only chats and teams; a third-party store app or a custom app
+needs the user's go-ahead. So when the user starts a recording, transcription
 or live captions, Microsoft's recording bot receives the user's recorder-scoped token, as Teams sends it.
 
 ## Before each live run

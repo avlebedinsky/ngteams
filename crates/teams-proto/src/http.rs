@@ -30,6 +30,7 @@ use crate::search::{SUBSTRATE_AUDIENCE, SUBSTRATE_HOST, SubstrateSearch};
 use crate::thumbnail::{ThumbnailLink, is_thumbnail_link_in};
 use crate::write::on_calling_base;
 
+mod bot;
 mod captions;
 mod drive;
 mod identity;
@@ -1519,6 +1520,10 @@ impl<C: Credentials> Transport for HttpTransport<C> {
 
     async fn deliver_caption(&self, write: crate::captions::CaptionWrite) -> Option<Result<Response, HttpError>> {
         Some(self.deliver_caption_write(&write).await)
+    }
+
+    async fn deliver_bot_invoke(&self, invoke: crate::bot::BotInvoke) -> Option<Result<Response, HttpError>> {
+        Some(self.deliver_bot_invoke_write(&invoke).await)
     }
 
     async fn deliver_attachment(&self, write: crate::DriveWrite) -> Option<Result<Response, HttpError>> {

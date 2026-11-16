@@ -15,6 +15,7 @@ use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::{Disableable as _, Sizable as _};
 use serde_json::Value;
 use teams_proto::TeamPerson;
+use teams_proto::chat::card::{self, InputKind};
 
 use super::WorkflowRun;
 use crate::icons::{Glyph, icon_button, selected_by};
@@ -141,23 +142,24 @@ fn collect(items: &Value, elements: &mut Vec<Element>, window: &mut Window, cx: 
     }
 }
 
-/// One `Input.*` element's question, when this build draws its kind.
+/// One `Input.*` element's question, when this build draws its kind: the card's input as
+/// [`teams_proto::chat::card::input`] reads it, with its control made.
 fn input(item: &Value, index: usize, window: &mut Window, cx: &mut Context<WorkflowRun>) -> Option<Input> {
-    let id = item.get("id").and_then(Value::as_str)?.to_owned();
-    let placeholder = item
-        .get("placeholder")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
+    let asked = card::input(item)?;
+    let people = asked.asks_for_people();
     let mut subscriptions = Vec::new();
-    let control = match item.get("type").and_then(Value::as_str)? {
-        "Input.Text" if item.get("isMultiline").and_then(Value::as_bool) == Some(true) => {
-            Control::Multiline(cx.new(|cx| TextareaState::new(window, cx).placeholder(placeholder)))
+    let control = match asked.kind {
+        InputKind::Text {
+            multiline: true,
+            placeholder,
+            ..
+        } => {
+            Control::Multiline(cx.new(|cx| TextareaState::new(window, cx).placeholder(placeholder.unwrap_or_default())))
         }
-        "Input.Text" | "Input.Number" => {
-            Control::Text(cx.new(|cx| InputState::new(window, cx).placeholder(placeholder)))
+        InputKind::Text { placeholder, .. } | InputKind::Number { placeholder, .. } => {
+            Control::Text(cx.new(|cx| InputState::new(window, cx).placeholder(placeholder.unwrap_or_default())))
         }
-        "Input.Date" => {
+        InputKind::Date { .. } => {
             let state = cx.new(|cx| DatePickerState::new(window, cx).date_format("%B %-d, %Y"));
             subscriptions.push(cx.subscribe(&state, move |this, _, event: &DatePickerEvent, cx| {
                 let DatePickerEvent::Change(picked) = event;
@@ -171,11 +173,21 @@ fn input(item: &Value, index: usize, window: &mut Window, cx: &mut Context<Workf
             }));
             Control::Date { state, picked: None }
         }
-        "Input.Time" => Control::Time(cx.new(|cx| InputState::new(window, cx).placeholder("Select a time..."))),
-        "Input.Toggle" => toggle(item),
-        "Input.ChoiceSet"
-            if item.pointer("/choices.data/dataset").and_then(Value::as_str) == Some("graph.microsoft.com/users") =>
-        {
+        InputKind::Time { .. } => {
+            Control::Time(cx.new(|cx| InputState::new(window, cx).placeholder("Select a time...")))
+        }
+        InputKind::Toggle {
+            title,
+            value_on,
+            value_off,
+            on,
+        } => Control::Toggle {
+            title,
+            on,
+            value_on,
+            value_off,
+        },
+        InputKind::ChoiceSet { .. } if people => {
             let search = cx.new(|cx| InputState::new(window, cx).placeholder("Select people"));
             subscriptions.push(cx.subscribe(&search, move |this, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -189,58 +201,23 @@ fn input(item: &Value, index: usize, window: &mut Window, cx: &mut Context<Workf
                 asked: 0,
             }
         }
-        "Input.ChoiceSet" => choice_set(item),
-        _ => return None,
+        InputKind::ChoiceSet {
+            choices, multi, chosen, ..
+        } => Control::Choice {
+            choices: choices.into_iter().map(|choice| (choice.title, choice.value)).collect(),
+            multi,
+            chosen,
+        },
     };
     Some(Input {
-        id,
-        label: item.get("label").and_then(Value::as_str).map(str::to_owned),
-        required: item.get("isRequired").and_then(Value::as_bool) == Some(true),
-        error_message: item
-            .get("errorMessage")
-            .and_then(Value::as_str)
-            .unwrap_or("This is required.")
-            .to_owned(),
+        id: asked.id,
+        label: asked.label,
+        required: asked.required,
+        error_message: asked.error_message.unwrap_or_else(|| "This is required.".to_owned()),
         missing: false,
         control,
         _subscriptions: subscriptions,
     })
-}
-
-/// A switch, with the values the card names for on and off (`true`, `false` by default).
-fn toggle(item: &Value) -> Control {
-    let word = |key: &str, default: &str| item.get(key).and_then(Value::as_str).unwrap_or(default).to_owned();
-    let value_on = word("valueOn", "true");
-    Control::Toggle {
-        title: word("title", ""),
-        on: item.get("value").and_then(Value::as_str) == Some(value_on.as_str()),
-        value_on,
-        value_off: word("valueOff", "false"),
-    }
-}
-
-/// A choice from the card's own list, one or several.
-fn choice_set(item: &Value) -> Control {
-    Control::Choice {
-        choices: item
-            .get("choices")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|choice| {
-                Some((
-                    choice.get("title")?.as_str()?.to_owned(),
-                    choice.get("value")?.as_str()?.to_owned(),
-                ))
-            })
-            .collect(),
-        multi: item.get("isMultiSelect").and_then(Value::as_bool) == Some(true),
-        chosen: item
-            .get("value")
-            .and_then(Value::as_str)
-            .map(|value| value.split(',').map(str::to_owned).collect())
-            .unwrap_or_default(),
-    }
 }
 
 impl Input {

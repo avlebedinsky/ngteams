@@ -115,11 +115,52 @@ pub(crate) struct State {
     pub(crate) list_page: Option<usize>,
     /// The requests a test holds (`startup.rs`).
     pub(crate) holds: Vec<std::sync::Arc<crate::startup::Gate>>,
+    /// The bots a test scripted and the invokes taken (`bots.rs`).
+    pub(crate) bots: crate::bots::Bots,
     clock: u64,
     groups_made: u64,
 }
 
 impl State {
+    /// `from` (named `name`) posts a message of `message_type` with `content` to `conversation` (a channel reply's
+    /// names its `;messageid=<post>` chain): see [`crate::ChatServiceMock::add_message`].
+    pub(crate) fn add_message(
+        &mut self,
+        conversation: &str,
+        (from, name): (&str, &str),
+        message_type: &str,
+        content: &str,
+    ) -> Option<String> {
+        let link = format!("{}/v1/users/ME/conversations/{conversation}", self.chat_base());
+        let conversation = conversation
+            .split_once(";messageid=")
+            .map_or(conversation, |(channel, _)| channel);
+        let arrival = self.tick();
+        let sequence = self.conversation(conversation)?.next_sequence();
+        let message = serde_json::json!({
+            "sequenceId": sequence,
+            "conversationid": conversation,
+            "conversationLink": link,
+            "type": "Message",
+            "id": arrival.to_string(),
+            "version": arrival.to_string(),
+            "clientmessageid": (9_000_000_000_000_000_000_u64 + arrival).to_string(),
+            "messagetype": message_type,
+            "contenttype": "Text",
+            "content": content,
+            "from": self.contact(from),
+            "imdisplayname": name,
+            "composetime": iso_time(arrival, 7),
+            "originalarrivaltime": iso_time(arrival, 7),
+            "properties": {},
+        });
+        let stored = self.conversation_mut(conversation)?;
+        stored.messages.push(message.clone());
+        stored.version = arrival;
+        self.queue(conversation, from, EventKind::Message, &message);
+        Some(arrival.to_string())
+    }
+
     pub(crate) fn chat_base(&self) -> String {
         self.cloud.origin().map_or_else(
             || CHAT_BASE.to_owned(),
@@ -211,6 +252,7 @@ impl State {
             user_graph_settings: BTreeMap::new(),
             list_page: None,
             holds: Vec::new(),
+            bots: crate::bots::Bots::default(),
             clock: CLOCK_START,
             groups_made: 0,
         })

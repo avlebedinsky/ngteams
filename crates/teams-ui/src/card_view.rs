@@ -357,7 +357,8 @@ fn unshown_line(palette: Palette) -> AnyElement {
 fn elements(draw: &Draw<'_>, path: &str, items: &[Element], cx: &mut App) -> Vec<AnyElement> {
     let mut drawn = Vec::new();
     for (at, element) in items.iter().enumerate() {
-        if !draw.state.shown(element.id.as_deref(), element.visible) {
+        // inputs aren't drawn yet: their card says it has content it can't show
+        if matches!(element.kind, Kind::Input(_)) || !draw.state.shown(element.id.as_deref(), element.visible) {
             continue;
         }
         if !drawn.is_empty() {
@@ -419,6 +420,7 @@ fn element_view(draw: &Draw<'_>, path: &str, element: &Element, cx: &mut App) ->
             placed(draw, path, set.into_any_element())
         }
         Kind::Table(table) => placed(draw, path, table_view(draw, path, table, cx)),
+        Kind::Input(_) => div().into_any_element(),
     }
 }
 
@@ -959,7 +961,7 @@ fn action_button(draw: &Draw<'_>, key: &str, action: &Action, set: &[String]) ->
     if draw.state.is_open(key) {
         button = button.selected(true);
     }
-    if matches!(action.kind, ActionKind::Submit) {
+    if matches!(action.kind, ActionKind::Submit(_)) {
         button = button.tooltip(RUNS_IN_TEAMS);
     }
     let click = click_of(draw, key, action, set);
@@ -980,7 +982,7 @@ fn action_button(draw: &Draw<'_>, key: &str, action: &Action, set: &[String]) ->
 fn action_glyph(action: &Action) -> Option<Glyph> {
     match (action.teams_icon(), &action.kind) {
         (Some("Open" | "OpenRegular" | "Open16Regular"), _) => Some(Glyph::EXTERNAL_LINK),
-        (_, ActionKind::Submit) => Some(Glyph::OPEN_OUT),
+        (_, ActionKind::Submit(_)) => Some(Glyph::OPEN_OUT),
         _ => None,
     }
 }
@@ -993,7 +995,7 @@ fn click_of(draw: &Draw<'_>, key: &str, action: &Action, set: &[String]) -> OnCl
             let url = url.clone();
             Rc::new(move |_, cx| cx.open_url(&url))
         }
-        ActionKind::Submit => {
+        ActionKind::Submit(_) => {
             let link = draw.in_teams.map(str::to_owned);
             Rc::new(move |_, cx| {
                 if let Some(link) = &link {

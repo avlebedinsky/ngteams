@@ -90,6 +90,7 @@
 //! `capabilities` among them) with the `uniquerosterthread` the conversation list gives the chat; its `fixedRoster`
 //! and its own capabilities aren't known, so they aren't made up.
 
+mod bots;
 mod calendar;
 mod calling;
 mod channels;
@@ -120,6 +121,7 @@ use serde_json::Value;
 use wiremock::matchers::{any, method};
 use wiremock::{Match, Mock, MockServer, Request, Respond, ResponseTemplate};
 
+pub use bots::{BotInvokeRecord, BotReply, bot_answer};
 pub use calling::{ANSWERED_ELSEWHERE, CallPhase, Leg, MockCall, TIMED_OUT};
 pub use channels::{ChannelWrite, NOT_ADDED};
 pub use fixtures::FixtureError;
@@ -391,35 +393,8 @@ impl ChatServiceMock {
         message_type: &str,
         content: &str,
     ) -> Option<String> {
-        let mut world = self.lock();
-        let link = format!("{}/v1/users/ME/conversations/{conversation}", world.chat_base());
-        let conversation = conversation
-            .split_once(";messageid=")
-            .map_or(conversation, |(channel, _)| channel);
-        let arrival = world.tick();
-        let sequence = world.conversation(conversation)?.next_sequence();
-        let message = serde_json::json!({
-            "sequenceId": sequence,
-            "conversationid": conversation,
-            "conversationLink": link,
-            "type": "Message",
-            "id": arrival.to_string(),
-            "version": arrival.to_string(),
-            "clientmessageid": (9_000_000_000_000_000_000_u64 + arrival).to_string(),
-            "messagetype": message_type,
-            "contenttype": "Text",
-            "content": content,
-            "from": world.contact(from),
-            "imdisplayname": name,
-            "composetime": world::iso_time(arrival, 7),
-            "originalarrivaltime": world::iso_time(arrival, 7),
-            "properties": {},
-        });
-        let stored = world.conversation_mut(conversation)?;
-        stored.messages.push(message.clone());
-        stored.version = arrival;
-        world.queue(conversation, from, EventKind::Message, &message);
-        Some(arrival.to_string())
+        self.lock()
+            .add_message(conversation, (from, name), message_type, content)
     }
 
     /// An item in `owner`'s activity feed ([`NOTIFICATIONS`]): its `activity` as the service's feed carries it (made up
@@ -927,6 +902,19 @@ impl ChatServiceMock {
     /// Every request the mock got, in order (to check what a client sent, and how often).
     pub async fn received_requests(&self) -> Vec<Request> {
         self.server.received_requests().await.unwrap_or_default()
+    }
+
+    /// Scripts the bot `bot` (`28:<bot id>`), named `name`: each invoke of one of `replies`' names gets its
+    /// [`BotReply`] (`bots.rs`); a later script of the same bot adds to it. An invoke of a bot or a name nobody
+    /// scripted is a 404.
+    pub fn script_bot(&self, bot: &str, name: &str, replies: &[(&str, BotReply)]) {
+        self.lock().bots.script(bot, name, replies);
+    }
+
+    /// Every bot invoke the mock took, in order, its body as sent.
+    #[must_use]
+    pub fn bot_invokes(&self) -> Vec<BotInvokeRecord> {
+        self.lock().bots.invokes.clone()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, world::State> {

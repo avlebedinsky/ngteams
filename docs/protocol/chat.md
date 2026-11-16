@@ -623,9 +623,11 @@ for its shape only.
   asks the async gateway's thumbnail of it instead, as for a link preview's (`LinkPreviewPicture::card_picture_src`),
   so it never reaches the picture's site; that read of a card picture hasn't been seen live.
 - **Buttons that send to the bot** (`Action.Submit`, `Action.Execute`, a hero card's `imBack`/`messageBack`): the web
-  client runs them as bot invokes that carry the account's token to the app's backend
-  (`docs/backlog/bot-invokes-and-message-extensions.md`), which the native client never sends; its button opens the
-  message in Teams on the web instead.
+  client runs them as invokes on its own chat service, `POST v1/agents/28:<bot>/invoke` ([bots.md](bots.md)); a
+  Microsoft account's invoke carries its Teams service token for that service, never a token for the app. The
+  native client reads what each button carries (its `data`, `verb`, `msteams` kind) and a card's inputs and
+  `refresh`, and has the invoke, but no view sends it yet: the button opens the message in Teams on the web, and a
+  card with an input says it has content it can't show.
 
 ## Forwarded messages
 
@@ -1160,9 +1162,7 @@ The native client: [`teams_core::activity`](../../crates/teams-core/src/activity
   (hundreds of retries a run), `favorites`, `locale`, `firstLoginInformation`, and `readReceiptsEnabled`, new in this run.
 - Whenever an editor opens (the compose box, the mention picker, an edit box), the client asks its message
   extensions' bots for their commands: `POST v1/agents/28:<id>/invoke` with `name` `composeExtension/fetchCommands`, to
-  two bots, denied as unknown (a bot invoke hands the account's token to the bot's own service). The reviewed
-  expected-deny list (`crates/proto-lab/src/scenario/expected.rs`) expects them, so a run isn't failed by them; they
-  stay denied.
+  two bots ([bots.md](bots.md)). The fence of the time denied them as unknown.
 - Once b's reaction reached a's activity feed, a's client marked the feed item read: `PUT
   v1/users/ME/conversations/48%3Anotifications/messages/<id>/properties?name=isread` with `{"isread": "true"}`, retried
   nine times while denied. A carve-out under the lab rule (the account's own feed): it passes.

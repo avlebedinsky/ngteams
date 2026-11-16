@@ -318,8 +318,8 @@ plan with the message's text and link.
 Teams runs it through the Workflows bot, over the chat service's `POST v1/agents/<bot>/invoke`: `composeExtension/
 fetchCommands` (the message workflows, `runFlow/<flow resource id>`), `composeExtension/fetchTask` (the card, its
 Submit carrying `flowTriggerUri`) and `composeExtension/submitAction` (the answers, each a string: a date
-`2026-11-05`, a time `08:00`, a switch `"false"`, an empty answer left out). Each invoke carries a `userAadToken` for
-the bot. The bot then posts to the workflow's Logic Flows runtime trigger, `<runtime>/apim/logicflows/<flow>/
+`2026-11-05`, a time `08:00`, a switch `"false"`, an empty answer left out). Each invoke carries the account's Teams
+service token as `userAadToken`, for the chat service ([bots.md](bots.md#the-token-rule)). The bot then posts to the workflow's Logic Flows runtime trigger, `<runtime>/apim/logicflows/<flow>/
 triggers/manual/run?api-version=2016-06-01`, the body a run's trigger outputs show: `cardOutputs` (the answers by
 input id) and `teamsFlowRunContext` with `MessagePayload` (`Id`, `From.User` (`DisplayName`, `Id`: the object id) or
 `From.Application` for a bot's message, `Body` (`ContentType` `html`, `Content`, `PlainText`), `LinkToMessage`,

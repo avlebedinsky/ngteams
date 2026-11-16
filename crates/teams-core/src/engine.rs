@@ -625,6 +625,9 @@ pub enum EngineError {
     /// ([`crate::service_search`]).
     #[error("the search couldn't be read")]
     SearchFailed,
+    /// A bot invoke didn't reach the app's service, or its outcome isn't known ([`crate::bots`]): it isn't sent again.
+    #[error("the app wasn't reached: {why}")]
+    BotNotReached { why: String },
     /// A call action was refused: nothing was sent.
     #[error(transparent)]
     Call(CallActionError),
@@ -666,6 +669,7 @@ impl EngineError {
             Self::ChannelNotCreated { .. } => "channel not created",
             Self::TeamNotChanged { .. } => "team not changed",
             Self::SearchFailed => "search failed",
+            Self::BotNotReached { .. } => "bot not reached",
             Self::Call(_) => "call",
         }
     }
@@ -867,6 +871,10 @@ enum Request {
     Team(Box<TeamAsk>),
     /// What the Apps tab, Change picture, a channel's analytics and "More create team options" ask ([`crate::team_apps`]).
     TeamApps(Box<TeamAppsAsk>),
+    BotInvoke {
+        ask: Box<crate::bots::BotAsk>,
+        reply: Responder<teams_proto::InvokeAnswer>,
+    },
     Workflow {
         request: Box<teams_proto::WorkflowRequest>,
         reply: Responder<teams_proto::WorkflowResponse>,
@@ -1616,6 +1624,15 @@ impl EngineRequests {
                 period,
                 reply,
             }))
+        })
+    }
+
+    /// Asks an app's bot through the account's chat service ([`crate::bots`]): one attempt through the outbox, never
+    /// sent again; refused in read-only mode. The bot's answer, or [`EngineError::BotNotReached`].
+    pub fn bot_invoke(&self, ask: crate::bots::BotAsk) -> Reply<teams_proto::InvokeAnswer> {
+        self.ask(|reply| Request::BotInvoke {
+            ask: Box::new(ask),
+            reply,
         })
     }
 
@@ -2407,8 +2424,8 @@ where
         }
     }
 
-    /// A person (their stored profile, or their profile card read now), other people's calendars read, or a meeting of
-    /// the account's own made now (Meet now).
+    /// A person (their stored profile, or their profile card read now), other people's calendars and availability read,
+    /// a meeting of the account's own made now (Meet now), or a bot asked ([`crate::bots`]).
     fn on_more_lookups(&mut self, request: Request) {
         match request {
             Request::ProfileCard(mri, reply) => self.profile_cards.card(mri, reply),
@@ -2423,6 +2440,13 @@ where
                 reply,
             } => self.calendar.people_calendars(people, start_ms, days, reply),
             Request::MeetNow { subject, reply } => self.calendar.meet_now(subject, reply),
+            Request::BotInvoke { ask, reply } => self.channels.bot_invoke(*ask, reply),
+            Request::MeetingAvailability {
+                attendees,
+                start_ms,
+                meeting_minutes,
+                reply,
+            } => self.calendar.availability(attendees, start_ms, meeting_minutes, reply),
             _ => {}
         }
     }
@@ -2470,14 +2494,10 @@ where
             Request::TeamApps(ask) => self.channels.team_apps_ask(*ask),
             Request::Workflow { request, reply } => self.channels.workflow(*request, reply),
             Request::SearchService { query, scope, reply } => self.service_search.search(query, scope, reply),
-            Request::MeetingAvailability {
-                attendees,
-                start_ms,
-                meeting_minutes,
-                reply,
-            } => self.calendar.availability(attendees, start_ms, meeting_minutes, reply),
             request @ (Request::PeopleCalendars { .. }
             | Request::MeetNow { .. }
+            | Request::BotInvoke { .. }
+            | Request::MeetingAvailability { .. }
             | Request::ProfileCard(..)
             | Request::Person(..)) => self.on_more_lookups(request),
             Request::Invitable { query, reply } => match self.store.profiles_named(&query, INVITABLE) {

@@ -14,6 +14,7 @@ pub use call_operation::CallOperation;
 
 mod ams;
 mod attachment;
+pub mod bot;
 mod calendar;
 pub mod captions;
 mod channel_meeting;
@@ -55,6 +56,7 @@ mod team_read;
 mod thumbnail;
 pub mod transcript;
 pub use attachment::{DriveSite, DriveWrite, MAX_ATTACHMENT_SIZE, OwnDrive, UploadedFile, direct_file_grants};
+pub use bot::{BotInvoke, CardInvoke, CommandContext, InvokeAnswer, InvokeKind};
 mod urlp;
 pub mod workflow;
 mod write;

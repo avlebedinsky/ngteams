@@ -1,0 +1,114 @@
+{
+  "_synthetic": "Made up (ids as <guid:name> placeholders a test fills in), in the shape of the bodies the web client posts to the chat service's POST v1/agents/28:<bot>/invoke (docs/protocol/bots.md), every value made up and no token: the userAadToken a Microsoft account's body carries is left out here and added by the transport. fetchCommands, fetchTask and submitAction take the shapes seen in the lab's Workflows runs of 2026-11-05 (team-manage); query, selectItem, adaptiveCard/action, task/fetch, task/submit and the plain submit (name message) follow the public Teams and Bot Framework documentation and are unseen.",
+  "fetchCommands": {
+    "name": "composeExtension/fetchCommands",
+    "appId": "<guid:app>",
+    "value": {"commandContext": "Message"},
+    "imdisplayname": "Lab A",
+    "conversation": {"id": "19:channel0001@thread.tacv2"}
+  },
+  "fetchTask": {
+    "name": "composeExtension/fetchTask",
+    "appId": "<guid:app>",
+    "value": {
+      "commandId": "synthetic-command-1",
+      "commandContext": "message",
+      "context": {"theme": "default"},
+      "messagePayload": {
+        "id": "1700000000001",
+        "replyToId": "1700000000000",
+        "createdDateTime": "2026-01-02T03:04:05.006Z",
+        "deleted": false,
+        "importance": "normal",
+        "locale": "en-us",
+        "from": {"application": {"applicationIdentityType": "bot", "id": "<guid:bot>", "displayName": "Synthetic Bot"}},
+        "body": {"contentType": "html", "content": "<p>Synthetic post</p>"},
+        "attachments": [],
+        "mentions": [],
+        "reactions": [],
+        "linkToMessage": "https://teams.cloud.microsoft/l/message/19:channel0001@thread.tacv2/1700000000001?parentMessageId=1700000000000"
+      }
+    },
+    "imdisplayname": "Lab A",
+    "conversation": {"id": "19:channel0001@thread.tacv2;messageid=1700000000000"}
+  },
+  "submitAction": {
+    "name": "composeExtension/submitAction",
+    "appId": "<guid:app>",
+    "value": {
+      "commandId": "synthetic-command-1",
+      "commandContext": "message",
+      "data": {"hostEvent": "RunFlow", "flowDetails": {"data": {"flowId": "<guid:flow>"}}, "remindDate": "2026-01-03", "remindTime": "08:00"},
+      "context": {"theme": "default"},
+      "messagePayload": {
+        "id": "1700000000002",
+        "createdDateTime": "2026-01-02T03:04:05.006Z",
+        "deleted": false,
+        "importance": "normal",
+        "locale": "en-us",
+        "from": {"user": {"userIdentityType": "aadUser", "id": "<guid:b>", "displayName": "Lab B"}},
+        "body": {"contentType": "html", "content": "<p>Synthetic message</p>"},
+        "attachments": [],
+        "mentions": [],
+        "reactions": [],
+        "linkToMessage": "https://teams.cloud.microsoft/l/message/19:<guid:a>_<guid:b>@unq.gbl.spaces/1700000000002?context=%7B%22contextType%22:%22chat%22%7D"
+      }
+    },
+    "imdisplayname": "Lab A",
+    "conversation": {"id": "19:<guid:a>_<guid:b>@unq.gbl.spaces"}
+  },
+  "query": {
+    "name": "composeExtension/query",
+    "appId": "<guid:app>",
+    "value": {
+      "commandId": "synthetic-search",
+      "commandContext": "compose",
+      "parameters": [{"name": "searchText", "value": "lab"}],
+      "queryOptions": {"skip": 0, "count": 25},
+      "context": {"theme": "default"}
+    },
+    "imdisplayname": "Lab A",
+    "conversation": {"id": "19:00000000000000000000000000000abc@thread.v2"}
+  },
+  "selectItem": {
+    "name": "composeExtension/selectItem",
+    "appId": "<guid:app>",
+    "value": {"itemId": "synthetic-item-3"},
+    "imdisplayname": "Lab A",
+    "conversation": {"id": "19:00000000000000000000000000000abc@thread.v2"}
+  },
+  "execute": {
+    "name": "adaptiveCard/action",
+    "appId": "<guid:app>",
+    "value": {
+      "action": {"type": "Action.Execute", "id": "approve", "verb": "approve", "data": {"request": "synthetic-request-1", "comment": "Looks fine"}},
+      "trigger": "manual"
+    },
+    "imdisplayname": "Lab B",
+    "conversation": {"id": "19:<guid:a>_<guid:b>@unq.gbl.spaces"},
+    "messageId": "1700000000003"
+  },
+  "taskFetch": {
+    "name": "task/fetch",
+    "appId": "<guid:app>",
+    "value": {"data": {"msteams": {"type": "task/fetch"}, "form": "synthetic"}, "context": {"theme": "default"}},
+    "imdisplayname": "Lab A",
+    "conversation": {"id": "19:00000000000000000000000000000abc@thread.v2"},
+    "messageId": "1700000000004"
+  },
+  "taskSubmit": {
+    "name": "task/submit",
+    "appId": "<guid:app>",
+    "value": {"data": {"form": "synthetic", "title": "A made-up title"}, "context": {"theme": "default"}},
+    "imdisplayname": "Lab A",
+    "conversation": {"id": "19:00000000000000000000000000000abc@thread.v2"}
+  },
+  "submit": {
+    "name": "message",
+    "appId": "<guid:app>",
+    "value": {"choice": "yes", "note": "A made-up note"},
+    "imdisplayname": "Lab A",
+    "conversation": {"id": "19:<guid:a>_<guid:bot>@unq.gbl.spaces"},
+    "messageId": "1700000000005"
+  }
+}
