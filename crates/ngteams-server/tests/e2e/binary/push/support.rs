@@ -638,32 +638,125 @@ pub struct Tally {
     task: tokio::task::JoinHandle<()>,
 }
 
-/// The request lines at the start of `bytes` and after each line end, as far as `bytes` holds them whole; how much of
-/// `bytes` was read through.
-fn request_lines(bytes: &[u8], found: &mut Vec<String>) -> usize {
-    const METHODS: [&[u8]; 5] = [b"GET /", b"POST /", b"PUT /", b"DELETE /", b"PATCH /"];
-    let mut done = 0;
+/// The HTTP/1.1 requests of one client connection, read as its bytes pass: each request's head, then its body skipped
+/// by its `Content-Length` (or its chunks), so a request that follows a body on a kept-alive connection counts too.
+#[derive(Default)]
+struct Requests {
+    /// Bytes of a head (or of a chunked body) not yet whole.
+    carry: Vec<u8>,
+    /// Bytes of the current body still to pass.
+    skip: usize,
+    /// The connection was upgraded: what follows is not HTTP.
+    upgraded: bool,
+}
+
+fn find(bytes: &[u8], wanted: &[u8]) -> Option<usize> {
+    bytes.windows(wanted.len()).position(|window| window == wanted)
+}
+
+/// The length of the chunked body at the start of `bytes` with its trailer, when `bytes` holds it whole.
+fn chunked_length(bytes: &[u8]) -> Option<usize> {
     let mut at = 0;
-    while at < bytes.len() {
-        let line_start = at == 0 || bytes[at - 1] == b'\n';
-        if line_start && METHODS.iter().any(|method| bytes[at..].starts_with(method)) {
-            let Some(end) = bytes[at..].windows(2).position(|pair| pair == b"\r\n") else {
-                return at;
-            };
-            let line = String::from_utf8_lossy(&bytes[at..at + end]);
-            if let Some(line) = line.strip_suffix(" HTTP/1.1") {
-                found.push(line.to_owned());
+    loop {
+        let line = find(&bytes[at..], b"\r\n")?;
+        let size = String::from_utf8_lossy(&bytes[at..at + line]);
+        let size = usize::from_str_radix(size.split(';').next().unwrap_or_default().trim(), 16).ok()?;
+        at += line + 2;
+        if size == 0 {
+            if bytes[at..].starts_with(b"\r\n") {
+                return Some(at + 2);
             }
-            at += end + 2;
-            done = at;
-        } else {
-            at += 1;
-            if bytes[at - 1] == b'\n' {
-                done = at;
+            return find(&bytes[at..], b"\r\n\r\n").map(|end| at + end + 4);
+        }
+        at += size + 2;
+        if at > bytes.len() {
+            return None;
+        }
+    }
+}
+
+impl Requests {
+    /// Reads `bytes`, the next ones from the client; pushes the line (`GET /path?query`) of each request whose head
+    /// they complete to `found`.
+    fn feed(&mut self, bytes: &[u8], found: &mut Vec<String>) {
+        if self.upgraded {
+            return;
+        }
+        self.carry.extend_from_slice(bytes);
+        loop {
+            let passed = self.skip.min(self.carry.len());
+            self.carry.drain(..passed);
+            self.skip -= passed;
+            if self.skip > 0 {
+                return;
+            }
+            while self.carry.starts_with(b"\r\n") {
+                self.carry.drain(..2);
+            }
+            let Some(end) = find(&self.carry, b"\r\n\r\n") else {
+                return;
+            };
+            let head = String::from_utf8_lossy(&self.carry[..end]).into_owned();
+            let mut lines = head.split("\r\n");
+            let line = lines.next().unwrap_or_default();
+            let (mut length, mut chunked, mut upgrade) = (0, false, false);
+            for header in lines {
+                let Some((name, value)) = header.split_once(':') else {
+                    continue;
+                };
+                let value = value.trim();
+                match name.trim().to_ascii_lowercase().as_str() {
+                    "content-length" => length = value.parse().unwrap_or(0),
+                    "transfer-encoding" => chunked = value.to_ascii_lowercase().contains("chunked"),
+                    "upgrade" => upgrade = true,
+                    _ => {}
+                }
+            }
+            let mut taken = end + 4;
+            if chunked {
+                let Some(body) = chunked_length(&self.carry[taken..]) else {
+                    return;
+                };
+                taken += body;
+            } else {
+                self.skip = length;
+            }
+            found.push(line.strip_suffix(" HTTP/1.1").unwrap_or(line).to_owned());
+            self.carry.drain(..taken);
+            if upgrade {
+                self.upgraded = true;
+                self.carry = Vec::new();
+                return;
             }
         }
     }
-    done.max(bytes.len().saturating_sub(64))
+}
+
+#[test]
+fn requests_after_a_body_on_a_kept_alive_connection_count_too() {
+    let stream: &[u8] = b"POST /api/channels HTTP/1.1\r\nContent-Type: application/json\r\ncontent-length: 15\r\n\r\n\
+        {\"n\":\"\nGET /x\"}GET /api/v3/teams/users/me HTTP/1.1\r\nHost: x\r\n\r\n\
+        PUT /v1/a HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nGET \r\n0\r\n\r\n\
+        GET /api/v3/teams/users/me HTTP/1.1\r\n\r\n\
+        GET /socket HTTP/1.1\r\nUpgrade: websocket\r\n\r\nGET /not-http HTTP/1.1\r\n\r\n";
+    let wanted = [
+        "POST /api/channels",
+        "GET /api/v3/teams/users/me",
+        "PUT /v1/a",
+        "GET /api/v3/teams/users/me",
+        "GET /socket",
+    ];
+    let mut whole = Vec::new();
+    Requests::default().feed(stream, &mut whole);
+    assert_eq!(whole, wanted);
+    // the same bytes in pieces of every size
+    for piece in 1..stream.len() {
+        let (mut requests, mut found) = (Requests::default(), Vec::new());
+        for bytes in stream.chunks(piece) {
+            requests.feed(bytes, &mut found);
+        }
+        assert_eq!(found, wanted, "in pieces of {piece}");
+    }
 }
 
 async fn tally_one(client: TcpStream, target: String, lines: Arc<std::sync::Mutex<Vec<String>>>) {
@@ -674,13 +767,11 @@ async fn tally_one(client: TcpStream, target: String, lines: Arc<std::sync::Mute
     let (mut from_client, mut to_client) = client.into_split();
     let (mut from_server, mut to_server) = server.into_split();
     let up = async move {
-        let mut carry: Vec<u8> = Vec::new();
+        let mut requests = Requests::default();
         let mut buffer = vec![0_u8; 16 * 1024];
         while let Ok(read @ 1..) = from_client.read(&mut buffer).await {
-            carry.extend_from_slice(&buffer[..read]);
             let mut found = Vec::new();
-            let done = request_lines(&carry, &mut found);
-            carry.drain(..done);
+            requests.feed(&buffer[..read], &mut found);
             lines.lock().unwrap().extend(found);
             if to_server.write_all(&buffer[..read]).await.is_err() {
                 break;

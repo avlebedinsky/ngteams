@@ -341,14 +341,19 @@ async fn thirty_channels_made_quickly_end_right_in_every_members_list_with_a_few
             "{backend:?}: {BURST} channels made in {made:?}, every list right after {settled:?}; teams reads since the \
              burst began, by a (who made them), b, c, d: {reads:?}"
         );
-        // the maker reads them after each channel it made (as before the pushes); the pushes add at most a few
+        // every list moved by a read the relay saw: a relay that counts nothing fails here
         assert!(
-            reads[0] <= BURST + 3,
-            "a: {} teams reads for its {BURST} channels",
-            reads[0]
+            reads.iter().all(|reads| *reads >= 1),
+            "{reads:?}: a client's teams reads were not counted"
         );
         // the members only hear of them: gathered, a read per 5 s of the burst and one after, not one per channel
         let allowed = usize::try_from(settled.as_secs() / 5).unwrap_or(usize::MAX) + 2;
+        // the maker reads them after each channel it made (as before the pushes); the pushes add the members' few
+        assert!(
+            reads[0] <= BURST + allowed,
+            "a: {} teams reads for its {BURST} channels over {settled:?}",
+            reads[0]
+        );
         for (upn, reads) in ["b", "c", "d"].iter().zip(&reads[1..]) {
             assert!(
                 *reads <= allowed,
@@ -461,9 +466,9 @@ async fn twenty_people_added_to_a_group_chat_at_once_show_in_every_running_clien
                 );
             }
         }
-        // a read or two each, not one per person
+        // a read or two each, not one per person (and each counted: none is zero)
         assert!(
-            reads.iter().all(|reads| *reads <= 2),
+            reads.iter().all(|reads| (1..=2).contains(reads)),
             "{reads:?} reads of the chat for one add of {PEOPLE}"
         );
 
@@ -492,9 +497,9 @@ async fn ten_taken_out(users: [&mut User; 5], tallies: &[Tally], chat: &str, gon
     }
     let reads = since(&each(tallies, &["/v1/threads/", chat]), &before);
     eprintln!("10 taken out one by one; chat reads by a, b, c, p01, p02: {reads:?}");
-    // at most one each per change
+    // at most one each per change, and each counted
     assert!(
-        reads.iter().all(|reads| *reads <= 10),
+        reads.iter().all(|reads| (1..=10).contains(reads)),
         "{reads:?} reads of the chat for 10 removals"
     );
 }
@@ -558,7 +563,10 @@ async fn channels_made_steadily_without_a_pause_still_show_in_a_members_list_whi
             seen <= Duration::from_secs(7),
             "b listed the first channel only after {seen:?}"
         );
-        assert!(reads <= 5, "b read the teams {reads} times for {n} channels over 12 s");
+        assert!(
+            (1..=5).contains(&reads),
+            "b read the teams {reads} times for {n} channels over 12 s"
+        );
         drop((a, b));
         rig.stop().await;
     }
@@ -752,6 +760,11 @@ async fn a_microsoft_account_and_an_own_servers_account_in_one_process_each_foll
         // Microsoft's pushes, a channel's and a group chat's (their id alone): its engine reads, the own one doesn't
         let own_teams = each(std::slice::from_ref(&tally), &[TEAMS_READ])[0];
         let own_threads = each(std::slice::from_ref(&tally), &["/v1/threads/"])[0];
+        // the own changes were read through the relay: a relay that counts nothing fails here
+        assert!(
+            own_teams >= 1 && own_threads >= 1,
+            "own reads not counted: teams {own_teams}, threads {own_threads}"
+        );
         for thread in [teams_mock::CHANNEL, ABC_CHAT] {
             let update =
                 serde_json::json!({"type": "EventMessage", "resourceType": "ThreadUpdate", "resource": {"id": thread}});
