@@ -517,3 +517,61 @@ async fn a_channels_meet_now_is_posted_titled_joined_from_its_post_and_told_ende
         shut_down(vec![ada, bert], mixed).await;
     }
 }
+
+/// Until `person` is told its meeting `call` is as `wanted` says.
+async fn meeting_is(person: &mut Person, call: CallId, wanted: impl Fn(&teams_call::MeetingState) -> bool) {
+    person
+        .engine
+        .next(|event| match event {
+            Event::CallMeeting { call: of, state } if *of == call && wanted(state) => Some(()),
+            _ => None,
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_organizers_controls_bind_everyone_in_the_meeting_while_it_runs() {
+    for backend in backends() {
+        let mixed = Mixed::start(backend).await;
+        let mut ada = Person::new(&mixed, "Ada", A_TONE).await;
+        let mut bert = Person::new(&mixed, "Bert", B_TONE).await;
+        let mut cora = Person::new(&mixed, "Cora", C_TONE).await;
+        let event = schedule(&ada, &[&bert, &cora]).await;
+        let join = join_of(&event);
+        let a_call = joined(&mut ada, &join).await;
+        let b_call = joined(&mut bert, &join).await;
+        let c_call = joined(&mut cora, &join).await;
+        let option = |option| CallAction::MeetingOption { call: a_call, option };
+        // only the organizer presents: the others are attendees, told so with the option
+        ada.engine
+            .call(option(teams_proto::MeetingOption::Present(false)))
+            .await;
+        for (person, call) in [(&mut bert, b_call), (&mut cora, c_call)] {
+            meeting_is(person, call, |state| {
+                state.attendee && state.options.present == Some(false)
+            })
+            .await;
+        }
+        // attendees may not unmute: the service mutes them, and their microphone is blocked
+        let restrict = teams_proto::MeetingOption::Attendees {
+            unmute: false,
+            camera: true,
+        };
+        ada.engine.call(option(restrict)).await;
+        for (person, call) in [(&mut bert, b_call), (&mut cora, c_call)] {
+            meeting_is(person, call, |state| {
+                state.unmute_blocked() && state.muted_by_organizer.is_some()
+            })
+            .await;
+        }
+        let b = bert.engine.mri.clone();
+        muted_shown(&mut ada, a_call, &b, true).await;
+        // everyone presents again: the restriction binds nobody
+        ada.engine.call(option(teams_proto::MeetingOption::Present(true))).await;
+        for (person, call) in [(&mut bert, b_call), (&mut cora, c_call)] {
+            meeting_is(person, call, |state| !state.attendee && !state.unmute_blocked()).await;
+        }
+        leave_all(&mut [&mut ada, &mut bert, &mut cora], &[a_call, b_call, c_call]).await;
+        shut_down(vec![ada, bert, cora], mixed).await;
+    }
+}

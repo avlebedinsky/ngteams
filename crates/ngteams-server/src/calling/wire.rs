@@ -187,7 +187,37 @@ pub(crate) fn conversation(origin: &str, region: &str, call: &Call) -> Value {
         "state": conversation_state(call),
         "roster": answered_roster(call),
         "links": conversation_links(origin, call),
+        "meetingDetails": meeting_details(call),
     })
+}
+
+/// A meeting's options in effect, as a conversation tells them (`meetingDetails`); none in a call that is no meeting's.
+fn meeting_details(call: &Call) -> Value {
+    let Some(meeting) = &call.meeting else {
+        return Value::Null;
+    };
+    let controls = &meeting.controls;
+    let or = |value: &str, default: &'static str| {
+        if value.is_empty() {
+            default.to_owned()
+        } else {
+            value.to_owned()
+        }
+    };
+    let restrictions = match controls.restrictions.as_str() {
+        "DisableAudio,DisableVideo" => "DisableAv".to_owned(),
+        other => or(other, "UnRestricted"),
+    };
+    json!({"meetingCapability": {
+        "autoAdmittedUsers": or(&controls.lobby, "EveryoneInCompany"),
+        "presenterOption": or(&controls.presenters, "Everyone"),
+        "attendeeRestrictions": restrictions,
+    }})
+}
+
+/// What everyone in a meeting is told at its `conversationUpdate` callback when its options change.
+pub(crate) fn conversation_update(call: &Call) -> Value {
+    json!({"meetingDetails": meeting_details(call)})
 }
 
 /// A conversation that never runs: the answer of a start refused at once at its `conversationEnd` callback.
@@ -462,14 +492,14 @@ pub(crate) fn music_entry(version: u64, playing: bool) -> Value {
 /// What an endpoint in the call sends and takes: a 1:1 call's lists no media streams (its media goes through no
 /// mixer); a group call's its main audio, its main video (sent while its camera is on) and, while its share is the
 /// call's, its sharing stream, by the party's sources: what the others' source requests name.
-fn endpoint_call(kind: Kind, party: &Party) -> Value {
-    let Some(leg) = party.leg.as_ref().filter(|_| kind == Kind::Group) else {
+fn endpoint_call(call: &Call, party: &Party) -> Value {
+    let Some(leg) = party.leg.as_ref().filter(|_| call.kind == Kind::Group) else {
         return json!({"serverMuteVersion": party.mute_version});
     };
     let camera = if party.showing.camera { "sendrecv" } else { "recvonly" };
     let mut streams = vec![
         json!({"type": "audio", "label": "main-audio", "sourceId": leg.sources.audio, "direction": "sendrecv",
-            "serverMuted": party.server_muted}),
+            "serverMuted": party.server_muted || call.audio_blocked(party)}),
         json!({"type": "video", "label": "main-video", "sourceId": leg.sources.video, "direction": camera}),
     ];
     if party.presenting {
@@ -512,7 +542,6 @@ pub(crate) fn seed(parameters: &Value) -> Option<u64> {
 
 /// One party as the roster lists it: in a meeting's call, with its role there.
 fn roster_entry(call: &Call, party: &Party, version: u64) -> Value {
-    let kind = call.kind;
     let endpoint = party.participant["endpointId"].as_str().unwrap_or_default();
     let endpoints = if party.status == Status::Lobby && party.active.is_some() {
         json!({endpoint: {
@@ -524,7 +553,7 @@ fn roster_entry(call: &Call, party: &Party, version: u64) -> Value {
         }})
     } else if party.active.is_some() {
         json!({endpoint: {
-            "call": endpoint_call(kind, party),
+            "call": endpoint_call(call, party),
             "modalityJoined": "Call",
             "participantId": party.participant["participantId"],
             "endpointJoinTime": party.joined,

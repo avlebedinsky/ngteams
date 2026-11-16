@@ -48,6 +48,7 @@ use axum::{Json, Router};
 use serde_json::{Value, json};
 
 pub use media::{MediaError, MediaHome, MediaNodes, Mixers, Sdp, Sources};
+pub(crate) use meeting::options_saved as meeting_options_saved;
 pub use repo::{OpenCall, open_calls};
 pub use turn::rest_credential;
 

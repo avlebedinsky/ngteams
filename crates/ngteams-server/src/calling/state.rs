@@ -122,6 +122,31 @@ pub(crate) struct Meeting {
     pub channel: bool,
     #[serde(default)]
     pub post: Option<String>,
+    /// The meeting's options in effect, as its organizer last saved them.
+    #[serde(default)]
+    pub controls: Controls,
+}
+
+/// A meeting's options that bind its call (`docs/protocol/calling.md`, "Controls"), as saved: who comes in without
+/// the lobby (`AutoAdmittedUsers`), who presents (`PresenterOption`), and what attendees may not do
+/// (`AttendeeRestrictions`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Controls {
+    pub lobby: String,
+    pub presenters: String,
+    pub restrictions: String,
+}
+
+impl Controls {
+    /// Only the organizer presents: everyone else is an attendee.
+    pub(crate) fn attendees(&self) -> bool {
+        matches!(self.presenters.as_str(), "OrganizerOnly" | "SpecificPeople")
+    }
+
+    /// Attendees may not unmute themselves.
+    pub(crate) fn audio_blocked(&self) -> bool {
+        self.restrictions.contains("DisableAudio")
+    }
 }
 
 /// One of a party's endpoints: its Trouter endpoint and the callbacks it handed out, by name.

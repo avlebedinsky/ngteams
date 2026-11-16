@@ -136,6 +136,7 @@ pub(super) async fn save(
         values.insert((*name).to_owned(), json!(value));
     }
     meeting_repo::set_options(&app.db, chat, &Value::Object(values.clone()).to_string()).await?;
+    crate::calling::meeting_options_saved(&app, chat).await?;
     let options: Vec<Value> = changes
         .iter()
         .map(|((name, kind, allowed), _)| entry(name, kind, allowed, &values))

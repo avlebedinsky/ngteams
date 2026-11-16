@@ -16,7 +16,7 @@ use serde_json::Value;
 
 use super::group::{self, Opened, Start};
 use super::repo::{self, Key};
-use super::state::{At, Call, Meeting, Out, Party, Refusal, Seat, Status};
+use super::state::{At, Call, Controls, Meeting, Out, Party, Refusal, Seat, Status};
 use super::wire;
 use super::{Caller, Failure, call_events, carry_out, needed_links, now_ms, step, step_any};
 use crate::app::App;
@@ -50,6 +50,40 @@ async fn admission(app: &App, chat: &str, organizer: &str, account: &str) -> Res
     Ok(if admitted { Admission::In } else { Admission::Lobby })
 }
 
+/// The options saved for the meeting whose chat is `chat` that bind its call.
+async fn controls(app: &App, chat: &str) -> Result<Controls, DbError> {
+    let option = |name| crate::calendar::option(&app.db, chat, name);
+    Ok(Controls {
+        lobby: option("AutoAdmittedUsers").await?,
+        presenters: option("PresenterOption").await?,
+        restrictions: option("AttendeeRestrictions").await?,
+    })
+}
+
+/// The organizer saved the options of the meeting whose chat is `chat`: the meeting's call running in it, if any,
+/// goes by them from now on and tells everyone in it.
+///
+/// # Errors
+/// A database failure.
+pub(crate) async fn options_saved(app: &App, chat: &str) -> Result<(), DbError> {
+    let Some(running) = repo::running_in(&app.db, chat).await? else {
+        return Ok(());
+    };
+    if running.call.meeting.is_none() {
+        return Ok(());
+    }
+    let controls = controls(app, chat).await?;
+    let changed = step_any(app, Key::Id(&running.call.id), |call, at, out| {
+        call.set_controls(controls.clone(), at, out);
+        Ok(())
+    })
+    .await;
+    match changed {
+        Err(Failure::Database(error)) => Err(error),
+        _ => Ok(()),
+    }
+}
+
 /// `POST epconv` with a meeting's chat and organizer: the call of the meeting is joined when it runs, else started
 /// with the joiner in it; a joiner the lobby holds waits there instead. Nobody rings.
 pub(super) async fn start(app: &App, caller: &Caller, asked: Start<'_>, body: &Value) -> Result<Response, Failure> {
@@ -72,6 +106,7 @@ pub(super) async fn start(app: &App, caller: &Caller, asked: Start<'_>, body: &V
     let mut call = group::new_call(asked.chat, from);
     call.meeting = Some(Meeting {
         organizer: meeting.organizer_id,
+        controls: controls(app, asked.chat).await?,
         ..Meeting::default()
     });
     let opened = match admitted {
@@ -285,6 +320,7 @@ pub(super) async fn meet_now(
         organizer: caller.id.clone(),
         channel: true,
         post: None,
+        controls: controls(app, channel).await?,
     });
     call.alive_due = now_ms() / 1000 + super::state::KEEP_ALIVE;
     call.reschedule();

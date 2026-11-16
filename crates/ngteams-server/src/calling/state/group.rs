@@ -31,11 +31,13 @@ impl Call {
     }
 
     /// The role `party` has in a meeting's call, as its roster names it: the meeting's organizer, everyone else a
-    /// presenter. `None` in a call that is no meeting's.
+    /// presenter, or an attendee while only the organizer presents. `None` in a call that is no meeting's.
     pub(crate) fn role_of(&self, party: &Party) -> Option<&'static str> {
         let meeting = self.meeting.as_ref()?;
         Some(if party.id == meeting.organizer {
             "organizer"
+        } else if meeting.controls.attendees() {
+            "attendee"
         } else {
             "presenter"
         })

@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use serde_json::json;
 
-use super::{At, Call, Hand, KEEP_ALIVE, KEEP_ALIVE_SLACK, Kind, Out, Party, Phase, Refusal, Seat, Status};
+use super::{At, Call, Controls, Hand, KEEP_ALIVE, KEEP_ALIVE_SLACK, Kind, Out, Party, Phase, Refusal, Seat, Status};
 use crate::calling::wire::{self, Links};
 
 /// What someone turned away from the lobby is told at its `end` callback.
@@ -232,6 +232,43 @@ impl Call {
         let sender = self.party(seat).participant.clone();
         let end = wire::end(0, ENDED_FOR_ALL, Some(&sender));
         self.end_group(at, &end, out);
+    }
+    /// Whether `party`'s main audio is muted by the meeting's options: it is an attendee, and attendees may not
+    /// unmute.
+    pub(crate) fn audio_blocked(&self, party: &Party) -> bool {
+        let blocked = self
+            .meeting
+            .as_ref()
+            .is_some_and(|meeting| meeting.controls.audio_blocked());
+        blocked && self.role_of(party) == Some("attendee")
+    }
+
+    /// The meeting's options as its organizer saved them now (`controls`): each party whose audio they mute or let go
+    /// gets a new mute version, the roster tells everyone their roles and mutes, and each one in the call or its lobby
+    /// is told the options at its `conversationUpdate` callback.
+    pub(crate) fn set_controls(&mut self, controls: Controls, at: At<'_>, out: &mut Out) {
+        let Some(meeting) = self.meeting.as_ref() else { return };
+        if self.phase == Phase::Ended || meeting.controls == controls {
+            return;
+        }
+        let blocked_before: Vec<bool> = self.parties.iter().map(|party| self.audio_blocked(party)).collect();
+        if let Some(meeting) = self.meeting.as_mut() {
+            meeting.controls = controls;
+        }
+        for (number, before) in blocked_before.into_iter().enumerate() {
+            if self.audio_blocked(self.party(Seat(number))) != before {
+                self.party_mut(Seat(number)).mute_version += 2;
+            }
+        }
+        let present: Vec<Seat> = (0..self.parties.len())
+            .map(Seat)
+            .filter(|seat| matches!(self.party(*seat).status, Status::InCall | Status::Lobby))
+            .collect();
+        self.tell_group(at.origin, &present, None, out);
+        let update = wire::conversation_update(self);
+        for seat in present {
+            out.call_back(at.origin, self.party(seat).link("conversationUpdate"), update.clone());
+        }
     }
 }
 
