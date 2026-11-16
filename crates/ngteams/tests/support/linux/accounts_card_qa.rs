@@ -692,7 +692,8 @@ fn search(run: &mut Run) -> SandboxResult {
     Ok(())
 }
 
-/// What Bert's card must hold: the server's names, mail, organization, working-with and schedule.
+/// What Bert's card must hold: the server's names, mail, work details, phones, organization, working-with and
+/// schedule.
 fn bert_holds(card: &Card) -> SandboxResult {
     card.holds("loaded", "read")?;
     card.holds("name", BERT_NAME)?;
@@ -701,6 +702,10 @@ fn bert_holds(card: &Card) -> SandboxResult {
     card.holds("upn", BERT)?;
     card.holds("job", "Engineer")?;
     card.holds("office", "Room 4")?;
+    card.holds("department", "Platform")?;
+    card.holds("company", "Synthetic Labs")?;
+    card.holds("mobile", "+1 555 0100")?;
+    card.holds("phones", "+1 555 0101")?;
     card.holds("ooo", "false")?;
     card.holds("managers", &format!("{CORA_NAME},{EVE_NAME}"))?;
     card.holds("manager_mail", &format!("{CORA},{EVE}"))?;
@@ -886,6 +891,10 @@ fn card(window: WindowHandle<KitRoot>, cx: &mut App) -> String {
                 format!("upn={}", data.user_principal_name.clone().unwrap_or_default()),
                 format!("job={}", data.job_title.clone().unwrap_or_default()),
                 format!("office={}", data.office.clone().unwrap_or_default()),
+                format!("department={}", data.department.clone().unwrap_or_default()),
+                format!("company={}", data.company.clone().unwrap_or_default()),
+                format!("mobile={}", data.mobile_phone.clone().unwrap_or_default()),
+                format!("phones={}", data.business_phones.join(",")),
                 format!(
                     "ooo={}",
                     data.out_of_office.map_or("none".to_owned(), |ooo| ooo.to_string())
