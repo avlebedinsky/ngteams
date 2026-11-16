@@ -430,7 +430,7 @@ impl TokenClient {
 
     fn build(config: EntraConfig, cloud: &crate::cloud::Cloud) -> Result<Self, TokenError> {
         let http = cloud
-            .trust(reqwest::Client::builder())
+            .connect_limit(cloud.trust(reqwest::Client::builder()))
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(REQUEST_TIMEOUT)

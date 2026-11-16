@@ -5,9 +5,10 @@ use serde_json::{Value, json};
 use teams_core::engine::Action;
 use teams_core::{SearchAnswer, SearchScope};
 use teams_proto::chat::MessageText;
-use teams_proto::{Endpoint, Method, Mri, Request, SUBSTRATE_AUDIENCE, SearchKind, Service};
+use teams_proto::{Mri, SUBSTRATE_AUDIENCE, SearchKind};
 use teams_store::OutboxState;
 
+use crate::chatsvc::members::RemoveMember;
 use crate::support::{Backend, TestServer, backends};
 use crate::teams::{Seat, server};
 
@@ -35,30 +36,6 @@ async fn chat(seat: &Seat, others: &[&Seat], topic: Option<&str>) -> String {
         .unwrap();
     assert_eq!(row.state, OutboxState::Sent, "{row:?}");
     row.message_id.unwrap()
-}
-
-/// A member's removal from a group chat, as the chat service takes it.
-struct RemoveMember {
-    chat: String,
-    member: String,
-}
-
-impl Request for RemoveMember {
-    fn service(&self) -> Service {
-        Service::ChatService
-    }
-    fn method(&self) -> Method {
-        Method::Delete
-    }
-    fn endpoint(&self) -> Endpoint {
-        Endpoint::new(["v1", "threads", &self.chat, "members", &self.member])
-    }
-    fn body(&self) -> Option<Value> {
-        None
-    }
-    fn is_write(&self) -> bool {
-        true
-    }
 }
 
 async fn search(seat: &Seat, query: &str, scope: SearchScope) -> SearchAnswer {

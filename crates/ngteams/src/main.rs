@@ -747,8 +747,8 @@ fn ready_accounts(setup: &Setup) -> Result<(Vec<PersonalAccount>, Vec<PersonalAc
 
 /// An own server's account: its server's authz is asked again before it starts, so that its region names the
 /// services the server has now (a server updated, or an option turned on or off, since the sign-in), and the client
-/// shows only those. One that can't be asked starts on the region it has; when that names no chat service, the start
-/// says why.
+/// shows only those. A server that takes no connection soon is not waited on ([`teams_auth::cloud::OWN_CONNECT_TIMEOUT`]).
+/// One that can't be asked starts on the region it has; when that names no chat service, the start says why.
 fn ask_own_again(setup: &Setup, account: &PersonalAccount) {
     if account.server_host().is_none() {
         return;

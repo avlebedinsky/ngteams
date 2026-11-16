@@ -606,7 +606,8 @@ hands out its GTM where it has one.
 
 The client hides what an own server doesn't serve, rather than offering it and failing (`teams_core::Capabilities`,
 read from authz's GTMs when the account starts; the app asks the server's authz again at each start, so a change to
-the server's services shows after a restart). Each optional service has a GTM that announces it:
+the server's services shows after a restart; a server that takes no connection in 5 seconds is not waited on, and the
+account starts on the region it has). Each optional service has a GTM that announces it:
 
 | Service | GTM | Served | What the client hides without it |
 |---|---|---|---|

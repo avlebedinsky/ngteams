@@ -535,6 +535,18 @@ fn startup_controllers_use_only_the_fixture_backend_and_close_their_engines() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+        said_not_asked_again(case, &String::from_utf8_lossy(&output.stderr));
+    }
+}
+
+/// A failed re-ask of the own server's authz is said on stderr only for an account whose region names no chat
+/// service.
+fn said_not_asked_again(case: &str, stderr: &str) {
+    let said = stderr.contains("region wasn't asked again");
+    match case {
+        "unserved-own" => assert!(said, "{case}: {stderr}"),
+        "served-own" => assert!(!said, "{case}: {stderr}"),
+        _ => {}
     }
 }
 

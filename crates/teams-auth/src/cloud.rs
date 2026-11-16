@@ -2,8 +2,13 @@
 //! trust its deployment's own certificate authority beside the system's (a self-signed deployment's `ca_file`).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use url::Url;
+
+/// How long a sign-in client waits for an own server's connection: a host that is off or out of reach fails a start
+/// fast, before anything is sent.
+pub const OWN_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The services an account belongs to.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
@@ -119,6 +124,14 @@ impl Cloud {
         {
             Some(roots) => builder.tls_certs_merge(roots),
             None => builder,
+        }
+    }
+
+    /// `builder` waiting at most [`OWN_CONNECT_TIMEOUT`] for a connection to an own server; Microsoft's are as before.
+    pub fn connect_limit(&self, builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+        match self {
+            Self::Microsoft => builder,
+            Self::Own { .. } => builder.connect_timeout(OWN_CONNECT_TIMEOUT),
         }
     }
 

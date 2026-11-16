@@ -234,8 +234,8 @@ pub fn sign_in_own(setup: &Setup, account: &PersonalAccount, password: &Secret) 
     runtime()?.block_on(signin::sign_in_own_again(setup, account, password, &store))
 }
 
-/// Asks the own server of `account` for its authz again (blocking), as [`signin::region_again`]: for an account
-/// whose saved region names no chat service ([`unserved`]), before that is said.
+/// Asks the own server of `account` for its authz again (blocking), as [`signin::region_again`]: for an own server's
+/// account at each start, so its region names the services the server has now.
 ///
 /// # Errors
 /// Why the region wasn't asked again; the one saved before stays.
