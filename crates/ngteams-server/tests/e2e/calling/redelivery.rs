@@ -109,7 +109,11 @@ async fn the_node_that_holds_the_callees_socket_delivers_its_invitation_again() 
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_invitation_goes_no_more_to_an_account_disabled_while_it_rings() {
-    let server = crate::trouter::server_with(Backend::Sqlite, |_| {}).await;
+    // with Redis, a socket does not read its account each second: only the redelivery's own look at it can end it
+    let Some(redis) = redis_url() else {
+        return;
+    };
+    let server = crate::trouter::server_with(Backend::Sqlite, |config| config.redis_url = Some(redis)).await;
     let a_id = server.add_user("a@own.test", "Ada").await;
     let b_id = server.add_user("b@own.test", "Bert").await;
     let mut a = super::client(&server, &server, "a@own.test", &a_id, "Ada").await;

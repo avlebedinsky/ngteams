@@ -1,8 +1,9 @@
 //! A call delivery as a calling endpoint's socket is told of it (`docs/protocol/calling.md`): what the call
 //! controller published on the endpoint's topic ([`crate::calling::topic`]), `POST`ed at the endpoint's root (an
-//! invitation, as JSON) or at a call agent's callback under it (gzip'd in base64, as Teams' call controller sends
-//! them). An invitation the endpoint doesn't answer is delivered again ([`REDELIVERIES`] times, [`REDELIVER_AFTER`]
-//! apart), as Teams' service does: the socket that wrote it is the one that sees its answer, or none.
+//! invitation, or a group call's presence, as JSON) or at a call agent's callback under it (gzip'd in base64, as
+//! Teams' call controller sends them). An invitation the endpoint doesn't answer is delivered again
+//! ([`REDELIVERIES`] times, [`REDELIVER_AFTER`] apart), as Teams' service does: the socket that wrote it is the one
+//! that sees its answer, or none.
 
 use std::collections::VecDeque;
 use std::io::Write as _;
