@@ -129,16 +129,21 @@ async fn three_join_a_scheduled_meeting_nobody_rings_and_its_chat_tells_its_star
         let a_call = joined(&mut ada, &join).await;
         let c_call = joined(&mut cora, &join).await;
         mixed.connected(&mixed.open_call().await, 3).await;
-        let organizer = ada.engine.mri.clone();
-        let view = cora
-            .engine
-            .view(c_call, |view| {
-                view.participants.len() == 2 && view.participants.iter().any(|party| party.mri == organizer)
+        // each view read is told after the wait for it began: bert was in before ada and cora came, ada before cora
+        let (organizer, guest, last) = (ada.engine.mri.clone(), bert.engine.mri.clone(), cora.engine.mri.clone());
+        bert.engine
+            .view(b_call, |view| {
+                view.participants
+                    .iter()
+                    .any(|party| party.mri == organizer && party.organizer)
             })
             .await;
-        let shown = |mri: &str| view.participants.iter().find(|party| party.mri == mri).unwrap();
-        assert!(shown(&organizer).organizer, "{view:?}");
-        assert!(!shown(&bert.engine.mri).organizer, "{view:?}");
+        ada.engine
+            .view(a_call, |view| {
+                let shown = |mri: &str| view.participants.iter().find(|party| party.mri == mri);
+                shown(&last).is_some() && shown(&guest).is_some_and(|party| !party.organizer)
+            })
+            .await;
         let chat = event.meeting_chat.clone().unwrap();
         leave_all(&mut [&mut bert, &mut ada, &mut cora], &[b_call, a_call, c_call]).await;
         let events = call_events(&mixed, &cora, &chat).await;
@@ -316,6 +321,64 @@ async fn a_raised_hand_and_a_reaction_reach_everyone_in_the_meeting() {
             .await;
         hand_shown(&mut ada, a_call, &b, false).await;
         hand_shown(&mut cora, c_call, &b, false).await;
+        leave_all(&mut [&mut ada, &mut bert, &mut cora], &[a_call, b_call, c_call]).await;
+        shut_down(vec![ada, bert, cora], mixed).await;
+    }
+}
+
+/// Until `person`'s view of `call` shows `mri` muted (`muted`) or not.
+async fn muted_shown(person: &mut Person, call: CallId, mri: &str, muted: bool) {
+    person
+        .engine
+        .view(call, |view| {
+            view.participants
+                .iter()
+                .any(|party| party.mri == mri && party.muted == muted)
+        })
+        .await;
+}
+
+/// Until `person` is told the organizer muted it in `call`.
+async fn muted_by_organizer(person: &mut Person, call: CallId) {
+    person
+        .engine
+        .next(|event| match event {
+            Event::CallMeeting { call: of, state } if *of == call && state.muted_by_organizer.is_some() => Some(()),
+            _ => None,
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_organizer_mutes_everyone_else_who_see_it_and_may_unmute_themselves() {
+    for backend in backends() {
+        let mixed = Mixed::start(backend).await;
+        let mut ada = Person::new(&mixed, "Ada", A_TONE).await;
+        let mut bert = Person::new(&mixed, "Bert", B_TONE).await;
+        let mut cora = Person::new(&mixed, "Cora", C_TONE).await;
+        let event = schedule(&ada, &[&bert, &cora]).await;
+        let join = join_of(&event);
+        let b_call = joined(&mut bert, &join).await;
+        let a_call = joined(&mut ada, &join).await;
+        let c_call = joined(&mut cora, &join).await;
+        let (b, c) = (bert.engine.mri.clone(), cora.engine.mri.clone());
+        muted_shown(&mut ada, a_call, &c, false).await;
+        ada.engine.call(CallAction::MuteAll { call: a_call }).await;
+        muted_by_organizer(&mut bert, b_call).await;
+        muted_by_organizer(&mut cora, c_call).await;
+        muted_shown(&mut ada, a_call, &b, true).await;
+        muted_shown(&mut ada, a_call, &c, true).await;
+        let a = ada.engine.mri.clone();
+        muted_shown(&mut bert, b_call, &a, false).await;
+        // a muted participant unmutes itself, as Teams' "You've been muted" card lets it
+        bert.engine
+            .call(CallAction::Mute {
+                call: b_call,
+                muted: false,
+            })
+            .await;
+        muted_shown(&mut ada, a_call, &b, false).await;
+        muted_shown(&mut cora, c_call, &b, false).await;
         leave_all(&mut [&mut ada, &mut bert, &mut cora], &[a_call, b_call, c_call]).await;
         shut_down(vec![ada, bert, cora], mixed).await;
     }

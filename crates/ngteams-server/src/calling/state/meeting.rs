@@ -181,4 +181,43 @@ impl Call {
         }
         self.in_call(seat)
     }
+
+    /// The host at `seat` mutes others' main audio (`mute`): everyone else in the call (`scope` `all`) or those it
+    /// names. Each muted party's roster entry turns `serverMuted` at a new version (its client mutes itself), and the
+    /// outcome goes to `callback`, the host's own.
+    pub(crate) fn mute_others(
+        &mut self,
+        seat: Seat,
+        body: &Value,
+        callback: Option<&str>,
+        at: At<'_>,
+        out: &mut Out,
+    ) -> Result<(), Refusal> {
+        self.hosts(seat)?;
+        let named: Vec<String> = body
+            .get("muteParticipants")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|person| person.as_str().or_else(|| person.get("id").and_then(Value::as_str)))
+            .map(str::to_owned)
+            .collect();
+        let everyone = body.get("scope").and_then(Value::as_str) == Some("all");
+        let muted: Vec<Seat> = (0..self.parties.len())
+            .map(Seat)
+            .filter(|other| *other != seat && self.party(*other).status == Status::InCall)
+            .filter(|other| everyone || named.contains(&self.party(*other).mri()))
+            .collect();
+        for other in &muted {
+            let party = self.party_mut(*other);
+            party.server_muted = true;
+            party.mute_version += 2;
+        }
+        if !muted.is_empty() {
+            self.tell_group(at.origin, &muted, None, out);
+        }
+        let operation = body.get("operationId").cloned().unwrap_or(Value::Null);
+        out.call_back(at.origin, callback, wire::mute_outcome(self, &muted, &operation));
+        Ok(())
+    }
 }

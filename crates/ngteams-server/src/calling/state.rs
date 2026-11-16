@@ -172,6 +172,12 @@ pub(crate) struct Party {
     /// Its raised hand, while it is up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hand: Option<Hand>,
+    /// A host muted its main audio, and it hasn't unmuted itself since.
+    #[serde(default)]
+    pub server_muted: bool,
+    /// How many times the service changed its mutes: the roster's `serverMuteVersion`.
+    #[serde(default)]
+    pub mute_version: u64,
 }
 
 /// A raised hand: the state the roster names it by, its rank among the hands raised (the first is 1), and what its
@@ -620,7 +626,9 @@ impl Call {
         if sequence.is_some_and(|sequence| sequence < party.state_sequence) {
             return Ok(());
         }
-        let changed = muted.is_some_and(|muted| muted != party.muted);
+        // an unmute of its own takes back a host's mute
+        let unmuted = muted == Some(false) && std::mem::take(&mut party.server_muted);
+        let changed = unmuted || muted.is_some_and(|muted| muted != party.muted);
         party.muted = muted.unwrap_or(party.muted);
         party.state_sequence = sequence.unwrap_or(party.state_sequence + 1);
         if changed && self.in_call(seat).is_ok() {

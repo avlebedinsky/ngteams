@@ -138,7 +138,7 @@ fn conversation_links(origin: &str, call: &Call) -> Value {
         }
     }
     if call.meeting.is_some() {
-        for op in ["admit", "removeParticipant"] {
+        for op in ["admit", "removeParticipant", "mute"] {
             links[op] = json!(link(op));
         }
     }
@@ -464,12 +464,12 @@ pub(crate) fn music_entry(version: u64, playing: bool) -> Value {
 /// call's, its sharing stream, by the party's sources: what the others' source requests name.
 fn endpoint_call(kind: Kind, party: &Party) -> Value {
     let Some(leg) = party.leg.as_ref().filter(|_| kind == Kind::Group) else {
-        return json!({"serverMuteVersion": 0});
+        return json!({"serverMuteVersion": party.mute_version});
     };
     let camera = if party.showing.camera { "sendrecv" } else { "recvonly" };
     let mut streams = vec![
         json!({"type": "audio", "label": "main-audio", "sourceId": leg.sources.audio, "direction": "sendrecv",
-            "serverMuted": false}),
+            "serverMuted": party.server_muted}),
         json!({"type": "video", "label": "main-video", "sourceId": leg.sources.video, "direction": camera}),
     ];
     if party.presenting {
@@ -478,7 +478,7 @@ fn endpoint_call(kind: Kind, party: &Party) -> Value {
             "direction": "sendonly"}),
         );
     }
-    json!({"mediaStreams": streams, "serverMuteVersion": 0})
+    json!({"mediaStreams": streams, "serverMuteVersion": party.mute_version})
 }
 
 /// What a group call party sends, as its `updateMediaDescriptions` describes its lines: its camera while a line other
@@ -792,4 +792,20 @@ mod tests {
         assert_eq!(seed(&unreadable), None);
         assert_eq!(seed(&json!({})), None);
     }
+}
+
+/// What a host's mute is told at its request's callback: each party it muted, by MRI, at its new mute version.
+pub(crate) fn mute_outcome(call: &Call, muted: &[Seat], operation: &Value) -> Value {
+    let parties: Map<String, Value> = muted
+        .iter()
+        .map(|seat| call.party(*seat))
+        .map(|party| {
+            let result = json!([{
+                "result": "success", "participantId": party.participant["participantId"], "reason": "success",
+                "serverMuteVersion": party.mute_version,
+            }]);
+            (party.mri(), result)
+        })
+        .collect();
+    json!({"muteUnmuteResponseAsync": parties, "operationId": operation, "result": "success"})
 }

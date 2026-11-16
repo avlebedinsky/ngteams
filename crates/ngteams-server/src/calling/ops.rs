@@ -316,6 +316,20 @@ pub(super) async fn conversation(
             .await?;
             return Ok(Json(answer).into_response());
         }
+        "mute" => {
+            let back = own_links(&app, &caller, &body)
+                .await?
+                .and_then(|(_, links)| links.get("clientCallback").cloned());
+            step(&app, key, &caller, |call, seat, at, out| {
+                call.mute_others(seat, &body, back.as_deref(), at, out)
+            })
+            .await?;
+            return Ok((
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({"muteUnmuteResponse": {}})),
+            )
+                .into_response());
+        }
         "sendMessage" => {
             step(&app, key, &caller, |call, seat, at, out| {
                 call.react(seat, &body, at, out)
