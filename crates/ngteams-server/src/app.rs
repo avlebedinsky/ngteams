@@ -226,27 +226,35 @@ async fn ready(State(app): State<Arc<App>>) -> StatusCode {
     }
 }
 
-/// The node's housekeeping, until the task is dropped: key rotation when due, expired refresh tokens and push
-/// registrations dropped.
-pub async fn maintain(app: Arc<App>) {
+/// The node's housekeeping for its `role`, until the task is dropped: key rotation when due, expired refresh tokens
+/// and push registrations dropped.
+pub async fn maintain(app: Arc<App>, role: crate::mixer::Role) {
     let mut every = tokio::time::interval(MAINTENANCE);
     loop {
         every.tick().await;
-        tidy(&app).await;
+        tidy_for(&app, role).await;
     }
 }
 
-/// One round of [`maintain`].
+/// One round of [`maintain`] on a node that runs every role.
 pub async fn tidy(app: &App) {
-    rotate(app).await;
+    tidy_for(app, crate::mixer::Role::All).await;
+}
+
+/// One round of [`maintain`] on a node that runs `role`.
+pub async fn tidy_for(app: &App, role: crate::mixer::Role) {
+    rotate(app, role).await;
     purge(app).await;
 }
 
-async fn rotate(app: &App) {
+async fn rotate(app: &App, role: crate::mixer::Role) {
     if let Err(error) = app.issuer.keys().rotate_if_due().await {
         tracing::warn!(%error, "key rotation failed");
     }
-    crate::apps::keys::rotate(app).await;
+    // only the API signs activities to bots: a media node alone doesn't make or retire their keys
+    if role.serves_api() {
+        crate::apps::keys::rotate(app).await;
+    }
 }
 
 async fn purge(app: &App) {

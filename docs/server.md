@@ -567,7 +567,8 @@ database on each request, so a key one node makes is published by all at once. A
 is shorter), so each key signs for one `bots.key_rotation` (the first also for those 25 hours): an SDK keeps the JWKS
 for a day and fetches it again for an unknown `kid` at most once an hour. The key it replaces
 is then retired, and stays published until no token it signed can still be used (its lifetime, the SDKs' five
-minutes of skew and three housekeeping rounds), then goes.
+minutes of skew and three housekeeping rounds), then goes. The housekeeping of a node that serves the API (`serve
+--role all` or `api`) rotates these keys; a `media` node does not.
 
 With `apps.enabled = false` none of these routes is served.
 

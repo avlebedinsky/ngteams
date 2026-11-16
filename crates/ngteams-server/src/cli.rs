@@ -295,7 +295,7 @@ async fn serve(
     };
     // a media node takes a lost party out of its call through the same steps, its legs dropped through this
     crate::mixer::install(&app, media.as_ref())?;
-    let maintenance = tokio::spawn(app::maintain(std::sync::Arc::clone(&app)));
+    let maintenance = tokio::spawn(app::maintain(std::sync::Arc::clone(&app), role));
     let served = if let Some(listener) = listener {
         serve_api(&app, listener, shutdown).await
     } else {

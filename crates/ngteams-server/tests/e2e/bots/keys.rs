@@ -291,9 +291,13 @@ async fn housekeeping_publishes_the_next_bot_key_before_it_signs_and_drops_one_n
     let shown = format!("{:?}", server.app.bot_keys);
     assert!(shown.contains(&first) && !shown.contains("PRIVATE"), "{shown}");
 
-    // due: the next key is published, and the first still signs
+    // due, but a media node alone doesn't rotate the bots' keys: the API does
     tokio::time::sleep(Duration::from_millis(1100)).await;
-    ngteams_server::app::tidy(&server.app).await;
+    ngteams_server::app::tidy_for(&server.app, ngteams_server::mixer::Role::Media).await;
+    assert_eq!(published(server).await, std::slice::from_ref(&first));
+
+    // due: the next key is published, and the first still signs
+    ngteams_server::app::tidy_for(&server.app, ngteams_server::mixer::Role::Api).await;
     assert_eq!(signing(), first);
     let keys = published(server).await;
     assert_eq!(keys.len(), 2, "{keys:?}");
