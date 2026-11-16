@@ -379,12 +379,16 @@ async fn post_meeting(app: &App, call: &Call) {
     }
 }
 
-/// Posts the channel's meeting and keeps its post with its call. One not posted is logged.
+/// Posts the channel's meeting and keeps its post with its call. One not posted is logged, and its claim is released:
+/// a later entry tries again.
 async fn announce(app: &App, key: Key<'_>, call: &Call) {
     // `None`: its organizer has no account or isn't in its channel (any more)
     match posted(app, call).await.transpose() {
         Some(Ok(post)) => keep_post(app, key, post).await,
-        failed => tracing::warn!(?failed, "a channel meeting wasn't posted to its channel"),
+        failed => {
+            tracing::warn!(?failed, "a channel meeting wasn't posted to its channel");
+            release_post(app, key).await;
+        }
     }
 }
 
@@ -400,6 +404,24 @@ async fn claim_post(app: &App, key: Key<'_>) -> bool {
     })
     .await;
     matches!(claimed, Ok(true))
+}
+
+/// Releases the claim of a channel meeting's post that wasn't made, so that a later entry posts it.
+async fn release_post(app: &App, key: Key<'_>) {
+    let released = step_any(app, key, |call, _, _| {
+        if let Some(meeting) = call
+            .meeting
+            .as_mut()
+            .filter(|meeting| meeting.post.as_deref() == Some(""))
+        {
+            meeting.post = None;
+        }
+        Ok(())
+    })
+    .await;
+    if let Err(Failure::Database(error)) = released {
+        tracing::warn!(%error, "a channel meeting's claimed post wasn't released");
+    }
 }
 
 /// The channel's post of its meeting `call`, as its organizer's: its id, when it was posted.

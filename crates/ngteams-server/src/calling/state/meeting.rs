@@ -15,13 +15,11 @@ const TURNED_AWAY: (i64, &str) = (403, "Participant was denied entry to the meet
 const TAKEN_OUT: (i64, &str) = (0, "Participant was removed from the meeting.");
 
 impl Call {
-    /// Whether the call's end goes to its chat. A channel's meeting that was never posted (nobody entered it, so it
-    /// lapses) has no post in its channel, and its end has nothing to close there: it posts no end.
+    /// Whether the call's end goes to its chat. A channel's meeting with no post in its channel has nothing to close
+    /// there: it posts no end. That is one nobody entered (it lapses), and also one whose post is only claimed (an
+    /// empty id: the post failed, or the call ended before the post was made).
     pub(crate) fn tells_chat_end(&self) -> bool {
-        !self
-            .meeting
-            .as_ref()
-            .is_some_and(|meeting| meeting.channel && meeting.post.is_none())
+        self.meeting.as_ref().is_none_or(|meeting| !meeting.channel) || self.end_under().is_some()
     }
 
     /// The channel meeting's post its end replies under, as Teams writes a channel meeting's end into its post's
@@ -815,8 +813,12 @@ mod tests {
         let channel = call.meeting.as_mut().unwrap();
         channel.channel = true;
         assert!(!call.tells_chat_end());
+        call.meeting.as_mut().unwrap().post = Some(String::new());
+        assert!(!call.tells_chat_end(), "a post only claimed is no post");
+        assert_eq!(call.end_under(), None);
         call.meeting.as_mut().unwrap().post = Some("1700000000000".to_owned());
         assert!(call.tells_chat_end());
+        assert_eq!(call.end_under(), Some(1_700_000_000_000));
         call.meeting = None;
         assert!(call.tells_chat_end());
     }
