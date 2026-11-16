@@ -957,7 +957,7 @@ fn action_set(draw: &Draw<'_>, path: &str, actions: &[Action]) -> AnyElement {
             actions
                 .iter()
                 .enumerate()
-                .filter(|(_, action)| draw.submits || !matches!(action.kind, ActionKind::Submit))
+                .filter(|(_, action)| draw.submits || !matches!(action.kind, ActionKind::Submit(_)))
                 .map(|(at, action)| action_button(draw, &format!("{path}{at}"), action, &keys)),
         )
         .into_any_element()
@@ -1041,7 +1041,7 @@ fn click_of(draw: &Draw<'_>, key: &str, action: &Action, set: &[String]) -> OnCl
 fn selectable(draw: &Draw<'_>, key: &str, action: Option<&Action>, inner: gpui::Div) -> AnyElement {
     let Some(action) = action.filter(|action| match action.kind {
         ActionKind::ShowCard(_) => false,
-        ActionKind::Submit => draw.submits,
+        ActionKind::Submit(_) => draw.submits,
         _ => true,
     }) else {
         return inner.into_any_element();
