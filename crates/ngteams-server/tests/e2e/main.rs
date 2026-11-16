@@ -14,6 +14,7 @@ mod calling;
 mod chatsvc;
 mod crowd;
 mod deployments;
+mod first_write;
 mod media;
 mod migrations;
 mod node;
