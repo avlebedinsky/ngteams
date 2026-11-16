@@ -107,6 +107,7 @@ mod meeting_tabs;
 mod new_chat;
 mod profile_card;
 mod title_bar;
+mod apps;
 mod workflows;
 
 pub use meeting_tabs::ChatTab;
@@ -263,6 +264,8 @@ pub enum Main {
     CreateTeamMore,
     /// The Workflows app, across both panes.
     Workflows,
+    /// The rail's Store, across both panes (`NGTEAMS_BOTS=1`).
+    Apps,
     /// New message, in the conversation pane.
     NewChat,
 }
@@ -333,6 +336,9 @@ pub struct Shell {
     create_team_more: Option<(Entity<CreateTeamMore>, Subscription)>,
     /// The Workflows app, once it was opened: it keeps its tab and pages while another place is shown.
     workflows: workflows::Place,
+    /// The rail's Store, once it was opened, with its events' subscription.
+    apps: Option<Entity<crate::apps_page::AppsPage>>,
+    apps_events: Option<Subscription>,
     /// A dialog of the team pages, while one is open.
     team_dialog: Option<(gpui::AnyView, Subscription)>,
     /// Where the keyboard was when a dialog opened (a team's line, its "..." menu's row, a page's row): it goes back
@@ -452,6 +458,8 @@ impl Shell {
             join_team: None,
             create_team_more: None,
             workflows: workflows::Place::default(),
+            apps: None,
+            apps_events: None,
             team_dialog: None,
             dialog_return: crate::keyboard::Return::default(),
             toast: None,
@@ -661,7 +669,13 @@ impl Shell {
     fn sync_activity_shown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let covered = matches!(
             self.main,
-            Main::Settings | Main::Calendar | Main::Search | Main::JoinTeam | Main::CreateTeamMore | Main::Workflows
+            Main::Settings
+                | Main::Calendar
+                | Main::Search
+                | Main::JoinTeam
+                | Main::CreateTeamMore
+                | Main::Workflows
+                | Main::Apps
         );
         let shown = self.list_place == ListPlace::Activity && self.list_shown && !covered;
         if self.activity.0.read(cx).shown() != shown {
@@ -2090,6 +2104,10 @@ impl Shell {
                             page.update(cx, ManageTeam::refresh);
                         }
                     }
+                    TeamDialogEvent::AppsChanged { words } => this.apps_changed(words, cx),
+                    TeamDialogEvent::AddAppTo { app, team } => this.open_add_app_to(app.as_ref().clone(), *team, window, cx),
+                    TeamDialogEvent::OpenChat(chat) => this.open_chat(chat.clone(), window, cx),
+                    TeamDialogEvent::ShowStore => this.open_apps(window, cx),
                     TeamDialogEvent::Gone { team, words } => {
                         this.show_toast(words, cx);
                         if this.main == Main::ManageTeam(team.clone()) {
@@ -2647,7 +2665,7 @@ impl Shell {
     fn show_chats_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !matches!(
             self.main,
-            Main::Settings | Main::Calendar | Main::Search | Main::Workflows
+            Main::Settings | Main::Calendar | Main::Search | Main::Workflows | Main::Apps
         ) {
             return;
         }
@@ -2664,7 +2682,8 @@ impl Shell {
             | Main::ManageTeam(_)
             | Main::JoinTeam
             | Main::CreateTeamMore
-            | Main::Workflows => {
+            | Main::Workflows
+            | Main::Apps => {
                 self.main = Main::Nothing;
                 cx.notify();
             }
@@ -2853,7 +2872,7 @@ impl Shell {
     }
 
     fn rail_view(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let place = !matches!(self.main, Main::Settings | Main::Calendar | Main::Workflows);
+        let place = !matches!(self.main, Main::Settings | Main::Calendar | Main::Workflows | Main::Apps);
         let chats = place && self.list_place == ListPlace::Chats;
         let activity = place && self.list_place == ListPlace::Activity;
         let unseen = self.activity.0.read(cx).unseen();
@@ -2897,6 +2916,7 @@ impl Shell {
                 cx,
                 Self::show_calendar,
             ))
+            .children(self.store_rail(palette, cx))
             .children(self.app_rail(palette, cx))
             .child(div().flex_1())
             .children(self.account_rail(palette, cx))
@@ -3244,7 +3264,8 @@ impl Shell {
             | Main::Search
             | Main::JoinTeam
             | Main::CreateTeamMore
-            | Main::Workflows => pane.child(no_chat(palette, cx)).into_any_element(),
+            | Main::Workflows
+            | Main::Apps => pane.child(no_chat(palette, cx)).into_any_element(),
         }
     }
 
@@ -3275,6 +3296,7 @@ impl Shell {
             crate::chat_translate::header_button(&model, window, cx)
         });
         let tabs = self.meeting_tab_bar(id, palette, cx);
+        let apps = Self::chat_apps_button(id, cx);
         // Teams' chat header: the chat's picture and name (a meeting's tabs after it), the other member's
         // presence, the call on the right
         let header = self
@@ -3282,6 +3304,7 @@ impl Shell {
             .unwrap_or_else(|| pane_header_led(face, name, palette))
             .children(tabs)
             .children(presence)
+            .children(apps)
             .child(div().flex_1())
             .children(translate)
             .children(call)
@@ -3641,6 +3664,11 @@ impl Shell {
         }
         if self.main == Main::Workflows
             && let Some(page) = &self.workflows.app
+        {
+            return page.clone().into_any_element();
+        }
+        if self.main == Main::Apps
+            && let Some(page) = &self.apps
         {
             return page.clone().into_any_element();
         }

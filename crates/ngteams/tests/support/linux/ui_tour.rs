@@ -189,7 +189,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 305 + 8 + 5] = [
+const STEPS: [Step; 5 + 305 + 8 + 5 + 11] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -2310,11 +2310,112 @@ const STEPS: [Step; 5 + 305 + 8 + 5] = [
     ("live-channel-renamed-dark", |shell, _, cx| {
         fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
     }),
+    // the rail's Store (`NGTEAMS_BOTS=1`): the org's app and the popular ones, in Teams Light and Dark
+    ("apps-store", |shell, window, cx| {
+        cx.set_global(teams_ui::bots_flag::BotsFlag(true));
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
+        shell.update(cx, |shell, cx| shell.open_apps(window, cx));
+    }),
+    ("apps-store-dark", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
+    }),
+    ("apps-search", |shell, window, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
+        if let Some(page) = shell.read(cx).apps().cloned() {
+            page.update(cx, |page, cx| page.set_search("made-up p", window, cx));
+        }
+    }),
+    // the organization's app's details: what it does, its permissions, Add
+    ("apps-details", |shell, window, cx| {
+        let Some(page) = shell.read(cx).apps().cloned() else { return };
+        page.update(cx, |page, cx| page.set_search("", window, cx));
+        let helper = page.read(cx).listing().and_then(|listing| listing.app(APPS_HELPER).cloned());
+        if let Some(helper) = helper {
+            shell.update(cx, |shell, cx| shell.open_app_details(helper, window, cx));
+        }
+    }),
+    ("apps-details-dark", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
+    }),
+    // Add: the app added for the account, its button saying so
+    ("apps-details-added", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
+        let dialog = shell
+            .read(cx)
+            .team_dialog()
+            .cloned()
+            .and_then(|dialog| dialog.downcast::<teams_ui::apps_page::details::AppDetailsDialog>().ok());
+        if let Some(dialog) = dialog {
+            dialog.update(cx, teams_ui::apps_page::details::AppDetailsDialog::add);
+        }
+    }),
+    // "Add to a chat" of the chats-and-teams app: the a–b chat picked
+    ("apps-place", |shell, window, cx| {
+        shell.update(cx, Shell::close_team_dialog);
+        let Some(page) = shell.read(cx).apps().cloned() else { return };
+        let polls = page.read(cx).listing().and_then(|listing| listing.app(APPS_POLLS).cloned());
+        let Some(polls) = polls else { return };
+        shell.update(cx, |shell, cx| shell.open_app_details(polls, window, cx));
+        let details = shell
+            .read(cx)
+            .team_dialog()
+            .cloned()
+            .and_then(|dialog| dialog.downcast::<teams_ui::apps_page::details::AppDetailsDialog>().ok());
+        if let Some(details) = details {
+            details.update(cx, |details, cx| details.add_to(false, cx));
+        }
+        let place = shell
+            .read(cx)
+            .team_dialog()
+            .cloned()
+            .and_then(|dialog| dialog.downcast::<teams_ui::apps_page::place::AddToPlaceDialog>().ok());
+        if let Some(place) = place {
+            place.update(cx, |place, cx| place.choose(AB_CHAT.to_owned(), cx));
+        }
+    }),
+    ("apps-place-added", |shell, _, cx| {
+        let place = shell
+            .read(cx)
+            .team_dialog()
+            .cloned()
+            .and_then(|dialog| dialog.downcast::<teams_ui::apps_page::place::AddToPlaceDialog>().ok());
+        if let Some(place) = place {
+            place.update(cx, teams_ui::apps_page::place::AddToPlaceDialog::go);
+        }
+    }),
+    // "Manage your apps": the app added above, opened to where it is, and Remove's question
+    ("apps-manage", |shell, window, cx| {
+        shell.update(cx, Shell::close_team_dialog);
+        let Some(page) = shell.read(cx).apps().cloned() else { return };
+        page.update(cx, |page, cx| {
+            page.refresh(cx);
+            page.show(teams_ui::apps_page::AppsView::Manage, window, cx);
+            page.toggle_row(APPS_HELPER, cx);
+        });
+    }),
+    ("apps-manage-remove-dark", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
+        let Some(page) = shell.read(cx).apps().cloned() else { return };
+        let helper = page.read(cx).mine_shown(cx).into_iter().next();
+        if let Some(helper) = helper {
+            page.update(cx, |page, cx| page.ask_remove(helper, cx));
+        }
+    }),
+    // the a–b chat's apps, from its header's "Apps in this chat"
+    ("apps-chat", |shell, window, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
+        shell.update(cx, |shell, cx| {
+            shell.open_chat(AB_CHAT.to_owned(), window, cx);
+            shell.open_chat_apps(AB_CHAT.to_owned(), window, cx);
+        });
+    }),
     // a group call rings while its chat is open, shot as the ring's first frame is drawn and the app is busy (the
     // start of a ring holds the main thread): the banner over the panes is whole at once, never an empty band (QA
     // 297's Q5)
     ("group-call-chat", |shell, window, cx| {
         fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
+        cx.set_global(teams_ui::bots_flag::BotsFlag(false));
+        shell.update(cx, Shell::close_team_dialog);
         shell.update(cx, |shell, cx| {
             shell.show_chats(window, cx);
             shell.open_chat(ABC_CHAT.to_owned(), window, cx);
@@ -2345,6 +2446,10 @@ const STEPS: [Step; 5 + 305 + 8 + 5] = [
         fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
     }),
 ];
+
+/// The mock's organization app (a personal bot and page) and its chats-and-teams app.
+const APPS_HELPER: &str = "00000000-0000-4000-8000-00000000a004";
+const APPS_POLLS: &str = "00000000-0000-4000-8000-00000000a005";
 
 /// The steps whose shot shows a call that rings over the panes.
 const RINGING_SHOTS: [&str; 2] = ["group-call-ringing", "group-call-ringing-dark"];

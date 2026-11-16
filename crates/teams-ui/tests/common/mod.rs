@@ -197,6 +197,10 @@ pub struct FakeCore {
     pub team_apps: Mutex<Vec<teams_proto::InstalledApp>>,
     /// The apps the store offers.
     pub store_apps: Mutex<Vec<teams_proto::StoreApp>>,
+    /// The store as the Apps page reads it, the account's own apps and each chat's.
+    pub app_listing: Mutex<teams_core::AppListing>,
+    pub user_apps: Mutex<Vec<teams_proto::StoreApp>>,
+    pub chat_apps: Mutex<Vec<teams_proto::StoreApp>>,
     /// Teams' templates, and what one makes.
     pub templates: Mutex<(
         Vec<teams_proto::TeamTemplateCard>,
@@ -661,6 +665,18 @@ impl Core for FakeCore {
 
     fn app_store(&self) -> Reply<Vec<teams_proto::StoreApp>> {
         Reply::ready(Ok(locked(&self.store_apps).clone()))
+    }
+
+    fn app_listing(&self) -> Reply<teams_core::AppListing> {
+        Reply::ready(Ok(locked(&self.app_listing).clone()))
+    }
+
+    fn user_apps(&self) -> Reply<Vec<teams_proto::StoreApp>> {
+        Reply::ready(Ok(locked(&self.user_apps).clone()))
+    }
+
+    fn chat_apps(&self, _chat: String) -> Reply<Vec<teams_proto::StoreApp>> {
+        Reply::ready(Ok(locked(&self.chat_apps).clone()))
     }
 
     fn team_templates(&self) -> Reply<Vec<teams_proto::TeamTemplateCard>> {

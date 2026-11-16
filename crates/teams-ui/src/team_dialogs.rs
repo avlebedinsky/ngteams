@@ -74,6 +74,14 @@ pub enum TeamDialogEvent {
         flow: crate::workflow_dialog::FlowRef,
         message: crate::workflow_run::MessageRef,
     },
+    /// An app was added or removed: the store reads the account's apps again; `words` go in a toast.
+    AppsChanged { words: &'static str },
+    /// An app's "Add to a chat" (`team` false) or "Add to a team": the place's picker opens in the dialog's place.
+    AddAppTo { app: Box<teams_proto::StoreApp>, team: bool },
+    /// A chat opens (an app's Open: its bot's chat).
+    OpenChat(String),
+    /// "Get more apps": the store opens.
+    ShowStore,
 }
 
 /// Whether `text` holds a link, as the bundle tells it for a team's name and description.

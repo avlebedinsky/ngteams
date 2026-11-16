@@ -472,6 +472,18 @@ pub trait Core: Send + Sync + 'static {
     fn app_store(&self) -> Reply<Vec<StoreApp>> {
         Reply::ready(Ok(Vec::new()))
     }
+    /// The store's sections as the Apps page shows them, with their apps. A fake core has an empty store.
+    fn app_listing(&self) -> Reply<teams_core::AppListing> {
+        Reply::ready(Ok(teams_core::AppListing::default()))
+    }
+    /// The apps the account added for itself. A fake core added none.
+    fn user_apps(&self) -> Reply<Vec<StoreApp>> {
+        Reply::ready(Ok(Vec::new()))
+    }
+    /// The apps added to a chat. A fake core's chats have none.
+    fn chat_apps(&self, _chat: String) -> Reply<Vec<StoreApp>> {
+        Reply::ready(Ok(Vec::new()))
+    }
     /// How a team's channel did. A fake core doesn't know.
     fn channel_analytics(
         &self,
@@ -748,6 +760,18 @@ impl Core for EngineRequests {
 
     fn app_store(&self) -> Reply<Vec<StoreApp>> {
         EngineRequests::app_store(self)
+    }
+
+    fn app_listing(&self) -> Reply<teams_core::AppListing> {
+        EngineRequests::app_listing(self)
+    }
+
+    fn user_apps(&self) -> Reply<Vec<StoreApp>> {
+        EngineRequests::user_apps(self)
+    }
+
+    fn chat_apps(&self, chat: String) -> Reply<Vec<StoreApp>> {
+        EngineRequests::chat_apps(self, chat)
     }
 
     fn channel_analytics(
