@@ -471,6 +471,23 @@ impl EndReason {
     }
 }
 
+impl Ask {
+    /// Whether the account's cloud serves what it asks for: a cloud without captions takes no caption ask, one
+    /// without recording no recording's or transcription's.
+    #[must_use]
+    pub fn served(&self, capabilities: teams_core::Capabilities) -> bool {
+        match self {
+            Self::ToggleCaptions | Self::Captions(_) | Self::RecordCaptions(_) | Self::CaptionLanguage(_) => {
+                capabilities.captions
+            }
+            Self::Record { .. } | Self::StopRecording | Self::Transcribe { .. } | Self::StopTranscription => {
+                capabilities.recording
+            }
+            _ => true,
+        }
+    }
+}
+
 /// What the user asks of the calls.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ask {
@@ -1964,7 +1981,7 @@ pub fn ask_then(
     cx: &mut App,
     then: impl FnOnce(Answered, &mut App) + 'static,
 ) {
-    if !calls.read(cx).shows() {
+    if !calls.read(cx).shows() || !ask.served(core.capabilities()) {
         cx.defer(move |cx| then(Answered::Refused, cx));
         return;
     }

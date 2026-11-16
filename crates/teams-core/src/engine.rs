@@ -190,6 +190,9 @@ pub struct EngineOptions {
     /// read-only mode, which opens no push channel, reads what is new so. `None` (the default): without a push channel
     /// nothing is caught up but on [`EngineRequests::sync`].
     pub poll: Option<Duration>,
+    /// The optional services the account's cloud serves, as the views read them ([`EngineRequests::capabilities`]):
+    /// all of them by default.
+    pub capabilities: crate::Capabilities,
 }
 
 impl Default for EngineOptions {
@@ -203,6 +206,7 @@ impl Default for EngineOptions {
             presence_poll: PRESENCE_POLL,
             presence_poll_subscribed: PRESENCE_POLL_SUBSCRIBED,
             poll: None,
+            capabilities: crate::Capabilities::ALL,
         }
     }
 }
@@ -1023,6 +1027,7 @@ pub struct EngineRequests {
     me: Arc<str>,
     /// The engine sends nothing ([`EngineRequests::read_only`]).
     read_only: bool,
+    capabilities: crate::Capabilities,
 }
 
 impl EngineRequests {
@@ -1048,6 +1053,12 @@ impl EngineRequests {
     #[must_use]
     pub fn read_only(&self) -> bool {
         self.read_only
+    }
+
+    /// The optional services the account's cloud serves: what the views offer. Fixed when the engine starts.
+    #[must_use]
+    pub fn capabilities(&self) -> crate::Capabilities {
+        self.capabilities
     }
 
     /// A call action ([`crate::calling`]); the reply is the call it acted on, once the action went (a start, a join or an
@@ -2025,6 +2036,7 @@ where
     let handle = runtime.handle().clone();
     let me: Arc<str> = parts.outbox.me().mri().as_str().into();
     let read_only = parts.outbox.is_read_only();
+    let capabilities = parts.options.capabilities;
     let (requests, received) = mpsc::unbounded_channel();
     let (events, taken) = mpsc::unbounded_channel();
     let (ending, ended) = std::sync::mpsc::channel();
@@ -2052,6 +2064,7 @@ where
             requests,
             me,
             read_only,
+            capabilities,
         },
         events: taken,
         thread: Some(thread),

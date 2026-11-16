@@ -2140,7 +2140,7 @@ impl ChatView {
             Some(message.to_owned())
         };
         self.more_actions = None;
-        if self.options.is_some() && !self.core.read_only() {
+        if self.options.is_some() && !self.core.read_only() && self.core.capabilities().workflows {
             self.read_workflows(cx);
         }
         cx.notify();
@@ -3600,6 +3600,7 @@ impl ChatView {
                     cards: matches!(item.body, Body::Cards(_)).then(|| self.card_hook(&item.id, cx)),
                     root: self.place.in_channel().then(|| self.root_of(&item.id)),
                     meeting: Self::meeting_view(item, palette, cx),
+                    bots: self.core.capabilities().apps,
                 },
                 highlighted,
                 palette,
@@ -3890,10 +3891,11 @@ impl ChatView {
             .map(|action| menu_entry(&message, action, palette, window, cx))
             .collect::<Vec<_>>();
         // Teams' workflows run on any message of a chat that takes the account's writes
-        let offers_workflows = self
-            .message_items()
-            .find(|item| item.id == message)
-            .is_some_and(MessageItem::offers_workflows);
+        let offers_workflows = self.core.capabilities().workflows
+            && self
+                .message_items()
+                .find(|item| item.id == message)
+                .is_some_and(MessageItem::offers_workflows);
         let workflows = if offers_workflows {
             self.message_workflows(cx)
         } else {
@@ -4877,6 +4879,8 @@ struct InChat<'a> {
     root: Option<&'a str>,
     /// A channel meeting's card, drawn as the message's content ([`channel::meeting_card`]).
     meeting: Option<AnyElement>,
+    /// Whether the account's cloud serves bot invokes: a card's button that sends to the bot is drawn only then.
+    bots: bool,
 }
 
 impl InChat<'_> {
@@ -4931,7 +4935,8 @@ fn bubble_content(
                     chat.conversation,
                     &item.id,
                     chat.root,
-                )));
+                )))
+                .submits(chat.bots);
             match chat.cards.take() {
                 Some(hook) => drawn
                     .state(hook.state.clone(), Rc::clone(&hook.on_state))

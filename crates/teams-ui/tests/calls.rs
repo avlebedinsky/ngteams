@@ -5102,3 +5102,25 @@ fn the_calls_page_says_why_calls_are_unavailable_and_offers_no_test_call() {
         "what to do"
     );
 }
+
+#[test]
+fn a_cloud_without_captions_or_recording_offers_neither_and_takes_no_ask_of_them() {
+    let (rig, _windows, window) = caption_stage();
+    *rig.core.capabilities.lock().unwrap() = Some(teams_core::Capabilities {
+        captions: false,
+        recording: false,
+        ..teams_core::Capabilities::ALL
+    });
+    let before = actions(&rig).len();
+    for downs in 1..=6 {
+        click(window, "call-more");
+        window.simulate_keystrokes(&format!("{} right", vec!["down"; downs].join(" ")));
+        assert!(!drawn(window, "call-toggle-captions"), "no Language and speech");
+        assert!(!drawn(window, "call-record-start"), "no Record and transcribe");
+        window.simulate_keystrokes("escape escape");
+        draw(window);
+    }
+    window.simulate_keystrokes("alt-shift-c");
+    draw(window);
+    assert_eq!(actions(&rig).len(), before, "a caption key asks nothing");
+}

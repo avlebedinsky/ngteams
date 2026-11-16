@@ -242,11 +242,13 @@ impl WorkflowDialog {
             Some(_) => "For this chat message",
             None => "Available in this channel",
         };
+        let copilot = self.core.capabilities().copilot;
         let tabs = [
             (Tab::Channel, first, "workflow-tab-channel"),
             (Tab::Workflows, "Workflows", "workflow-tab-all"),
             (Tab::Ai, "AI Workflows", "workflow-tab-ai"),
         ];
+        let tabs = tabs.into_iter().filter(|(tab, _, _)| copilot || *tab != Tab::Ai);
         div()
             .flex()
             .items_center()

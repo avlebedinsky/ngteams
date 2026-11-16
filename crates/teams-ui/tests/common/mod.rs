@@ -250,6 +250,8 @@ pub struct FakeCore {
     pub meeting_options: Mutex<Option<teams_proto::MeetingOptions>>,
     /// The app's read-only mode, as `Core::read_only` answers it.
     pub read_only: Mutex<bool>,
+    /// The optional services the account's cloud serves, as `Core::capabilities` answers them: all when `None`.
+    pub capabilities: Mutex<Option<teams_core::Capabilities>>,
     /// The scheduling tests' calendar service; its defaults match Core's empty, unsaved calendar.
     pub calendar: Mutex<calendar::CalendarFake>,
     /// The meetings their chats' threads name, by chat; any other chat names none.
@@ -746,6 +748,10 @@ impl Core for FakeCore {
 
     fn read_only(&self) -> bool {
         *locked(&self.read_only)
+    }
+
+    fn capabilities(&self) -> teams_core::Capabilities {
+        locked(&self.capabilities).unwrap_or(teams_core::Capabilities::ALL)
     }
 
     fn activity(&self) -> Reply<teams_core::activity::ActivityFeed> {

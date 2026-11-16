@@ -255,13 +255,20 @@ pub fn start_for_cloud<S: SecretStore + 'static>(
         client,
         outbox,
         push,
-        options: EngineOptions {
-            poll: read_only.then_some(READ_ONLY_POLL),
-            ..EngineOptions::default()
-        },
+        options: options(read_only, cloud, &session),
         known_names,
     })?;
     Ok(AccountEngine { handle, session })
+}
+
+/// The engine's options: a read-only account's polling, and the optional services the cloud serves as the region
+/// names them.
+fn options<S: SecretStore>(read_only: bool, cloud: &Cloud, session: &Session<S>) -> EngineOptions {
+    EngineOptions {
+        poll: read_only.then_some(READ_ONLY_POLL),
+        capabilities: crate::Capabilities::of(cloud, |gtm| session.service_base(gtm).is_some()),
+        ..EngineOptions::default()
+    }
 }
 
 fn new_session<S: SecretStore>(

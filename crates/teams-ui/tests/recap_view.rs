@@ -939,3 +939,20 @@ fn a_download_that_fails_says_why_and_tries_again() {
     assert_eq!(std::fs::read(&target).unwrap(), bytes);
     assert!(cx.debug_bounds("recap-download-0 saved").is_some());
 }
+
+#[test]
+fn a_cloud_without_recaps_shows_no_recap_tab_and_its_card_opens_none() {
+    let rig = rig(false);
+    *locked(&rig.core.capabilities) = Some(teams_core::Capabilities {
+        recap: false,
+        ..teams_core::Capabilities::ALL
+    });
+    let (shell, cx) = shell_window(&rig, fixtures::MEETING);
+    assert!(cx.debug_bounds("chat-tab-chat shown").is_some());
+    assert!(cx.debug_bounds("chat-tab-shared").is_some());
+    assert!(cx.debug_bounds("chat-tab-recap").is_none());
+    shell.update_in(cx, |shell, window, cx| shell.show_chat_tab(ChatTab::Recap, window, cx));
+    cx.run_until_parked();
+    assert_eq!(cx.update(|_, cx| shell.read(cx).chat_tab()), ChatTab::Chat);
+    assert_eq!(asked(&rig, "meeting_contents"), 0);
+}

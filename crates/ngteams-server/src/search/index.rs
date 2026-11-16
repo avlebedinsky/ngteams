@@ -26,7 +26,19 @@ const BATCH: i64 = 500;
 
 /// The elements whose ends part words.
 const BLOCKS: [&str; 13] = [
-    "br", "p", "div", "li", "ul", "ol", "blockquote", "tr", "td", "th", "h1", "h2", "h3",
+    "br",
+    "p",
+    "div",
+    "li",
+    "ul",
+    "ol",
+    "blockquote",
+    "tr",
+    "td",
+    "th",
+    "h1",
+    "h2",
+    "h3",
 ];
 
 /// The text message `body` of thread `chat` is found by: none for a thread the search doesn't cover (the activity
@@ -194,7 +206,11 @@ mod tests {
         let db = Db::connect(&format!("sqlite://{}", dir.path().join("server.sqlite").display()), 1).await?;
         with_conn!(db, |conn| conn.batch_execute(BEFORE_THE_INDEX).await?);
         let page = Page { from: 0, size: 5 };
-        assert!(repo::messages(&db, "una", &Terms::of("lantern"), page).await?.is_empty());
+        assert!(
+            repo::messages(&db, "una", &Terms::of("lantern"), page)
+                .await?
+                .is_empty()
+        );
         assert_eq!(backfill(&db).await?, 2);
         assert_eq!(backfill(&db).await?, 0);
         let found = repo::messages(&db, "una", &Terms::of("lant"), page).await?;

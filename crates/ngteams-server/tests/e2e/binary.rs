@@ -178,6 +178,7 @@ async fn check_region(session: &Session<MemorySecretStore>, origin: &str) {
         ("userProfileService", "/api/userprofilesvc/own"),
         ("amsV2", "/ams"),
         ("presenceUPS", "/ups/own"),
+        ("workflowsService", "/workflows"),
     ];
     for (gtm, path) in bases {
         assert_eq!(session.service_base(gtm), Some(format!("{origin}{path}")), "{gtm}");

@@ -449,6 +449,9 @@ impl ManageTeam {
 
     /// Shows `tab`, reading what it shows.
     pub fn show_tab(&mut self, tab: ManageTab, cx: &mut Context<Self>) {
+        if tab == ManageTab::Apps && !self.core.capabilities().apps {
+            return;
+        }
         self.tab = tab;
         self.problem = None;
         self.trace.record(&TraceLine::new("manage-team", "tab").kind(tab.key()));
@@ -751,7 +754,10 @@ impl ManageTeam {
 
     fn header(&self, team: &Team, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
         let avatar = self.teams.read(cx).avatar(team, 32.0, false, palette);
-        let shown = tabs_of(team);
+        let mut shown = tabs_of(team);
+        if !self.core.capabilities().apps {
+            shown.retain(|tab| *tab != ManageTab::Apps);
+        }
         let tabs: Vec<keyboard::Stop> = shown
             .iter()
             .copied()

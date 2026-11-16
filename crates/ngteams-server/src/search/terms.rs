@@ -128,7 +128,8 @@ pub fn indexed(text: &str) -> String {
 
 /// The runs of letters and digits of `text`.
 fn words(text: &str) -> impl Iterator<Item = &str> + Clone {
-    text.split(|c: char| !c.is_alphanumeric()).filter(|word| !word.is_empty())
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
 }
 
 /// Whether `word` starts with `term`, case aside.

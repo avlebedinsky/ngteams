@@ -227,6 +227,7 @@ impl TeamsList {
         let weak = cx.entity().downgrade();
         let folders = self.sections.clone();
         let read_only = self.core.read_only();
+        let workflows = self.core.capabilities().workflows;
         let return_focus = window.focused(cx);
         let palette = crate::theme::current(cx);
         let menu = PopupMenu::build(window, cx, move |menu, window, cx| {
@@ -238,6 +239,7 @@ impl TeamsList {
                     team: &team,
                     channel: &channel,
                     read_only,
+                    workflows,
                     folders: &folders,
                     index,
                     palette,

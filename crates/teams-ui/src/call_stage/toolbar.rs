@@ -510,6 +510,7 @@ impl CallStage {
         let video = self.calls.read(cx).video().is_some();
         let caption_visible = self.calls.read(cx).captions_shown();
         let caption_available = !self.core.read_only()
+            && self.core.capabilities().captions
             && self
                 .live(cx)
                 .is_some_and(|call| call.status == CallStatus::Connected && call.kind != CallKind::TestCall);

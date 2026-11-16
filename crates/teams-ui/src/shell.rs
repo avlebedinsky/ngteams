@@ -1899,6 +1899,9 @@ impl Shell {
 
     /// "Get more apps" on `team`: the apps Manage team lists count as on it.
     pub fn open_add_app(&mut self, team: teams_store::Team, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.core.capabilities().apps {
+            return;
+        }
         let installed: Vec<String> = self
             .manage_team
             .as_ref()

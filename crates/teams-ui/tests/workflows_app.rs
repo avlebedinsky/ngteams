@@ -361,3 +361,19 @@ fn the_bot_chat_is_the_accounts_one_to_one_with_the_workflows_bot() {
     );
     assert_eq!(bot_chat("28:not-a-person"), None);
 }
+
+#[test]
+fn a_cloud_without_workflows_shows_no_more_apps_and_opens_no_workflows() {
+    let rig = common::Rig::start();
+    *rig.core.capabilities.lock().unwrap() = Some(teams_core::Capabilities {
+        workflows: false,
+        ..teams_core::Capabilities::ALL
+    });
+    let (shell, cx) = shell_window(&rig);
+    assert!(bounds(cx, "rail-more-apps").is_none(), "no More apps for no app");
+    shell.update_in(cx, |shell, window, cx| shell.open_workflows(true, window, cx));
+    cx.run_until_parked();
+    assert!(bounds(cx, "rail-workflows").is_none());
+    assert!(cx.update(|_, cx| shell.read(cx).workflows().is_none()));
+    assert!(asked(&rig).is_empty(), "nothing is asked of a service the cloud lacks");
+}

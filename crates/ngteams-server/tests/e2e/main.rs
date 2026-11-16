@@ -15,6 +15,7 @@ mod calling;
 mod chatsvc;
 mod crowd;
 mod deployments;
+mod endpoints;
 mod first_write;
 mod first_write_accounts;
 mod first_write_cancel;

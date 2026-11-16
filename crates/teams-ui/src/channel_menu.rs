@@ -149,6 +149,8 @@ pub struct MenuContext<'a> {
     pub team: &'a Team,
     pub channel: &'a TeamChannel,
     pub read_only: bool,
+    /// Whether the account's cloud serves Workflows: its entry is left out when it doesn't.
+    pub workflows: bool,
     pub folders: &'a [ChannelSection],
     pub index: usize,
     pub palette: Palette,
@@ -165,11 +167,19 @@ pub fn build(
         team,
         channel,
         read_only,
+        workflows,
         folders,
         index,
         palette,
     } = context;
-    for (at, section) in sections(team, channel, read_only).into_iter().enumerate() {
+    let mut sections = sections(team, channel, read_only);
+    if !workflows {
+        for section in &mut sections {
+            section.retain(|choice| *choice != ChannelChoice::Workflows);
+        }
+        sections.retain(|section| !section.is_empty());
+    }
+    for (at, section) in sections.into_iter().enumerate() {
         if at > 0 {
             menu = menu.separator();
         }

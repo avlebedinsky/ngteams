@@ -101,7 +101,12 @@ impl Office {
 async fn the_title_bar_search_finds_messages_people_chats_and_channels() {
     for backend in backends() {
         let office = Office::open(backend).await;
-        let review = send(&office.bert, &office.picnic, "The quarterly <rocket> review is on Friday").await;
+        let review = send(
+            &office.bert,
+            &office.picnic,
+            "The quarterly <rocket> review is on Friday",
+        )
+        .await;
         send(&office.ada, &office.launch, "Countdown starts at noon, rockets ready").await;
         send(&office.dan, &office.secret, "the rocket secret stays here").await;
         send(&office.ada, &office.picnic, "Bring sandwiches").await;
@@ -176,7 +181,10 @@ async fn the_title_bar_search_finds_messages_people_chats_and_channels() {
         // the user's text is never the service's syntax
         let odd = search(&office.ada, "\"rocket*) (:", SearchScope::All).await;
         assert_eq!(odd.messages.len(), 2, "{:?}", odd.messages);
-        assert_eq!(search(&office.ada, "zzqx", SearchScope::All).await, SearchAnswer::default());
+        assert_eq!(
+            search(&office.ada, "zzqx", SearchScope::All).await,
+            SearchAnswer::default()
+        );
         office.stop().await;
     }
 }
@@ -188,7 +196,10 @@ async fn the_search_follows_edits_deletes_and_who_may_read_the_history() {
         let before = send(&office.ada, &office.picnic, "Meet at the lighthouse").await;
         let gone = send(&office.ada, &office.picnic, "the password is swordfish").await;
         assert_eq!(
-            search(&office.cora, "lighthouse", SearchScope::All).await.messages.len(),
+            search(&office.cora, "lighthouse", SearchScope::All)
+                .await
+                .messages
+                .len(),
             1
         );
 
@@ -203,7 +214,12 @@ async fn the_search_follows_edits_deletes_and_who_may_read_the_history() {
             .await
             .unwrap();
         assert_eq!(edited.state, OutboxState::Sent, "{edited:?}");
-        assert!(search(&office.cora, "lighthouse", SearchScope::All).await.messages.is_empty());
+        assert!(
+            search(&office.cora, "lighthouse", SearchScope::All)
+                .await
+                .messages
+                .is_empty()
+        );
         let harbour = search(&office.cora, "harbour", SearchScope::All).await;
         assert_eq!(harbour.messages.len(), 1);
         assert_eq!(harbour.messages[0].id, before);
@@ -218,7 +234,12 @@ async fn the_search_follows_edits_deletes_and_who_may_read_the_history() {
             .await
             .unwrap();
         assert_eq!(deleted.state, OutboxState::Sent, "{deleted:?}");
-        assert!(search(&office.bert, "swordfish", SearchScope::All).await.messages.is_empty());
+        assert!(
+            search(&office.bert, "swordfish", SearchScope::All)
+                .await
+                .messages
+                .is_empty()
+        );
 
         // Dan, added later without the history, finds the chat but none of what was said before him
         let added = office
@@ -232,7 +253,12 @@ async fn the_search_follows_edits_deletes_and_who_may_read_the_history() {
             .await
             .unwrap();
         assert_eq!(added.state, OutboxState::Sent, "{added:?}");
-        assert!(search(&office.dan, "harbour", SearchScope::All).await.messages.is_empty());
+        assert!(
+            search(&office.dan, "harbour", SearchScope::All)
+                .await
+                .messages
+                .is_empty()
+        );
         let later = send(&office.dan, &office.picnic, "the harbour has fog").await;
         let found = search(&office.dan, "harbour", SearchScope::All).await;
         assert_eq!(found.messages.len(), 1, "{:?}", found.messages);
@@ -277,13 +303,13 @@ async fn files_the_reader_owns_or_was_sent_are_found_by_name() {
         let file = &mine.files[0];
         assert_eq!(file.name, "Budget forecast.xlsx");
         assert_eq!(file.kind.as_deref(), Some("xlsx"));
-        assert!(file.url.starts_with("https://own.example.test/sp/personal/"), "{}", file.url);
+        assert!(
+            file.url.starts_with("https://own.example.test/sp/personal/"),
+            "{}",
+            file.url
+        );
         assert!(file.modified_ms.is_some());
-        let shared = trio
-            .b
-            .search_service("forecast", SearchScope::All)
-            .await
-            .unwrap();
+        let shared = trio.b.search_service("forecast", SearchScope::All).await.unwrap();
         assert_eq!(shared.files.len(), 1, "{:?}", shared.files);
         let dir = tempfile::tempdir().unwrap();
         let cora = crate::media::engine(&trio.server, "c@own.test", &trio.ids[2], dir.path()).await;
@@ -318,7 +344,10 @@ async fn the_search_takes_only_its_own_token_and_refuses_an_empty_ask() {
         };
         let ask = json!({"EntityRequests": [{"entityType": "People", "query": {"queryString": "ada"}, "size": 5}]});
         assert_eq!(post(None, ask.clone()).await, 401);
-        assert_eq!(post(Some(token(teams_proto::GRAPH_AUDIENCE).await), ask.clone()).await, 401);
+        assert_eq!(
+            post(Some(token(teams_proto::GRAPH_AUDIENCE).await), ask.clone()).await,
+            401
+        );
         assert_eq!(post(Some(token(SUBSTRATE_AUDIENCE).await), ask).await, 200);
         // the web client's empty `PowerbarContextual` ask is answered 400, as Substrate answers it
         assert_eq!(

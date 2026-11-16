@@ -810,7 +810,9 @@ impl CreateTeamMore {
                         true,
                         |_, _| {},
                     ))
-                    .child(tick("create-more-copy-apps", "Apps".to_owned(), true, true, |_, _| {}))
+                    .when(self.core.capabilities().apps, |ticks| {
+                        ticks.child(tick("create-more-copy-apps", "Apps".to_owned(), true, true, |_, _| {}))
+                    })
                     .child(tick(
                         "create-more-copy-tabs",
                         "Tabs".to_owned(),

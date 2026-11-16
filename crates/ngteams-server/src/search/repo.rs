@@ -264,7 +264,10 @@ pub async fn channels(db: &Db, reader: &str, terms: &Terms, page: Page) -> Resul
         .bind::<BigInt, _>(CANDIDATES)
         .load(conn)
         .await?);
-    Ok(paged(rows.into_iter().filter(|row| terms.all_in(&[row.name.as_str()])), page))
+    Ok(paged(
+        rows.into_iter().filter(|row| terms.all_in(&[row.name.as_str()])),
+        page,
+    ))
 }
 
 const TEAMS: &str = "SELECT t.id, t.name FROM teams t \
@@ -284,7 +287,10 @@ pub async fn teams(db: &Db, reader: &str, terms: &Terms, page: Page) -> Result<V
         .bind::<BigInt, _>(CANDIDATES)
         .load(conn)
         .await?);
-    Ok(paged(rows.into_iter().filter(|row| terms.all_in(&[row.name.as_str()])), page))
+    Ok(paged(
+        rows.into_iter().filter(|row| terms.all_in(&[row.name.as_str()])),
+        page,
+    ))
 }
 
 const FILES: &str = "SELECT d.owner_id, u.display_name AS owner_name, d.name, d.created_at \
@@ -305,7 +311,10 @@ pub async fn files(db: &Db, reader: &str, terms: &Terms, page: Page) -> Result<V
         .bind::<BigInt, _>(CANDIDATES)
         .load(conn)
         .await?);
-    Ok(paged(rows.into_iter().filter(|row| terms.all_in(&[row.name.as_str()])), page))
+    Ok(paged(
+        rows.into_iter().filter(|row| terms.all_in(&[row.name.as_str()])),
+        page,
+    ))
 }
 
 /// `page` of `rows`.

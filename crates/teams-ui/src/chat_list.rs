@@ -866,6 +866,12 @@ impl ChatList {
         self.findable_rows().find(|row| row.id == id)
     }
 
+    /// The optional services the account's cloud serves (`Core::capabilities`).
+    #[must_use]
+    pub fn capabilities(&self) -> teams_core::Capabilities {
+        self.core.capabilities()
+    }
+
     /// Whether the stored chat identifies whom a call would ring, even while catch-up is still reading its roster.
     #[must_use]
     pub fn can_call(&self, id: &str) -> bool {

@@ -214,6 +214,7 @@ impl CallStage {
         let transcript_shown = self.pane == Pane::Transcript;
         RecordTools {
             available: !self.core.read_only()
+                && self.core.capabilities().recording
                 && live
                     .as_ref()
                     .is_some_and(|call| call.status == CallStatus::Connected && call.kind != CallKind::TestCall),

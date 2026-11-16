@@ -85,7 +85,8 @@ impl Shell {
         let allowed = crate::channel_menu::sections(&team, &channel, self.core.read_only())
             .into_iter()
             .flatten()
-            .any(|offered| offered.key() == choice.key());
+            .any(|offered| offered.key() == choice.key())
+            && (choice != ChannelChoice::Workflows || self.core.capabilities().workflows);
         if !(allowed || matches!(choice, ChannelChoice::NewSection) && !self.core.read_only()) {
             return;
         }

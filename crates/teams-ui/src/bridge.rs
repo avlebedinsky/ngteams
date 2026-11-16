@@ -295,6 +295,11 @@ pub trait Core: Send + Sync + 'static {
     fn read_only(&self) -> bool {
         false
     }
+    /// The optional services the account's cloud serves (`teams_core::Capabilities`): a view offers none it lacks
+    /// (an own server's Workflows, recap, captions, recording, apps). All of them by default.
+    fn capabilities(&self) -> teams_core::Capabilities {
+        teams_core::Capabilities::ALL
+    }
     /// The account's calendar events between `start_ms` and `end_ms` (ms since the epoch), read from the service now
     /// (`teams_core::calendar`). None by default (a fake core's calendar is empty).
     fn calendar(&self, start_ms: i64, end_ms: i64) -> Reply<Vec<CalendarEvent>> {
@@ -802,6 +807,10 @@ impl Core for EngineRequests {
 
     fn read_only(&self) -> bool {
         EngineRequests::read_only(self)
+    }
+
+    fn capabilities(&self) -> teams_core::Capabilities {
+        EngineRequests::capabilities(self)
     }
 
     fn write(&self, action: Action) -> Reply<OutboxEntry> {

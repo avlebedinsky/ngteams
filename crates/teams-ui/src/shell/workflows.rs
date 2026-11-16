@@ -31,6 +31,9 @@ impl Shell {
     /// Opens the Workflows app across both panes on its Home, or with `see_all` its "Your workflows", as the channel's
     /// Workflows asks: its list is read again, as changes made there may have left it behind.
     pub fn open_workflows(&mut self, see_all: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.core.capabilities().workflows {
+            return;
+        }
         let page = self.enter_workflows(window, cx);
         page.update(cx, |page, cx| {
             if see_all {
@@ -90,7 +93,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.core.read_only() {
+        if self.core.read_only() || !self.core.capabilities().workflows {
             return;
         }
         let message = self.with_team(message, cx);
@@ -108,6 +111,9 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.core.capabilities().workflows {
+            return;
+        }
         let message = self.with_team(message, cx);
         let place = self.channel_place(&message, cx);
         let core = Arc::clone(&self.core);
@@ -162,9 +168,13 @@ impl Shell {
         }
     }
 
-    /// The rail's More apps button and, while the app is shown, the Workflows item above it.
+    /// The rail's More apps button and, while the app is shown, the Workflows item above it; none when the account's
+    /// cloud doesn't serve Workflows, the one app it lists.
     pub(super) fn app_rail(&self, palette: Palette, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut items = Vec::new();
+        if !self.core.capabilities().workflows {
+            return items;
+        }
         if self.main == Main::Workflows {
             items.push(
                 div()
@@ -196,7 +206,7 @@ impl Shell {
 
     /// The More apps flyout beside the rail: the apps the app opens (Workflows), over a backdrop that closes it.
     pub(super) fn more_apps_view(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.workflows.more_apps {
+        if !self.workflows.more_apps || !self.core.capabilities().workflows {
             return None;
         }
         let row = div()

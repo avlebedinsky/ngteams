@@ -438,10 +438,9 @@ a chat" need:
   with no token. It answers 202 and posts what it got into the channel or chat as the Workflows bot (`28:358f0194-…`,
   "Workflows"), through the chat service, so sync and push deliver it as any message.
 
-With `workflows.enabled = false` the server serves none of this and issues no token for those two audiences; authz
-names no Workflows service either way. The client doesn't hide a service the server leaves out yet, so it still
-offers Workflows: its lists say "Power Automate needs access to your account. Sign in again, then refresh.", and
-signing in again doesn't change that.
+While `workflows.enabled`, authz names the GTM `workflowsService` (`<origin>/workflows`). With
+`workflows.enabled = false` the server serves none of this, issues no token for those two audiences and names no
+`workflowsService`, so the client offers no Workflows ([Optional services](#optional-services)).
 
 | Who | May |
 | --- | --- |
@@ -602,6 +601,24 @@ hands out its GTM where it has one.
 | Power Apps connections | (the client's fixed base) | `/workflow-connections/` | the account's Teams connections, while `workflows.enabled` |
 | A bot's token endpoint and metadata | (the bot's authority) | `/<tenant>/oauth2/v2.0/token`, `/<tenant>/v2.0/.well-known/`, `/adfs/` | while `apps.enabled` |
 | The keys bots check activities with | (the bot's settings) | `/bot/v1/.well-known/`, `/<tenant>/discovery/v2.0/keys` | while `apps.enabled` |
+
+## Optional services
+
+The client hides what an own server doesn't serve, rather than offering it and failing (`teams_core::Capabilities`,
+read from authz's GTMs when the account starts). Each optional service has a GTM that announces it:
+
+| Service | GTM | Served | What the client hides without it |
+|---|---|---|---|
+| Workflows | `workflowsService` | while `workflows.enabled` | the rail's More apps, a channel's and a message's Workflows entries, the Workflows app |
+| Copilot | `copilotService` | no | the Workflows dialog's AI Workflows tab and its Copilot check |
+| A meeting's recap | `mcpService` | no | a meeting chat's Recap tab |
+| Live captions | `captionsService` | no | a call's Language and speech, the captions key and command, the saved captions |
+| Recording and transcription | `recordingService` | no | a call's Record and transcribe |
+| The app catalogue and bots | `appsService` | no | a team's Apps tab, Get more apps, a copied team's Apps, a bot card's buttons that send to the bot |
+
+`docs/protocol/endpoints.md` names for every request the client sends whether the server serves it, the client hides
+it, it goes to a public host, or it is a known gap (`own server: …`); `cargo test -p ngteams-server endpoints` checks
+that each row says one, and that each hidden one is a service a default server leaves off.
 
 ## Push: the registrar and Trouter
 

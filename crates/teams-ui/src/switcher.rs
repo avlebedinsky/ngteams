@@ -333,6 +333,7 @@ impl Switcher {
                 .filter(|command| {
                     *command != CallCommand::CallChat || chat.as_ref().is_some_and(|id| list.can_call(id))
                 })
+                .filter(|command| *command != CallCommand::ToggleCaptions || list.capabilities().captions)
                 .collect()
         };
         let call_commands = fitting(calls.read(cx), list.read(cx));

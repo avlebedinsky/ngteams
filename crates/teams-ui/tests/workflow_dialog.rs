@@ -14,7 +14,15 @@ use teams_ui::workflow_dialog::WorkflowDialog;
 mod fixtures;
 use fixtures::{answer, webhook_answer};
 fn window() -> (common::Rig, Entity<WorkflowDialog>, &'static mut VisualTestContext) {
+    window_with(None)
+}
+
+/// The dialog on a core whose cloud serves `capabilities` (all when `None`).
+fn window_with(
+    capabilities: Option<teams_core::Capabilities>,
+) -> (common::Rig, Entity<WorkflowDialog>, &'static mut VisualTestContext) {
     let rig = common::Rig::start();
+    *rig.core.capabilities.lock().unwrap() = capabilities;
     *rig.core.workflow_handler.lock().unwrap() = Some(answer);
     rig.cx.update(teams_ui::window::init);
     let app: &'static mut TestAppContext = Box::leak(Box::new(rig.cx.clone()));
@@ -1021,4 +1029,23 @@ fn to_the_end(cx: &mut VisualTestContext) {
         touch_phase: gpui::TouchPhase::Moved,
         ..gpui::ScrollWheelEvent::default()
     });
+}
+
+#[test]
+fn a_cloud_without_copilot_offers_no_ai_workflows_and_asks_no_eligibility() {
+    let (rig, _dialog, cx) = window_with(Some(teams_core::Capabilities {
+        copilot: false,
+        ..teams_core::Capabilities::ALL
+    }));
+    assert!(bounds(cx, "workflow-tab-all").is_some());
+    assert!(bounds(cx, "workflow-tab-ai").is_none());
+    assert!(
+        !rig.core
+            .workflow_requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| matches!(request, WorkflowRequest::CopilotEligibility)),
+        "no Copilot ask to a cloud without it"
+    );
 }

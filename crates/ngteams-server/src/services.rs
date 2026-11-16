@@ -13,6 +13,18 @@ pub const AUTH_SERVICE_GTM: &str = "authService";
 #[must_use]
 pub fn region_gtms(config: &Config) -> BTreeMap<&'static str, String> {
     let origin = config.origin();
+    let mut gtms = served_gtms(config, &origin);
+    // the client hides an optional service whose GTM authz doesn't name (`teams_core::capabilities`)
+    if config.workflows.enabled {
+        gtms.insert(WORKFLOWS_GTM, format!("{origin}/workflows"));
+    }
+    gtms
+}
+
+/// The GTM that announces Workflows (the Flow API subset under `/workflows/`) while it is served.
+pub const WORKFLOWS_GTM: &str = "workflowsService";
+
+fn served_gtms(config: &Config, origin: &str) -> BTreeMap<&'static str, String> {
     BTreeMap::from([
         (AUTH_SERVICE_GTM, format!("{origin}/api/authsvc")),
         ("chatServiceAfd", format!("{origin}/api/chatsvc/{}", config.region)),

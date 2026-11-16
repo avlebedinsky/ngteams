@@ -125,10 +125,15 @@ impl Shell {
             })
     }
 
+    /// Whether the header offers `tab`: Recap only when the account's cloud serves a meeting's recap.
+    fn offers_tab(&self, tab: ChatTab) -> bool {
+        tab != ChatTab::Recap || self.core.capabilities().recap
+    }
+
     /// Shows `tab` of the meeting chat shown, its view made when first shown.
     pub fn show_chat_tab(&mut self, tab: ChatTab, window: &mut Window, cx: &mut Context<Self>) {
         let Main::Chat(id) = &self.main else { return };
-        if !self.has_tabs(id, cx) {
+        if !self.has_tabs(id, cx) || !self.offers_tab(tab) {
             return;
         }
         let id = id.clone();
@@ -215,7 +220,7 @@ impl Shell {
             return None;
         }
         let shown = self.meeting_tabs.shown;
-        let tabs = ChatTab::ALL.into_iter().map(|tab| {
+        let tabs = ChatTab::ALL.into_iter().filter(|tab| self.offers_tab(*tab)).map(|tab| {
             let chosen = tab == shown;
             let key = tab.key();
             div()

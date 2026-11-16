@@ -156,6 +156,8 @@ pub struct CardsElement {
     source: Option<PictureSource>,
     on_state: Option<OnState>,
     in_teams: Option<String>,
+    /// Whether a button that sends to the bot is drawn: not where the account's cloud serves no bot invokes.
+    submits: bool,
 }
 
 impl CardsElement {
@@ -170,6 +172,7 @@ impl CardsElement {
             source: None,
             on_state: None,
             in_teams: None,
+            submits: true,
         }
     }
 
@@ -201,6 +204,13 @@ impl CardsElement {
         self.in_teams = link;
         self
     }
+
+    /// Whether its buttons that send to the bot are drawn (`true` by default).
+    #[must_use]
+    pub fn submits(mut self, submits: bool) -> Self {
+        self.submits = submits;
+        self
+    }
 }
 
 impl RenderOnce for CardsElement {
@@ -217,6 +227,7 @@ impl RenderOnce for CardsElement {
             state: &self.state,
             on_state: self.on_state.as_ref(),
             in_teams: self.in_teams.as_deref(),
+            submits: self.submits,
             base: &base,
         };
         let id = self.id.clone();
@@ -251,6 +262,7 @@ struct Draw<'a> {
     state: &'a CardState,
     on_state: Option<&'a OnState>,
     in_teams: Option<&'a str>,
+    submits: bool,
     base: &'a HashMap<String, bool>,
 }
 
@@ -945,6 +957,7 @@ fn action_set(draw: &Draw<'_>, path: &str, actions: &[Action]) -> AnyElement {
             actions
                 .iter()
                 .enumerate()
+                .filter(|(_, action)| draw.submits || !matches!(action.kind, ActionKind::Submit))
                 .map(|(at, action)| action_button(draw, &format!("{path}{at}"), action, &keys)),
         )
         .into_any_element()

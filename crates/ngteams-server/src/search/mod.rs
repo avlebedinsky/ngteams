@@ -107,7 +107,9 @@ fn number(value: &Value, cap: i64) -> i64 {
 
 /// The entity requests of an ask; `None` for one with none (as the web client's empty contextual ask) or too many.
 fn requests(body: &Value) -> Option<Vec<Request>> {
-    let asked = field(body, "entityRequests").as_array().filter(|asked| !asked.is_empty())?;
+    let asked = field(body, "entityRequests")
+        .as_array()
+        .filter(|asked| !asked.is_empty())?;
     if asked.len() > MAX_REQUESTS {
         return None;
     }
@@ -156,7 +158,9 @@ async fn query(
     let requests = requests(&body).ok_or(StatusCode::BAD_REQUEST)?;
     let mut sets = Vec::with_capacity(requests.len());
     for request in &requests {
-        let found = find(&app, &caller, request, false).await.map_err(|error| unavailable(&error))?;
+        let found = find(&app, &caller, request, false)
+            .await
+            .map_err(|error| unavailable(&error))?;
         let total = request.page.from + i64::try_from(found.items.len()).unwrap_or(0) + i64::from(found.more);
         let results: Vec<Value> = found.items.into_iter().map(result).collect();
         sets.push(json!({
@@ -186,7 +190,9 @@ async fn suggestions(
     let requests = requests(&body).ok_or(StatusCode::BAD_REQUEST)?;
     let mut groups = Vec::new();
     for request in requests.iter().filter(|request| request.kind.is_some()) {
-        let found = find(&app, &caller, request, true).await.map_err(|error| unavailable(&error))?;
+        let found = find(&app, &caller, request, true)
+            .await
+            .map_err(|error| unavailable(&error))?;
         let suggestions: Vec<Value> = found
             .items
             .into_iter()
@@ -204,7 +210,10 @@ async fn suggestions(
 
 /// What `request` finds for `caller`; `suggested` for a suggestion, whose message preview is marked up.
 async fn find(app: &App, caller: &Caller<Substrate>, request: &Request, suggested: bool) -> Result<Found, DbError> {
-    let Some(kind) = request.kind.filter(|_| !request.terms.is_empty() && request.page.size > 0) else {
+    let Some(kind) = request
+        .kind
+        .filter(|_| !request.terms.is_empty() && request.page.size > 0)
+    else {
         return Ok(Found {
             items: Vec::new(),
             more: false,
@@ -331,10 +340,7 @@ fn person(row: &PersonRow, tenant: &str) -> Value {
 /// A file found: its name and type, where it opens, whose it is and when it was put there.
 fn file(app: &App, row: &FileRow) -> Option<Value> {
     let url = crate::media::file_url(app, &row.owner_id, &row.name)?;
-    let kind = row
-        .name
-        .rsplit_once('.')
-        .map(|(_, extension)| extension.to_lowercase());
+    let kind = row.name.rsplit_once('.').map(|(_, extension)| extension.to_lowercase());
     let modified = time(row.created_at.saturating_mul(1000));
     Some(json!({
         "EntityType": "File",

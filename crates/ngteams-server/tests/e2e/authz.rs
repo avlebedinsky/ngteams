@@ -149,3 +149,49 @@ async fn authz_refuses_a_disabled_account_as_teams_refuses_an_unlicensed_one() {
     );
     server.stop().await;
 }
+
+/// The optional services the account bring-up tells the views of, against a server with `workflows` on or off.
+async fn capabilities_with(workflows: bool) -> teams_core::Capabilities {
+    let server = TestServer::start_with(Backend::Sqlite, |config| {
+        config.public_origin = url::Url::parse("https://own.example.test").unwrap();
+        config.workflows.enabled = workflows;
+    })
+    .await;
+    server.add_user(UPN, "Ada").await;
+    let session = server.session(UPN).await;
+    let mri = format!("8:{}", session.skypetoken().await.unwrap().skype_id.unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let started = account::start_for_cloud(
+        Account {
+            upn: UPN.into(),
+            mri: mri.clone(),
+            display_name: "Ada".into(),
+            store_file: dir.path().join("account.sqlite"),
+            region: session.region(),
+            secrets: MemorySecretStore::new(),
+            push: false,
+            known_names: vec![(mri, "Ada".into())],
+            calls: None,
+            read_only: false,
+        },
+        teams_core::CallFloor::new(),
+        &teams_proto::Cloud::own("https://own.example.test").unwrap(),
+    )
+    .unwrap();
+    let capabilities = started.handle.requests().capabilities();
+    started.handle.shutdown();
+    server.stop().await;
+    capabilities
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_views_are_told_of_workflows_only_while_the_server_serves_them_and_of_no_service_it_lacks() {
+    let on = capabilities_with(true).await;
+    assert!(on.workflows);
+    assert!(
+        !on.recap && !on.captions && !on.recording && !on.apps && !on.copilot,
+        "{on:?}"
+    );
+    let off = capabilities_with(false).await;
+    assert!(!off.workflows, "{off:?}");
+}

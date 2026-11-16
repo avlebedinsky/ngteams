@@ -581,6 +581,10 @@ impl WorkflowDialog {
     }
 
     fn load_copilot_access(&mut self, cx: &mut Context<Self>) {
+        if !self.core.capabilities().copilot {
+            self.copilot_eligibility = Some(Ok(false));
+            return;
+        }
         self.copilot_eligibility = None;
         let generation = self.generation;
         let reply = self.core.workflow_request(WorkflowRequest::CopilotEligibility);

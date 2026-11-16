@@ -1050,3 +1050,17 @@ fn create_team_s_dropdown_offers_create_and_join() {
         .and_then(|dialog| dialog.downcast::<CreateTeamDialog>().ok());
     assert!(dialog.is_some(), "Create team's dialog opens");
 }
+
+#[test]
+fn a_cloud_without_apps_offers_no_apps_tab() {
+    let rig = Rig::start();
+    *rig.core.capabilities.lock().unwrap() = Some(teams_core::Capabilities {
+        apps: false,
+        ..teams_core::Capabilities::ALL
+    });
+    let (shell, cx) = shell_window(&rig, vec![team(OWNED, "Alpha", true)]);
+    open_page(&shell, cx);
+    click(cx, "teams-row-0");
+    assert!(bounds(cx, "manage-tab-members").is_some());
+    assert!(bounds(cx, "manage-tab-apps").is_none(), "no app catalogue to list");
+}

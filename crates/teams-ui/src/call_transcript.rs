@@ -340,7 +340,9 @@ impl Recorder {
     /// The calls or the settings changed: the captions of the call up are saved as the setting says.
     fn follow(&mut self, cx: &mut Context<Self>) {
         // the read-only app turns nothing on: starting the captions is a request of its own
-        let on = self.settings.read(cx).settings().save_call_captions && !self.core.read_only();
+        let on = self.settings.read(cx).settings().save_call_captions
+            && !self.core.read_only()
+            && self.core.capabilities().captions;
         if self.calls.read(cx).saving_captions() != on {
             self.calls.update(cx, |calls, cx| calls.set_saving_captions(on, cx));
         }
