@@ -465,6 +465,21 @@ async fn posts(mixed: &Mixed, reader: &Person, channel: &str) -> Vec<(String, St
         .collect()
 }
 
+/// A hand-made plain group start by `caller` in `chat`, ringing `to`, with its callbacks on its own calling endpoint
+/// as the engine sends them: only where the call may run decides its answer.
+async fn plain_start(mixed: &Mixed, caller: &Person, chat: &str, to: &[&Person]) -> serde_json::Value {
+    let (_, base) = super::group_signaling::own_callbacks(mixed.server(), caller.id()).await;
+    let to: Vec<_> = to.iter().map(|person| json!({"id": person.engine.mri})).collect();
+    json!({
+        "participants": {"from": {"id": caller.engine.mri}, "to": to},
+        "groupChat": {"threadId": chat, "messageId": "0"},
+        "callInvitation": {
+            "mediaContent": {"blob": "v=0", "contentType": "application/sdp-ngc-1.0"},
+            "links": {"acceptance": format!("{base}acceptance/"), "end": format!("{base}end/")},
+        },
+    })
+}
+
 /// The `<callId>` an `Event/Call` post names.
 fn call_id(text: &str) -> Option<String> {
     let rest = text.split("<callId>").nth(1)?;
@@ -479,15 +494,15 @@ async fn a_channels_meet_now_is_posted_titled_joined_from_its_post_and_told_ende
         let mut bert = Person::new(&mixed, "Bert", B_TONE).await;
         let channel = channel_of(&mixed, &ada, &[&bert]).await;
         // a hand-made plain group call in a channel isn't made: a channel's call is its Meet now
-        let plain = json!({
-            "participants": {"from": {"id": bert.engine.mri}, "to": [{"id": ada.engine.mri}]},
-            "groupChat": {"threadId": channel, "messageId": "0"},
-            "callInvitation": {"mediaContent": {"blob": "v=0", "contentType": "application/sdp-ngc-1.0"}},
-        });
+        let plain = plain_start(&mixed, &bert, &channel, &[&ada]).await;
         assert_eq!(
             raw(&mixed, &bert, Method::POST, "/flightproxy/api/v2/epconv", &plain).await,
             400
         );
+        let calls = ngteams_server::calling::open_calls(&mixed.server().app.db)
+            .await
+            .unwrap();
+        assert!(calls.is_empty(), "{calls:?}");
         let a_call = ada
             .engine
             .call(CallAction::MeetNow {
@@ -742,11 +757,7 @@ async fn only_a_meetings_hosts_let_in_or_mute_and_an_unknown_meeting_is_none() {
             "conversationRequest": {"properties": {"enableGroupCallMeetupGeneration": true}},
         });
         assert_eq!(raw(&mixed, &bert, Method::POST, start, &meet_now).await, 400);
-        let plain = json!({
-            "participants": {"from": {"id": bert.engine.mri}, "to": []},
-            "groupChat": {"threadId": chat, "messageId": "0"},
-            "callInvitation": {"mediaContent": offer},
-        });
+        let plain = plain_start(&mixed, &bert, &chat, &[]).await;
         assert_eq!(raw(&mixed, &bert, Method::POST, start, &plain).await, 400);
         let calls = ngteams_server::calling::open_calls(&mixed.server().app.db)
             .await

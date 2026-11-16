@@ -477,13 +477,13 @@ async fn raw_as(server: &TestServer, upn: &str, method: reqwest::Method, path: &
     (status, response.json().await.unwrap_or(Value::Null))
 }
 
-/// `person`'s calling endpoint and a callback base on it.
-async fn own_callbacks(server: &TestServer, person: &Person) -> (String, String) {
+/// The calling endpoint of the account `id` and a callback base on it.
+pub(super) async fn own_callbacks(server: &TestServer, id: &str) -> (String, String) {
     let stack = ngteams_server::trouter::Stack::Calling;
-    let registered = ngteams_server::registrar::registered(&server.app.db, &person.id, stack.app_id())
+    let registered = ngteams_server::registrar::registered(&server.app.db, id, stack.app_id())
         .await
         .unwrap();
-    let endpoint = ngteams_server::trouter::endpoint_id(&person.id, &registered[0], stack);
+    let endpoint = ngteams_server::trouter::endpoint_id(id, &registered[0], stack);
     let base = format!("{ORIGIN}/trouter/v4/f/{endpoint}/callAgent/raw/");
     (endpoint, base)
 }
@@ -622,7 +622,7 @@ async fn a_partys_renegotiation_is_answered_by_the_media_node_and_a_hold_is_refu
         "{quiet:#?}"
     );
     // a group call has no hold
-    let (_, base) = own_callbacks(&group.server, &group.a).await;
+    let (_, base) = own_callbacks(&group.server, &group.a.id).await;
     let hold = json!({"hold": {"links": {"holdCompletion": format!("{base}holdCompletion/")}}});
     let path = format!("/flightproxy/api/v2/ep/cc.own/cc/v1/active/{}/0/a1/1/hold", call.id);
     let (status, _) = raw(&group.server, &group.a, reqwest::Method::POST, &path, &hold).await;
@@ -640,7 +640,7 @@ async fn a_member_follows_the_roster_without_joining_and_nobody_acts_on_anothers
     let call = group.open_call().await;
     let conv = format!("/flightproxy/api/v2/ep/conv.own/conv/{}", call.conversation);
     // Cora, a member, subscribes without media: the whole roster in the answer and at her callback
-    let (endpoint, base) = own_callbacks(&group.server, &group.c).await;
+    let (endpoint, base) = own_callbacks(&group.server, &group.c.id).await;
     let mut told = group
         .server
         .app
@@ -871,7 +871,7 @@ async fn a_join_the_media_node_fails_keeps_the_ring_and_a_later_join_takes_the_s
         // Bert, still rung, joins instead of answering (from another device of his), and Cora, never rung, joins:
         // the node fails both
         let conv = format!("/flightproxy/api/v2/ep/conv.own/conv/{}", call.conversation);
-        let (_, base) = own_callbacks(&group.server, &group.b).await;
+        let (_, base) = own_callbacks(&group.server, &group.b.id).await;
         let join = json!({
             "callInvitation": {
                 "mediaContent": {"blob": "v=0\r\ns=bert joins\r\n", "contentType": "application/sdp-ngc-1.0"},
@@ -929,7 +929,7 @@ async fn an_answer_a_join_of_the_same_callee_overtook_is_refused_and_the_join_ta
         answer.reached().await;
         let new_leg = group.mixer.hold_new_leg();
         let conv = format!("/flightproxy/api/v2/ep/conv.own/conv/{}", call.conversation);
-        let (_, base) = own_callbacks(&group.server, &group.b).await;
+        let (_, base) = own_callbacks(&group.server, &group.b.id).await;
         let join = json!({
             "callInvitation": {
                 "mediaContent": {"blob": "v=0\r\ns=bert joins\r\n", "contentType": "application/sdp-ngc-1.0"},
@@ -984,7 +984,7 @@ async fn an_answer_that_comes_while_a_join_of_the_same_callee_is_under_way_is_re
         // Bert joins from another device and, once the node made the join's leg, answers on the ringing one
         let made = group.mixer.hold_made_leg();
         let conv = format!("/flightproxy/api/v2/ep/conv.own/conv/{}", call.conversation);
-        let (_, base) = own_callbacks(&group.server, &group.b).await;
+        let (_, base) = own_callbacks(&group.server, &group.b.id).await;
         let join = json!({
             "callInvitation": {
                 "mediaContent": {"blob": "v=0\r\ns=bert joins\r\n", "contentType": "application/sdp-ngc-1.0"},
@@ -1083,7 +1083,7 @@ async fn a_former_party_no_longer_in_the_chat_follows_nothing() {
     remove_member(&account.client(&group.server), &group.chat, &group.b).await;
     let call = group.open_call().await;
     let conv = format!("/flightproxy/api/v2/ep/conv.own/conv/{}", call.conversation);
-    let (_, base) = own_callbacks(&group.server, &group.b).await;
+    let (_, base) = own_callbacks(&group.server, &group.b.id).await;
     let watch =
         json!({"conversationRequest": {"roster": {"type": "Delta", "rosterUpdate": format!("{base}rosterUpdate/")}}});
     let (status, _) = raw(&group.server, &group.b, reqwest::Method::POST, &conv, &watch).await;
