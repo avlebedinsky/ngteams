@@ -804,20 +804,35 @@ room (`--role api` without Redis or a live node, or every node full) the start i
 with libopus: each party's audio is decoded into a buffer of its own (played once 60 ms are in, concealed for three
 20 ms ticks when it runs dry, trimmed back past 200 ms), and every 20 ms each party gets the sum of every other
 active party (above −50 dBFS within 200 ms), soft-clipped and encoded (32 kb/s, in-band FEC, DTX). A party is never
-sent its own voice. The control plane on the data channel answers the client's `syn` with `ack` (it sends `dsh`, takes
-nothing, so the client asks for no video source) and tells the dominant speakers (`dsh`, the audio source ids, the
-newest speaker first, at most every 300 ms and to a party once its control plane is up). A party that stops
-speaking, or mutes, while another talks on gives the first place to the newest party still speaking: the client
-shows the first one as speaking while it hears anything. Video isn't served yet:
-every video line of an offer is answered rejected. The node writes its SDP in Teams' dialect with its host
+sent its own voice. The control plane on the data channel answers the client's `syn` with `ack` (it sends `dsh` and
+`sr_res`, takes `sr`) and tells the dominant speakers (`dsh`, the audio source ids, the newest speaker first, at most
+every 300 ms and to a party once its control plane is up). A party that stops speaking, or mutes, while another talks
+on gives the first place to the newest party still speaking: the client shows the first one as speaking while it
+hears anything. The node writes its SDP in Teams' dialect with its host
 candidates (`mixer.public_addrs`); the client is relay-only, so its media reaches the node from the TURN relay's
 address, and **coturn must be allowed to send to the node's address** (a `denied-peer-ip` covering it, or coturn's
 default refusal of loopback peers, leaves group calls without media: add `allowed-peer-ip=<node address>`).
 
+**Video** is forwarded, never transcoded. Every party's leg has the main video line (its camera), nine receiving
+lines and the sharing line, each both ways and H.264 at `107` (retransmissions `99`); each line names its stream id
+(`a=x-source-streamid`): the main line the party's video source, the sharing line its sharing source, the receiving
+lines ids of their own from the party's block (a party's ids are 20 apart: audio, video, sharing, data, then its
+receiving lines). The camera and the screen go on as the party describes its lines (`updateMediaDescriptions`: a line
+other than the sharing line sending is the camera, the sharing line sending is the screen); the roster then says so
+(`main-video` `sendrecv`, an `applicationsharing-video` stream `sendonly` with the sharing source) and the others ask
+the node for it with source requests on the control plane (`sr`: a receiving line's stream id and the source to show,
+`-1` for none; each is answered `sr_res` `ok`). The node writes each frame of a camera or a screen onto every line
+whose last request named it, from that source's next keyframe on (it asks the source for one by PLI, or FIR where
+the line takes no PLI, at most every 300 ms per source), its RTP time going on from where the line was when it changes
+source. A receiver's PLI or FIR on a line is passed to the source it shows. No video goes to a party before it
+seeded its bandwidth (`applyChannelParameters`' `sendSideBWSeed`, in its start, answer, join or renegotiation, or on
+its own), as Teams' mixer does.
+
 **The internal API** (`mixer.internal_listen`; on a private network, never under the public origin) takes
 `PUT|DELETE /internal/mixer/v1/rooms/<call>/legs/<leg>` (`{"sources", "offer"?}`, answered `{"answer"|"offer",
 "epoch"}`), `POST …/legs/<leg>/answer` (`{"answer"}`), `POST …/legs/<leg>/offer` (`{"offer"}`, answered
-`{"answer"}`), `GET|DELETE …/rooms/<call>`. Each request carries a bearer token the deployment's own keys signed for
+`{"answer"}`), `POST …/legs/<leg>/parameters` (`{"seed"}`, the bandwidth seed in bits a second), `GET|DELETE
+…/rooms/<call>`. Each request carries a bearer token the deployment's own keys signed for
 `ngteams-media` (60 s; every node reads the same keys, so there is no secret to configure) and the node life its
 call's row names (`ngteams-media-epoch`); another life's room is `410`. A renegotiation the same as the last is
 answered the same; more than 20 in a minute are `429`.
