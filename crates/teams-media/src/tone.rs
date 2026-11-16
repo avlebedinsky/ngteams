@@ -81,6 +81,41 @@ pub fn decibels(level: f32, reference: f32) -> f32 {
     20.0 * (level / reference).log10()
 }
 
+/// How purely `samples` (at [`SAMPLE_RATE`]) carry a tone at `hz`: the amplitude of the sine at `hz` that fits them
+/// best, and the decibels of that sine over the rest (a gap, a click or noise). A silent window reads as 0 dB.
+#[must_use]
+pub fn purity(samples: &[f32], hz: f32) -> (f32, f32) {
+    let step = TAU * f64::from(hz) / f64::from(SAMPLE_RATE);
+    let basis = |n: usize| {
+        let phase = step * len_f64(n);
+        (phase.sin(), phase.cos())
+    };
+    let (mut ss, mut sc, mut cc, mut xs, mut xc) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    for (n, &x) in samples.iter().enumerate() {
+        let (s, c) = basis(n);
+        let x = f64::from(x);
+        (ss, sc, cc, xs, xc) = (ss + s * s, sc + s * c, cc + c * c, xs + x * s, xc + x * c);
+    }
+    let det = ss * cc - sc * sc;
+    if samples.is_empty() || det.abs() < f64::EPSILON {
+        return (0.0, 0.0);
+    }
+    let (a, b) = ((xs * cc - xc * sc) / det, (xc * ss - xs * sc) / det);
+    let (mut tone, mut rest) = (0.0, 0.0);
+    for (n, &x) in samples.iter().enumerate() {
+        let (s, c) = basis(n);
+        let fit = a * s + b * c;
+        tone += fit * fit;
+        rest += (f64::from(x) - fit).powi(2);
+    }
+    let db = if tone > 0.0 {
+        10.0 * (tone / rest.max(tone * 1e-12)).log10()
+    } else {
+        0.0
+    };
+    (to_f32(a.hypot(b)), to_f32(db))
+}
+
 #[expect(
     clippy::cast_possible_truncation,
     reason = "audio samples and levels fit an f32's range"
@@ -92,4 +127,35 @@ fn to_f32(value: f64) -> f32 {
 #[expect(clippy::cast_precision_loss, reason = "sample counts stay far below 2^52")]
 fn len_f64(len: usize) -> f64 {
     len as f64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn purity_reads_a_clean_tone_high_and_a_cut_or_noise_low() {
+        let tone = Tone {
+            hz: 1000.0,
+            amplitude: 0.5,
+        };
+        let mut samples = vec![0.0; 960];
+        ToneGenerator::new(tone).fill(&mut samples);
+        let (amplitude, clean) = purity(&samples, tone.hz);
+        assert!((amplitude - 0.5).abs() < 1e-3, "{amplitude}");
+        assert!(clean > 80.0, "{clean}");
+        let mut cut = samples.clone();
+        cut[100..160].fill(0.0);
+        let (_, db) = purity(&cut, tone.hz);
+        assert!((5.0..20.0).contains(&db), "a 60-sample gap reads {db} dB");
+        let noisy: Vec<f32> = samples
+            .iter()
+            .enumerate()
+            .map(|(n, s)| s + if n % 2 == 0 { 0.1 } else { -0.1 })
+            .collect();
+        let (_, db) = purity(&noisy, tone.hz);
+        assert!((10.0..20.0).contains(&db), "noise at a fifth of the tone reads {db} dB");
+        assert_eq!(purity(&[], tone.hz), (0.0, 0.0));
+        assert_eq!(purity(&[0.0; 960], tone.hz), (0.0, 0.0));
+    }
 }

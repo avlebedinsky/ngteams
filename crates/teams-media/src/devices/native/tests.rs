@@ -6,6 +6,8 @@ use gst::subclass::prelude::*;
 
 use super::*;
 
+mod formats;
+
 mod synthetic {
     use super::*;
     #[derive(Default)]
@@ -22,6 +24,16 @@ mod synthetic {
         fn create_element(&self, _name: Option<&str>) -> Result<gst::Element, gst::LoggableError> {
             let obj = self.obj();
             let label = obj.display_name();
+            let formatted = if let Some(caps) = label.strip_prefix(super::formats::MICROPHONE) {
+                Some(super::formats::microphone(caps))
+            } else {
+                label
+                    .strip_prefix(super::formats::SPEAKER)
+                    .map(|caps| Ok(super::formats::speaker(&label, caps)))
+            };
+            if let Some(element) = formatted {
+                return element.map_err(|e| gst::loggable_error!(gst::CAT_RUST, "{e}"));
+            }
             let element = match label.as_str() {
                 "microphone-a" => gst::ElementFactory::make("audiotestsrc")
                     .property("is-live", true)
