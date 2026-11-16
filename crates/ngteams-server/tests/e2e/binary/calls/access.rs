@@ -1,6 +1,6 @@
 //! Who a call is for: a third account touches nothing of it, a callee already in a call isn't disturbed, and the
-//! calls this server doesn't serve (a meeting, the test call) are refused without harm. Group calls are served
-//! (`group.rs`).
+//! calls this server doesn't serve (the test call, a meeting's start with no chat or in a chat of no meeting) are
+//! refused without harm. Group calls are served (`group.rs`), meetings too (`calling::meetings`).
 
 use std::time::Duration;
 
@@ -222,7 +222,7 @@ async fn refused(a: &mut Phone, others: &mut [&mut Phone], what: &str, action: C
 }
 
 /// The starts of the kinds this server doesn't serve, as a's own, through every node: each is answered 501 (a group
-/// call in a chat that doesn't exist 404) and leaves no call behind.
+/// call in a chat that doesn't exist 404; a meeting's start names no chat) and leaves no call behind.
 async fn not_served(rig: &Rig, a: &Phone, b_mri: &str, c_mri: &str) {
     let token = a.skypetoken().await;
     let callbacks = format!("{}/trouter/v4/f/AnyEndpoint000000000000/callAgent/x/", rig.origin);
@@ -244,7 +244,7 @@ async fn not_served(rig: &Rig, a: &Phone, b_mri: &str, c_mri: &str) {
         for (what, body, refusal) in [
             ("a group call in a chat that doesn't exist", &group, 404),
             ("two callees", &two, 501),
-            ("a meeting", &meeting, 501),
+            ("a meeting with no chat", &meeting, 501),
             ("the test call", &echo, 501),
         ] {
             let (status, _) = raw(node, &token, Method::POST, &epconv, body).await;
@@ -255,7 +255,7 @@ async fn not_served(rig: &Rig, a: &Phone, b_mri: &str, c_mri: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_meeting_and_the_test_call_are_refused_and_the_next_call_works() {
+async fn a_meeting_in_a_chat_of_no_meeting_and_the_test_call_are_refused_and_the_next_call_works() {
     for backend in backends() {
         let Some(rig) = Rig::start(backend, "refused", 30, Turn::Coturn).await else {
             return;
@@ -278,7 +278,13 @@ async fn a_meeting_and_the_test_call_are_refused_and_the_next_call_works() {
                 tenant_id: "00000000-0000-4000-8000-000000000001".into(),
             },
         };
-        refused(&mut a, &mut [&mut b, &mut c], "a meeting", meeting).await;
+        refused(
+            &mut a,
+            &mut [&mut b, &mut c],
+            "a meeting in a chat of no meeting",
+            meeting,
+        )
+        .await;
         let echo = CallAction::TestCall {
             echo: Mri::new("8:echo123"),
         };

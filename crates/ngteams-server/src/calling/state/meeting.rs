@@ -281,7 +281,7 @@ mod tests {
 
     use super::*;
     use crate::calling::media::MediaHome;
-    use crate::calling::state::{Leg, Meeting};
+    use crate::calling::state::{Leg, Meeting, Showing};
 
     const ORIGIN: &str = "https://own.example.test";
     const NAMES: [&str; 6] = [
@@ -749,5 +749,46 @@ mod tests {
             (call.party(B).mute_version, call.party(Seat::CALLER).mute_version),
             (4, 0)
         );
+    }
+
+    /// Whether the roster lists a sharing stream of the party at `seat`.
+    fn shares(call: &Call, seat: Seat) -> bool {
+        let party = call.party(seat);
+        let entry = &wire::roster(call, &[seat])["participants"][party.mri()];
+        entry["endpoints"]
+            .as_object()
+            .into_iter()
+            .flat_map(|endpoints| endpoints.values())
+            .filter_map(|endpoint| endpoint["call"]["mediaStreams"].as_array())
+            .flatten()
+            .any(|stream| stream["label"] == "applicationsharing-video")
+    }
+
+    #[test]
+    fn a_share_takes_over_in_a_meeting_as_in_a_group_call_and_one_taken_out_shares_no_more() {
+        let mut call = meeting();
+        let (d, _) = waits(&mut call, "d");
+        let sharing = Showing {
+            camera: false,
+            sharing: true,
+        };
+        call.group_described(B, sharing, at(1_003_000), &mut Out::default())
+            .unwrap();
+        let mut out = Out::default();
+        call.group_described(C, sharing, at(1_004_000), &mut out).unwrap();
+        assert!(shares(&call, C) && !shares(&call, B));
+        assert_eq!(
+            call.group_described(d, sharing, at(1_004_500), &mut Out::default()),
+            Err(Refusal::Forbidden),
+            "one in the lobby has no media"
+        );
+        let told = &out.deliveries[0].body["participants"];
+        assert!(
+            told.get("8:orgid:b").is_some() && told.get("8:orgid:c").is_some(),
+            "{told}"
+        );
+        call.remove(Seat::CALLER, C, at(1_005_000), &mut Out::default())
+            .unwrap();
+        assert!(!shares(&call, C) && !shares(&call, B));
     }
 }
