@@ -54,8 +54,9 @@ pub enum Failure {
     Disk(String),
     /// The user cancelled it.
     Cancelled,
-    /// Another job holds the `.part` file of the same place: another download, a download to the same place by
-    /// another path or in another ngteams, or a dismissed download that did not end yet. It may not show as running.
+    /// Another job holds the `.part` file of the same place, or saves to it or to its `.part` file (`report.part` while
+    /// `report` is written): another download, a download to the same place by another path or in another ngteams,
+    /// or a dismissed download that did not end yet. It may not show as running.
     Busy,
 }
 
@@ -266,7 +267,9 @@ pub struct Downloads {
 
 impl Global for Downloads {}
 
-/// Whether the job of a download other than `except` still writes to `target`, whatever its link. It sees only the
+/// Whether the job of a download other than `except` still writes to `target` or to its `.part` file, whatever its
+/// link: the same place, a place that is the `.part` file of the other (`report.part` while `report` is written), or
+/// the reverse. A rename of one over the other would replace the file that the other job writes. It sees only the
 /// downloads the app keeps ([`Downloads`]): not a dismissed one whose job did not end yet, and not one to the same
 /// place by another path. The lock of the `.part` file stops those (see `save`).
 fn target_busy(target: &Path, except: EntityId, cx: &App) -> bool {
@@ -280,8 +283,14 @@ fn target_busy(target: &Path, except: EntityId, cx: &App) -> bool {
         .filter(|download| download.entity_id() != except)
         .any(|download| {
             let download = download.read(cx);
-            download.writing.load(Ordering::Acquire) && download.target == target
+            download.writing.load(Ordering::Acquire) && places_collide(&download.target, target)
         })
+}
+
+/// Whether downloads to `one` and to `other` write the same file: the same place, or one place is the `.part` file of
+/// the other.
+fn places_collide(one: &Path, other: &Path) -> bool {
+    one == other || part_path(one) == other || one == part_path(other)
 }
 
 /// The download of the recording whose sharing link is `link`, when one was started this run (and not dismissed).
@@ -369,7 +378,8 @@ struct Told {
 }
 
 /// A download's job, from its start until it ends or is dropped (cancelled): it clears the download's `writing` as it
-/// ends, and before that removes the `.part` file it took, unless the file was saved.
+/// ends, and before that removes the `.part` file it took, unless the file was saved or is no longer at its path
+/// (another writer put its own file there, which stays).
 struct Job {
     writing: Arc<AtomicBool>,
     /// The `.part` file the job locked and writes (its path, and the file that holds the lock), until it is renamed
@@ -381,7 +391,9 @@ impl Drop for Job {
     fn drop(&mut self) {
         if let Some((part, file)) = self.part.take() {
             // removed while it is still locked, so that no other writer takes it before
-            let _ = fs::remove_file(part);
+            if matches!(still_at(&file, &part), Ok(true)) {
+                let _ = fs::remove_file(part);
+            }
             drop(file);
         }
         self.writing.store(false, Ordering::Release);
@@ -402,7 +414,7 @@ fn still_at(file: &fs::File, path: &Path) -> io::Result<bool> {
 /// bytes, and once the whole file came); what it wrote is removed when it fails or is dropped (by `job`). The
 /// `.part` file is locked while it is written: when another writer has it locked, or the file it locked is no longer
 /// the one at its path (another writer saved or removed it in the meantime), this fails ([`Failure::Busy`]) and does
-/// not change it.
+/// not change it. It also fails so when, before the rename, another file is at its path: that file stays.
 async fn save<F: Future<Output = ()>>(
     open: Opener,
     target: PathBuf,
@@ -451,6 +463,10 @@ async fn save<F: Future<Output = ()>>(
     fetched?;
     let file = sink.into_inner().map_err(|error| disk(error.into_error()))?;
     file.sync_all().map_err(disk)?;
+    // another writer may have put its own file at the path in the meantime (a rename over it): that file is not saved
+    if !still_at(file, &part).map_err(disk)? {
+        return Err(Failure::Busy);
+    }
     // renamed while it is still locked, so that no other writer takes it before
     fs::rename(&part, &target).map_err(disk)?;
     // saved: not removed, and the lock goes with the file
@@ -561,6 +577,36 @@ mod tests {
         assert!(!still_at(&file, &part).unwrap(), "another file at its path");
         fs::remove_file(&part).unwrap();
         assert!(!still_at(&file, &part).unwrap(), "removed");
+    }
+
+    #[test]
+    fn a_place_collides_with_itself_and_with_its_part_file_in_the_two_directions() {
+        let report = Path::new("/saved/report");
+        assert!(places_collide(report, report));
+        assert!(places_collide(report, Path::new("/saved/report.part")));
+        assert!(places_collide(Path::new("/saved/report.part"), report));
+        assert!(!places_collide(report, Path::new("/saved/report.part.part")));
+        assert!(!places_collide(report, Path::new("/saved/other")));
+        assert!(!places_collide(report, Path::new("/other/report.part")));
+    }
+
+    #[test]
+    fn a_dropped_job_keeps_the_file_that_another_writer_put_at_its_part_path() {
+        let folder = tempfile::tempdir().unwrap();
+        let part = folder.path().join("report.part");
+        let file = fs::File::create(&part).unwrap();
+        file.try_lock().unwrap();
+        let job = Job {
+            writing: Arc::new(AtomicBool::new(true)),
+            part: Some((part.clone(), file)),
+        };
+        // another download saved its own file over it (a rename, which a lock does not stop)
+        let other = folder.path().join("report.part.part");
+        fs::write(&other, b"the other download").unwrap();
+        fs::rename(&other, &part).unwrap();
+
+        drop(job);
+        assert_eq!(fs::read(&part).unwrap(), b"the other download");
     }
 
     #[test]

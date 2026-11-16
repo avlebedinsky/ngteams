@@ -485,6 +485,60 @@ fn a_download_of_another_file_to_where_one_still_runs_fails_and_the_first_saves(
     assert!(bounds(cx, &format!("file-download-{ID}-0 saved")).is_some());
 }
 
+/// A download to `<name>.part` saves its file by a rename over the `.part` file of a download to `<name>`, and the
+/// reverse: whichever starts second fails, and the first one saves its own bytes.
+#[test]
+fn a_download_to_the_part_file_of_a_running_download_fails_and_the_first_saves() {
+    for second_is_part in [true, false] {
+        let entry = |share: &str| {
+            serde_json::json!({"@type": teams_proto::chat::FILE_TYPE, "fileName": "made-up notes.pdf",
+                "fileType": "pdf", "state": "active", "objectUrl": share, "fileInfo": {"shareUrl": share}})
+        };
+        let mut stored = message(ID, LAB_B, "<p>the notes, twice</p>", NOON);
+        stored.properties = Some(
+            serde_json::json!({"files": Value::Array(vec![entry(OWN_SHARE), entry(OWN_SHARE_OTHER)]).to_string()})
+                .to_string(),
+        );
+        let other: &[u8] = b"%PDF-1.7 the older made-up notes";
+        let (rig, _opened, cx) = own_files_chat(stored, &[(OWN_SHARE, OWN_BYTES), (OWN_SHARE_OTHER, other)]);
+        *rig.core.hold_streams_from.lock().unwrap() = Some(0);
+        let chosen = tempfile::tempdir().unwrap();
+        let report = chosen.path().join("made-up notes.pdf");
+        let staging = teams_ui::recording_download::part_path(&report);
+        let (first, second) = if second_is_part {
+            (report.clone(), staging.clone())
+        } else {
+            (staging.clone(), report.clone())
+        };
+        for (file, place) in [(0, first.clone()), (1, second)] {
+            click(cx, &format!("file-more-{ID}-{file}"));
+            click(cx, &format!("file-menu-download-{ID}-{file}"));
+            cx.simulate_new_path_selection(move |_| Some(place));
+            draw(cx);
+        }
+        assert!(
+            bounds(cx, &format!("file-download-{ID}-1 failed")).is_some(),
+            "second is part: {second_is_part}"
+        );
+        let failed = cx.update(|_, cx| {
+            teams_ui::recording_download::download_of(OWN_SHARE_OTHER, cx)
+                .map(|download| download.read(cx).progress().clone())
+        });
+        assert_eq!(
+            failed,
+            Some(teams_ui::recording_download::Progress::Failed(
+                teams_ui::recording_download::Failure::Busy
+            ))
+        );
+        // one stream only: the second download never wrote
+        answer_held(&rig, &[OWN_BYTES]);
+        draw(cx);
+        assert_eq!(std::fs::read(&first).unwrap(), OWN_BYTES, "the first file, whole");
+        assert!(!teams_ui::recording_download::part_path(&first).exists());
+        assert!(bounds(cx, &format!("file-download-{ID}-0 saved")).is_some());
+    }
+}
+
 /// The second place is the first one by another path (a link to its folder, as a name in another case is on a file
 /// system that ignores case): the two `.part` files are one file, which the first download has locked.
 #[cfg(unix)]
