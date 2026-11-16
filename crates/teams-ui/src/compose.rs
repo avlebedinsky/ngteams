@@ -612,7 +612,8 @@ struct Routes {
     files: HashMap<u64, Route<u64>>,
     /// Uploads of pasted pictures, by the id of the picture in the editor.
     pictures: HashMap<u64, Route<u64>>,
-    /// Sends: with `true`, a refused draft comes back after the draft that its box holds (it moved there).
+    /// Sends: with `true`, a refused draft comes back after the draft that its box holds, with ids of that box for its
+    /// pictures and files (it moved there).
     sends: Vec<Route<bool>>,
 }
 
@@ -829,7 +830,7 @@ impl Compose {
             return;
         };
         if let Err(problem) = outcome {
-            self.give_back(draft, false, window, cx);
+            self.give_back(draft, None, window, cx);
             self.show_problem(problem, cx);
         }
         cx.notify();
@@ -894,14 +895,7 @@ impl Compose {
         } else {
             own.doc().clone()
         };
-        let pictures: Vec<_> = doc
-            .blocks
-            .iter()
-            .filter_map(|block| match block.kind {
-                Kind::Picture(id) => Some((id, own.picture(id)?.clone())),
-                _ => None,
-            })
-            .collect();
+        let pictures = self.pictures_of(&doc, cx);
         let files = std::mem::take(&mut self.attachments);
         let mode = std::mem::replace(&mut self.mode, Mode::New);
         let mut routes = std::mem::take(&mut self.routes);
@@ -940,6 +934,18 @@ impl Compose {
         });
         self.fit_pictures(cx);
         cx.notify();
+    }
+
+    /// The pictures of the blocks of `doc`, by their ids in the editor of this box.
+    fn pictures_of(&self, doc: &Doc, cx: &App) -> Vec<(u64, editor::pictures::Picture)> {
+        let editor = self.editor.read(cx);
+        doc.blocks
+            .iter()
+            .filter_map(|block| match block.kind {
+                Kind::Picture(id) => Some((id, editor.picture(id)?.clone())),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Whether the box edits a message.
@@ -1361,6 +1367,8 @@ impl Compose {
     ) {
         let files = !draft.attachments.is_empty();
         self.sending_files += usize::from(files);
+        // the ids of the pictures are the ids in this box: a draft given back to another box takes the pictures along
+        let pictures = self.pictures_of(&draft.doc, cx);
         let route: Route<bool> = Rc::new(RefCell::new((cx.weak_entity(), false)));
         self.routes.sends.push(Rc::clone(&route));
         cx.spawn_in(window, async move |_, cx| {
@@ -1371,7 +1379,7 @@ impl Compose {
                 this.sending_files = this.sending_files.saturating_sub(usize::from(files));
                 match answer {
                     Err(error) => {
-                        this.give_back(draft, after, window, cx);
+                        this.give_back(draft, after.then_some(pictures), window, cx);
                         this.show_problem(format!("Not sent: {error}"), cx);
                     }
                     Ok(row) => this.sent_post(row.client_message_id, post.as_ref(), cx),
@@ -1383,9 +1391,16 @@ impl Compose {
     }
 
     /// Restores a refused file send, retaining any newer text typed while its share was pending, and a reply or edit
-    /// started since. With `after` (the send moved here with a draft), the text given back comes after the text that
-    /// the box holds, else before it.
-    fn give_back(&mut self, mut draft: Draft, after: bool, _: &mut Window, cx: &mut Context<Self>) {
+    /// started since. With `moved` (the send moved here with a draft: the pictures of the draft, by their ids in the
+    /// box that sent it), the text given back comes after the text that the box holds and its pictures get ids of this
+    /// box, else it comes before it. The files given back always get ids of this box.
+    fn give_back(
+        &mut self,
+        mut draft: Draft,
+        moved: Option<Vec<(u64, editor::pictures::Picture)>>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // files attached since stay beside the text given back (a translated send's text left the box once it went),
         // but never beside an edit, which carries no files
         let edit_beside_files = matches!(draft.mode, Mode::Edit { .. }) && !self.attachments.is_empty();
@@ -1394,24 +1409,34 @@ impl Compose {
         {
             return;
         }
-        if !self.editor.read(cx).is_empty() {
-            let held = self.editor.read(cx).doc().blocks.clone();
-            if after {
-                draft
-                    .doc
-                    .blocks
-                    .splice(0..0, held.into_iter().chain([Block::default()]));
-            } else {
+        let held = !self.editor.read(cx).is_empty();
+        if let Some(pictures) = moved {
+            if held {
+                draft.doc.blocks.insert(0, Block::default());
+            }
+            // the editor puts the draft after what it holds, with new ids for its pictures
+            let sending = self
+                .editor
+                .update(cx, |editor, cx| editor.take_doc(draft.doc, pictures, cx));
+            for (_, id) in sending {
+                self.send_picture(id, cx);
+            }
+            self.fit_pictures(cx);
+        } else {
+            if held {
+                let held = self.editor.read(cx).doc().blocks.clone();
                 draft.doc.blocks.push(Block::default());
                 draft.doc.blocks.extend(held);
             }
+            self.editor.update(cx, |editor, cx| editor.set_doc(draft.doc, cx));
         }
-        self.editor.update(cx, |editor, cx| editor.set_doc(draft.doc, cx));
         if self.mode == Mode::New {
             self.mode = draft.mode;
         }
-        for file in draft.attachments {
+        for mut file in draft.attachments {
             if !self.attachments.iter().any(|current| current.path == file.path) {
+                self.next_attachment += 1;
+                file.id = self.next_attachment;
                 self.attachments.push(file);
             }
         }

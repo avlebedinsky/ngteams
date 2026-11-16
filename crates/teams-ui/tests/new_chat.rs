@@ -825,6 +825,63 @@ fn a_file_send_from_a_found_chat_that_fails_gives_its_draft_back_after_the_reply
     assert_eq!(file_names(&own, cx), ["plan.txt"]);
 }
 
+/// Pastes into the focused box a made-up picture, `width` by `height`.
+fn paste_picture(cx: &mut VisualTestContext, width: u32, height: u32) {
+    let pasted = gpui::ClipboardEntry::Image(gpui::Image::from_bytes(gpui::ImageFormat::Png, png(width, height)));
+    cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem { entries: vec![pasted] }));
+    cx.simulate_keystrokes("ctrl-v");
+    draw(cx);
+}
+
+#[test]
+fn a_refused_send_from_a_found_chat_comes_back_with_its_own_picture_and_file_beside_those_of_that_chat() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig);
+    open(&shell, cx, AB);
+    type_in_chat(&shell, cx, "foo");
+    paste_picture(cx, 30, 30);
+    let own = chat_box(&shell, cx);
+    let (_own_dir, own_file) = temp_file("own.txt");
+    cx.update(|window, cx| own.update(cx, |compose, cx| compose.attach_files(&[own_file], window, cx)));
+    draw(cx);
+    open(&shell, cx, TALK);
+    draft_to_found_ab(&shell, cx, "bar");
+    paste_picture(cx, 40, 20);
+    let view = new_chat(&shell, cx);
+    let found = cx.update(|_, cx| view.read(cx).compose(cx));
+    let (_dir, file) = temp_file("plan.txt");
+    cx.update(|window, cx| found.update(cx, |compose, cx| compose.attach_files(&[file], window, cx)));
+    draw(cx);
+    rig.core
+        .write_errors
+        .lock()
+        .unwrap()
+        .push_back(teams_core::EngineError::Stopped);
+    found.update_in(cx, |compose, window, cx| compose.focus(window, cx));
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    assert_eq!(chat_box(&shell, cx), own, "the chat keeps its box");
+    let editor = cx.update(|_, cx| own.read(cx).editor().clone());
+    cx.update(|_, cx| {
+        let editor = editor.read(cx);
+        let mut sizes: Vec<_> = editor
+            .shown_pictures()
+            .into_iter()
+            .map(|id| editor.picture(id).expect("each picture shown is held").own)
+            .collect();
+        sizes.sort_unstable();
+        assert_eq!(
+            sizes,
+            [(30, 30), (40, 20)],
+            "the picture of the chat and the refused one"
+        );
+        assert!(editor.pictures_ready(), "the box can send its pictures");
+    });
+    assert_eq!(file_names(&own, cx), ["own.txt", "plan.txt"]);
+    let ids: Vec<u64> = cx.update(|_, cx| own.read(cx).attachments().iter().map(|file| file.id).collect());
+    assert_ne!(ids[0], ids[1], "each file has its own id in the box: {ids:?}");
+}
+
 #[test]
 fn a_draft_with_a_file_from_new_message_calls_off_the_edit_in_the_found_chat_s_box() {
     let rig = seeded();
