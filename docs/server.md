@@ -973,7 +973,8 @@ its rooms for `mixer.drain_timeout` at most; a stopping `--role all` node, its A
 once.
 
 - **The start**: the caller must be in the chat (`403`), and only the chat's members it names ring, once each; a
-  chat that doesn't exist is `404`. The caller is in the call at once: its acceptance, with the node's answer to its
+  chat that doesn't exist is `404`, and a meeting's chat or a channel is `400` (their call is a meeting's,
+  [below](#meetings)). The caller is in the call at once: its acceptance, with the node's answer to its
   offer, comes at its `acceptance` callback, and its first roster at its `rosterUpdate`. Each callee's calling
   endpoints get `{"evt": 109, "gp": …}` with the node's offer to its own leg (`fromMixer`, `mediaLegId`,
   `conversationType: "groupCall"`, the chat in `groupChat`, `isMultiParty`). The chat gets `callStarted` naming the
@@ -998,7 +999,8 @@ once.
   links (`…/forked/<call>/<seat>/i1/<ring>/…`), as the client takes an invitation equal to an earlier one for its
   redelivery; an earlier ring's link is `410`. Someone with no calling endpoint isn't
   brought in, and the adder is told at its `addParticipantFailure` callback (`580` / `5205`); someone not in the
-  chat is `403`.
+  chat is `403`. In a meeting's call only a host adds (an attendee's add is `403`), and someone who waits in its
+  lobby is let in with `admit`, not added (`403`).
 - **Renegotiation** goes to the node, and its answer back to the party alone, at its `mediaAnswer` callback; the next
   one waits for that answer's acknowledgement (`491` at its `rejection` callback), for 30 s at most, as an
   acknowledgement may be lost and is never sent again. `updateMediaDescriptions` sets the party's camera and screen
@@ -1024,7 +1026,9 @@ the calendar's ([above](#the-calendar-and-meetings)); its organizer is the meeti
 
 - **Joining**: the client's start with the meeting's chat and organizer (`meetingInfo`, `groupChat` the meeting's
   chat) starts the meeting's call when none runs and joins it when one does; a start naming the meeting by its id and
-  passcode alone (`meetingData`, Join with an ID) does the same, and an id and passcode of no meeting are `404`. Two
+  passcode alone (`meetingData`, Join with an ID) does the same, and an id and passcode of no meeting are `404`. A
+  plain group call start in a meeting's chat is `400`, and a running call in it that is no meeting's is not joined
+  (`403`). Two
   first starts at once make one call (the group calls' unique index), the second joining it. The chat gets
   `callStarted` naming the call's conversation and, at the end, `callEnded`.
 - **The lobby** is the meeting's `AutoAdmittedUsers`, read at each join: the organizer always comes in; under
@@ -1036,7 +1040,7 @@ the calendar's ([above](#the-calendar-and-meetings)); its organizer is the meeti
   `removeParticipant` turns someone waiting away (`403` at its `end`) or takes someone out of the call (`0`, the
   others told). A guest who comes before anyone is in waits all the same; the call goes on while anyone is in it or
   waits.
-- **Hosts** are the organizer and the presenters in the call: they let in, turn away and mute. Each roster entry
+- **Hosts** are the organizer and the presenters in the call: they let in, turn away, add and mute. Each roster entry
   names its `meetingRole`: `organizer`, `presenter`, or `attendee` while only the organizer presents.
 - **The options in effect**: the call takes `AutoAdmittedUsers`, `PresenterOption` and `AttendeeRestrictions` when it
   starts and again each time the organizer saves them (Controls, or the options page). With `PresenterOption`
@@ -1053,7 +1057,8 @@ the calendar's ([above](#the-calendar-and-meetings)); its organizer is the meeti
 - **A channel's meeting**: the channel's Meet now subscribes at `epconv` with the channel and
   `enableGroupCallMeetupGeneration` (no call invitation); that makes the channel's meeting, its caller the organizer
   and nobody in it yet (a meeting running in the channel is answered instead), and the organizer then enters it at its
-  conversation. The first entry posts the meeting to the channel as its organizer's: an `Event/Call` `callStarted`
+  conversation; a Meet now in a thread that isn't a channel (a scheduled meeting's chat too) is `400`. The first
+  entry posts the meeting to the channel as its organizer's: an `Event/Call` `callStarted`
   naming where it runs, whose `properties.meeting` names its organizer and tenant and, once the organizer titles it
   (`PUT …/messages/<post>/properties?name=meeting`, the post's author only), its title. The channel's people join from
   that post at the conversation; the call's end is posted to the channel under the same call id. One meeting runs in

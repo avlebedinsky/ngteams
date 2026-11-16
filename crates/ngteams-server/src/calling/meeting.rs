@@ -6,8 +6,8 @@
 //!   joiner that waits keeps its offer in its seat and has no media until a host lets it in; its leg is then made
 //!   with that offer and its acceptance comes as a joiner's does, so the client goes from the lobby straight into the
 //!   call (no lobby media session, no retarget).
-//! - **Hosts** (the organizer and the presenters in the call) let people in (`admit`) and turn them away
-//!   (`removeParticipant`).
+//! - **Hosts** (the organizer and the presenters in the call) let people in (`admit`), turn them away
+//!   (`removeParticipant`), add a member of the chat (`add`) and mute others.
 
 use axum::Json;
 use axum::http::StatusCode;

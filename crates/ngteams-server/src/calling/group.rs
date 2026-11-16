@@ -124,13 +124,16 @@ pub(super) async fn start(app: &App, caller: &Caller, asked: Start<'_>, body: &V
     Ok(Json(wire::conversation(&origin, region, &call)).into_response())
 }
 
-/// The people of `chat`, where `caller` may start a group call: it is one of them, and the chat is no meeting's.
+/// The people of `chat`, where `caller` may start a group call: it is one of them, and the chat is no meeting's and
+/// no channel (a channel's call is its Meet now, [`super::meeting::meet_now`]).
 async fn starter_in(app: &App, caller: &Caller, chat: &str) -> Result<Vec<String>, Failure> {
     let members = call_events::members(app, chat).await?.ok_or(Refusal::Missing)?;
     if !members.contains(&caller.id) {
         return Err(Refusal::Forbidden.into());
     }
-    if crate::calendar::meeting_of(&app.db, chat).await?.is_some() {
+    if crate::calendar::meeting_of(&app.db, chat).await?.is_some()
+        || crate::chatsvc::channels::place(&app.db, chat).await?.is_some()
+    {
         return Err(Refusal::Bad.into());
     }
     Ok(members)

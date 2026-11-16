@@ -478,6 +478,16 @@ async fn a_channels_meet_now_is_posted_titled_joined_from_its_post_and_told_ende
         let mut ada = Person::new(&mixed, "Ada", A_TONE).await;
         let mut bert = Person::new(&mixed, "Bert", B_TONE).await;
         let channel = channel_of(&mixed, &ada, &[&bert]).await;
+        // a hand-made plain group call in a channel isn't made: a channel's call is its Meet now
+        let plain = json!({
+            "participants": {"from": {"id": bert.engine.mri}, "to": [{"id": ada.engine.mri}]},
+            "groupChat": {"threadId": channel, "messageId": "0"},
+            "callInvitation": {"mediaContent": {"blob": "v=0", "contentType": "application/sdp-ngc-1.0"}},
+        });
+        assert_eq!(
+            raw(&mixed, &bert, Method::POST, "/flightproxy/api/v2/epconv", &plain).await,
+            400
+        );
         let a_call = ada
             .engine
             .call(CallAction::MeetNow {
@@ -670,7 +680,8 @@ async fn only_a_meetings_hosts_let_in_or_mute_and_an_unknown_meeting_is_none() {
         let mut ada = Person::new(&mixed, "Ada", A_TONE).await;
         let mut bert = Person::new(&mixed, "Bert", B_TONE).await;
         let dan = Person::new(&mixed, "Dan", C_TONE).await;
-        let event = schedule(&ada, &[&bert]).await;
+        let cora = Person::new(&mixed, "Cora", C_TONE).await;
+        let event = schedule(&ada, &[&bert, &cora]).await;
         let join = join_of(&event);
         let a_call = joined(&mut ada, &join).await;
         let b_call = joined(&mut bert, &join).await;
@@ -696,7 +707,11 @@ async fn only_a_meetings_hosts_let_in_or_mute_and_an_unknown_meeting_is_none() {
         );
         let all = json!({"scope": "all", "muteParticipants": [], "mediaTypes": ["audio"]});
         assert_eq!(raw(&mixed, &bert, Method::POST, &at("mute"), &all).await, 403);
-        assert_eq!(raw(&mixed, &bert, Method::POST, &at("add"), &to(&ada)).await, 403);
+        // an attendee rings nobody into the meeting: not even an invited member of its chat who hasn't joined; the
+        // organizer may (the native client doesn't take that ring yet:
+        // `docs/backlog/meeting-add-rings-no-native-client.md`)
+        assert_eq!(raw(&mixed, &bert, Method::POST, &at("add"), &to(&cora)).await, 403);
+        assert_eq!(raw(&mixed, &ada, Method::POST, &at("add"), &to(&cora)).await, 202);
         assert_eq!(raw(&mixed, &ada, Method::POST, &at("admit"), &json!({})).await, 400);
         // the organizer mutes one person by name (Teams' client offers only Mute all)
         let one = json!({"scope": "specified", "muteParticipants": [{"id": bert.engine.mri}], "mediaTypes": ["audio"]});
@@ -738,7 +753,7 @@ async fn only_a_meetings_hosts_let_in_or_mute_and_an_unknown_meeting_is_none() {
             .unwrap();
         assert_eq!(calls.len(), 1, "{calls:?}");
         leave_all(&mut [&mut ada, &mut bert], &[a_call, b_call]).await;
-        shut_down(vec![ada, bert, dan], mixed).await;
+        shut_down(vec![ada, bert, cora, dan], mixed).await;
     }
 }
 
