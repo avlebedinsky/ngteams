@@ -401,7 +401,8 @@ impl CardBot {
         self.ask(at, key, kind, false, cx);
     }
 
-    /// Card `at`'s `refresh` run: by itself (`automatic`, once while the view lives) or by hand.
+    /// Card `at`'s `refresh` run: by itself (`automatic`, once for each version of its cards while the view lives) or
+    /// by hand.
     pub fn refresh(&mut self, at: usize, refresh: &Refresh, automatic: bool, cx: &mut Context<Self>) {
         if self.target.is_none() || self.busy.contains_key(&at) || (automatic && !self.refreshed.insert(at)) {
             return;
