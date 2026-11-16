@@ -229,9 +229,10 @@ srv_stop_unused() {
     local other pid
     [[ -z "${NGTEAMS_LAB_SERVER:-}" ]] || return 0
     srv_lock
-    for other in "$state"/srv-*; do
-        [[ -d "$other" ]] || continue
-        if running "${other##*/}"; then
+    # an alias's lock is held from its start (before its holder runs) until its holder ends
+    for other in "$state"/.locks/srv-*.lock; do
+        [[ -f "$other" ]] || continue
+        if ! flock -xn "$other" true; then
             exec 7>&-
             return 0
         fi

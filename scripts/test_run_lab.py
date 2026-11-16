@@ -281,6 +281,20 @@ class Launcher(unittest.TestCase):
                 os.kill(server, 0)
                 threading.Event().wait(0.05)
 
+    def test_a_srv_stop_keeps_the_server_while_another_srv_alias_is_still_starting(self):
+        self.srv_fakes()
+        self.start("srv-a")
+        home = self.root / "state/ngteams-lab/.srv-server"
+        server = int((home / "server.pid").read_text())
+        # srv-b between its alias lock and its holder: signed in, no holder or control socket yet
+        with open(self.root / "state/ngteams-lab/.locks/srv-b.lock", "w") as starting:
+            fcntl.flock(starting, fcntl.LOCK_EX)
+            stopped = self.invoke("srv-a", "--stop")
+            self.assertNotIn("stopped the srv server", stopped.stdout)
+            os.kill(server, 0)
+        # once srv-b's start ended without a holder, the next srv stop ends the server
+        self.assertIn("stopped the srv server", self.invoke("srv-a", "--stop").stdout)
+
     def test_a_srv_alias_on_a_server_the_caller_names_starts_none(self):
         self.srv_fakes()
         config = self.root / "node.toml"
