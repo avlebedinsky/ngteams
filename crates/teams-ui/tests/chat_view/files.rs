@@ -539,6 +539,44 @@ fn a_download_to_the_part_file_of_a_running_download_fails_and_the_first_saves()
     }
 }
 
+/// Another writer that the app can't see (another ngteams) saves its own file over the `.part` file of a running
+/// download by a rename: the download fails as it ends, does not save that file to its place, and keeps it.
+#[test]
+fn a_download_whose_part_file_another_writer_replaced_fails_and_keeps_that_file() {
+    let (rig, _opened, cx) = own_file_chat(true);
+    *rig.core.hold_streams_from.lock().unwrap() = Some(0);
+    let chosen = tempfile::tempdir().unwrap();
+    let target = chosen.path().join("made-up notes.pdf");
+    let staging = teams_ui::recording_download::part_path(&target);
+    click(cx, &format!("file-more-{ID}-0"));
+    click(cx, &format!("file-menu-download-{ID}-0"));
+    let place = target.clone();
+    cx.simulate_new_path_selection(move |_| Some(place));
+    draw(cx);
+    assert!(bounds(cx, &format!("file-download-{ID}-0 running")).is_some());
+    let theirs: &[u8] = b"the other writer's file";
+    let other = chosen.path().join("theirs");
+    std::fs::write(&other, theirs).unwrap();
+    std::fs::rename(&other, &staging).unwrap();
+    answer_held(&rig, &[OWN_BYTES]);
+    draw(cx);
+    let failed = cx.update(|_, cx| {
+        teams_ui::recording_download::download_of(OWN_SHARE, cx).map(|download| download.read(cx).progress().clone())
+    });
+    assert_eq!(
+        failed,
+        Some(teams_ui::recording_download::Progress::Failed(
+            teams_ui::recording_download::Failure::Busy
+        ))
+    );
+    assert!(!target.exists(), "not saved to its place");
+    assert_eq!(
+        std::fs::read(&staging).unwrap(),
+        theirs,
+        "the other writer's file stays"
+    );
+}
+
 /// The second place is the first one by another path (a link to its folder, as a name in another case is on a file
 /// system that ignores case): the two `.part` files are one file, which the first download has locked.
 #[cfg(unix)]

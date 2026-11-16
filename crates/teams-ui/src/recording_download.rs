@@ -69,7 +69,7 @@ impl Failure {
             Self::Network => "Check your connection and try again.".to_owned(),
             Self::Disk(error) => format!("The file couldn't be saved: {error}"),
             Self::Cancelled => "The download was cancelled.".to_owned(),
-            Self::Busy => "Another download is saving to the same place. Save it to another place.".to_owned(),
+            Self::Busy => "Another download is using this file. Save it to another place.".to_owned(),
         }
     }
 }
@@ -175,8 +175,9 @@ impl RecordingDownload {
 
     /// Starts (or, after a failure, starts again) writing the recording to its file. When the job of another
     /// download that the app keeps, or of an earlier start of this one, still writes to the same place (its `.part`
-    /// file), this one fails at once ([`Failure::Busy`]): two writers of one file would overwrite each other's bytes.
-    /// Its job also fails so when another writer holds the lock of the `.part` file.
+    /// file), to the `.part` file of this one, or the reverse (see `target_busy`), this one fails at once
+    /// ([`Failure::Busy`]): two writers of one file would overwrite each other's bytes. Its job also fails so when
+    /// another writer holds the lock of the `.part` file, or put another file at its path before the rename.
     pub fn start(&mut self, cx: &mut Context<Self>) {
         if self.writing.load(Ordering::Acquire) || target_busy(&self.target, cx.entity_id(), cx) {
             self.running = None;
@@ -269,9 +270,11 @@ impl Global for Downloads {}
 
 /// Whether the job of a download other than `except` still writes to `target` or to its `.part` file, whatever its
 /// link: the same place, a place that is the `.part` file of the other (`report.part` while `report` is written), or
-/// the reverse. A rename of one over the other would replace the file that the other job writes. It sees only the
-/// downloads the app keeps ([`Downloads`]): not a dismissed one whose job did not end yet, and not one to the same
-/// place by another path. The lock of the `.part` file stops those (see `save`).
+/// the reverse, also through a link to a folder ([`places_collide`]). A rename of one over the other would replace the
+/// file that the other job writes. It sees only the downloads the app keeps ([`Downloads`]): not a dismissed one whose
+/// job did not end yet, and not one in another ngteams. For one of those to the same place, the lock of the `.part`
+/// file stops it. For one to the `.part` file of the other, `save` finds another file at its `.part` path before the
+/// rename and fails ([`Failure::Busy`]), whichever one started first.
 fn target_busy(target: &Path, except: EntityId, cx: &App) -> bool {
     let Some(downloads) = cx.try_global::<Downloads>() else {
         return false;
@@ -288,9 +291,21 @@ fn target_busy(target: &Path, except: EntityId, cx: &App) -> bool {
 }
 
 /// Whether downloads to `one` and to `other` write the same file: the same place, or one place is the `.part` file of
-/// the other.
+/// the other, after the links in their folders are resolved (`alias/report.part` collides with `folder/report` when
+/// `alias` is a link to `folder`).
 fn places_collide(one: &Path, other: &Path) -> bool {
-    one == other || part_path(one) == other || one == part_path(other)
+    let (one, other) = (resolved(one), resolved(other));
+    one == other || part_path(&one) == other || one == part_path(&other)
+}
+
+/// `place` in its folder's real path (its links resolved), or `place` as it is when its folder can't be resolved (it
+/// is not there yet).
+fn resolved(place: &Path) -> PathBuf {
+    place
+        .parent()
+        .and_then(|folder| fs::canonicalize(folder).ok())
+        .zip(place.file_name())
+        .map_or_else(|| place.to_owned(), |(folder, name)| folder.join(name))
 }
 
 /// The download of the recording whose sharing link is `link`, when one was started this run (and not dismissed).
@@ -588,6 +603,21 @@ mod tests {
         assert!(!places_collide(report, Path::new("/saved/report.part.part")));
         assert!(!places_collide(report, Path::new("/saved/other")));
         assert!(!places_collide(report, Path::new("/other/report.part")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_place_collides_with_the_part_file_of_another_through_a_link_to_its_folder() {
+        let chosen = tempfile::tempdir().unwrap();
+        let folder = chosen.path().join("folder");
+        fs::create_dir(&folder).unwrap();
+        let alias = chosen.path().join("alias");
+        std::os::unix::fs::symlink(&folder, &alias).unwrap();
+        let report = folder.join("report");
+        assert!(places_collide(&report, &alias.join("report")));
+        assert!(places_collide(&report, &alias.join("report.part")));
+        assert!(places_collide(&alias.join("report.part"), &report));
+        assert!(!places_collide(&report, &alias.join("other")));
     }
 
     #[test]
