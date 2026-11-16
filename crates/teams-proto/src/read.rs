@@ -308,6 +308,18 @@ impl CsaTeams {
     /// Reads with the account's service origin.
     #[must_use]
     pub fn meetup_for_cloud(cloud: &crate::Cloud, body: &[u8], channel: &str) -> Option<ChannelMeetup> {
+        Self::meetup_of_post(cloud, body, channel, None)
+    }
+
+    /// The meeting of the post `post` in the channel `channel`, as [`Self::meetup_for_cloud`] reads it: only the active
+    /// meetup whose `messageId` is `post`. With no `post`, the first active meetup.
+    #[must_use]
+    pub fn meetup_of_post(
+        cloud: &crate::Cloud,
+        body: &[u8],
+        channel: &str,
+        post: Option<&str>,
+    ) -> Option<ChannelMeetup> {
         let answer: Value = serde_json::from_slice(body).ok()?;
         let channels = answer
             .get("teams")?
@@ -323,7 +335,8 @@ impl CsaTeams {
             .as_array()?
             .iter()
             .filter(|meetup| meetup.get("status").and_then(Value::as_str) == Some("Active"))
-            .find_map(|meetup| ChannelMeetup::of(cloud, meetup))
+            .filter_map(|meetup| ChannelMeetup::of(cloud, meetup))
+            .find(|meetup| post.is_none_or(|post| meetup.message_id == post))
     }
 }
 
@@ -370,6 +383,13 @@ impl ChannelMeetup {
     /// Reads with the account's service origin.
     #[must_use]
     pub fn of_posts_in(cloud: &crate::Cloud, messages: &[crate::chat::Message]) -> Option<Self> {
+        Self::of_post_in(cloud, messages, None)
+    }
+
+    /// The meeting of the post `post`, as [`Self::of_posts_in`] reads it: only when `post` is a call start that no newer
+    /// post among `messages` ends. With no `post`, the newest such start.
+    #[must_use]
+    pub fn of_post_in(cloud: &crate::Cloud, messages: &[crate::chat::Message], post: Option<&str>) -> Option<Self> {
         let mut ended: Vec<&str> = Vec::new();
         for message in messages {
             if message.message_type.as_str() != "Event/Call" {
@@ -379,7 +399,9 @@ impl ChannelMeetup {
             let call = xml_text(content, "callId");
             match xml_text(content, "callEventType") {
                 Some("callEnded") => ended.extend(call),
-                Some("callStarted") if call.is_none_or(|call| !ended.contains(&call)) => {
+                Some("callStarted")
+                    if call.is_none_or(|call| !ended.contains(&call)) && post.is_none_or(|post| message.id == post) =>
+                {
                     return Self::of_post(cloud, message);
                 }
                 _ => {}

@@ -308,8 +308,16 @@ fn meeting_and_lobby_actions_and_events_name_ids_and_counts_only() {
         (
             CallAction::JoinChannel {
                 channel: "synthetic-channel".to_owned(),
+                post: None,
             },
             "a join of the meeting running in synthetic-channel".to_owned(),
+        ),
+        (
+            CallAction::JoinChannel {
+                channel: "synthetic-channel".to_owned(),
+                post: Some("1700000000001".to_owned()),
+            },
+            "a join of the meeting of post 1700000000001 in synthetic-channel".to_owned(),
         ),
         (
             CallAction::Lobby {

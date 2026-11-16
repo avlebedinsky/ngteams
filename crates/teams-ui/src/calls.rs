@@ -510,10 +510,11 @@ pub enum Ask {
         chat: String,
     },
     /// Go into the call of the meeting whose chat is `chat`: it starts the call when nobody has, and joins it when it
-    /// runs.
+    /// runs. In a channel, `post` is the channel's post of the meeting: the join goes into the meeting of that post.
     JoinMeeting {
         chat: String,
         meeting: MeetingInfo,
+        post: Option<String>,
     },
     /// Join by invitation ID after the user confirms Join now.
     JoinMeetingCode(teams_core::MeetingCode),
@@ -648,14 +649,31 @@ impl Ask {
     }
 }
 
+/// The join of the meeting whose chat is `chat`: in a channel whose meeting's post (`post`) is known, the join of the
+/// meeting of that post, so that the join goes into that meeting and not into another meeting of the channel.
+fn join_meeting_action(chat: &str, meeting: &MeetingInfo, post: Option<&str>) -> CallAction {
+    match post {
+        Some(post) if teams_proto::is_team_thread_id(chat) => CallAction::JoinChannel {
+            channel: chat.to_owned(),
+            post: Some(post.to_owned()),
+        },
+        _ => CallAction::JoinMeeting {
+            chat: chat.to_owned(),
+            meeting: meeting.clone(),
+        },
+    }
+}
+
 /// A meeting a user can go into, as its calendar event names it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MeetingToJoin {
-    /// A calendar or chat meeting with known organizer and tenant.
+    /// A calendar or chat meeting with known organizer and tenant. For a channel's meeting, `post` is its post in the
+    /// channel when it is known: the join goes into the meeting of that post, not into another meeting of the channel.
     Chat {
         chat: String,
         meeting: MeetingInfo,
         title: String,
+        post: Option<String>,
     },
     /// An invitation resolved by the calling service on Join now.
     Code(teams_core::MeetingCode),
@@ -691,9 +709,12 @@ impl MeetingToJoin {
 
     fn ask(&self) -> Ask {
         match self {
-            Self::Chat { chat, meeting, .. } => Ask::JoinMeeting {
+            Self::Chat {
+                chat, meeting, post, ..
+            } => Ask::JoinMeeting {
                 chat: chat.clone(),
                 meeting: meeting.clone(),
+                post: post.clone(),
             },
             Self::Code(code) => Ask::JoinMeetingCode(code.clone()),
         }
@@ -1361,6 +1382,7 @@ impl Calls {
             chat,
             meeting,
             title: active.title.clone().unwrap_or_else(|| "Meeting".to_owned()),
+            post: None,
         });
     }
 
@@ -1563,10 +1585,7 @@ impl Calls {
             Ask::Join { chat } if !self.joinable(chat) => Err("not-joinable"),
             Ask::Join { chat } => Ok(CallAction::Join { chat: chat.clone() }),
             Ask::JoinMeetingCode(code) => Ok(CallAction::JoinMeetingCode(code.clone())),
-            Ask::JoinMeeting { chat, meeting } => Ok(CallAction::JoinMeeting {
-                chat: chat.clone(),
-                meeting: meeting.clone(),
-            }),
+            Ask::JoinMeeting { chat, meeting, post } => Ok(join_meeting_action(chat, meeting, post.as_deref())),
             Ask::Answer | Ask::Decline => {
                 let call = self.ringing.as_ref().map(|ringing| ringing.call).ok_or("not-ringing")?;
                 Ok(if *ask == Ask::Answer {

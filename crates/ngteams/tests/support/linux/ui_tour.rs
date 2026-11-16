@@ -1533,6 +1533,7 @@ const STEPS: [Step; 5 + 314 + 8 + 5 + 15] = [
                 chat: shown.event.meeting_chat.clone()?,
                 meeting: shown.event.meeting.clone()?,
                 title: shown.title(),
+                post: None,
             })
         });
         if let Some(to_join) = to_join {

@@ -203,7 +203,7 @@ impl ChatView {
                     call,
                     &time_of_day(item.arrival_time, cycle),
                     palette,
-                    self.meeting_join(call, cx),
+                    self.meeting_join(&item.id, call, cx),
                 ))
                 .into_any_element(),
             Body::UnsupportedEvent(_) => div()
@@ -228,16 +228,17 @@ impl ChatView {
         }
     }
 
-    /// A running channel meeting's Join on its post, telling [`ChatViewEvent::JoinMeeting`]; none in the read-only
-    /// mode, as no write is offered there.
-    fn meeting_join(&self, call: &MeetingCall, cx: &mut Context<Self>) -> Option<crate::forwarded::OnOpen> {
+    /// A running channel meeting's Join on its post (`post`), telling [`ChatViewEvent::JoinMeeting`]; none in the
+    /// read-only mode, as no write is offered there.
+    fn meeting_join(&self, post: &str, call: &MeetingCall, cx: &mut Context<Self>) -> Option<crate::forwarded::OnOpen> {
         if self.core.read_only() {
             return None;
         }
-        let (meeting, title) = (call.meeting.clone(), call.title.to_string());
+        let (post, meeting, title) = (post.to_owned(), call.meeting.clone(), call.title.to_string());
         Some(Box::new(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
             cx.stop_propagation();
             cx.emit(ChatViewEvent::JoinMeeting {
+                post: post.clone(),
                 meeting: meeting.clone(),
                 title: title.clone(),
             });

@@ -424,9 +424,10 @@ pub enum ChatViewEvent {
     /// A channel meeting card's Edit: the meeting's details, read from the team's calendar by its id (`ical_uid`),
     /// opened to change or cancel it (the shell's to open, as it knows the channel's team).
     EditMeeting { ical_uid: String },
-    /// A running channel meeting's Join on its post: its pre-join, titled `title` (the shell's to open, as for the
-    /// channel header's Join).
+    /// A running channel meeting's Join on its post (`post`): its pre-join, titled `title` (the shell's to open, as for
+    /// the channel header's Join).
     JoinMeeting {
+        post: String,
         meeting: teams_proto::MeetingInfo,
         title: String,
     },

@@ -63,7 +63,10 @@ pub(super) fn call(action: &CallAction) -> String {
         CallAction::JoinMeetingCode(_) => "a join by meeting ID".to_owned(),
         CallAction::JoinMeeting { chat, .. } => format!("a join of the meeting in {chat}"),
         CallAction::MeetNow { channel } => format!("a new meeting in {channel}"),
-        CallAction::JoinChannel { channel } => format!("a join of the meeting running in {channel}"),
+        CallAction::JoinChannel { channel, post } => match post {
+            Some(post) => format!("a join of the meeting of post {post} in {channel}"),
+            None => format!("a join of the meeting running in {channel}"),
+        },
         CallAction::Answer { call } => format!("the answer of call {}", call.get()),
         CallAction::Decline { call } => format!("the decline of call {}", call.get()),
         CallAction::HangUp { call } => format!("a hang-up of call {}", call.get()),

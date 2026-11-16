@@ -1203,6 +1203,7 @@ async fn meet_now_posted(
 async fn join_from_post(phone: &mut Phone, channel: &str, organizer: &str) -> CallId {
     let action = CallAction::JoinChannel {
         channel: channel.to_owned(),
+        post: None,
     };
     let call = join(phone, action, &CallStatus::Connected).await;
     shows(phone, call, "the organizer", |view| {

@@ -1,11 +1,14 @@
 //! A channel's running meeting, as Teams shows it: its post is a card with Join while the meeting runs and its ended
 //! line after; the post's Join and the channel header's Join open the pre-join titled with the meeting's own title
-//! (the post's `meetingtitle`), not the channel's name. Every id and name is made up.
+//! (the post's `meetingtitle`), not the channel's name, and the join goes into the meeting of that post. Every id and
+//! name is made up.
 
 use std::sync::Arc;
 
 use teams_store::{ChannelKind, Message, Team, TeamChannel};
 use teams_ui::calls::MeetingToJoin;
+
+use teams_core::CallAction;
 
 use super::{AB, LAB_B, Rig, actions, call_windows, calling, calls_of, click, drawn, prejoin_window, registered};
 use super::{shell_window, trace};
@@ -15,6 +18,9 @@ const CHANNEL: &str = "19:MadeUpChannel0002@thread.tacv2";
 const POST: &str = "1760000300000";
 const END: &str = "1760000400000";
 const CALL_ID: &str = "00000000-0000-4000-8000-0000000c0001";
+/// The post of a second meeting that runs in the channel at the same time, and its call.
+const OTHER_POST: &str = "1760000500000";
+const OTHER_CALL_ID: &str = "00000000-0000-4000-8000-0000000c0002";
 const ORGANIZER: &str = "00000000-0000-4000-8000-00000000000b";
 const TENANT: &str = "00000000-0000-4000-8000-0000000000f1";
 const TITLE: &str = "Sprint review «Q4» & demo";
@@ -46,6 +52,11 @@ fn teams() -> Vec<Team> {
 /// A channel meeting's call event (`callStarted` or `callEnded`), in the shape the service posts it (seen 2026-11-03),
 /// its post's `properties.meeting` titled `title`.
 fn call_event(id: &str, event: &str, title: Option<&str>) -> Message {
+    call_event_of(id, CALL_ID, event, title)
+}
+
+/// [`call_event`] of the call `call`.
+fn call_event_of(id: &str, call: &str, event: &str, title: Option<&str>) -> Message {
     let arrival: i64 = id.parse().unwrap();
     let meeting = serde_json::json!({
         "@type": "http://schema.skype.com/ScheduledMeetingCreated", "meetingtitle": title,
@@ -61,7 +72,7 @@ fn call_event(id: &str, event: &str, title: Option<&str>) -> Message {
         message_type: "Event/Call".to_owned(),
         content: format!(
             "<partlist alt =\"\"></partlist><callEventType>{event}</callEventType>\
-             <conversationUrl>{LINK}</conversationUrl><callId>{CALL_ID}</callId>"
+             <conversationUrl>{LINK}</conversationUrl><callId>{call}</callId>"
         ),
         properties: Some(serde_json::json!({ "meeting": meeting.to_string() }).to_string()),
         arrival_time: arrival,
@@ -82,7 +93,13 @@ fn channel_holds(rig: &Rig, messages: Vec<Message>) {
     rig.core.roots.lock().unwrap().insert(CHANNEL.to_owned(), roots);
 }
 
+/// The pre-join of the meeting of [`POST`], titled `title`.
 fn channel_meeting(title: &str) -> MeetingToJoin {
+    channel_meeting_of(POST, title)
+}
+
+/// The pre-join of the meeting of the post `post`, titled `title`.
+fn channel_meeting_of(post: &str, title: &str) -> MeetingToJoin {
     MeetingToJoin::Chat {
         chat: CHANNEL.to_owned(),
         meeting: teams_core::MeetingInfo {
@@ -90,6 +107,7 @@ fn channel_meeting(title: &str) -> MeetingToJoin {
             tenant_id: TENANT.to_owned(),
         },
         title: title.to_owned(),
+        post: Some(post.to_owned()),
     }
 }
 
@@ -158,8 +176,17 @@ fn the_channel_headers_join_titles_the_pre_join_with_the_meetings_own_title() {
     registered(&rig);
     click(cx, "channel-row-1");
     click(cx, "channel-join-meeting");
-    let _window = prejoin_window(&rig, &windows);
+    let window = prejoin_window(&rig, &windows);
     assert_eq!(prejoin_shown(&rig), Some(channel_meeting(TITLE)));
+    click(window, "prejoin-join");
+    assert_eq!(
+        actions(&rig),
+        vec![CallAction::JoinChannel {
+            channel: CHANNEL.to_owned(),
+            post: Some(POST.to_owned()),
+        }],
+        "the header's Join goes into the meeting that it read"
+    );
 }
 
 #[test]
@@ -174,4 +201,47 @@ fn an_untitled_channel_meeting_is_titled_by_its_channel_as_teams_names_it() {
     click(cx, &format!("channel-meeting-join-{POST}"));
     let _window = prejoin_window(&rig, &windows);
     assert_eq!(prejoin_shown(&rig), Some(channel_meeting("Meeting in \"Launch v2\"")));
+}
+
+#[test]
+fn of_two_meetings_that_run_in_a_channel_each_posts_join_goes_into_its_own() {
+    let rig = calling();
+    channel_holds(
+        &rig,
+        vec![
+            call_event_of(OTHER_POST, OTHER_CALL_ID, "callStarted", Some("Design sync")),
+            call_event(POST, "callStarted", Some(TITLE)),
+        ],
+    );
+    // each meeting's call is a post of its own
+    rig.core.roots.lock().unwrap().insert(
+        CHANNEL.to_owned(),
+        [
+            (OTHER_POST.to_owned(), OTHER_POST.to_owned()),
+            (POST.to_owned(), POST.to_owned()),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let (trace, _) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    click(cx, "channel-row-1");
+    assert!(
+        drawn(cx, &format!("channel-meeting-join-{OTHER_POST}")),
+        "the newer meeting's Join"
+    );
+    click(cx, &format!("channel-meeting-join-{POST}"));
+    let window = prejoin_window(&rig, &windows);
+    assert_eq!(prejoin_shown(&rig), Some(channel_meeting_of(POST, TITLE)));
+    click(window, "prejoin-join");
+    assert_eq!(
+        actions(&rig),
+        vec![CallAction::JoinChannel {
+            channel: CHANNEL.to_owned(),
+            post: Some(POST.to_owned()),
+        }],
+        "the older meeting's post names it, not the newer meeting of the channel"
+    );
 }

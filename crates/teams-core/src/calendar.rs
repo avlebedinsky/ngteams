@@ -437,7 +437,7 @@ where
     pub(crate) fn channel_meetup(&self, channel: String, reply: Responder<Option<ChannelMeetup>>) {
         let client = Arc::clone(&self.client);
         tokio::task::spawn_local(async move {
-            let answer = find_channel_meetup(&client, &channel).await.map_err(|error| {
+            let answer = find_channel_meetup(&client, &channel, None).await.map_err(|error| {
                 log::info!("{error}");
                 EngineError::MeetingUnread
             });
@@ -739,23 +739,26 @@ pub(crate) fn settle_write(store: &mut Store, touched: &Touched, kept: Option<&S
 /// The meeting that runs in the channel `channel` now: as CSA's teams read names it under the channel's
 /// `activeMeetups` ([`CsaTeams::meetup_in`]), else as the channel's newest posts tell it ([`ChannelMeetup::of_posts`]:
 /// CSA names a channel's meeting only to some of the team, seen 2026-11-03, where the web client joins by the post's
-/// card). `Ok(None)` when neither names one; an error saying what couldn't be read when neither read.
+/// card). With a `post`, only the meeting of that post: the one its Join stands for. `Ok(None)` when neither names
+/// one; an error saying what couldn't be read when neither read.
 ///
 /// # Errors
 /// As above.
 pub(crate) async fn find_channel_meetup<C: Credentials + 'static>(
     client: &Client<HttpTransport<C>>,
     channel: &str,
+    post: Option<&str>,
 ) -> Result<Option<ChannelMeetup>, String> {
+    let cloud = client.transport().cloud();
     let csa = match client.read(&CsaTeams).await {
-        Ok(answer) => match CsaTeams::meetup_for_cloud(client.transport().cloud(), answer.body(), channel) {
+        Ok(answer) => match CsaTeams::meetup_of_post(cloud, answer.body(), channel, post) {
             Some(meetup) => return Ok(Some(meetup)),
             None => Ok(()),
         },
         Err(error) => Err(format!("the channel's meeting couldn't be read: {error}")),
     };
     match ChatReads::new(client).messages(channel, POSTS_LOOKED_AT).await {
-        Ok(page) => Ok(ChannelMeetup::of_posts_in(client.transport().cloud(), &page.messages)),
+        Ok(page) => Ok(ChannelMeetup::of_post_in(cloud, &page.messages, post)),
         Err(error) => {
             log::info!("the channel's posts couldn't be read for its meeting: {error}");
             csa.map(|()| None)

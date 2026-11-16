@@ -2542,6 +2542,7 @@ fn meeting_to_join() -> teams_ui::calls::MeetingToJoin {
             tenant_id: "00000000-0000-4000-8000-0000000000f1".to_owned(),
         },
         title: "Synthetic meeting".to_owned(),
+        post: None,
     }
 }
 
@@ -2703,6 +2704,7 @@ fn a_meet_nows_subject_is_edited_in_its_pre_join_and_titles_the_new_meeting() {
         chat: channel.to_owned(),
         meeting: meeting_to_join().meeting().unwrap().clone(),
         title: "Meeting in \"General\"".to_owned(),
+        post: None,
     };
     rig.cx
         .update(|cx| calls_of(&rig).update(cx, |calls, cx| calls.open_meet_now(to_join, cx)));
@@ -2960,7 +2962,8 @@ fn join_with_an_id_keeps_the_resolved_meeting_for_controls_and_rejoin() {
             calls.rejoin_of(calls.ended().unwrap()),
             Some(Ask::JoinMeeting {
                 chat: MEETING_CHAT.to_owned(),
-                meeting: info.clone()
+                meeting: info.clone(),
+                post: None,
             })
         );
     });

@@ -350,6 +350,7 @@ async fn an_engine_that_makes_no_calls_refuses_every_call_action() {
         },
         CallAction::JoinChannel {
             channel: CHANNEL.to_owned(),
+            post: None,
         },
         // a chat the store doesn't hold: no calling is said before the chat is read, as no chat could be called
         // (an engine that calls refuses these as not a chat: `calls::failures`)

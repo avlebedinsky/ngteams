@@ -50,10 +50,12 @@ pub enum ChannelViewEvent {
     /// A meeting card's Edit: the meeting's details, read from the team's calendar by its id (`ical_uid`), opened to
     /// change or cancel it (the shell's to open, as it knows the channel's team).
     EditMeeting { ical_uid: String },
-    /// A running meeting's Join on its post: the pre-join of the meeting (`meeting`) in the channel `channel`, titled
-    /// `title` (the shell's to open, as for the channel header's Join).
+    /// A running meeting's Join on its post: the pre-join of the meeting (`meeting`) of the post `post` in the channel
+    /// `channel`, titled `title` (the shell's to open, as for the channel header's Join). The join goes into the meeting
+    /// of that post, not into another meeting of the channel.
     JoinMeeting {
         channel: String,
+        post: String,
         meeting: teams_proto::MeetingInfo,
         title: String,
     },
@@ -141,8 +143,9 @@ impl ChannelView {
             ChatViewEvent::EditMeeting { ical_uid } => cx.emit(ChannelViewEvent::EditMeeting {
                 ical_uid: ical_uid.clone(),
             }),
-            ChatViewEvent::JoinMeeting { meeting, title } => cx.emit(ChannelViewEvent::JoinMeeting {
+            ChatViewEvent::JoinMeeting { post, meeting, title } => cx.emit(ChannelViewEvent::JoinMeeting {
                 channel: this.channel().to_owned(),
+                post: post.clone(),
                 meeting: meeting.clone(),
                 title: title.clone(),
             }),

@@ -465,7 +465,10 @@ The native client joins a running channel meeting: the channel's header shows **
 while it shows, `Core::channel_meetup`), which opens the pre-join, and Join now reads the meeting again and enters it at
 its conversation in the web client's entry shape (`Calls::join_channel_meeting`). The meeting's post is Teams' card with
 **Join** while no `callEnded` of its `callId` came (its line "<title> ended" after); that Join opens the same pre-join.
-Both titles are the post's `meetingtitle`, else `Meeting in "<channel>"`. While none runs, the header has
+Both titles are the post's `meetingtitle`, else `Meeting in "<channel>"`. Each Join names its post
+(`CallAction::JoinChannel`'s `post`: the post of the card, or the post of the meeting that the header read), and Join
+now enters only the meeting of that post (CSA's meetup with that `messageId`, else that post when no newer `callEnded`
+of its `callId` came): when two meetings run in the channel, each card joins its own meeting. While none runs, the header has
 **Meet now** with its caret's menu, as Teams' has: it opens the pre-join titled `Meeting in "<channel>"`, and Join now
 goes as the web client's does (`CallAction::MeetNow`, `Placement::Channel`): first the subscription at `epconv`
 (`StartCall::meet_now`: the conversation's callbacks, `enableGroupCallMeetupGeneration` `true`, `groupChat` the channel

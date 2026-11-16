@@ -139,6 +139,7 @@ async fn to_join(target: &Target, chat: String, meeting: Option<MeetingInfo>) ->
         title: title
             .filter(|title| !title.trim().is_empty())
             .unwrap_or_else(|| UNTITLED.to_owned()),
+        post: None,
     })
 }
 

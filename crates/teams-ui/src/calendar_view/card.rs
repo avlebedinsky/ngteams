@@ -330,6 +330,7 @@ impl CalendarView {
                 chat: chat.clone(),
                 meeting: meeting.clone(),
                 title: shown.title(),
+                post: None,
             })),
             // a short `/meet/` link names no organizer: the meeting's chat does
             (Some(chat), None) => Some(JoinTarget::Chat {

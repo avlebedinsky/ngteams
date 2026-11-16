@@ -1083,6 +1083,7 @@ impl Shell {
                             chat,
                             meeting: details.meeting,
                             title,
+                            post: None,
                         },
                         cx,
                     );
@@ -1123,6 +1124,7 @@ impl Shell {
                     chat: channel,
                     meeting,
                     title,
+                    post: None,
                 },
                 cx,
             ),
@@ -1356,6 +1358,7 @@ impl Shell {
                 tenant_id: String::new(),
             },
             title,
+            post: None,
         };
         self.models
             .calls
@@ -1419,7 +1422,8 @@ impl Shell {
         .detach();
     }
 
-    /// The channel header's Join: the meeting that runs in the channel shown, its pre-join first.
+    /// The channel header's Join: the meeting that runs in the channel shown, its pre-join first. The join goes into
+    /// the meeting of the post that the header read ([`ChannelMeetup::message_id`]).
     pub fn join_channel_meeting(&mut self, cx: &mut Context<Self>) {
         let Some((channel, meetup)) = self.channel_meetup.clone() else {
             let ask = Ask::Join { chat: String::new() };
@@ -1432,6 +1436,7 @@ impl Shell {
                 chat: channel,
                 meeting: meetup.meeting,
                 title,
+                post: Some(meetup.message_id),
             },
             cx,
         );
@@ -2613,6 +2618,7 @@ impl Shell {
             ChannelViewEvent::EditMeeting { ical_uid } => this.edit_channel_meeting(ical_uid.clone(), cx),
             ChannelViewEvent::JoinMeeting {
                 channel,
+                post,
                 meeting,
                 title,
             } => this.open_prejoin(
@@ -2620,6 +2626,7 @@ impl Shell {
                     chat: channel.clone(),
                     meeting: meeting.clone(),
                     title: title.clone(),
+                    post: Some(post.clone()),
                 },
                 cx,
             ),

@@ -583,6 +583,45 @@ fn a_channel_s_running_meeting_is_read_from_its_posts_when_csa_names_none() {
 }
 
 #[test]
+fn the_meeting_of_one_post_is_read_by_the_post_s_id() {
+    let cloud = teams_proto::Cloud::Microsoft;
+    let conversation = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticMeetup3?i=10-0-0-1&e=1";
+    let meetup = |id: &str| {
+        json!({
+            "messageId": id, "conversationUrl": conversation, "status": "Active",
+            "tenantId": "00000000-0000-4000-8000-0000000000d0", "organizerId": "00000000-0000-4000-8000-00000000000a"
+        })
+    };
+    let answer = json!({"teams": [{"id": TEAM, "displayName": "a", "channels": [
+        {"id": TEAM, "displayName": "General", "activeMeetups": [meetup("1700000000010"), meetup("1700000000020")]},
+    ]}]})
+    .to_string()
+    .into_bytes();
+    // two meetings run: each post's id names its own, an id CSA doesn't name names none, and no id the first
+    let second = CsaTeams::meetup_of_post(&cloud, &answer, TEAM, Some("1700000000020")).unwrap();
+    assert_eq!(second.message_id, "1700000000020");
+    assert_eq!(
+        CsaTeams::meetup_of_post(&cloud, &answer, TEAM, Some("1700000000030")),
+        None
+    );
+    let first = CsaTeams::meetup_of_post(&cloud, &answer, TEAM, None).unwrap();
+    assert_eq!(first.message_id, "1700000000010");
+    // in the posts, newest first: the older running meeting is read by its post, and an ended one's post names none
+    let newer = call_post("1700000000002", "callStarted", "call-2", conversation);
+    let older = call_post("1700000000001", "callStarted", "call-1", conversation);
+    let posts = [newer.clone(), older.clone()];
+    let found = teams_proto::ChannelMeetup::of_post_in(&cloud, &posts, Some("1700000000001")).unwrap();
+    assert_eq!(found.message_id, "1700000000001");
+    let found = teams_proto::ChannelMeetup::of_post_in(&cloud, &posts, None).unwrap();
+    assert_eq!(found.message_id, "1700000000002");
+    let ended = call_post("1700000000003", "callEnded", "call-1", conversation);
+    assert_eq!(
+        teams_proto::ChannelMeetup::of_post_in(&cloud, &[ended, newer, older], Some("1700000000001")),
+        None
+    );
+}
+
+#[test]
 fn a_group_chat_s_running_call_is_where_its_newest_unended_start_says() {
     let conversation = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticHuddle?i=10-0-0-1&amp;e=1";
     let event = |kind: &str, call: &str| {

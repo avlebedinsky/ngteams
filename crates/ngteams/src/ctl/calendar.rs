@@ -202,7 +202,12 @@ async fn to_join(core: &dyn Core, event: &CalendarEvent) -> Result<MeetingToJoin
             Err(error) => return Err(engine_error(&error)),
         },
     };
-    Ok(MeetingToJoin::Chat { chat, meeting, title })
+    Ok(MeetingToJoin::Chat {
+        chat,
+        meeting,
+        title,
+        post: None,
+    })
 }
 
 /// `to_join`'s pre-join opened on `target`'s calls as the calendar's Join opens it, and with `now` its Join now asked:

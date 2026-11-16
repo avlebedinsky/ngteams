@@ -111,7 +111,12 @@ impl CalendarView {
         };
         match (event.meeting_chat, event.meeting) {
             (Some(chat), Some(meeting)) => {
-                cx.emit(CalendarViewEvent::Join(MeetingToJoin::Chat { chat, meeting, title }));
+                cx.emit(CalendarViewEvent::Join(MeetingToJoin::Chat {
+                    chat,
+                    meeting,
+                    title,
+                    post: None,
+                }));
             }
             (Some(chat), None) => cx.emit(CalendarViewEvent::JoinChat {
                 chat,

@@ -209,8 +209,10 @@ pub enum CallAction {
     /// A new meeting in the channel `channel` (a team's channel thread), its header's Meet now: the account starts it
     /// and organizes it, and the service posts it to the channel.
     MeetNow { channel: String },
-    /// The account goes into the meeting that runs in the channel `channel` now, as CSA names it (its header's Join).
-    JoinChannel { channel: String },
+    /// The account goes into the meeting that runs in the channel `channel` now, as CSA names it: the meeting of the
+    /// channel's post `post` (a meeting post's Join, or the header's Join on the meeting it saw), else the first that
+    /// CSA names.
+    JoinChannel { channel: String, post: Option<String> },
     /// The answer of an invitation the engine offered ([`Event::IncomingCall`]).
     Answer { call: CallId },
     /// The decline of an invitation the engine offered.
@@ -389,9 +391,9 @@ pub(crate) enum Act {
     /// The running call of a group chat joined: the chat, and where its own newest start says it runs (the store's,
     /// `teams_proto::running_call`), for a meeting no invitation named.
     Join(String, Option<teams_proto::CallLink>),
-    /// The meeting that runs in a channel joined: the channel, and the meeting as CSA names it, read as the media is
-    /// set up ([`Calling::set_up`]).
-    JoinChannel(String, Arc<std::sync::Mutex<Option<ChannelMeetup>>>),
+    /// The meeting that runs in a channel joined: the channel, the meeting's post when the join names one, and the
+    /// meeting as CSA names it, read as the media is set up ([`Calling::set_up`]).
+    JoinChannel(String, Option<String>, Arc<std::sync::Mutex<Option<ChannelMeetup>>>),
     Answer(CallId),
     Decline(CallId),
     HangUp(CallId),
@@ -1975,10 +1977,15 @@ where
         );
         let setup: Pin<Box<dyn Future<Output = Result<Prepared, String>>>> = match &act {
             // a channel's meeting: where it runs is read first (CSA's `activeMeetups`), then its media set up
-            Act::JoinChannel(channel, meetup) => {
-                let (client, channel, meetup) = (Arc::clone(&self.client), channel.clone(), Arc::clone(meetup));
+            Act::JoinChannel(channel, post, meetup) => {
+                let (client, channel, post, meetup) = (
+                    Arc::clone(&self.client),
+                    channel.clone(),
+                    post.clone(),
+                    Arc::clone(meetup),
+                );
                 Box::pin(async move {
-                    let found = crate::calendar::find_channel_meetup(&client, &channel)
+                    let found = crate::calendar::find_channel_meetup(&client, &channel, post.as_deref())
                         .await?
                         .ok_or_else(|| "no meeting runs in the channel".to_owned())?;
                     *meetup.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(found);
@@ -2048,7 +2055,7 @@ where
         let acted = match &preparing.act {
             Act::Place(placement) => self.calls.place(placement, sdp, now),
             Act::Join(chat, _) => self.calls.join(chat, sdp, now),
-            Act::JoinChannel(channel, meetup) => {
+            Act::JoinChannel(channel, _, meetup) => {
                 let meetup = meetup.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
                 meetup.map_or(Err(CallError::NotJoinable), |meetup| {
                     self.calls.join_channel_meeting(channel, &meetup, sdp, now)

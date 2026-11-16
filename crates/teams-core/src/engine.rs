@@ -3647,12 +3647,12 @@ fn call_act_in(
         }
         // a channel's meeting is joined at the conversation its channel names it runs at, read as it goes
         CallAction::JoinMeeting { chat, .. } if teams_proto::is_team_thread_id(&chat) => {
-            Act::JoinChannel(chat, Arc::default())
+            Act::JoinChannel(chat, None, Arc::default())
         }
         CallAction::JoinMeeting { chat, meeting } => Act::Place(Placement::Meeting { chat, meeting }),
         CallAction::JoinMeetingCode(code) => Act::Place(Placement::MeetingCode(code)),
         CallAction::MeetNow { channel } => Act::Place(Placement::Channel { channel }),
-        CallAction::JoinChannel { channel } => Act::JoinChannel(channel, Arc::default()),
+        CallAction::JoinChannel { channel, post } => Act::JoinChannel(channel, post, Arc::default()),
         CallAction::Answer { call } => Act::Answer(call),
         CallAction::Decline { call } => Act::Decline(call),
         CallAction::HangUp { call } => Act::HangUp(call),
@@ -3848,7 +3848,7 @@ mod start_within {
             chat: channel.clone(),
             meeting: meeting.clone(),
         });
-        assert!(matches!(in_channel, Ok(Act::JoinChannel(ref at, _)) if *at == channel));
+        assert!(matches!(in_channel, Ok(Act::JoinChannel(ref at, None, _)) if *at == channel));
         let chat = "19:meeting_MadeUpMeeting01@thread.v2".to_owned();
         let in_chat = resolved(CallAction::JoinMeeting {
             chat: chat.clone(),
@@ -3863,8 +3863,11 @@ mod start_within {
         assert!(matches!(meet_now, Ok(Act::Place(Placement::Channel { channel: ref at })) if *at == channel));
         let join = resolved(CallAction::JoinChannel {
             channel: channel.clone(),
+            post: Some("1700000000001".to_owned()),
         });
-        assert!(matches!(join, Ok(Act::JoinChannel(ref at, _)) if *at == channel));
+        assert!(
+            matches!(join, Ok(Act::JoinChannel(ref at, Some(ref post), _)) if *at == channel && post == "1700000000001")
+        );
     }
 
     #[test]
@@ -3983,6 +3986,12 @@ mod start_within {
         assert!(CallAction::Call { chat: chat.clone() }.starts());
         assert!(CallAction::Join { chat: chat.clone() }.starts());
         assert!(CallAction::MeetNow { channel: chat.clone() }.starts());
-        assert!(CallAction::JoinChannel { channel: chat }.starts());
+        assert!(
+            CallAction::JoinChannel {
+                channel: chat,
+                post: None
+            }
+            .starts()
+        );
     }
 }

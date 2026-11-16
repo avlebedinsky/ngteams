@@ -616,6 +616,7 @@ async fn a_channels_meet_now_is_posted_titled_joined_from_its_post_and_told_ende
             .engine
             .call(CallAction::JoinChannel {
                 channel: channel.clone(),
+                post: None,
             })
             .await;
         // the roster with the organizer can come before the join's status: waited for first, so no wait eats it
