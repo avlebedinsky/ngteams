@@ -333,7 +333,7 @@ messages (`ThreadActivity/…`) for a team's changes.
 
 The client's calendar, scheduling form and channel meetings find their routes on the middle tier, with the
 account's token for `https://api.spaces.skype.com`; the shapes are those of `docs/protocol/calendar.md` and of
-"A channel's meeting" in `calling.md`. Scheduling is served here; a meeting's call and media are not.
+"A channel's meeting" in `calling.md`. Scheduling is served here; a meeting's call is [Meetings](#meetings).
 
 - **Events**: `GET v2.0/me/calendars/default/calendarView` (a window of at most 100 days; the client asks for 62
   at most), `POST v2.0/me/calendars/default/events`, and `GET`, `PUT`, `DELETE v2.0/me/calendars/events/<id>` with
@@ -382,7 +382,7 @@ account's token for `https://api.spaces.skype.com`; the shapes are those of `doc
   read starts at, at which everyone asked about is free).
 - **Meeting options**: `GET` and `POST beta/meetings/v1/options/<tenant>/<organizer>/<chat>/0/0`, kept per chat
   (a meeting's, or a group chat's for its calls): `AutoAdmittedUsers`, `PresenterOption`, `AllowMeetingChat`,
-  `AttendeeRestrictions`.
+  `AttendeeRestrictions`. A meeting's call goes by them while it runs ([Meetings](#meetings)).
 - **Rooms**: `GET v2.0/places/roomLists`, `places/rooms` and `places/<list address>/roomList/rooms` list the
   `[[rooms]]` of the configuration. A room is a place, not an account: an event that names one invites nobody by
   it.
@@ -413,7 +413,7 @@ always written; a change or a cancellation is not written for an account that mu
 
 Not served: mail of any kind (invitations, answers and their notes reach nobody by mail; an answer's note is not
 kept), the form's delete of an unused online meeting, `masterCategories`, an event by its join link, forwarding,
-reminders, and the options' enforcement in a call (the calls' part).
+reminders, and `AllowMeetingChat` (the meeting chat takes messages whatever it says).
 
 ## Workflows with incoming webhooks
 
@@ -872,7 +872,8 @@ callee's answer in the caller's acceptance; `ngteams` takes an own-server accoun
   `attach`, `progress` and `reject` links and the caller's offer. An invitation an endpoint doesn't answer (its
   socket sends no response to the delivery) is delivered again, three times 2 s apart, as Teams' service does, by
   the node that holds that socket; any response stops it, and the client takes a redelivery as the invitation it
-  has. A group chat's call is [below](#group-calls); a meeting's and the test call's start is answered `501`.
+  has. A group chat's call is [below](#group-calls), a
+  meeting's [below that](#meetings); the test call's start is answered `501`.
 - **While it rings**: `attach` (answered with the leg's `progress`, `acceptance` and `callLeg` links and the
   conversation's), `progress`, `accept` (answered with the call leg's links and the keep-alive interval), `reject`.
   An answer delivers the acceptance, with the callee's answer, at the caller's `acceptance` callback; the callee's
@@ -1009,10 +1010,59 @@ once.
   the call, every ringing party's ring subscription and every follower; a party that comes in gets the whole roster.
   Each calling endpoint of the others also gets `{"evt": 115 | 116, "cp": base64(gzip(JSON))}` when someone comes in
   or leaves; the client reads neither, and the shape is the protocol notes' minimum.
+- **Raised hands and reactions**: `conv/<id>/publishState` of `raiseHands` puts the party's hand up (answered with
+  its state id and its rank among the hands raised; the roster lists it under `publishedStates`), `removeState` of
+  that id takes it down, and a party's hand goes when it leaves. `sendMessage`'s reactions go to everyone in the
+  call, the sender too, at their `receiveMessage` callback, named by who sent them (`202`).
 - **Seats**: a group call's controller links carry the party's seat where a 1:1 call's carry `1`; a link naming
   another party's seat is `404`.
 
-Not served yet: meetings, the test call, transfer, voicemail.
+### Meetings
+
+A meeting's call is a group call in the meeting's chat that nobody rings (`src/calling/meeting.rs`). The meeting is
+the calendar's ([above](#the-calendar-and-meetings)); its organizer is the meeting's, whoever started the call.
+
+- **Joining**: the client's start with the meeting's chat and organizer (`meetingInfo`, `groupChat` the meeting's
+  chat) starts the meeting's call when none runs and joins it when one does; a start naming the meeting by its id and
+  passcode alone (`meetingData`, Join with an ID) does the same, and an id and passcode of no meeting are `404`. Two
+  first starts at once make one call (the group calls' unique index), the second joining it. The chat gets
+  `callStarted` naming the call's conversation and, at the end, `callEnded`.
+- **The lobby** is the meeting's `AutoAdmittedUsers`, read at each join: the organizer always comes in; under
+  `InvitedUsers` the meeting chat's people do, under `OrganizerOnly` nobody else; any other value lets every account
+  in (they are all of the company). Whom it holds waits: its roster entry has a `lobby` endpoint (`modalityJoined`
+  `Lobby`), everyone sees it waiting, and it has no media. Its offer is kept with its seat; a host's `admit`
+  (`conv/<id>/admit`) makes its leg on the media node with that offer, and its acceptance comes as a joiner's, so the
+  client goes from the lobby straight into the call (Teams' lobby media session and retarget aren't used). A host's
+  `removeParticipant` turns someone waiting away (`403` at its `end`) or takes someone out of the call (`0`, the
+  others told). A guest who comes before anyone is in waits all the same; the call goes on while anyone is in it or
+  waits.
+- **Hosts** are the organizer and the presenters in the call: they let in, turn away and mute. Each roster entry
+  names its `meetingRole`: `organizer`, `presenter`, or `attendee` while only the organizer presents.
+- **The options in effect**: the call takes `AutoAdmittedUsers`, `PresenterOption` and `AttendeeRestrictions` when it
+  starts and again each time the organizer saves them (Controls, or the options page). With `PresenterOption`
+  `OrganizerOnly` (or `SpecificPeople`, whose list isn't kept) everyone else is an attendee; while attendees may not
+  unmute (`DisableAudio`), their main audio is `serverMuted` at a new `serverMuteVersion`. Everyone in the call or its
+  lobby is told the options at their `conversationUpdate` callback (`meetingDetails.meetingCapability`, both
+  restrictions as `DisableAv`); a meeting's conversation names them too.
+- **Mute others**: a host's `conv/<id>/mute` mutes everyone else (`scope` `all`, the client's Mute all) or those its
+  `muteParticipants` name. Each muted party's main audio turns `serverMuted` at a new version, so its client mutes
+  itself; the outcome goes to the request's own `muteUnmuteAsync` callback. The party's own unmute takes the mute
+  back. Signaling only: the media node mixes whatever the party sends.
+- **End for all**: the organizer's `DELETE` of the conversation ends the call for everyone in it and in its lobby
+  (`ConversationEndForAllInitiated`, the organizer its sender) and drops the room; anyone else's is a leave.
+- **A channel's meeting**: the channel's Meet now subscribes at `epconv` with the channel and
+  `enableGroupCallMeetupGeneration` (no call invitation); that makes the channel's meeting, its caller the organizer
+  and nobody in it yet (a meeting running in the channel is answered instead), and the organizer then enters it at its
+  conversation. The first entry posts the meeting to the channel as its organizer's: an `Event/Call` `callStarted`
+  naming where it runs, whose `properties.meeting` names its organizer and tenant and, once the organizer titles it
+  (`PUT …/messages/<post>/properties?name=meeting`, the post's author only), its title. The channel's people join from
+  that post at the conversation; the call's end is posted to the channel under the same call id. One meeting runs in
+  a channel at a time.
+
+Not served yet: the test call, transfer, voicemail; for meetings, CSA's `activeMeetups` (the client finds a channel's
+meeting by its post), a scheduled channel meeting's call (only a Meet now's runs in a channel), co-organizers, a lobby
+for a meeting locked by its organizer, Spotlight, the meeting's timer, notes and layout, and the meeting chat's
+`AllowMeetingChat`.
 
 ### The call log
 
