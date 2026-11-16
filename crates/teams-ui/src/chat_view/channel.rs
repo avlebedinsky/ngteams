@@ -7,8 +7,9 @@
 //!   summary ([`Replies`]: how many, who replied, when the last came).
 //! - **What a channel's messages are besides a chat's**: a meeting scheduled in the channel is Teams' meeting card
 //!   ([`MeetingCard`]: its day, its title, struck through once a reply says it is cancelled, its times and place, and
-//!   its organizer's Edit), a channel meeting's call is a line titled by its meeting (`Meeting in "<channel>"`, "…
-//!   ended"), and the channel's own events (`ThreadActivity/…`: people added or gone, the channel renamed) aren't
+//!   its organizer's Edit), a channel meeting's call is Teams' card with Join while it runs ([`MeetingCall`]) and a
+//!   line once it ended, titled by its meeting (`Meeting in "<channel>"` until titled, "… ended"), and the channel's
+//!   own events (`ThreadActivity/…`: people added or gone, the channel renamed) aren't
 //!   posts: the web client reads a channel's posts with `filterSystemMessage=true` and tells those events only in the
 //!   channel's info pane.
 
@@ -20,7 +21,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, div, px, rgb,
 };
 use gpui_component::Sizable as _;
-use gpui_component::button::Button;
+use gpui_component::button::{Button, ButtonVariants as _};
 use teams_proto::ScheduledMeeting;
 use teams_store::Message;
 
@@ -71,6 +72,14 @@ pub struct MeetingCard {
     pub ical_uid: String,
     /// The account scheduled it and it still stands: its organizer's Edit shows (not in the read-only mode).
     pub editable: bool,
+}
+
+/// A channel meeting's call post while the meeting runs, as Teams' card shows it: the meeting's title, and the meeting
+/// its Join opens the pre-join of (its organizer and tenant, as the post's `properties.meeting` names them).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MeetingCall {
+    pub title: SharedString,
+    pub meeting: teams_proto::MeetingInfo,
 }
 
 /// A post's replies, as the summary under it shows them: how many, who replied (the latest first, each once, at most
@@ -129,10 +138,10 @@ impl ChannelLooks {
         })
     }
 
-    /// What a channel meeting's call post says, as Teams' card titles it: the meeting's title (the Meet now pre-join's
-    /// subject its post was given, else `Meeting in "<channel>"`), and "ended" once the call is over (the service turns
-    /// the post itself into the end); `None` for a post that isn't a meeting's call.
-    pub(super) fn meeting_call_line(&self, message: &Message) -> Option<String> {
+    /// What a channel meeting's call post shows, as Teams' post has it: its card with Join while the meeting runs and
+    /// the post names its organizer and tenant, else its line, "ended" once the call is over (the service turns the
+    /// post itself into the end); `None` for a post that isn't a meeting's call.
+    pub(super) fn meeting_call(&self, message: &Message) -> Option<Result<MeetingCall, String>> {
         if message.message_type != "Event/Call" {
             return None;
         }
@@ -142,20 +151,35 @@ impl ChannelLooks {
             object @ serde_json::Value::Object(_) => object.clone(),
             _ => return None,
         };
-        let titled = meeting
-            .get("meetingtitle")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|title| !title.is_empty())
-            .map(str::to_owned);
-        let title = titled.or_else(|| {
+        let text = |key: &str| {
+            meeting
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        };
+        // the Meet now pre-join's subject its post was given, else Teams' name of an untitled one
+        let title = text("meetingtitle").or_else(|| {
             self.place
                 .as_ref()
                 .map(|(_, channel)| format!("Meeting in \"{channel}\""))
         })?;
         let ended = message.content.contains("<callEventType>callEnded</callEventType>")
             || xml_text(&message.content, "callId").is_some_and(|call| self.ended_calls.contains(&call));
-        Some(if ended { format!("{title} ended") } else { title })
+        if ended {
+            return Some(Err(format!("{title} ended")));
+        }
+        Some(match text("organizerId").zip(text("tenantId")) {
+            Some((organizer_id, tenant_id)) => Ok(MeetingCall {
+                title: title.into(),
+                meeting: teams_proto::MeetingInfo {
+                    organizer_id,
+                    tenant_id,
+                },
+            }),
+            None => Err(title),
+        })
     }
 }
 
@@ -308,6 +332,84 @@ pub(super) fn meeting_card(
         .children(edit.map(|edit| div().flex_none().child(edit)))
         .into_any_element()
 }
+
+/// A running channel meeting's post, as Teams' card draws it: the meeting's tile, its title over when it started
+/// (`started`, a time of day), and Join (`join`; none in the read-only mode; below them when the card is narrow). Its
+/// test selectors are `channel-meeting-call-<id>` and `channel-meeting-join-<id>`.
+pub(super) fn meeting_call_card(
+    id: &str,
+    call: &MeetingCall,
+    started: &str,
+    palette: Palette,
+    join: Option<OnOpen>,
+) -> AnyElement {
+    let tile = div()
+        .size(px(32.0))
+        .flex_none()
+        .rounded_md()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(rgb(palette.brand))
+        .text_color(rgb(palette.on_brand))
+        .child(Glyph::VIDEO.icon().size(px(16.0)));
+    let join = join.map(|join| {
+        let selector = format!("channel-meeting-join-{id}");
+        crate::icons::selected_by(
+            &selector,
+            crate::icons::icon_button(SharedString::from(selector.clone()), Glyph::VIDEO, "Join the meeting")
+                .label("Join")
+                .primary()
+                .on_click(join),
+        )
+    });
+    let id = id.to_owned();
+    div()
+        .debug_selector(move || format!("channel-meeting-call-{id}"))
+        .w_full()
+        .max_w(px(MEETING_CALL_WIDTH))
+        .px_4()
+        .py_3()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_x_3()
+        .gap_y_2()
+        .rounded_lg()
+        .border_1()
+        .border_color(rgb(palette.border))
+        .bg(rgb(palette.surface))
+        .shadow_sm()
+        .child(tile)
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(MEETING_CALL_TEXT))
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(rgb(palette.foreground))
+                        .truncate()
+                        .child(call.title.clone()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(palette.muted_foreground))
+                        .truncate()
+                        .child(format!("Started {started}")),
+                ),
+        )
+        .children(join.map(|join| div().flex_none().child(join)))
+        .into_any_element()
+}
+
+/// The widest a running meeting's card is drawn, px.
+const MEETING_CALL_WIDTH: f32 = 680.0;
+/// The narrowest a running meeting's title and time are drawn, px: in a narrower card, Join goes on a line below them.
+const MEETING_CALL_TEXT: f32 = 64.0;
 
 /// A meeting card's "<team> > <channel>": the team's tile, its name, a chevron and the channel's.
 fn place_line(team: &SharedString, channel: &SharedString, palette: Palette) -> gpui::Div {

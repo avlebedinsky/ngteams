@@ -50,6 +50,13 @@ pub enum ChannelViewEvent {
     /// A meeting card's Edit: the meeting's details, read from the team's calendar by its id (`ical_uid`), opened to
     /// change or cancel it (the shell's to open, as it knows the channel's team).
     EditMeeting { ical_uid: String },
+    /// A running meeting's Join on its post: the pre-join of the meeting (`meeting`) in the channel `channel`, titled
+    /// `title` (the shell's to open, as for the channel header's Join).
+    JoinMeeting {
+        channel: String,
+        meeting: teams_proto::MeetingInfo,
+        title: String,
+    },
     /// A workflow was chosen in a post's or a reply's "More options" (or "More actions"): it runs on that message
     /// ([`crate::workflow_run`]); the shell names its team.
     RunWorkflow {
@@ -133,6 +140,11 @@ impl ChannelView {
             ChatViewEvent::OpenOriginal(original) => cx.emit(ChannelViewEvent::OpenOriginal(original.clone())),
             ChatViewEvent::EditMeeting { ical_uid } => cx.emit(ChannelViewEvent::EditMeeting {
                 ical_uid: ical_uid.clone(),
+            }),
+            ChatViewEvent::JoinMeeting { meeting, title } => cx.emit(ChannelViewEvent::JoinMeeting {
+                channel: this.channel().to_owned(),
+                meeting: meeting.clone(),
+                title: title.clone(),
             }),
             ChatViewEvent::RunWorkflow { flow, message } => cx.emit(ChannelViewEvent::RunWorkflow {
                 flow: flow.clone(),

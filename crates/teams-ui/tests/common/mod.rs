@@ -272,6 +272,8 @@ pub struct FakeCore {
     pub calendar: Mutex<calendar::CalendarFake>,
     /// The meetings their chats' threads name, by chat; any other chat names none.
     pub meetings: Mutex<HashMap<String, teams_core::MeetingDetails>>,
+    /// What `channel_meetup` answers, by the channel; any other channel has no meeting running.
+    pub channel_meetups: Mutex<HashMap<String, teams_core::ChannelMeetup>>,
     /// The chats' translations kept, as the store keeps them (a newer version's replacing an older one's).
     pub translations: Mutex<Vec<StoredTranslation>>,
     /// The account's own messages as written, kept when they were sent translated.
@@ -530,6 +532,10 @@ impl Core for FakeCore {
     fn meeting(&self, chat: String) -> Reply<Option<teams_core::MeetingDetails>> {
         let found = locked(&self.meetings).get(&chat).cloned();
         self.answer("meeting", || found)
+    }
+
+    fn channel_meetup(&self, channel: String) -> Reply<Option<teams_core::ChannelMeetup>> {
+        Reply::ready(Ok(locked(&self.channel_meetups).get(&channel).cloned()))
     }
 
     fn calendar(&self, start_ms: i64, end_ms: i64) -> Reply<Vec<teams_core::CalendarEvent>> {

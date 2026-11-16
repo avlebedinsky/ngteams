@@ -21,7 +21,8 @@ use teams_proto::chat::{ChatEvent, RecordingItem, chat_event, meeting_times, web
 use teams_store::Message;
 
 use super::{
-    AVATAR, AVATAR_GAP, Body, ChatView, ChatViewEvent, MessageItem, RecapOpen, UNSUPPORTED, VIEW_RECAP, web_line,
+    AVATAR, AVATAR_GAP, Body, ChatView, ChatViewEvent, MeetingCall, MessageItem, RecapOpen, UNSUPPORTED, VIEW_RECAP,
+    web_line,
 };
 use crate::clock::HourCycle;
 use crate::icons::{Glyph, icon_button, selected_by};
@@ -193,6 +194,18 @@ impl ChatView {
                 .debug_selector(selector)
                 .child(self.recap_card(item, card, palette, cx))
                 .into_any_element(),
+            Body::MeetingCall(call) => div()
+                .w_full()
+                .py_1p5()
+                .debug_selector(selector)
+                .child(super::channel::meeting_call_card(
+                    &item.id,
+                    call,
+                    &time_of_day(item.arrival_time, cycle),
+                    palette,
+                    self.meeting_join(call, cx),
+                ))
+                .into_any_element(),
             Body::UnsupportedEvent(_) => div()
                 .w_full()
                 .py_2()
@@ -213,6 +226,22 @@ impl ChatView {
                 div().into_any_element()
             }
         }
+    }
+
+    /// A running channel meeting's Join on its post, telling [`ChatViewEvent::JoinMeeting`]; none in the read-only
+    /// mode, as no write is offered there.
+    fn meeting_join(&self, call: &MeetingCall, cx: &mut Context<Self>) -> Option<crate::forwarded::OnOpen> {
+        if self.core.read_only() {
+            return None;
+        }
+        let (meeting, title) = (call.meeting.clone(), call.title.to_string());
+        Some(Box::new(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
+            cx.stop_propagation();
+            cx.emit(ChatViewEvent::JoinMeeting {
+                meeting: meeting.clone(),
+                title: title.clone(),
+            });
+        })))
     }
 
     /// A line's words as drawn: runs of words (each `(words, bold)`) between Teams' unverified marks (`None`), a

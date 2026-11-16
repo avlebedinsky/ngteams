@@ -1,7 +1,8 @@
 //! The call window's header, as Teams' call window has it: who the call is with and its state on the left; on the
 //! right its controls in Teams' order (Chat, People, Raise and React in a group call or a meeting, View, More; the
 //! camera and the microphone with their devices, and Share (Stop sharing while the account shares: [`super::share`]);
-//! Leave, with End meeting beside it for a meeting's organizer).
+//! Leave, with End meeting beside it for a meeting's organizer). Waiting in a meeting's lobby, only the camera, the
+//! microphone with their devices, and Leave, as Teams' lobby offers: the rest acts on a meeting the account isn't in.
 use super::*;
 
 /// Teams' live reactions in React's order: the name the call sends, the reaction's picture's key, and its name.
@@ -176,6 +177,19 @@ impl CallStage {
             active.muted && active.meeting.unmute_blocked(),
             "call-mute-blocked",
         );
+        let devices = self.devices_menu("call-audio-devices", AUDIO, "Choose microphone and speaker", cx);
+        let microphone = div().flex().items_center().child(microphone).children(devices);
+        if active.status == CallStatus::Lobby {
+            return div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap_1()
+                .children(camera)
+                .child(microphone)
+                .child(div().w_2())
+                .child(self.leave(active, cx));
+        }
         let hold_or_resume = self.hold(active, palette, cx);
         let held = active.held.is_some();
         let share = self.share_tool(active, palette, cx).map(|share| {
@@ -190,13 +204,7 @@ impl CallStage {
             .items_center()
             .gap_1()
             .children(camera)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .child(microphone)
-                    .children(self.devices_menu("call-audio-devices", AUDIO, "Choose microphone and speaker", cx)),
-            )
+            .child(microphone)
             .children(share);
         let transfer = self.transfer_tools(active, palette, cx);
         div()

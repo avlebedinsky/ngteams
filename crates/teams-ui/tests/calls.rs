@@ -14,6 +14,9 @@
 #[expect(dead_code, reason = "the shared fake CLI helper serves several test harnesses")]
 mod fake_tool;
 
+/// A channel's running meeting: its post's Join, and the meeting's own title on the header's Join.
+#[path = "calls/channel_meeting.rs"]
+mod channel_meeting;
 pub mod common;
 /// The faces a call shows: pictures, else initials.
 #[path = "calls/faces.rs"]
@@ -2826,10 +2829,27 @@ fn waiting_in_the_lobby_the_account_is_told_someone_should_let_it_in() {
     let rig = calling();
     let (trace, _) = trace();
     let (_windows, stage) = in_meeting(&rig, &trace);
+    assert!(drawn(stage, "call-roster"), "in the meeting, its tools show");
     status(&rig, 1, CallStatus::Lobby);
     rig.cx.run_until_parked();
     draw(stage);
     assert!(drawn(stage, "call-calling"));
+    // Teams' lobby offers only the camera, the microphone with its devices (none known here), and Leave
+    for gone in [
+        "call-chat",
+        "call-roster",
+        "call-raise-hand",
+        "call-react",
+        "call-view",
+        "call-controls",
+        "call-more",
+        "call-share",
+    ] {
+        assert!(!drawn(stage, gone), "{gone} shows in the lobby");
+    }
+    for kept in ["call-mute", "call-hang-up"] {
+        assert!(drawn(stage, kept), "{kept} shows in the lobby");
+    }
     let text = rig
         .cx
         .read(|cx| calls_of(&rig).read(cx).call().map(teams_ui::calls::status_text));

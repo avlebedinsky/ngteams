@@ -160,7 +160,7 @@ pub mod reactors;
 mod saved;
 
 use channel::{ChannelLooks, THREAD_EVENT};
-pub use channel::{MeetingCard, Place, Replies};
+pub use channel::{MeetingCall, MeetingCard, Place, Replies};
 use events::Expiry;
 pub use events::UNVERIFIED;
 
@@ -424,6 +424,12 @@ pub enum ChatViewEvent {
     /// A channel meeting card's Edit: the meeting's details, read from the team's calendar by its id (`ical_uid`),
     /// opened to change or cancel it (the shell's to open, as it knows the channel's team).
     EditMeeting { ical_uid: String },
+    /// A running channel meeting's Join on its post: its pre-join, titled `title` (the shell's to open, as for the
+    /// channel header's Join).
+    JoinMeeting {
+        meeting: teams_proto::MeetingInfo,
+        title: String,
+    },
 }
 
 /// How far the conversation's older history is loaded.
@@ -495,6 +501,8 @@ pub enum Body {
     Cards(ShownCards),
     /// A meeting scheduled in a channel, drawn as Teams' meeting card ([`channel::meeting_card`]).
     Meeting(Box<MeetingCard>),
+    /// A channel meeting's call post while it runs, drawn as Teams' card with Join ([`channel::meeting_call_card`]).
+    MeetingCall(Box<MeetingCall>),
     /// A type this build doesn't show, by its name.
     Unsupported(String),
     /// A type this build doesn't show that the thread itself sent: its placeholder as a centred line, with no author
@@ -515,6 +523,7 @@ impl Body {
             Self::Card(_) => "transcript",
             Self::Cards(_) => "cards",
             Self::Meeting(_) => "meeting",
+            Self::MeetingCall(_) => "meeting-call",
             Self::Unsupported(_) => "unsupported",
             Self::UnsupportedEvent(_) => "unsupported-event",
         }
@@ -525,7 +534,12 @@ impl Body {
     pub const fn is_system(&self) -> bool {
         matches!(
             self,
-            Self::Event(_) | Self::TimedEvent(_) | Self::MeetingEnded(_) | Self::Card(_) | Self::UnsupportedEvent(_)
+            Self::Event(_)
+                | Self::TimedEvent(_)
+                | Self::MeetingEnded(_)
+                | Self::MeetingCall(_)
+                | Self::Card(_)
+                | Self::UnsupportedEvent(_)
         )
     }
 }
@@ -1652,6 +1666,17 @@ impl ChatView {
         let (message, src) = (picture.message.clone(), picture.src.clone());
         self.open_picture(&message, &src, cx);
         true
+    }
+
+    /// The title of the running meeting whose post is `post`, as its card shows it; `None` when no such card shows.
+    #[must_use]
+    pub fn meeting_title(&self, post: &str) -> Option<String> {
+        self.message_items()
+            .find(|item| item.id == post)
+            .and_then(|item| match &item.body {
+                Body::MeetingCall(call) => Some(call.title.to_string()),
+                _ => None,
+            })
     }
 
     /// The message rows, the oldest first.
@@ -2887,8 +2912,10 @@ impl ChatView {
             if let Some(card) = self.looks.meeting_card(message, self.core.me(), self.core.read_only()) {
                 return Some(Body::Meeting(Box::new(card)));
             }
-            if let Some(line) = self.looks.meeting_call_line(message) {
-                return Some(Body::TimedEvent(EventLine::plain(EventIcon::Meeting, line)));
+            match self.looks.meeting_call(message) {
+                Some(Ok(call)) => return Some(Body::MeetingCall(Box::new(call))),
+                Some(Err(line)) => return Some(Body::TimedEvent(EventLine::plain(EventIcon::Meeting, line))),
+                None => {}
             }
             // the channel's own events: Teams' post list has them filtered out (its info pane tells them)
             if message.message_type.starts_with(THREAD_EVENT) {
@@ -5001,9 +5028,12 @@ fn bubble_content(
             chat.web_link(&item.id),
             palette,
         ),
-        Body::Event(_) | Body::TimedEvent(_) | Body::MeetingEnded(_) | Body::Card(_) | Body::UnsupportedEvent(_) => {
-            div().into_any_element()
-        }
+        Body::Event(_)
+        | Body::TimedEvent(_)
+        | Body::MeetingEnded(_)
+        | Body::MeetingCall(_)
+        | Body::Card(_)
+        | Body::UnsupportedEvent(_) => div().into_any_element(),
     }
 }
 

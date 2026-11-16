@@ -1306,6 +1306,16 @@ impl Shell {
         true
     }
 
+    /// The title of the meeting running in the channel `channel`, as its post (`post`) names it in the channel shown
+    /// (the post's `meetingtitle`), else [`Self::channel_meeting_title`].
+    fn meetup_title(&self, channel: &str, post: &str, cx: &App) -> String {
+        self.channel
+            .as_ref()
+            .filter(|(view, _)| view.read(cx).channel() == channel)
+            .and_then(|(view, _)| view.read(cx).posts().read(cx).meeting_title(post))
+            .unwrap_or_else(|| self.channel_meeting_title(channel, cx))
+    }
+
     /// A channel meeting's title, as Teams names one: `Meeting in "<channel>"`.
     fn channel_meeting_title(&self, channel: &str, cx: &App) -> String {
         self.channel
@@ -1416,7 +1426,7 @@ impl Shell {
             calls::refuse_here(&self.models.calls, &self.trace, &ask, "no-meeting", cx);
             return;
         };
-        let title = self.channel_meeting_title(&channel, cx);
+        let title = self.meetup_title(&channel, &meetup.message_id, cx);
         self.open_prejoin(
             MeetingToJoin::Chat {
                 chat: channel,
@@ -2589,7 +2599,10 @@ impl Shell {
             } => this.open_recap(recording.clone(), transcribed.clone(), *open, window, cx),
             ChatViewEvent::OpenSavedTranscript(id) => this.open_saved_transcript(*id, window, cx),
             // a chat has no channel's thread or meeting card
-            ChatViewEvent::Action { .. } | ChatViewEvent::OpenThread { .. } | ChatViewEvent::EditMeeting { .. } => {}
+            ChatViewEvent::Action { .. }
+            | ChatViewEvent::OpenThread { .. }
+            | ChatViewEvent::EditMeeting { .. }
+            | ChatViewEvent::JoinMeeting { .. } => {}
         })
     }
 
@@ -2598,6 +2611,18 @@ impl Shell {
         cx.subscribe_in(channel, window, |this: &mut Self, _, event, window, cx| match event {
             ChannelViewEvent::OpenOriginal(original) => this.open_original(original.clone(), window, cx),
             ChannelViewEvent::EditMeeting { ical_uid } => this.edit_channel_meeting(ical_uid.clone(), cx),
+            ChannelViewEvent::JoinMeeting {
+                channel,
+                meeting,
+                title,
+            } => this.open_prejoin(
+                MeetingToJoin::Chat {
+                    chat: channel.clone(),
+                    meeting: meeting.clone(),
+                    title: title.clone(),
+                },
+                cx,
+            ),
             ChannelViewEvent::RunWorkflow { flow, message } => {
                 this.run_workflow(flow.clone(), message.clone(), window, cx);
             }
