@@ -211,9 +211,10 @@ The firewall lets in:
 | UDP `TURN_MIN_PORT`–`TURN_MAX_PORT` (49160–49359) | coturn's relay ports: one per party in a call |
 
 coturn runs on the host's network: its relay ports and the addresses it sees must be the host's own. It sends a group
-call's media to the media node at `HOST_IP`, the only private address it may reach. On a host behind 1:1 NAT (a
-cloud instance's public address), set `TURN_EXTERNAL_IP=<public>/<private>`. The relay speaks plain TURN: a call's
-media is DTLS-SRTP inside it, and its credentials expire.
+call's media to the media node at `HOST_IP`, the only private address it may reach: it relays UDP only, and it refuses
+the private, shared (CGNAT, Tailscale), link-local and benchmark ranges, IPv6's too. On a host behind 1:1 NAT (a cloud
+instance's public address), set `TURN_EXTERNAL_IP=<public>/<private>`. The relay speaks plain TURN: a call's media is
+DTLS-SRTP inside it, and its credentials expire.
 
 Compose sets the connections, the TURN relay and the media node's keys in the environment. Other keys go in
 `server.toml` (read through `NGTEAMS_SERVER_CONFIG`) or as more `NGTEAMS_SERVER_*` variables, which win. After a
@@ -262,7 +263,9 @@ Behind Caddy the nodes see its address as every client's, so the first-admin set
   A database restored beside the deployment it came from, on the same Redis, needs its own `redis_namespace`
   ([Configuration](#configuration)).
 - **The bucket** holds the pictures, files, thumbnails, profile pictures and app icons. Copy it with any S3 tool after
-  the database dump, so the dump names no blob the copy lacks. For example, with rclone on the Compose network:
+  the database dump: the copy then holds each blob the dump names, except one deleted between the two steps (its file
+  is restored without its bytes). For an exact pair, stop `api-1`, `api-2` and `media` during both steps. For example,
+  with rclone on the Compose network:
 
   ```sh
   docker run --rm --network ngteams_default --env-file .env -v "$PWD/blobs:/backup" \
@@ -279,7 +282,7 @@ Behind Caddy the nodes see its address as every client's, so the first-admin set
   their next heartbeat.
 - **`.env`** and the volume **`caddy-data`** (certificates, and with `local_certs` the authority clients trust).
 
-### Scaling
+### Adding nodes
 
 Every API node serves every request ([Scaling](#scaling)). What all nodes share: the database, Redis (the same
 namespace), the bucket with its keys, `public_origin`, and the TURN relay's URLs and secret. The signing keys are in
@@ -1657,10 +1660,11 @@ podman stop ngts-coturn
 `serve --role media` node of the real binary on one Postgres, one Redis and one bucket, coturn as the relay, and a
 front per node that sends a connection to another node when its own is down, as Caddy does. The server is first
 seeded with 300 synthetic accounts (odd names, a few disabled), group chats with them, a team, files, a picture and
-calendar events. Three clients (`srv-a`, `srv-b`, `srv-c`), each through a different node, then chat both ways
+calendar events. Three clients (`srv-a` and `srv-c` through one node, `srv-b` through the other) then chat both ways
 (each push in under 2 s), react, edit, read on a second device, show presence, send a picture and a file, make a
 1:1 and a group video call, and survive their node being killed. The single-node mode (SQLite, no Redis) runs the
-chat and call part. It needs all four variables above; without coturn the calls are skipped:
+chat and call part. The two-node tests need Postgres and Redis. S3 is optional: without it, the nodes share a
+directory. coturn is optional: without it, the calls are skipped:
 
 ```sh
 NGTEAMS_SERVER_PG_URL=… NGTEAMS_SERVER_REDIS_URL=… NGTEAMS_SERVER_S3_URL=… NGTS_TEST_COTURN=… \
@@ -1670,5 +1674,5 @@ NGTS_TEST_COTURN_SECRET=… cargo test -p ngteams-server --test e2e -- binary::c
 `cargo test -p ngteams --test own_server_nodes_window` runs the same deployment through the app's own windows, each
 `srv-*` app in a UI sandbox of its own, signed in from the first sign-in screen ("Own server", typed). The nodes share
 one `public_origin`, so a front on its port passes each TLS connection through to the node the app is pinned to, and
-to the other node once that one is down. It needs the same five variables and the server binary
-(`cargo build -p ngteams-server`); screenshots go to `target/ui-shots/own-server-nodes-*.png`.
+to the other node once that one is down. It needs Postgres, Redis and coturn (S3 is optional, as above) and the
+server binary (`cargo build -p ngteams-server`); screenshots go to `target/ui-shots/own-server-nodes-*.png`.
