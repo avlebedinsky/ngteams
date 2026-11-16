@@ -43,8 +43,8 @@ fn party<'a>(view: &'a CallView, mri: &str) -> Option<&'a CallParticipant> {
 }
 
 /// Waits until `engine` shows each of `others` with its camera on, on a receiving line of its own, and that line has
-/// shown at least [`FRAMES`] frames of the shape the other's camera has.
-async fn sees(engine: &mut Engine, call: CallId, others: &[(&str, PatternCamera)]) {
+/// shown at least [`FRAMES`] frames of the shape the other's camera has. Gives the line of each other, in order.
+async fn sees(engine: &mut Engine, call: CallId, others: &[(&str, PatternCamera)]) -> Vec<usize> {
     let view = engine
         .view(call, |view| {
             others.iter().all(|(mri, _)| {
@@ -52,8 +52,10 @@ async fn sees(engine: &mut Engine, call: CallId, others: &[(&str, PatternCamera)
             })
         })
         .await;
+    let mut lines = Vec::new();
     for (mri, camera) in others {
         let line = party(&view, mri).and_then(|party| party.line).unwrap();
+        lines.push(line);
         let wanted = shape(camera.width, camera.height);
         let what = format!("{}: {mri}'s video on line {line}", engine.mri);
         wait_until(&what, || {
@@ -63,6 +65,7 @@ async fn sees(engine: &mut Engine, call: CallId, others: &[(&str, PatternCamera)
         .await;
         eprintln!("{what}: {:?}", engine.seen(line));
     }
+    lines
 }
 
 /// Turns `engine`'s camera in `call` on or off.
@@ -85,14 +88,25 @@ async fn three_clients_see_each_others_video_on_the_lines_they_asked_for() {
         }
         let (a_mri, b_mri, c_mri) = (a.mri.clone(), b.mri.clone(), c.mri.clone());
         sees(&mut a, calls[0], &[(&b_mri, FOUR_THREE), (&c_mri, SQUARE)]).await;
-        sees(&mut b, calls[1], &[(&a_mri, WIDE), (&c_mri, SQUARE)]).await;
-        sees(&mut c, calls[2], &[(&a_mri, WIDE), (&b_mri, FOUR_THREE)]).await;
+        let lines = [
+            sees(&mut b, calls[1], &[(&a_mri, WIDE), (&c_mri, SQUARE)]).await[0],
+            sees(&mut c, calls[2], &[(&a_mri, WIDE), (&b_mri, FOUR_THREE)]).await[0],
+        ];
         // a's camera off: the others are told, and its line shows nothing more
         camera(&a, calls[0], false).await;
         for (engine, call) in [(&mut b, calls[1]), (&mut c, calls[2])] {
             engine
                 .view(call, |view| party(view, &a_mri).is_some_and(|party| !party.video_on))
                 .await;
+        }
+        let shown = [b.seen(lines[0]).frames, c.seen(lines[1]).frames];
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        for (engine, line, shown) in [(&b, lines[0], shown[0]), (&c, lines[1], shown[1])] {
+            assert!(
+                engine.seen(line).frames <= shown + 2,
+                "{}: a's camera still came after it was turned off",
+                engine.mri
+            );
         }
         hang_up_all(&mut [&mut a, &mut b, &mut c], &calls).await;
         for engine in [a, b, c] {

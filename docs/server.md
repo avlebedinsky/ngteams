@@ -878,17 +878,19 @@ once.
   chat is `403`.
 - **Renegotiation** goes to the node, and its answer back to the party alone, at its `mediaAnswer` callback; the next
   one waits for that answer's acknowledgement (`491` at its `rejection` callback), for 30 s at most, as an
-  acknowledgement may be lost and is never sent again. `updateMediaDescriptions` and
-  `applyChannelParameters` are taken and change nothing. A group call has no hold (`403`, and no `hold` link).
-- **The roster** lists each party in the call with its main audio and main video (only taken: the node doesn't
-  forward video yet) by the source ids signaling gave it (1000, 1010, … per party). Each change goes to every party in
+  acknowledgement may be lost and is never sent again. `updateMediaDescriptions` sets the party's camera and screen
+  in the roster (one that describes nothing changes nothing); `applyChannelParameters` gives its bandwidth seed to its
+  leg on the node. A group call has no hold (`403`, and no `hold` link).
+- **The roster** lists each party in the call with its main audio, its main video (`sendrecv` while its camera is
+  on, `recvonly` if not) and, while it shares its screen, its sharing stream, by the source ids signaling gave it
+  (1000, 1020, … per party). Each change goes to every party in
   the call, every ringing party's ring subscription and every follower; a party that comes in gets the whole roster.
   Each calling endpoint of the others also gets `{"evt": 115 | 116, "cp": base64(gzip(JSON))}` when someone comes in
   or leaves; the client reads neither, and the shape is the protocol notes' minimum.
 - **Seats**: a group call's controller links carry the party's seat where a 1:1 call's carry `1`; a link naming
   another party's seat is `404`.
 
-Not served yet: meetings, the test call, group video and sharing (the node mixes audio only), transfer, voicemail.
+Not served yet: meetings, the test call, transfer, voicemail.
 
 ### The call log
 
