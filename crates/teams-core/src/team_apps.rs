@@ -347,7 +347,8 @@ pub(crate) struct BotIndex {
     account: tokio::sync::Mutex<Option<(Instant, bool)>>,
     /// The bots whose id was read as an app's and named none; a read that failed is no miss.
     missed: std::sync::Mutex<BTreeSet<String>>,
-    /// One lock per bot across the read by its id, so asks at once for one bot send one read and all get its answer.
+    /// One lock per bot across the read by its id, so asks at once for one bot share one answered read; an ask that
+    /// waited on a read that failed sends its own.
     reading: std::sync::Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 

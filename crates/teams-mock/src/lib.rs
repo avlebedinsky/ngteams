@@ -506,6 +506,24 @@ impl ChatServiceMock {
             .await;
     }
 
+    /// [`Self::answer_next`], its answer held back for `delay`: a slow answer the world doesn't make.
+    pub async fn answer_next_after_with(
+        &self,
+        http_method: &str,
+        path_end: &str,
+        status: u16,
+        body: &Value,
+        delay: std::time::Duration,
+    ) {
+        Mock::given(method(http_method))
+            .and(PathEnds(path_end.to_owned()))
+            .respond_with(ResponseTemplate::new(status).set_body_json(body).set_delay(delay))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&self.server)
+            .await;
+    }
+
     /// Answers every `GET` of exactly `path` with `body` as `content_type`, before the world sees it: a test's stand-in
     /// for a static file (a message's picture on AMS, an emoticon's animation on Teams' CDN), which the world has none
     /// of.

@@ -728,6 +728,39 @@ async fn a_bot_s_read_by_its_id_that_failed_is_read_again() {
     assert_eq!(reads, 2, "the refused read, then the one answered; none after");
 }
 
+/// Asks at once for one bot share one answered read by its id: the ask that waited takes its answer.
+#[tokio::test]
+async fn asks_at_once_for_a_bot_share_one_read_by_its_id() {
+    const SAME_ID: &str = "00000000-0000-4000-8000-00000000c001";
+    let rig = setup().await;
+    let requests = rig.handle.requests();
+    // the account's apps first, so the reads after are the bot's alone
+    assert!(requests.bot_app(APPROVALS_BOT).await.unwrap().is_some());
+    let definition = json!([{ "id": SAME_ID, "name": "Made-up Same", "developerName": "Made-up Maker",
+                              "bots": [{ "id": SAME_ID, "scopes": ["personal"] }] }]);
+    rig.mock
+        .answer_next_after_with(
+            "POST",
+            "users/apps/batchedDefinitions",
+            200,
+            &definition,
+            Duration::from_millis(200),
+        )
+        .await;
+    let bot = format!("28:{SAME_ID}");
+    let (first, second) = tokio::join!(requests.bot_app(bot.clone()), requests.bot_app(bot.to_uppercase()));
+    for app in [first.unwrap(), second.unwrap()] {
+        assert_eq!(app.map(|app| app.app.id).as_deref(), Some(SAME_ID));
+    }
+    let sent = rig.mock.received_requests().await;
+    let reads = sent
+        .iter()
+        .filter(|request| request.url.path().ends_with("users/apps/batchedDefinitions"))
+        .filter(|request| String::from_utf8_lossy(&request.body).contains("c001"))
+        .count();
+    assert_eq!(reads, 1, "one read for both asks");
+}
+
 #[tokio::test]
 async fn the_bots_people_can_mention_are_those_of_the_chat_s_or_the_team_s_apps() {
     let rig = setup().await;

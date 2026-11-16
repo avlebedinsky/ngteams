@@ -97,9 +97,9 @@ definition its reads bring (the store, the account's apps, a chat's and a team's
 none of them names is looked for in the account's apps (`aggregatedEntitlements`, every definition in its answer, Teams'
 own and the store's offers too), then, for an id known to be a bot's (a `28:` member or sender of the chat), by its id as
 an app's in `batchedDefinitions` until a read of it is answered (many apps' bot has the app's id); asks at once for
-one bot send one read. An id that may be a person's is never
-read as an app's. A 1:1 chat whose other one is neither a stored `28:` member, nor a `28:` sender, nor a bot of a known
-app is with a person.
+one bot share one answered read, and an ask that waited on a read that failed sends its own. An id that may be a
+person's is never read as an app's. A 1:1 chat whose other one is neither a stored `28:` member, nor a `28:` sender,
+nor a bot of a known app is with a person.
 
 ## Own servers
 

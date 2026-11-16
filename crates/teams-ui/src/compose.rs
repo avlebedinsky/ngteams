@@ -684,7 +684,7 @@ pub struct Compose {
     candidates: Option<Vec<Candidate>>,
     /// The app of each bot the box may mention, by the bot's MRI: a bot's mention is written with it.
     bots: BTreeMap<Mri, String>,
-    /// The bots of mentions in the box whose app the box asked the engine for ([`Compose::learn_bots`]).
+    /// The bots of mentions in the box whose app the box is asking the engine for ([`Compose::learn_bots`]).
     asked_bots: BTreeSet<Mri>,
     reading: Option<Task<()>>,
     /// What the last send couldn't do, shown over the box.
@@ -1657,16 +1657,18 @@ impl Compose {
         }));
     }
 
-    /// The apps of bots the box may mention, by the bot's MRI: those the picker offers, and those an edited message
-    /// named.
+    /// The apps of bots the box may mention, by the bot's MRI: those the picker offers, those an edited message named,
+    /// those a box that handed over its text or draft knew, and those the engine found for a pasted mention
+    /// ([`Compose::learn_bots`]).
     pub fn know_bots(&mut self, bots: impl IntoIterator<Item = (Mri, String)>) {
         self.bots.extend(bots);
     }
 
     /// Asks the engine, once for each bot, for the app of a bot that a mention in the box names and the box doesn't
-    /// know (a mention pasted from another box): a bot's mention is sent with its app's id.
+    /// know (a mention pasted from another box): a bot's mention is sent with its app's id. Only while the bots are
+    /// shown (`NGTEAMS_BOTS=1`). An ask that found no app is asked again at the next change of the text.
     fn learn_bots(&mut self, cx: &mut Context<Self>) {
-        if !self.core.capabilities().apps {
+        if !(crate::bots_flag::bots_on(cx) && self.core.capabilities().apps) {
             return;
         }
         let unknown: BTreeSet<Mri> = self
@@ -1685,10 +1687,15 @@ impl Compose {
             self.asked_bots.insert(bot.clone());
             let app = self.core.bot_app(bot.as_str().to_owned());
             cx.spawn(async move |this, cx: &mut AsyncApp| {
-                let Some(app) = app.await.ok().flatten() else {
-                    return;
-                };
-                let _ = this.update(cx, |this, _| this.know_bots([(bot, app.app.id)]));
+                let app = app.await.ok().flatten();
+                let _ = this.update(cx, |this, _| match app {
+                    Some(app) => this.know_bots([(bot, app.app.id)]),
+                    // a read that failed is no answer, so ask again at the next change; the engine answers a bot it
+                    // knows has no app without a read
+                    None => {
+                        this.asked_bots.remove(&bot);
+                    }
+                });
             })
             .detach();
         }

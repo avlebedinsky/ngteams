@@ -1023,7 +1023,70 @@ fn a_group_chat_s_picker_offers_its_apps_bots_and_sends_a_bot_s_mention() {
 /// with its app's id: the box asks the engine for the app of a bot it doesn't know.
 #[test]
 fn a_pasted_bot_s_mention_is_sent_with_its_app() {
-    const OTHER_GROUP: &str = "19:made-up-other-group@thread.v2";
+    let (rig, cx) = bot_mention_pasted_in_other_group(|_, _| {});
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let actions = std::mem::take(&mut *rig.core.actions.lock().unwrap());
+    let Some(teams_core::Action::Send { conversation, text }) = actions.first() else {
+        panic!("a post: {actions:?}");
+    };
+    assert_eq!(conversation, OTHER_GROUP);
+    assert_eq!(
+        text.bots().get(&teams_proto::Mri::new(POLLS_BOT)).map(String::as_str),
+        Some(POLLS)
+    );
+}
+
+/// With the bots hidden, the box asks for no bot's app: a pasted bot's mention is not sent as a bot's.
+#[test]
+fn a_pasted_bot_s_mention_is_not_sent_as_a_bot_s_with_the_bots_hidden() {
+    let (rig, cx) = bot_mention_pasted_in_other_group(|_, cx| cx.update(|_, cx| cx.set_global(BotsFlag(false))));
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let actions = std::mem::take(&mut *rig.core.actions.lock().unwrap());
+    assert!(
+        !actions
+            .iter()
+            .any(|action| matches!(action, teams_core::Action::Send { .. })),
+        "{actions:?}"
+    );
+}
+
+/// An ask for a pasted bot's app that failed is asked again at the next change of the text, and the mention is then
+/// sent with its app's id.
+#[test]
+fn a_pasted_bot_s_app_that_could_not_be_read_is_asked_again() {
+    let (rig, cx) = bot_mention_pasted_in_other_group(|rig, _| *rig.core.bot_app_failures.lock().unwrap() = 1);
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let actions = std::mem::take(&mut *rig.core.actions.lock().unwrap());
+    assert!(
+        !actions
+            .iter()
+            .any(|action| matches!(action, teams_core::Action::Send { .. })),
+        "not sent while the app is unknown: {actions:?}"
+    );
+    cx.simulate_input(" ");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let actions = std::mem::take(&mut *rig.core.actions.lock().unwrap());
+    let Some(teams_core::Action::Send { text, .. }) = actions.first() else {
+        panic!("a post: {actions:?}");
+    };
+    assert_eq!(
+        text.bots().get(&teams_proto::Mri::new(POLLS_BOT)).map(String::as_str),
+        Some(POLLS)
+    );
+}
+
+const OTHER_GROUP: &str = "19:made-up-other-group@thread.v2";
+
+/// The Polls bot's mention picked in the group's box, copied, and pasted into the box of another group, after
+/// `before_paste`; nothing sent yet.
+fn bot_mention_pasted_in_other_group(
+    before_paste: impl FnOnce(&Rig, &mut VisualTestContext),
+) -> (Rig, &'static mut VisualTestContext) {
     let (rig, shell, cx) = picker_in_group(true);
     know_bots(&rig);
     cx.simulate_input("poll");
@@ -1044,17 +1107,8 @@ fn a_pasted_bot_s_mention_is_sent_with_its_app() {
     assert_eq!(cx.update(|_, cx| chat.read(cx).conversation().to_owned()), OTHER_GROUP);
     let compose = cx.update(|_, cx| chat.read(cx).compose().clone());
     cx.update(|window, cx| compose.update(cx, |compose, cx| compose.focus(window, cx)));
+    before_paste(&rig, cx);
     cx.simulate_keystrokes("ctrl-v");
     cx.run_until_parked();
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
-    let actions = std::mem::take(&mut *rig.core.actions.lock().unwrap());
-    let Some(teams_core::Action::Send { conversation, text }) = actions.first() else {
-        panic!("a post: {actions:?}");
-    };
-    assert_eq!(conversation, OTHER_GROUP);
-    assert_eq!(
-        text.bots().get(&teams_proto::Mri::new(POLLS_BOT)).map(String::as_str),
-        Some(POLLS)
-    );
+    (rig, cx)
 }
