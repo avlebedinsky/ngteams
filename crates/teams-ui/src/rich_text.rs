@@ -655,6 +655,17 @@ pub fn layout_with_web_link(text: &RichText, mentions: &Mentions, web_link: Opti
     rendered
 }
 
+/// Whether `src` names a picture an account's engine reads: one on Microsoft's services, or a view on the media
+/// service of the own server its URL names. The engine reads one only on its own account's cloud
+/// (`teams_core::pictures`), so another account's is drawn as its fallback and nothing is asked of its server.
+fn is_inline_picture(src: &str) -> bool {
+    InlinePicture::of(src).is_some()
+        || url::Url::parse(src)
+            .ok()
+            .and_then(|url| teams_proto::Cloud::own(&url.origin().ascii_serialization()).ok())
+            .is_some_and(|cloud| InlinePicture::of_in(&cloud, src).is_some())
+}
+
 /// Builds the blocks of one level (the message's, or a quote's).
 struct Builder<'a> {
     mentions: &'a Mentions,
@@ -806,7 +817,7 @@ impl<'a> Builder<'a> {
             });
             return;
         }
-        if !self.quoted && self.link.is_none() && InlinePicture::of(&image.src).is_some() {
+        if !self.quoted && self.link.is_none() && is_inline_picture(&image.src) {
             self.end_block();
             let mut fallback = Builder::new(self.mentions);
             fallback.web_link.clone_from(&self.web_link);

@@ -660,6 +660,27 @@ fn an_emoticon_keeps_its_place_in_the_text_and_a_pasted_picture_is_a_block() {
     );
 }
 
+#[test]
+fn a_picture_on_an_own_servers_media_service_is_a_block() {
+    let src = "https://chat.example:8443/ams/v1/objects/0-own-d1-0a56c46309364577b47881c59dae75a7/views/imgo";
+    let content = format!(
+        "<p><img src=\"{src}\" itemtype=\"http://schema.skype.com/AMSImage\" width=\"240\" height=\"160\" \
+         alt=\"image\"></p>"
+    );
+    let rendered = rich_text::layout(&parse_html(&content), &Mentions::default());
+    let [Block::Picture(picture)] = &rendered.blocks[..] else {
+        panic!("a picture block: {rendered:#?}");
+    };
+    assert_eq!((picture.src.as_str(), picture.size), (src, Some((240, 160))));
+    // anything on that server that isn't a view of its media service stays a placeholder
+    let other = "<p><img src=\"https://chat.example:8443/files/made-up.png\" alt=\"x\"></p>";
+    let rendered = rich_text::layout(&parse_html(other), &Mentions::default());
+    assert!(
+        !rendered.blocks.iter().any(|block| matches!(block, Block::Picture(_))),
+        "{rendered:#?}"
+    );
+}
+
 /// A GIF from Teams' GIF picker, on Giphy's media host as a message names it (the id and Giphy's token made up).
 const GIF: &str = "https://media2.giphy.com/media/v1.Y2lkPW1hZGUtdXA/MadeUpGif000/giphy.gif";
 

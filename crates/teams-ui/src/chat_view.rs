@@ -120,7 +120,8 @@ use gpui_component::tooltip::Tooltip;
 use gpui_component::{Sizable as _, Size};
 use teams_core::{Action, Command, EngineError, NOTES};
 use teams_proto::chat::{
-    LinkPreview, MessageType, RichText, SharedFile, Unshown, parse_html, shared_files, unshown_parts, web_chat_link,
+    LinkPreview, MessageType, RichText, SharedFile, Unshown, parse_html, shared_files_any, unshown_parts_any,
+    web_chat_link,
 };
 use teams_store::{Message, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction, counts_unread};
 
@@ -642,7 +643,7 @@ impl UnshownParts {
     }
 }
 
-/// The parts of a stored message this build can't show (`teams_proto::chat::unshown_parts`: `properties.files`
+/// The parts of a stored message this build can't show (`teams_proto::chat::unshown_parts_any`: `properties.files`
 /// entries it can't read as a file, `properties.cards` other than an empty list); `properties` that aren't a JSON
 /// object are one too, never read as nothing. None for a message without `properties`. (The store keeps no `amsreferences`: an image shows from the
 /// content's markup, as a placeholder.)
@@ -657,7 +658,7 @@ pub fn unshown_of(message: &Message) -> UnshownParts {
             ..UnshownParts::default()
         };
     };
-    unshown_parts(&properties)
+    unshown_parts_any(&properties)
         .iter()
         .fold(UnshownParts::default(), |parts, part| match part {
             Unshown::Files(_) => UnshownParts { files: true, ..parts },
@@ -666,7 +667,7 @@ pub fn unshown_of(message: &Message) -> UnshownParts {
         })
 }
 
-/// The files a stored message carries (`teams_proto::chat::shared_files`, its `properties.files` entries read as
+/// The files a stored message carries (`teams_proto::chat::shared_files_any`, its `properties.files` entries read as
 /// files), in their order; none for a message without `properties` or with `properties` that aren't a JSON object.
 #[must_use]
 pub fn files_of(message: &Message) -> Vec<SharedFile> {
@@ -674,7 +675,7 @@ pub fn files_of(message: &Message) -> Vec<SharedFile> {
         .properties
         .as_deref()
         .and_then(|text| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(text).ok())
-        .map(|properties| shared_files(properties.get("files")).files)
+        .map(|properties| shared_files_any(properties.get("files")).files)
         .unwrap_or_default()
 }
 
@@ -3109,7 +3110,7 @@ impl ChatView {
                 body: self.pending_body(row),
                 files: match sending::command_of(row) {
                     Some(Command::Send { text, .. }) => {
-                        shared_files(Some(&serde_json::json!(text.files_property()))).files
+                        shared_files_any(Some(&serde_json::json!(text.files_property()))).files
                     }
                     _ => Vec::new(),
                 },
