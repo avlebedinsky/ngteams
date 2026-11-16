@@ -309,6 +309,9 @@ pub struct Ended {
     /// A test call's results: what it showed of the devices and the network ([`DeviceCheck`]); `None` for any other
     /// call.
     pub check: Option<DeviceCheck>,
+    /// The user declined it here (or hung up before its answer went): its end is the user's own, also when the
+    /// `reject` was not taken and it ended as failed.
+    pub declined: bool,
 }
 
 impl Ended {
@@ -325,6 +328,7 @@ impl Ended {
             voicemail: active.voicemail,
             duration: active.connected_at.map(|at| at.elapsed()),
             check,
+            declined: false,
         }
     }
 
@@ -332,6 +336,7 @@ impl Ended {
     #[must_use]
     pub fn reason(&self, me: &str) -> EndReason {
         let remote = match &self.end {
+            _ if self.declined => return EndReason::Own,
             End::HungUp | End::Declined => return EndReason::Own,
             End::Failed(_) if self.duration.is_some() => return EndReason::Dropped,
             End::Failed(_) => return EndReason::NotConnected,
@@ -362,10 +367,11 @@ impl Ended {
     }
 
     /// Whether its window stays open on how it ended: a test call's results, and any end the user didn't choose
-    /// (the far end hung up, the call dropped or never connected); a hang-up or a decline of the user's closes it.
+    /// (the far end hung up, the call dropped or never connected); a hang-up or a decline of the user's closes it,
+    /// also a decline whose `reject` was not taken.
     #[must_use]
     pub fn stays_in_window(&self) -> bool {
-        self.check.is_some() || !matches!(self.end, End::HungUp | End::Declined)
+        self.check.is_some() || !(self.declined || matches!(self.end, End::HungUp | End::Declined))
     }
 
     /// The group chat it was in, if it was a group call (a 1:1 chat's id names its two members).
@@ -1406,6 +1412,8 @@ impl Calls {
             }
         }
         let Some(active) = self.call.as_mut() else { return };
+        // a decline is the user's end, also when its `reject` fails (the caller's cancel came first)
+        let declined = active.status == CallStatus::Declining;
         active.status = status.clone();
         if *status == CallStatus::Connected && active.connected_at.is_none() {
             active.connected_at = Some(Instant::now());
@@ -1426,7 +1434,10 @@ impl Calls {
             if !why_it_failed {
                 self.refused = None;
             }
-            self.ended = self.call.take().map(|active| Ended::of(active, end.clone()));
+            self.ended = self.call.take().map(|active| Ended {
+                declined,
+                ..Ended::of(active, end.clone())
+            });
         }
     }
 

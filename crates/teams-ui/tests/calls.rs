@@ -2272,6 +2272,7 @@ fn ended_with(end: End, chat: Option<&str>, connected: bool) -> Ended {
         voicemail: false,
         duration: connected.then(|| std::time::Duration::from_secs(63)),
         check: None,
+        declined: false,
     }
 }
 
@@ -2418,6 +2419,29 @@ fn a_ring_that_failed_before_it_had_a_window_says_call_failed_in_the_main_window
     assert!(drawn(cx, "call-after"), "the callee is told");
     click(cx, "call-dismiss");
     assert!(!drawn(cx, "call-after"), "dismissed");
+    no_name_in(&written);
+}
+
+#[test]
+fn a_declined_ring_whose_reject_failed_says_nothing_in_the_main_window() {
+    let rig = calling();
+    let (trace, written) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    // the user declines, and the `reject` fails (the caller's cancel came first): the end is the user's, no strip
+    rig.send(Event::IncomingCall(invitation(3, Some(CALLER_NAME), None)));
+    status(&rig, 3, CallStatus::Declining);
+    status(&rig, 3, CallStatus::Ended(End::Failed("reject")));
+    assert!(!window_open(&rig, &windows), "a declined ring opens no window");
+    let ended = rig.cx.read(|cx| calls_of(&rig).read(cx).ended().cloned()).unwrap();
+    // its end is the user's own, as a decline taken is
+    assert!(ended.declined && !ended.stays_in_window());
+    assert_eq!(ended.reason(LAB_A), EndReason::Own);
+    assert!(
+        !drawn(cx, "call-after") && !drawn(cx, "in-call"),
+        "a declined ring is no failed call"
+    );
     no_name_in(&written);
 }
 
