@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use gpui::{App, AppContext as _, Context, Entity, EntityId, Global, Task};
+use same_file::Handle;
 use teams_core::{EngineError, FileStream, Reply};
 
 use crate::bridge::Core;
@@ -53,7 +54,8 @@ pub enum Failure {
     Disk(String),
     /// The user cancelled it.
     Cancelled,
-    /// Another running download (of another file) writes to the same place.
+    /// Another job holds the `.part` file of the same place: another download, a download to the same place by
+    /// another path or in another ngteams, or a dismissed download that did not end yet. It may not show as running.
     Busy,
 }
 
@@ -171,8 +173,9 @@ impl RecordingDownload {
     }
 
     /// Starts (or, after a failure, starts again) writing the recording to its file. When the job of another
-    /// download, or of an earlier start of this one, still writes to the same place (its `.part` file), this one
-    /// fails at once ([`Failure::Busy`]): two writers of one file would overwrite each other's bytes.
+    /// download that the app keeps, or of an earlier start of this one, still writes to the same place (its `.part`
+    /// file), this one fails at once ([`Failure::Busy`]): two writers of one file would overwrite each other's bytes.
+    /// Its job also fails so when another writer holds the lock of the `.part` file.
     pub fn start(&mut self, cx: &mut Context<Self>) {
         if self.writing.load(Ordering::Acquire) || target_busy(&self.target, cx.entity_id(), cx) {
             self.running = None;
@@ -263,7 +266,9 @@ pub struct Downloads {
 
 impl Global for Downloads {}
 
-/// Whether the job of a download other than `except` still writes to `target`, whatever its link.
+/// Whether the job of a download other than `except` still writes to `target`, whatever its link. It sees only the
+/// downloads the app keeps ([`Downloads`]): not a dismissed one whose job did not end yet, and not one to the same
+/// place by another path. The lock of the `.part` file stops those (see `save`).
 fn target_busy(target: &Path, except: EntityId, cx: &App) -> bool {
     let Some(downloads) = cx.try_global::<Downloads>() else {
         return false;
@@ -367,23 +372,37 @@ struct Told {
 /// ends, and before that removes the `.part` file it took, unless the file was saved.
 struct Job {
     writing: Arc<AtomicBool>,
-    /// The `.part` file the job locked and writes, until it is renamed over its place.
-    part: Option<PathBuf>,
+    /// The `.part` file the job locked and writes (its path, and the file that holds the lock), until it is renamed
+    /// over its place.
+    part: Option<(PathBuf, fs::File)>,
 }
 
 impl Drop for Job {
     fn drop(&mut self) {
-        if let Some(part) = self.part.take() {
+        if let Some((part, file)) = self.part.take() {
+            // removed while it is still locked, so that no other writer takes it before
             let _ = fs::remove_file(part);
+            drop(file);
         }
         self.writing.store(false, Ordering::Release);
     }
 }
 
+/// Whether `file` is still the file at `path` (not renamed or removed, and not replaced by another file).
+fn still_at(file: &fs::File, path: &Path) -> io::Result<bool> {
+    let at = match Handle::from_path(path) {
+        Ok(at) => at,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    Ok(Handle::from_file(file.try_clone()?)? == at)
+}
+
 /// Writes the file to `target` (through its [`part_path`]), telling `told` how far it got (every [`TELL_EVERY`]
 /// bytes, and once the whole file came); what it wrote is removed when it fails or is dropped (by `job`). The
-/// `.part` file is locked while it is written: when another writer has it locked, this fails ([`Failure::Busy`]) and
-/// does not change it.
+/// `.part` file is locked while it is written: when another writer has it locked, or the file it locked is no longer
+/// the one at its path (another writer saved or removed it in the meantime), this fails ([`Failure::Busy`]) and does
+/// not change it.
 async fn save<F: Future<Output = ()>>(
     open: Opener,
     target: PathBuf,
@@ -409,7 +428,12 @@ async fn save<F: Future<Output = ()>>(
         Err(fs::TryLockError::WouldBlock) => return Err(Failure::Busy),
         Err(fs::TryLockError::Error(error)) => return Err(disk(error)),
     }
-    job.part = Some(part.clone());
+    // the writer that had the lock before may have renamed or removed it since it was opened
+    if !still_at(&file, &part).map_err(disk)? {
+        return Err(Failure::Busy);
+    }
+    let (_, file) = job.part.insert((part.clone(), file));
+    let file: &fs::File = file;
     // what an earlier run left in it
     file.set_len(0).map_err(disk)?;
     let mut sink = BufWriter::with_capacity(WRITE_BUFFER, file);
@@ -429,8 +453,8 @@ async fn save<F: Future<Output = ()>>(
     file.sync_all().map_err(disk)?;
     // renamed while it is still locked, so that no other writer takes it before
     fs::rename(&part, &target).map_err(disk)?;
+    // saved: not removed, and the lock goes with the file
     job.part = None;
-    drop(file);
     Ok(())
 }
 
@@ -516,5 +540,47 @@ pub fn byte_size(bytes: u64) -> String {
         bytes if bytes < MB => format!("{} KB", bytes.div_ceil(KB)),
         bytes if bytes < GB => format!("{} MB", tenths(MB)),
         _ => format!("{} GB", tenths(GB)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_locked_file_is_still_at_its_path_only_until_it_is_renamed_removed_or_replaced() {
+        let folder = tempfile::tempdir().unwrap();
+        let part = folder.path().join("Weekly sync.mp4.part");
+        let file = fs::File::create(&part).unwrap();
+        assert!(still_at(&file, &part).unwrap());
+
+        let saved = folder.path().join("Weekly sync.mp4");
+        fs::rename(&part, &saved).unwrap();
+        assert!(!still_at(&file, &part).unwrap(), "renamed");
+        fs::File::create(&part).unwrap();
+        assert!(!still_at(&file, &part).unwrap(), "another file at its path");
+        fs::remove_file(&part).unwrap();
+        assert!(!still_at(&file, &part).unwrap(), "removed");
+    }
+
+    #[test]
+    fn a_dropped_job_removes_its_part_file_and_then_lets_its_lock_go() {
+        let folder = tempfile::tempdir().unwrap();
+        let part = folder.path().join("Weekly sync.mp4.part");
+        let file = fs::File::create(&part).unwrap();
+        file.try_lock().unwrap();
+        let writing = Arc::new(AtomicBool::new(true));
+        let job = Job {
+            writing: Arc::clone(&writing),
+            part: Some((part.clone(), file)),
+        };
+        let other = fs::OpenOptions::new().write(true).open(&part).unwrap();
+        assert!(matches!(other.try_lock(), Err(fs::TryLockError::WouldBlock)));
+
+        drop(job);
+        assert!(!part.exists());
+        assert!(!writing.load(Ordering::Acquire));
+        // the lock went with the job's file
+        other.try_lock().unwrap();
     }
 }

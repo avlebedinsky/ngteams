@@ -34,6 +34,8 @@ gpui-kit-assets.workspace = true
 # the view trace: one JSON object per line; a recap's AI summary kept as a file, and the tool's answer read
 serde.workspace = true
 serde_json.workspace = true
+# a recording download's locked `.part` file compared with the file at its path
+same-file.workspace = true
 # a recap's AI summary's file named by a hash of its recording's link
 sha2.workspace = true
 # a reaction's animation strip (a PNG) cut into the frames GPUI plays, and a message's pictures (PNG, JPEG, GIF,

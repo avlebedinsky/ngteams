@@ -12501,6 +12501,7 @@ dependencies = [
  "objc2-user-notifications",
  "raw-window-handle",
  "regex",
+ "same-file",
  "serde",
  "serde_json",
  "sha2 0.11.1",

@@ -226,6 +226,8 @@ rustls-platform-verifier = "0.7.1"
 # the local store: SQLite built from source (`bundled`), so every machine runs the same version
 rusqlite = { version = "0.40.2", features = ["array", "bundled"] }
 rustix = { version = "1.1.5", features = ["process"] }
+# whether a locked `.part` file is still the one at its path (`teams-ui`'s recording downloads), on every platform
+same-file = "1.0.6"
 # the chat service's message HTML, read into a small typed model (teams-proto's `chat::html`): html5ever's
 # browser-grade parse, as a tree to walk; without the CLI (`main`) and the parse-error list (`errors`)
 scraper = { version = "0.27.0", default-features = false }
