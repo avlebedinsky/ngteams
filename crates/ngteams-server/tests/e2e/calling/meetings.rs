@@ -93,6 +93,20 @@ pub(super) async fn call_events(mixed: &Mixed, reader: &Person, chat: &str) -> V
         .collect()
 }
 
+/// The `Event/Call` messages of `chat` once the newest tells the call's end, which the chat gets just after the
+/// parties hear it (or as they are when that takes too long).
+pub(super) async fn ended_events(mixed: &Mixed, reader: &Person, chat: &str) -> Vec<String> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let events = call_events(mixed, reader, chat).await;
+        let ended = events.first().is_some_and(|newest| newest.contains("<ended/>"));
+        if ended || tokio::time::Instant::now() >= deadline {
+            return events;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 /// Each person hangs up its call and waits for its end.
 pub(super) async fn leave_all(people: &mut [&mut Person], calls: &[CallId]) {
     for (person, call) in people.iter_mut().zip(calls) {
@@ -146,7 +160,7 @@ async fn three_join_a_scheduled_meeting_nobody_rings_and_its_chat_tells_its_star
             .await;
         let chat = event.meeting_chat.clone().unwrap();
         leave_all(&mut [&mut bert, &mut ada, &mut cora], &[b_call, a_call, c_call]).await;
-        let events = call_events(&mixed, &cora, &chat).await;
+        let events = ended_events(&mixed, &cora, &chat).await;
         assert_eq!(events.len(), 2, "{events:?}");
         assert!(events[1].contains("callStarted"), "{events:?}");
         assert!(
@@ -415,7 +429,7 @@ async fn the_organizer_ends_the_meeting_for_everyone_in_it_and_its_chat_tells_th
             .unwrap();
         assert!(calls.is_empty(), "{calls:?}");
         let chat = event.meeting_chat.clone().unwrap();
-        let events = call_events(&mixed, &bert, &chat).await;
+        let events = ended_events(&mixed, &bert, &chat).await;
         assert!(
             events[0].contains("callEnded") && events[0].contains("count=\"3\""),
             "{events:?}"
@@ -471,7 +485,7 @@ async fn a_meeting_leaves_no_call_log_entry_and_no_missed_call_as_in_teams() {
         bert.engine.ended(b_call).await;
         ada.engine.ended(a_call).await;
         let chat = event.meeting_chat.clone().unwrap();
-        assert!(call_events(&mixed, &bert, &chat).await[0].contains("callEnded"));
+        assert!(ended_events(&mixed, &bert, &chat).await[0].contains("callEnded"));
         // a call's end is told in its chat just before it is written to the parties' streams
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
         while tokio::time::Instant::now() < deadline {
