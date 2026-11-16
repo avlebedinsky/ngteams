@@ -1652,3 +1652,17 @@ NGTS_TEST_COTURN=127.0.0.1:53478 NGTS_TEST_COTURN_SECRET=test-secret \
   cargo test -p ngteams-server relayed_by_coturn
 podman stop ngts-coturn
 ```
+
+`binary::cluster` runs the server as [Operations](#operations) deploys it: two `serve --role api` nodes and a
+`serve --role media` node of the real binary on one Postgres, one Redis and one bucket, coturn as the relay, and a
+front per node that sends a connection to another node when its own is down, as Caddy does. The server is first
+seeded with 300 synthetic accounts (odd names, a few disabled), group chats with them, a team, files, a picture and
+calendar events. Three clients (`srv-a`, `srv-b`, `srv-c`), each through a different node, then chat both ways
+(each push in under 2 s), react, edit, read on a second device, show presence, send a picture and a file, make a
+1:1 and a group video call, and survive their node being killed. The single-node mode (SQLite, no Redis) runs the
+chat and call part. It needs all four variables above; without coturn the calls are skipped:
+
+```sh
+NGTEAMS_SERVER_PG_URL=… NGTEAMS_SERVER_REDIS_URL=… NGTEAMS_SERVER_S3_URL=… NGTS_TEST_COTURN=… \
+NGTS_TEST_COTURN_SECRET=… cargo test -p ngteams-server --test e2e -- binary::cluster --test-threads 4
+```
