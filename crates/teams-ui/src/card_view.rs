@@ -62,6 +62,8 @@ pub const PADDING: f32 = 16.0;
 pub const APP_ICON: f32 = 20.0;
 /// The size of the play mark on a video's picture, px.
 pub const PLAY_MARK: f32 = 56.0;
+/// How far a video's cropped picture reaches past its box on each side, px.
+const OVERREACH: f32 = 2.0;
 /// The tooltip of a video's picture: it plays in the browser, not in the card.
 pub const PLAYS_IN_BROWSER: &str = "Play in the browser";
 /// What a card's preview line in the chat list says, as Teams' does.
@@ -416,15 +418,25 @@ fn media_view(draw: &Draw<'_>, path: &str, media: &Media, cx: &mut App) -> AnyEl
         Some(PictureState::Shown(image, (natural_w, natural_h))) => {
             let selector = draw.selector(&format!("{path}picture"));
             let (width, height) = cropped_16_9(natural_w, natural_h);
+            // the box and the picture round to whole pixels apart: a crop to the box's exact edge can show a bar's row
+            let overreach = px(-OVERREACH);
             Some(
                 div()
-                    .debug_selector(move || selector)
                     .absolute()
-                    .top(relative((1.0 - height) / 2.0))
-                    .left(relative((1.0 - width) / 2.0))
-                    .w(relative(width))
-                    .h(relative(height))
-                    .child(img(image).size_full().object_fit(ObjectFit::Fill)),
+                    .top(overreach)
+                    .bottom(overreach)
+                    .left(overreach)
+                    .right(overreach)
+                    .child(
+                        div()
+                            .debug_selector(move || selector)
+                            .absolute()
+                            .top(relative((1.0 - height) / 2.0))
+                            .left(relative((1.0 - width) / 2.0))
+                            .w(relative(width))
+                            .h(relative(height))
+                            .child(img(image).size_full().object_fit(ObjectFit::Fill)),
+                    ),
             )
         }
         _ => None,

@@ -154,3 +154,37 @@ fn a_video_s_picture_is_cropped_to_16_9_from_its_middle() {
     );
     assert_eq!(cropped_16_9(0, 90), (1.0, 1.0));
 }
+
+#[test]
+fn no_row_of_a_video_s_bars_shows_at_any_card_width() {
+    // the box and the picture are each rounded to whole pixels: a crop that ends exactly at the box's edge can show
+    // a row of YouTube's black bar there, so the picture's 16:9 middle must reach past the box on every side
+    let rig = rig_with(vec![app_card_message()]);
+    rig.core.pictures.lock().unwrap().insert(
+        LinkPreviewPicture::card_picture_src(VIDEO_PICTURE).unwrap(),
+        png(48, 36),
+    );
+    let (written_trace, _) = trace();
+    let (_view, cx) = chat_window(&rig, written_trace);
+    let mut widths = Vec::new();
+    for window in [800.0, 560.0, 470.0, 433.0, 401.0, 377.0] {
+        cx.simulate_resize(gpui::size(px(window), px(600.0)));
+        draw(cx);
+        let media = bounds(cx, &format!("card-{ID}-c0b0.")).expect("the video");
+        let picture = bounds(cx, &format!("card-{ID}-c0b0.picture")).expect("the video's picture");
+        let bar = (f32::from(picture.size.height) - f32::from(picture.size.width) * 9.0 / 16.0) / 2.0;
+        let middle_top = f32::from(picture.top()) + bar;
+        let middle_bottom = f32::from(picture.bottom()) - bar;
+        assert!(
+            middle_top <= f32::from(media.top()) - 1.0 && middle_bottom >= f32::from(media.bottom()) + 1.0,
+            "the bars reach into the box at {window} px: {media:?} {picture:?}"
+        );
+        assert!(
+            picture.left() <= media.left() - px(1.0) && picture.right() >= media.right() + px(1.0),
+            "the picture fills the box's width at {window} px: {media:?} {picture:?}"
+        );
+        widths.push(media.size.width);
+    }
+    widths.dedup();
+    assert!(widths.len() > 2, "the card takes more than one width: {widths:?}");
+}
