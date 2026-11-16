@@ -577,17 +577,18 @@ struct MixerSide {
     /// The data line's stream, drawn once: an answer that names another each time is a changed answer.
     data_ssrc: u32,
     ids: Option<StreamIds>,
-    /// The stream id of the first receiving video line, the next ones counting on ([`NgcSession::set_slot_stream_ids`]).
-    slots: Option<u32>,
+    /// The stream id of the first receiving video line, the next ones counting on, and how many lines get one
+    /// ([`NgcSession::set_slot_stream_ids`]).
+    slots: Option<(u32, u32)>,
 }
 
 impl MixerSide {
     /// The stream id a line labelled `label` is named by, it being the `video`-th video line labelled `main-video` (the
-    /// first is the main line, the others receiving lines).
+    /// first is the main line, the others receiving lines; a receiving line past the ones that get an id has none).
     fn stream_id(self, label: &str, video: u32) -> Option<u32> {
         let ids = self.ids?;
         match (label, self.slots) {
-            ("main-video", Some(first)) if video > 0 => Some(first + video - 1),
+            ("main-video", Some((first, count))) if video > 0 => (video <= count).then(|| first + video - 1),
             _ => ids.of(label),
         }
     }
@@ -663,10 +664,11 @@ impl NgcSession {
     }
 
     /// The stream id a mixer's session names its first receiving video line by (each video line labelled `main-video`
-    /// after the main one), the next ones counting on from it; until set, every such line is named as the main one.
-    pub fn set_slot_stream_ids(&mut self, first: u32) {
+    /// after the main one), the next ones counting on from it for `count` lines in all; a receiving line after those
+    /// is named by no id. Until set, every such line is named as the main one.
+    pub fn set_slot_stream_ids(&mut self, first: u32, count: u32) {
         if let Some(mixer) = &mut self.mixer {
-            mixer.slots = Some(first);
+            mixer.slots = Some((first, count));
         }
     }
 

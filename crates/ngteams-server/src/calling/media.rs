@@ -29,6 +29,10 @@ pub struct Sources {
 }
 
 impl Sources {
+    /// How many receiving video lines' stream ids a party's block of ids holds, after its audio, video, sharing and
+    /// data.
+    pub const SLOTS: u32 = 16;
+
     /// The stream id of the party's first receiving video line on its media node: the others count on from it, within
     /// the ids the party was given.
     #[must_use]

@@ -13,9 +13,9 @@ use crate::calling::media::Sources;
 use crate::calling::wire::{self, Links};
 
 /// The first party's first source id; each party's sources are this far apart: its audio, video, sharing and data, then
-/// its receiving lines' stream ids ([`Sources::first_slot`], nine of them).
+/// its receiving lines' stream ids ([`Sources::first_slot`], [`Sources::SLOTS`] of them).
 const FIRST_SOURCE: u32 = 1000;
-const SOURCE_STEP: u32 = 20;
+const SOURCE_STEP: u32 = 4 + Sources::SLOTS;
 
 impl Call {
     /// The sources of the next party to get a leg.

@@ -155,13 +155,20 @@ fn str0m_offer_with_video(videos: usize) -> String {
 fn each_receiving_line_of_the_mixers_names_a_stream_of_its_own() -> TestResult {
     let mut mixer = NgcSession::mixer();
     mixer.set_stream_ids(IDS);
-    mixer.set_slot_stream_ids(1004);
+    mixer.set_slot_stream_ids(1004, 2);
     let offer = mixer.write_offer(&SdpOffer::new(str0m_offer_with_video(4)))?;
     // the main line, two receiving lines and the sharing line (the last video line)
     assert_eq!(
         values(&offer, "video", "x-source-streamid"),
         ["1001", "1004", "1005", "1002"]
     );
+    // a receiving line past the ids given has none
+    let mut capped = NgcSession::mixer();
+    capped.set_stream_ids(IDS);
+    capped.set_slot_stream_ids(1004, 1);
+    let offer = capped.write_offer(&SdpOffer::new(str0m_offer_with_video(4)))?;
+    assert_eq!(values(&offer, "video", "x-source-streamid"), ["1001", "1004", "1002"]);
+    assert_eq!(values(&offer, "video", "label").len(), 4);
     assert_eq!(
         values(&offer, "video", "label"),
         ["main-video", "main-video", "main-video", "applicationsharing-video"]
