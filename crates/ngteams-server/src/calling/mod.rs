@@ -285,6 +285,9 @@ async fn publish(app: &App, call: &str, delivery: &Delivery) {
 
 async fn tell_chat_ended(app: &App, call: &Call, outcome: Outcome) {
     let Some(chat) = &call.chat else { return };
+    if !call.tells_chat_end() {
+        return;
+    }
     let part = |seat: Seat, seconds: i64| {
         let party = call.party(seat);
         Part {

@@ -15,6 +15,15 @@ const TURNED_AWAY: (i64, &str) = (403, "Participant was denied entry to the meet
 const TAKEN_OUT: (i64, &str) = (0, "Participant was removed from the meeting.");
 
 impl Call {
+    /// Whether the call's end goes to its chat. A channel's meeting that was never posted (nobody entered it, so it
+    /// lapses) has no post in its channel, and its end has nothing to close there: it posts no end.
+    pub(crate) fn tells_chat_end(&self) -> bool {
+        !self
+            .meeting
+            .as_ref()
+            .is_some_and(|meeting| meeting.channel && meeting.post.is_none())
+    }
+
     /// Whether the party at `seat` hosts the meeting: it is in the call as its organizer or a presenter, who let people
     /// in from the lobby, turn them away and mute the others.
     pub(crate) fn hosts(&self, seat: Seat) -> Result<(), Refusal> {
@@ -790,5 +799,18 @@ mod tests {
         call.remove(Seat::CALLER, C, at(1_005_000), &mut Out::default())
             .unwrap();
         assert!(!shares(&call, C) && !shares(&call, B));
+    }
+
+    #[test]
+    fn a_channels_meeting_never_posted_tells_no_end_and_a_posted_one_does() {
+        let mut call = meeting();
+        assert!(call.tells_chat_end());
+        let channel = call.meeting.as_mut().unwrap();
+        channel.channel = true;
+        assert!(!call.tells_chat_end());
+        call.meeting.as_mut().unwrap().post = Some("1700000000000".to_owned());
+        assert!(call.tells_chat_end());
+        call.meeting = None;
+        assert!(call.tells_chat_end());
     }
 }
