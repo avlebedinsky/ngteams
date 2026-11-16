@@ -864,7 +864,19 @@ fn row_tools_act(user: &mut User<'_>) -> SandboxResult {
     user.click(CALL_FORMAT)?;
     let state = user.until("formatting shown", |state| call_box(state)["expanded"] == true)?;
     ensure(call_box(&state)["stacked"] == true, || format!("not stacked: {state}"))?;
-    user.settled_shot("call-chat-format-open")?;
+    // the format bar fits the narrow box: the tools that do not fit are in its own More options
+    let state = user.state()?;
+    let in_more = &call_box(&state)["format_in_more"];
+    ensure(
+        in_more
+            .as_array()
+            .is_some_and(|tools| tools.iter().any(|tool| tool == "format-code")),
+        || format!("the format bar keeps every tool in a narrow box: {state}"),
+    )?;
+    user.shots_in_both_themes("call-chat-format-open")?;
+    user.ask("call-format-more")?;
+    user.shots_in_both_themes("call-chat-format-more")?;
+    user.ask("call-format-more")?;
     user.click_after_layout_change("format")?;
     user.until("formatting hidden", |state| call_box(state)["expanded"] == false)?;
     // Emoji
@@ -941,7 +953,7 @@ fn more_menu_by_keys(user: &mut User<'_>) -> SandboxResult {
     user.settled_shot("call-chat-correction-proposed")?;
     // Correct again (its row) gives the keyboard to the proposal; Enter takes it
     user.open_more()?;
-    user.settled_shot("call-chat-more-correction-shown")?;
+    user.shots_in_both_themes("call-chat-more-correction-shown")?;
     user.press("down")?;
     user.press("enter")?;
     user.press("enter")?;
@@ -1071,6 +1083,16 @@ fn keyboard_only(user: &mut User<'_>) -> SandboxResult {
         user.press("enter")?;
         let state = user.state()?;
         let boxed = call_box(&state);
+        // the language is in More options: no stop of its own, so Enter on a stop never opens its menu
+        ensure(boxed["language_open"] == false, || {
+            format!("stop {tabs} is a hidden one: Enter opened the language menu: {boxed}")
+        })?;
+        // the stops are Format, Emoji, Attach, More options, then Send
+        if tabs == 5 {
+            ensure(text_of(boxed).is_empty(), || {
+                format!("Enter on stop 5 did not send: {boxed}")
+            })?;
+        }
         seen.push(format!(
             "tab x{tabs} then enter: text {:?} more {} language {} emoji {} expanded {} focused {}",
             text_of(boxed),
@@ -1097,7 +1119,7 @@ fn keyboard_only(user: &mut User<'_>) -> SandboxResult {
     Ok(())
 }
 
-/// A click on Send: does the text keep the keyboard, in the narrow call box and in a wide box?
+/// A click on Send: the text keeps the keyboard, in the narrow call box and in a wide box, as in Teams.
 fn send_click_keyboard(user: &mut User<'_>) -> SandboxResult {
     user.call_chat()?;
     let mark = user.mark();
@@ -1121,8 +1143,8 @@ fn send_click_keyboard(user: &mut User<'_>) -> SandboxResult {
     say(&format!(
         "  the text keeps the keyboard after a click on Send: narrow {narrow}, wide {wide}"
     ));
-    ensure(narrow == wide, || {
-        format!("the narrow box (keyboard {narrow}) acts other than the wide box (keyboard {wide})")
+    ensure(narrow == true && wide == true, || {
+        format!("the text lost the keyboard after a click on Send: narrow {narrow}, wide {wide}")
     })
 }
 
@@ -1600,6 +1622,16 @@ fn on_call(verb: &str, cx: &mut App) -> String {
             });
             "ok".to_owned()
         }
+        "format-more" => {
+            let Some(chat) = stage.read(cx).chat_view().cloned() else {
+                return "no chat".to_owned();
+            };
+            let bar = chat.read(cx).compose().read(cx).format_bar().clone();
+            bar.update(cx, |bar, cx| {
+                bar.toggle(teams_ui::editor::toolbar::Menu::More, window, cx);
+            });
+            "ok".to_owned()
+        }
         "reply-last" => {
             let Some(chat) = stage.read(cx).chat_view().cloned() else {
                 return "no chat".to_owned();
@@ -1777,6 +1809,7 @@ fn box_state(compose: &Entity<Compose>, window: &Window, cx: &App) -> Value {
         "narrow": compose.is_narrow(),
         "more_open": compose.more_open(),
         "expanded": compose.is_expanded(),
+        "format_in_more": compose.format_bar().read(cx).in_more_options(),
         "emoji_open": compose.emoji_picker().is_some(),
         "language_open": compose.language_menu().is_some_and(|menu| menu.read(cx).is_open()),
         "correction": format!("{:?}", compose.correction_status()),
