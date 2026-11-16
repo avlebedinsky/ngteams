@@ -103,7 +103,11 @@ impl CallStage {
     /// Who the call up is with as the ringing screen draws them ([`CallStage::big_face`]).
     fn active_face(&self, active: &ActiveCall, title: &SharedString, palette: Palette, cx: &App) -> AnyElement {
         self.big_face(
-            (active.kind, active.chat.as_deref()),
+            (
+                active.kind,
+                active.chat.as_deref(),
+                (active.caller.as_ref().map(Mri::as_str), active.caller_name.as_deref()),
+            ),
             (title, Some(active.id)),
             "call-calling",
             palette,

@@ -12,8 +12,8 @@ use teams_ui::video::VideoFeed;
 
 use super::common::{LAB_A, LAB_B, Rig};
 use super::{
-    AB, LAB_C, call, call_windows, calling, click, draw, drawn, group_call_up, in_meeting, one_to_one_video_call,
-    registered, shell_window, stage, status, trace, view,
+    AB, CALLER_NAME, LAB_C, TRIO, call, call_windows, calling, click, draw, drawn, group_call_up, in_meeting,
+    invitation, one_to_one_video_call, registered, shell_window, stage, status, trace, view,
 };
 
 /// A made-up picture's bytes (a PNG's signature: GPUI is handed it, never decodes it in a test).
@@ -138,6 +138,42 @@ fn a_one_to_one_call_without_a_picture_rings_with_initials() {
     assert!(drawn(window, "call-calling-initials"));
     status(&rig, 1, CallStatus::Connected);
     assert!(drawn(window, "call-person-0-initials"));
+}
+
+#[test]
+fn an_incoming_group_call_shows_its_caller_not_the_initials_of_its_title() {
+    let rig = calling();
+    profile(&rig, LAB_B, "Lab Bee", true);
+    let (trace, _) = trace();
+    let (shell, cx) = shell_window(&rig, None, std::sync::Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+
+    // b rings the account in the trio chat; the account answers and puts the call on hold: no tile shows, the
+    // stage shows who called, with their picture (the title is "Bee Caller in <chat>")
+    rig.send(Event::IncomingCall(invitation(4, Some(CALLER_NAME), Some(TRIO))));
+    cx.simulate_keystrokes("ctrl-shift-s");
+    cx.run_until_parked();
+    status(&rig, 4, CallStatus::Connected);
+    let window = stage(&rig, &windows);
+    rig.send(Event::CallHeld {
+        call: call(4),
+        held: true,
+    });
+    assert!(
+        drawn(window, "call-calling-picture"),
+        "the caller's picture while on hold"
+    );
+    assert!(!drawn(window, "call-calling-initials"));
+    rig.send(Event::CallHeld {
+        call: call(4),
+        held: false,
+    });
+
+    // it ended: the end shows the caller too
+    status(&rig, 4, CallStatus::Ended(End::Remote(RemoteEnd::default())));
+    assert!(drawn(window, "call-end"));
+    assert!(drawn(window, "call-end-picture"), "the caller's picture once it ended");
 }
 
 #[test]

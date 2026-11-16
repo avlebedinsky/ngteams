@@ -127,6 +127,15 @@ const COMPACT_BELOW: f32 = 860.0;
 const BIG_AVATAR: Size = Size::Large;
 /// [`BIG_AVATAR`]'s side, px (the kit's large avatar).
 const BIG_AVATAR_PX: f32 = 80.0;
+
+/// Who called, for an incoming call: their MRI and the name the invitation gives.
+type Caller<'a> = (Option<&'a str>, Option<&'a str>);
+
+/// Who an ended call was with, as [`CallStage::big_face`] takes it: its kind, its chat and who called.
+fn ended_who(ended: &Ended) -> (CallKind, Option<&str>, Caller<'_>) {
+    let caller = (ended.caller.as_ref().map(Mri::as_str), ended.caller_name.as_deref());
+    (ended.kind, ended.chat.as_deref(), caller)
+}
 /// How long a call's end stays shown when the user does nothing.
 pub const AUTO_CLOSE: Duration = Duration::from_secs(8);
 
@@ -456,16 +465,20 @@ impl CallStage {
     }
 
     /// Who a call in `chat` (`kind`) is with as the ringing and ended screens draw them: a group chat as its row draws
-    /// it, else the one person's picture (`call`'s), else the initials of `title`. A call that rang in shows its caller.
-    /// Its test selector is `<place>-<kind>`: `call-calling-split`, `call-end-picture`.
+    /// it, else the one person's picture (`call`'s), else the initials of `title`. A call that rang in shows its caller
+    /// (`caller`: their MRI and name), in a group chat too. Its test selector is `<place>-<kind>`: `call-calling-split`,
+    /// `call-end-picture`.
     fn big_face(
         &self,
-        (kind, chat): (CallKind, Option<&str>),
+        (kind, chat, caller): (CallKind, Option<&str>, Caller<'_>),
         (title, call): (&SharedString, Option<CallId>),
         place: &'static str,
         palette: Palette,
         cx: &App,
     ) -> AnyElement {
+        if kind == CallKind::Incoming {
+            return self.caller_face(caller, chat.is_some(), (title, call), place);
+        }
         let group = chat
             .filter(|_| kind != CallKind::Incoming)
             .and_then(|chat| self.namer.as_ref().and_then(|namer| namer(chat, cx)))
@@ -476,6 +489,28 @@ impl CallStage {
         let picture = self.partner_picture(call);
         let shown = if picture.is_some() { "picture" } else { "initials" };
         people::avatar(Some(title), picture, BIG_AVATAR)
+            .debug_selector(move || format!("{place}-{shown}"))
+            .into_any_element()
+    }
+
+    /// The avatar of who called (`caller`), as Teams shows an incoming call: their picture, else their initials. The
+    /// title of a call in a group chat (`in_group`) is "<caller> in <chat>": its initials are not the caller's, so only
+    /// a 1:1 call falls back to the title's initials and to the picture of the one person the call is with.
+    fn caller_face(
+        &self,
+        (mri, name): Caller<'_>,
+        in_group: bool,
+        (title, call): (&SharedString, Option<CallId>),
+        place: &'static str,
+    ) -> AnyElement {
+        let name = name
+            .map(SharedString::from)
+            .or_else(|| (!in_group).then(|| title.clone()));
+        let picture = mri
+            .and_then(|mri| self.faces.picture(mri))
+            .or_else(|| if in_group { None } else { self.partner_picture(call) });
+        let shown = if picture.is_some() { "picture" } else { "initials" };
+        people::avatar(name.as_ref(), picture, BIG_AVATAR)
             .debug_selector(move || format!("{place}-{shown}"))
             .into_any_element()
     }
@@ -996,7 +1031,13 @@ impl CallStage {
             (Some(ended), Some(check)) => self.results_card(ended, check, palette, cx),
             (Some(ended), None) => self.end_view(ended, title, palette, cx),
             (None, _) => {
-                let face = self.big_face((CallKind::Chat, None), (title, None), "call-calling", palette, cx);
+                let face = self.big_face(
+                    (CallKind::Chat, None, (None, None)),
+                    (title, None),
+                    "call-calling",
+                    palette,
+                    cx,
+                );
                 calling((title, face), "Call ended", palette, Vec::new())
             }
         }
@@ -1041,13 +1082,7 @@ impl CallStage {
                 .outline()
                 .on_click(cx.listener(|_, _, _, cx| cx.emit(CallStageEvent::Close))),
         );
-        let face = self.big_face(
-            (ended.kind, ended.chat.as_deref()),
-            (title, None),
-            "call-end",
-            palette,
-            cx,
-        );
+        let face = self.big_face(ended_who(ended), (title, None), "call-end", palette, cx);
         div()
             .debug_selector(|| "call-end".to_owned())
             .size_full()

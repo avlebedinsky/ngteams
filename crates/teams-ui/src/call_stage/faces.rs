@@ -100,10 +100,11 @@ pub(super) fn face_side(width: f32, height: f32) -> f32 {
         .round()
 }
 
-/// Everyone `active` shows a face of: the account, the people it is with, the roster's participants, who was invited
-/// and who waits in the lobby.
+/// Everyone `active` shows a face of: the account, who called, the people it is with, the roster's participants, who
+/// was invited and who waits in the lobby.
 fn shown_in<'a>(active: &'a ActiveCall, me: &'a str, people: &'a [(String, SharedString)]) -> Vec<&'a str> {
     let mut mris = vec![me];
+    mris.extend(active.caller.as_ref().map(Mri::as_str));
     mris.extend(people.iter().map(|(mri, _)| mri.as_str()));
     mris.extend(
         active
