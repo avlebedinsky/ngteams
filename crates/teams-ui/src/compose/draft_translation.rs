@@ -330,17 +330,12 @@ impl Compose {
     /// Translate and the language button, in the box's toolbar: Translate lit while it runs, when it stops it; the
     /// language button its name and a caret, or the caret alone in a `narrow` box.
     pub(super) fn translate_buttons(&self, narrow: bool, cx: &mut Context<Self>) -> AnyElement {
-        let busy = self.translating_draft();
         let language = self.settings.read(cx).settings().message_translate_to.clone();
-        let tip: SharedString = if busy {
-            "Stop translating".into()
-        } else {
-            format!("Translate to {language}").into()
-        };
+        let (tip, busy, can) = self.translate_state(cx);
         let translate = icon_button_with_key("compose-translate", Glyph::LANGUAGES, tip, &TranslateDraft)
             .with_size(Size::Size(px(TOOL)))
             .selected(busy)
-            .disabled(!busy && !self.can_translate_draft(cx))
+            .disabled(!busy && !can)
             .on_click(cx.listener(|this, _, window, cx| this.translate_draft(window, cx)));
         let face = Button::new("compose-language")
             .ghost()
@@ -364,6 +359,19 @@ impl Compose {
                 )
             }))
             .into_any_element()
+    }
+
+    /// Translate's name now ("Translate to <language>", or "Stop translating" while it runs), whether it runs and
+    /// whether it can start.
+    pub(super) fn translate_state(&self, cx: &App) -> (SharedString, bool, bool) {
+        let busy = self.translating_draft();
+        let language = &self.settings.read(cx).settings().message_translate_to;
+        let tip: SharedString = if busy {
+            "Stop translating".into()
+        } else {
+            format!("Translate to {language}").into()
+        };
+        (tip, busy, self.can_translate_draft(cx))
     }
 
     /// What the box says of its translation, over it.

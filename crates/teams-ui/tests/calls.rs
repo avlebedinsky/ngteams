@@ -3645,6 +3645,10 @@ fn a_one_to_one_call_offers_no_raise_or_react_and_its_chat_opens_beside_the_stag
     );
     click(stage, "call-chat");
     assert!(drawn(stage, "call-chat-pane"));
+    // the pane's box is stacked: its text keeps a usable width, the tools that do not fit are in More options
+    let text = stage.debug_bounds("rich-editor").expect("the chat's text field");
+    assert!(text.size.width >= gpui::px(180.0), "{text:?}");
+    assert!(drawn(stage, "compose-more") && drawn(stage, "compose-send"));
     // one pane at a time: People takes its place, and Chat brings it back
     click(stage, "call-roster");
     assert!(drawn(stage, "call-roster-pane"));

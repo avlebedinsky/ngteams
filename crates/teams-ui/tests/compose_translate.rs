@@ -470,7 +470,8 @@ fn a_narrow_box_keeps_its_placeholder_on_one_line_and_its_language_an_icon() {
     let wide = cx.debug_bounds("compose-language").unwrap();
     let one_line = cx.debug_bounds("compose-box").unwrap().size.height;
 
-    cx.simulate_resize(size(px(380.0), px(600.0)));
+    // as wide as a thread's pane: narrow, with room for the text beside its tools on one line
+    cx.simulate_resize(size(px(460.0), px(600.0)));
     draw(cx);
     let narrow = cx.debug_bounds("compose-language").unwrap();
     assert!(narrow.size.width < wide.size.width, "{narrow:?} vs {wide:?}");

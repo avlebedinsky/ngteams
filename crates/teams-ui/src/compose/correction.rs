@@ -403,15 +403,21 @@ impl Compose {
 
     /// Correct, in the box's toolbar: lit while a correction runs or is shown, when it stops or takes the keyboard.
     pub(super) fn correct_button(&self, cx: &mut Context<Self>) -> AnyElement {
-        let busy = matches!(self.correction.state, State::Running { .. });
-        let lit = busy || matches!(self.correction.state, State::Proposed(_));
-        let tip = if busy { "Stop correcting" } else { CORRECT_TIP };
+        let (tip, lit, can) = self.correct_state(cx);
         let button = icon_button_with_key("compose-correct", Glyph::SPELL_CHECK, tip, &CorrectDraft)
             .with_size(Size::Size(px(TOOL)))
             .selected(lit)
-            .disabled(!lit && !self.can_correct(cx))
+            .disabled(!lit && !can)
             .on_click(cx.listener(|this, _, window, cx| this.correct_draft(window, cx)));
         selected_by("compose-correct", button).into_any_element()
+    }
+
+    /// Correct's name now, whether it is lit (a correction runs or is proposed) and whether it can start one.
+    pub(super) fn correct_state(&self, cx: &App) -> (&'static str, bool, bool) {
+        let busy = matches!(self.correction.state, State::Running { .. });
+        let lit = busy || matches!(self.correction.state, State::Proposed(_));
+        let tip = if busy { "Stop correcting" } else { CORRECT_TIP };
+        (tip, lit, self.can_correct(cx))
     }
 
     /// What the box says of its correction, over it.

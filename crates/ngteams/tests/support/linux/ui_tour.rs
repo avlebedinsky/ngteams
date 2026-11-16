@@ -189,7 +189,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 309 + 8 + 5 + 15] = [
+const STEPS: [Step; 5 + 312 + 8 + 5 + 15] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -2094,6 +2094,18 @@ const STEPS: [Step; 5 + 309 + 8 + 5 + 15] = [
             stage.show_chat(true, window, cx);
         });
     }),
+    // a message typed in the call's chat: its 360 px pane stacks the box, the text over its tools and Send
+    ("call-group-chat-typed", |_, _, cx| {
+        with_call_compose(cx, |compose, _, cx| {
+            compose
+                .editor()
+                .update(cx, |editor, cx| editor.insert(CALL_CHAT_DRAFT, cx));
+        });
+    }),
+    // and its More options open: the tools that do not fit, each with its key
+    ("call-group-chat-more", |_, _, cx| {
+        with_call_compose(cx, Compose::open_more);
+    }),
     // in Teams Dark, the account's own hand up, the People pane open
     ("call-group-dark", |shell, _, cx| {
         let models = shell.read(cx).models().clone();
@@ -2112,9 +2124,14 @@ const STEPS: [Step; 5 + 309 + 8 + 5 + 15] = [
         });
         with_stage(cx, |stage, cx| stage.show_roster(true, cx));
     }),
-    // and its chat in Teams Dark
+    // and its chat in Teams Dark, the message typed
     ("call-group-chat-dark", |_, _, cx| {
         with_stage_window(cx, |stage, window, cx| stage.show_chat(true, window, cx));
+        with_call_compose(cx, Compose::close_more);
+    }),
+    // its More options in Teams Dark
+    ("call-group-chat-more-dark", |_, _, cx| {
+        with_call_compose(cx, Compose::open_more);
     }),
     // back in Teams Light, the People pane with the hands up in their line, and End meeting's confirmation over it
     ("call-end-meeting-confirm", |shell, _, cx| {
@@ -3150,6 +3167,20 @@ fn with_stage_window(cx: &mut App, change: impl FnOnce(&mut CallStage, &mut Wind
             stage.update(cx, |stage, cx| change(stage, window, cx));
         });
     }
+}
+
+/// What the tour types in the call's chat (made up).
+const CALL_CHAT_DRAFT: &str = "Running five minutes late, start without me";
+
+/// Changes the compose box of the call's Chat pane, in the call window.
+fn with_call_compose(cx: &mut App, change: impl FnOnce(&mut Compose, &mut Window, &mut Context<Compose>)) {
+    with_stage_window(cx, |stage, window, cx| {
+        let Some(chat) = stage.chat_view().cloned() else {
+            return;
+        };
+        let compose = chat.read(cx).compose().clone();
+        compose.update(cx, |compose, cx| change(compose, window, cx));
+    });
 }
 
 /// A fake Claude Code for the tour's message correction (made-up German): one draft answered slowly, one left as it is,

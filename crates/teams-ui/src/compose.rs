@@ -33,7 +33,9 @@
 //!   controls inside it on the right: Format, Emoji, Attach, Loop and Actions and apps (the last two shown disabled,
 //!   saying the app doesn't have them yet), Correct, Translate and its language, a thin divider, then Send. Its
 //!   placeholder stays on one line, cut short with an ellipsis; a narrow box (a thread's pane) shows the language as
-//!   a caret alone, naming it in its tooltip. Expanded, the format bar ([`crate::editor::toolbar::FormatBar`]) runs
+//!   a caret alone, naming it in its tooltip. A box too narrow for its text beside its tools (a call's Chat pane) is
+//!   stacked, as Teams' is: the text on top, the tools and Send on a row under it, and the tools that do not fit in
+//!   "More options" ([`fit`]). Expanded, the format bar ([`crate::editor::toolbar::FormatBar`]) runs
 //!   along its top, the editor is taller, and the controls sit along its foot; Discard on the bar empties the box (and
 //!   ends a reply or an edit).
 //! - **Emoji** ([`Compose::toggle_emoji`], the button or Ctrl+.): every emoji Teams offers ([`ReactionPicker::for_emoji`],
@@ -64,6 +66,7 @@
 pub mod attachments;
 mod correction;
 mod draft_translation;
+mod fit;
 mod pictures;
 mod translated;
 
@@ -117,7 +120,8 @@ pub const BOX_HEIGHT: f32 = 56.0;
 const BOX_PADDING: f32 = 6.0;
 /// A toolbar button in the box, px (its icon three quarters of it).
 const TOOL: f32 = 28.0;
-/// Below this width, px, the box's toolbar is compacted (the translation language an icon alone), as in a thread's pane.
+/// Below this width, px, the box's toolbar is compacted (the translation language an icon alone), as in a thread's pane,
+/// and the box is stacked when its text has no room beside its tools ([`fit`]).
 const NARROW_BOX: f32 = 560.0;
 /// The editor's least height expanded, px: Teams' expanded box's writing area.
 const EXPANDED_MIN: f32 = 96.0;
@@ -672,6 +676,8 @@ pub struct Compose {
     emoji_at: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// Where the box was last drawn: a narrow one compacts its toolbar.
     box_at: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// "More options" while it is open ([`fit`]).
+    more: Option<(Entity<gpui_component::menu::PopupMenu>, Subscription)>,
     /// Whether the picker was open as the emoji button was pressed: its click then closes it.
     emoji_on_press: bool,
     _editor_events: Subscription,
@@ -785,6 +791,7 @@ impl Compose {
             emoji: None,
             emoji_at: Rc::default(),
             box_at: Rc::default(),
+            more: None,
             emoji_on_press: false,
             _editor_events: editor_events,
             _bar_events: bar_events,
@@ -1828,41 +1835,57 @@ impl Compose {
 
     /// The box's controls, inside it on the right as Teams has them: Format, Emoji, Attach, Loop and Actions and
     /// apps (the last two not in this app yet: shown disabled, saying so), then this app's Correct, Translate and its
-    /// language, a thin divider, then Send.
-    fn toolbar(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    /// language, a thin divider, then Send. The tools that `fit` puts in the menu go into "More options"; a stacked
+    /// box's row has its tools on the left and Send on the right.
+    fn toolbar(&self, palette: Palette, fit: &fit::Fit, cx: &mut Context<Self>) -> AnyElement {
+        let narrow = self.is_narrow();
+        let tools: Vec<AnyElement> = fit
+            .row
+            .iter()
+            .filter_map(|tool| self.tool_button(*tool, narrow, palette, cx))
+            .collect();
         div()
             .debug_selector(|| "compose-toolbar".to_owned())
             .flex_none()
             .flex()
             .items_center()
             .gap_1()
+            .when(fit.stacked, gpui::Styled::w_full)
             // the box's inside, its padding and border taken off: centred on one line, at the foot of more
             .h(px(BOX_HEIGHT - 2.0 * BOX_PADDING - 2.0))
-            .child(self.format_button(palette, cx))
-            .child(self.emoji_button(cx))
-            .children(self.writes_a_chat().then(|| {
-                selected_by(
-                    "compose-attach",
-                    icon_button_with_key("compose-attach", Glyph::PAPERCLIP, "Attach files", &AttachFiles)
-                        .with_size(Size::Size(px(TOOL)))
-                        .disabled(!self.accepts_files())
-                        .on_click(cx.listener(|this, _, window, cx| this.choose_files(window, cx))),
-                )
-            }))
-            // a channel's box offers only what works there
-            .children(
-                self.writes_a_chat()
-                    .then(|| unavailable("compose-loop", Glyph::REPEAT, NO_LOOP)),
-            )
-            .children(
-                self.writes_a_chat()
-                    .then(|| unavailable("compose-apps", Glyph::PLUS, NO_APPS)),
-            )
-            .child(self.correct_button(cx))
-            .child(self.translate_buttons(self.is_narrow(), cx))
+            .children(tools)
+            .children((!fit.more.is_empty()).then(|| self.more_button(&fit.more, cx)))
+            .when(fit.stacked, |row| row.child(div().flex_1()))
             .child(div().w(px(1.0)).h(px(20.0)).mx_1().bg(rgb(palette.border)))
             .child(self.send_button(palette, cx))
             .into_any_element()
+    }
+
+    /// A tool's button on the box's row; Translate draws its language button too, beside it.
+    fn tool_button(
+        &self,
+        tool: fit::Tool,
+        narrow: bool,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        Some(match tool {
+            fit::Tool::Format => self.format_button(palette, cx),
+            fit::Tool::Emoji => self.emoji_button(cx),
+            fit::Tool::Attach => selected_by(
+                "compose-attach",
+                icon_button_with_key("compose-attach", Glyph::PAPERCLIP, "Attach files", &AttachFiles)
+                    .with_size(Size::Size(px(TOOL)))
+                    .disabled(!self.accepts_files())
+                    .on_click(cx.listener(|this, _, window, cx| this.choose_files(window, cx))),
+            )
+            .into_any_element(),
+            fit::Tool::Loop => unavailable("compose-loop", Glyph::REPEAT, NO_LOOP),
+            fit::Tool::Apps => unavailable("compose-apps", Glyph::PLUS, NO_APPS),
+            fit::Tool::Correct => self.correct_button(cx),
+            fit::Tool::Translate => self.translate_buttons(narrow, cx),
+            fit::Tool::Language => return None,
+        })
     }
 
     /// The emoji picker over the box, by the emoji button as it was last drawn, opening upwards: out of the box's key
@@ -1940,7 +1963,8 @@ impl Compose {
         // an edit stays where its reply is: nothing is sent anywhere new
         let send_to =
             (self.writes == Writes::Thread && !matches!(self.mode, Mode::Edit { .. })).then(|| send_to_line(palette));
-        if self.expanded || !self.attachments.is_empty() {
+        let fit = self.fit();
+        if self.expanded || !self.attachments.is_empty() || fit.stacked {
             return surface
                 .flex()
                 .flex_col()
@@ -1952,7 +1976,7 @@ impl Compose {
                 .children(self.expanded.then(|| self.format_bar.clone()))
                 .child(div().px_1().pt_1().child(self.editor.clone()))
                 .children(self.attachment_cards(palette, cx))
-                .child(div().flex().justify_end().child(self.toolbar(palette, cx)))
+                .child(div().flex().justify_end().child(self.toolbar(palette, &fit, cx)))
                 .child(measured(&self.box_at))
                 .children(accent)
                 .into_any_element();
@@ -1970,7 +1994,7 @@ impl Compose {
                     .py_1()
                     .child(self.editor.clone()),
             )
-            .child(self.toolbar(palette, cx));
+            .child(self.toolbar(palette, &fit, cx));
         surface
             .flex()
             .flex_col()

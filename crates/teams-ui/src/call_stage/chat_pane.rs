@@ -56,6 +56,12 @@ impl CallStage {
         cx.notify();
     }
 
+    /// The chat of the Chat pane, once it was opened.
+    #[must_use]
+    pub fn chat_view(&self) -> Option<&Entity<ChatView>> {
+        self.chat.as_ref()
+    }
+
     /// Whether the Chat pane is open.
     #[must_use]
     pub fn chat_shown(&self) -> bool {
