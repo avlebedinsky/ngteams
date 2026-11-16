@@ -655,12 +655,13 @@ fn a_download_whose_part_file_another_writer_has_locked_fails_and_keeps_that_fil
     );
     assert!(bounds(cx, &format!("file-download-{ID}-0 failed")).is_some());
     assert!(!target.exists(), "not saved to its place");
+    // On Windows the lock is mandatory: a read through a second handle fails while it is held.
+    drop(locked);
     assert_eq!(
         std::fs::read(&staging).unwrap(),
         theirs,
         "the other writer's file stays"
     );
-    drop(locked);
 }
 
 #[test]
