@@ -81,7 +81,7 @@ context = { "crates/teams-media/src/video/effects.rs" = "787856448e591791db31587
 
 
 [unmapped_sources."crates/teams-proto/src/chat/mod.rs"]
-sha256 = "583d41ef8cb267940c9d6b1b8dd463e8c5da0a5199b01107bedbe592c4b09652"
+sha256 = "a2bef2412e6064140323149f2e17de5c1d92a2e2f3ca71c906ef7daf31140d13"
 reason = "module declarations, re-exports and documentation only; no executable items"
 
 
@@ -641,7 +641,7 @@ reason = "unit-test module included only by meeting_alert.rs cfg(test); omitted 
 context = { "crates/teams-ui/src/meeting_alert.rs" = "be5825947b396fe792bc9f0fe9d4f284a47a3156292b503e78dc6374372d41eb" }
 
 [unmapped_sources."crates/teams-proto/src/http/cloud_tests.rs"]
-sha256 = "885613503f07f6fabe77ddea168bf3c4e7814f66caef61a3b0b9e338b6c74b40"
+sha256 = "2d519771578271632c7d831f414372a12e1c4d252d55d32733e4c5d5cab0ed0b"
 reason = "unit-test module included only under cfg(test); omitted by cargo-llvm-cov default tests.rs/_tests.rs filename filter; executable parent remains measured"
 context = { "crates/teams-proto/src/http.rs" = "799ea62729160fa5c0f3104397a97849a249f5300e5c727679fd8a7ce792257a" }
 
