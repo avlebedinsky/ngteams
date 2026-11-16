@@ -144,6 +144,37 @@ fn the_store_shows_only_with_the_bots_flag() {
     assert!(bounds(cx, "rail-chats").is_some());
 }
 
+/// An own server that does not name `appsService` gets no Store, no app details and no chat's apps, as with Workflows.
+#[test]
+fn an_own_server_without_apps_offers_no_store_and_no_chat_apps() {
+    let rig = Rig::start();
+    *rig.core.capabilities.lock().unwrap() = Some(teams_core::Capabilities {
+        apps: false,
+        ..teams_core::Capabilities::ALL
+    });
+    *rig.core.chat_apps.lock().unwrap() = vec![app(POLLS)];
+    let (shell, cx) = shell_window(&rig, true);
+    assert!(bounds(cx, "rail-apps").is_none(), "no Store on the rail");
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.open_apps(window, cx);
+            shell.open_app_details(app(HELPER), window, cx);
+            shell.open_chat_apps(GROUP_CHAT.to_owned(), window, cx);
+            shell.open_chat(GROUP_CHAT.to_owned(), window, cx);
+        });
+    });
+    cx.run_until_parked();
+    assert_ne!(cx.update(|_, cx| shell.read(cx).main().clone()), Main::Apps);
+    assert!(cx.update(|_, cx| shell.read(cx).apps().is_none()));
+    assert!(cx.update(|_, cx| shell.read(cx).team_dialog().is_none()));
+    assert!(bounds(cx, "chat-header").is_some());
+    assert!(bounds(cx, "chat-apps").is_none(), "no Apps in this chat");
+    *rig.core.capabilities.lock().unwrap() = None;
+    cx.update(|_, cx| shell.update(cx, |_, cx| cx.notify()));
+    assert!(bounds(cx, "rail-apps").is_some(), "the Store once the server serves apps");
+    assert!(bounds(cx, "chat-apps").is_some());
+}
+
 #[test]
 fn the_store_lists_the_org_s_and_popular_apps_and_searches_them() {
     let rig = Rig::start();

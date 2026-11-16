@@ -3304,7 +3304,7 @@ impl Shell {
             crate::chat_translate::header_button(&model, window, cx)
         });
         let tabs = self.meeting_tab_bar(id, palette, cx);
-        let apps = Self::chat_apps_button(id, cx);
+        let apps = self.chat_apps_button(id, cx);
         // Teams' chat header: the chat's picture and name (a meeting's tabs after it), the other member's
         // presence, the call on the right
         let header = self
