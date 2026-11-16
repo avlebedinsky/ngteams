@@ -2,6 +2,8 @@
 //! the instructions say so, and as a tool can ignore them, a dot that an answer only adds at such an end is taken out
 //! here, after the answer is decoded.
 
+use std::ops::Range;
+
 use crate::editor::doc::{Block, Doc};
 
 use super::draft::kept_whole_runs;
@@ -36,12 +38,7 @@ fn keep_missing_in(old: &Block, new: &mut Block) {
         return;
     }
     let whole = kept_whole_runs(&new.runs);
-    let mut start = 0;
-    let mut spans = Vec::with_capacity(new.runs.len());
-    for run in &new.runs {
-        spans.push(start..start + run.text.len());
-        start += run.text.len();
-    }
+    let spans: Vec<Range<usize>> = new.ranges().map(|(range, _)| range).collect();
     for at in dots {
         let Some(index) = spans.iter().position(|span| span.contains(&at)) else {
             continue;

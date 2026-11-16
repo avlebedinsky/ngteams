@@ -496,6 +496,32 @@ fn a_final_dot_is_not_added_after_or_inside_a_trailing_marker() {
         proposed(&mentioned, "<x0>Thanks <x1/>.</x0>").as_deref(),
         Some("Thanks Bee")
     );
+    let code = Doc::new(vec![paragraph(vec![
+        plain("run "),
+        styled("cfg.", Marks::CODE),
+        plain(" now"),
+    ])]);
+    let Ok(Some(fixed)) = read("<corrected><x0>Run <x1/></x0></corrected>", &encode(&code)) else {
+        panic!("no proposal");
+    };
+    assert_eq!(
+        fixed.corrected,
+        Doc::new(vec![paragraph(vec![plain("Run "), styled("cfg.", Marks::CODE)])])
+    );
+}
+
+#[test]
+fn a_final_dot_is_not_added_to_a_non_ascii_draft() {
+    let cyrillic = Doc::new(vec![Block::paragraph("привет всем")]);
+    assert_eq!(
+        proposed(&cyrillic, "<x0>Привет всем.</x0>").as_deref(),
+        Some("Привет всем")
+    );
+    let german = Doc::new(vec![Block::paragraph("schöne grüße\nbis später")]);
+    assert_eq!(
+        proposed(&german, "<x0>Schöne Grüße.<x1/>Bis später.</x0>").as_deref(),
+        Some("Schöne Grüße\nBis später")
+    );
 }
 
 #[test]
