@@ -190,7 +190,7 @@ async fn one_client_hears_its_own_silence_and_gets_the_control_planes_ack() {
         a.status(call, &CallStatus::Connected).await;
         let id = mixed.open_call().await;
         mixed.connected(&id, 1).await;
-        tokio::time::sleep(TALK + Duration::from_millis(500)).await;
+        tokio::time::sleep(TALKING).await;
         let talked = mark(&a);
         a.call(CallAction::HangUp { call }).await;
         a.ended(call).await;
