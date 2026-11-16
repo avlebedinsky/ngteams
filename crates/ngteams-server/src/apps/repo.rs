@@ -130,7 +130,7 @@ macro_rules! record {
     };
 }
 
-/// The app `$id` with its bot and users, or [`AppError::NoSuchApp`].
+/// The app row `$id`, if there is one.
 macro_rules! app_row {
     ($conn:ident, $id:expr) => {{
         let app: Option<AppRow> = apps::table
@@ -143,6 +143,7 @@ macro_rules! app_row {
     }};
 }
 
+/// The app row `$app` with its bot and users.
 macro_rules! filled {
     ($conn:ident, $app:expr) => {{
         let app: AppRow = $app;
@@ -162,6 +163,7 @@ macro_rules! filled {
     }};
 }
 
+/// The app `$id` with its bot and users, or [`AppError::NoSuchApp`].
 macro_rules! load {
     ($conn:ident, $id:expr) => {{
         let app = app_row!($conn, $id).ok_or(AppError::NoSuchApp)?;

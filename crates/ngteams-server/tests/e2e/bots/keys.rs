@@ -69,6 +69,32 @@ async fn sdk_verifies(
     Ok(claims)
 }
 
+/// The metadata and JWKS the SDKs read: botbuilder and the .NET SDKs' metadata, and the same RSA keys at every
+/// path an SDK reads or computes.
+async fn published_as_the_sdks_read_it(server: &TestServer, origin: &str, tenant: &str) {
+    let metadata = get(server, "/bot/v1/.well-known/openidconfiguration").await;
+    assert_eq!(metadata["issuer"], format!("{origin}/bot"));
+    assert_eq!(metadata["jwks_uri"], format!("{origin}/bot/v1/.well-known/keys"));
+    assert!(
+        metadata["id_token_signing_alg_values_supported"]
+            .as_array()
+            .unwrap()
+            .contains(&"RS256".into())
+    );
+    let published = get(server, "/bot/v1/.well-known/keys").await;
+    for key in published["keys"].as_array().unwrap() {
+        assert_eq!(key["kty"], "RSA");
+        assert_eq!(key["use"], "sig");
+        assert_eq!(key["alg"], "RS256");
+        assert_eq!(key["e"], "AQAB");
+        // a 2048-bit modulus in base64url
+        assert_eq!(key["n"].as_str().unwrap().len(), 342);
+        assert!(key.get("d").is_none() && key.get("p").is_none());
+    }
+    // the Teams SDK's rewritten path and the Agents SDK's computed one name the same keys
+    assert_eq!(get(server, &format!("/{tenant}/discovery/v2.0/keys")).await, published);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_activity_token_verifies_against_the_published_keys_as_the_sdks_check_it() {
     for backend in backends() {
@@ -82,29 +108,7 @@ async fn an_activity_token_verifies_against_the_published_keys_as_the_sdks_check
         let bot = added["id"].as_str().unwrap();
         let service_url = ngteams_server::apps::service_url(&server.app.config);
         assert_eq!(service_url, format!("{origin}/bot/"));
-
-        // botbuilder and the .NET SDKs' metadata
-        let metadata = get(server, "/bot/v1/.well-known/openidconfiguration").await;
-        assert_eq!(metadata["issuer"], format!("{origin}/bot"));
-        assert_eq!(metadata["jwks_uri"], format!("{origin}/bot/v1/.well-known/keys"));
-        assert!(
-            metadata["id_token_signing_alg_values_supported"]
-                .as_array()
-                .unwrap()
-                .contains(&"RS256".into())
-        );
-        let published = get(server, "/bot/v1/.well-known/keys").await;
-        for key in published["keys"].as_array().unwrap() {
-            assert_eq!(key["kty"], "RSA");
-            assert_eq!(key["use"], "sig");
-            assert_eq!(key["alg"], "RS256");
-            assert_eq!(key["e"], "AQAB");
-            // a 2048-bit modulus in base64url
-            assert_eq!(key["n"].as_str().unwrap().len(), 342);
-            assert!(key.get("d").is_none() && key.get("p").is_none());
-        }
-        // the Teams SDK's rewritten path and the Agents SDK's computed one name the same keys
-        assert_eq!(get(server, &format!("/{tenant}/discovery/v2.0/keys")).await, published);
+        published_as_the_sdks_read_it(server, &origin, &tenant).await;
 
         let token = server.app.bot_keys.activity_token(bot, &service_url).unwrap();
         let header = jsonwebtoken::decode_header(&token).unwrap();

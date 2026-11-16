@@ -562,9 +562,10 @@ EdDSA keys can't be used: no SDK accepts them), published where the SDKs look:
 
 Each key carries `endorsements: ["msteams"]` (botbuilder takes no key without its channel's endorsement). The keys
 are rows of `bot_signing_keys`, so every node signs with and publishes the same ones; the JWKS is read from the
-database on each request, so a key one node makes is published by all at once. A new key replaces the signer every
-`bots.key_rotation`, but only after it was published for 25 hours (or one `bots.key_rotation`, if that is shorter):
-an SDK keeps the JWKS for a day and fetches it again for an unknown `kid` at most once an hour. The key it replaces
+database on each request, so a key one node makes is published by all at once. A new key is published every
+`bots.key_rotation` and replaces the signer after it was published for 25 hours (or one `bots.key_rotation`, if that
+is shorter), so each key signs for one `bots.key_rotation` (the first also for those 25 hours): an SDK keeps the JWKS
+for a day and fetches it again for an unknown `kid` at most once an hour. The key it replaces
 is then retired, and stays published until no token it signed can still be used (its lifetime, the SDKs' five
 minutes of skew and three housekeeping rounds), then goes.
 

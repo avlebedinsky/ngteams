@@ -252,18 +252,14 @@ async fn a_package_registers_its_app_and_bot_and_a_new_version_replaces_it() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_package_that_teams_would_refuse_is_refused() {
-    let registry = Registry::open(Backend::Sqlite).await;
-    let upload = format!("{APPS}/package");
-    let (app, bot) = (uuid::Uuid::new_v4().to_string(), uuid::Uuid::new_v4().to_string());
-    let good = manifest(&app, &bot, "1.0.0");
+/// Packages Teams refuses, each with what is wrong with it.
+fn refused_packages(good: &Value) -> Vec<(&'static str, bytes::Bytes)> {
     let with = |change: fn(&mut Value)| {
         let mut manifest = good.clone();
         change(&mut manifest);
         package(&manifest, &png(192, 192), &png(32, 32), &[])
     };
-    let cases: Vec<(&str, bytes::Bytes)> = vec![
+    vec![
         ("not a zip", bytes::Bytes::from_static(b"PK not really")),
         ("no manifest", {
             let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
@@ -302,17 +298,26 @@ async fn a_package_that_teams_would_refuse_is_refused() {
         ),
         (
             "color icon of the wrong size",
-            package(&good, &png(64, 64), &png(32, 32), &[]),
+            package(good, &png(64, 64), &png(32, 32), &[]),
         ),
         (
             "outline icon of the wrong size",
-            package(&good, &png(192, 192), &png(48, 48), &[]),
+            package(good, &png(192, 192), &png(48, 48), &[]),
         ),
         (
             "icon that isn't a picture",
-            package(&good, b"GIF? no", &png(32, 32), &[]),
+            package(good, b"GIF? no", &png(32, 32), &[]),
         ),
-    ];
+    ]
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_package_that_teams_would_refuse_is_refused() {
+    let registry = Registry::open(Backend::Sqlite).await;
+    let upload = format!("{APPS}/package");
+    let (app, bot) = (uuid::Uuid::new_v4().to_string(), uuid::Uuid::new_v4().to_string());
+    let good = manifest(&app, &bot, "1.0.0");
+    let cases = refused_packages(&good);
     for (case, bytes) in cases {
         let (status, answer) = registry.upload(&upload, Method::POST, bytes).await;
         assert_eq!(

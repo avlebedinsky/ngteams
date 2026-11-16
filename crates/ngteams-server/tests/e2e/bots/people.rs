@@ -19,7 +19,7 @@ const WORKFLOWS_BOT: &str = "358f0194-6b0e-4dd3-af35-c24fe8a9ec87";
 async fn no_people_read_finds_a_bot() {
     for backend in backends() {
         let registry = Registry::open_with(backend, |config| {
-            config.public_origin = url::Url::parse(ORIGIN).unwrap()
+            config.public_origin = url::Url::parse(ORIGIN).unwrap();
         })
         .await;
         let server = &registry.server;
