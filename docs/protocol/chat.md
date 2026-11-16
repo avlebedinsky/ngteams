@@ -972,8 +972,9 @@ whose definition gives the bot the `groupChat` or `team` scope and doesn't make 
 and icon. A capture that differs changes the client and the own server together.
 
 Mention wire entries name an MRI. A person mention reaches that person; an `everyone` entry naming the destination
-group chat reaches its members. The native composer only builds captured mention forms, and the agent's lab check
-must include these recipients. There is no membership classifier on the outgoing request.
+group chat reaches its members; a `bot` entry reaches its `28:` bot, one of the chat's participants. The native
+composer builds the captured person and `everyone` forms, and the unseen bot form only behind `NGTEAMS_BOTS=1`; the
+agent's lab check must include these recipients. There is no membership classifier on the outgoing request.
 
 ## A mention of everyone (abc-everyone)
 

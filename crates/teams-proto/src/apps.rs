@@ -464,7 +464,18 @@ impl AppDefinition {
     /// its MRI: one that isn't notification-only, as Teams' picker offers none of those.
     #[must_use]
     pub fn mentionable_bot(&self, team: bool) -> Option<crate::Mri> {
-        let wanted = if team { "team" } else { "groupchat" };
+        self.bot_with_scope(if team { "team" } else { "groupchat" })
+    }
+
+    /// The bot it brings that a person can chat with one to one (a bot with the `personal` scope that isn't
+    /// notification-only), as its MRI.
+    #[must_use]
+    pub fn personal_bot(&self) -> Option<crate::Mri> {
+        self.bot_with_scope("personal")
+    }
+
+    /// The first bot it brings with `scope` (in any case) that isn't notification-only, as its MRI.
+    fn bot_with_scope(&self, scope: &str) -> Option<crate::Mri> {
         self.listed("bots").find_map(|bot| {
             let scoped = bot
                 .get("scopes")
@@ -472,28 +483,10 @@ impl AppDefinition {
                 .into_iter()
                 .flatten()
                 .filter_map(Value::as_str)
-                .any(|scope| scope.eq_ignore_ascii_case(wanted));
+                .any(|listed| listed.eq_ignore_ascii_case(scope));
             let quiet = bot.get("isNotificationOnly").and_then(Value::as_bool) == Some(true);
             let id = bot.get("id")?.as_str().filter(|id| !id.is_empty())?;
             (scoped && !quiet).then(|| crate::Mri::new(format!("28:{id}")))
-        })
-    }
-
-    /// The bot it brings that a person can chat with one to one (a bot with the `personal` scope that isn't
-    /// notification-only), as its MRI.
-    #[must_use]
-    pub fn personal_bot(&self) -> Option<crate::Mri> {
-        self.listed("bots").find_map(|bot| {
-            let personal = bot
-                .get("scopes")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .any(|scope| scope.eq_ignore_ascii_case("personal"));
-            let quiet = bot.get("isNotificationOnly").and_then(Value::as_bool) == Some(true);
-            let id = bot.get("id")?.as_str().filter(|id| !id.is_empty())?;
-            (personal && !quiet).then(|| crate::Mri::new(format!("28:{id}")))
         })
     }
 }

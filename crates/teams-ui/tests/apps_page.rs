@@ -1018,3 +1018,43 @@ fn a_group_chat_s_picker_offers_its_apps_bots_and_sends_a_bot_s_mention() {
     );
     assert!(text.participants().contains(&teams_proto::Mri::new(POLLS_BOT)));
 }
+
+/// A bot's mention copied from one chat's box and pasted into another's, whose picker never read its bots, is sent
+/// with its app's id: the box asks the engine for the app of a bot it doesn't know.
+#[test]
+fn a_pasted_bot_s_mention_is_sent_with_its_app() {
+    const OTHER_GROUP: &str = "19:made-up-other-group@thread.v2";
+    let (rig, shell, cx) = picker_in_group(true);
+    know_bots(&rig);
+    cx.simulate_input("poll");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("ctrl-a ctrl-c");
+    rig.core.conversations.lock().unwrap().push(Conversation {
+        id: OTHER_GROUP.to_owned(),
+        kind: ConversationKind::Group,
+        topic: Some("Made-up other group".to_owned()),
+        version: 1,
+        last_activity: Some(90),
+    });
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(OTHER_GROUP.to_owned(), window, cx)));
+    cx.run_until_parked();
+    let chat = cx.update(|_, cx| shell.read(cx).chat().cloned()).expect("the chat");
+    assert_eq!(cx.update(|_, cx| chat.read(cx).conversation().to_owned()), OTHER_GROUP);
+    let compose = cx.update(|_, cx| chat.read(cx).compose().clone());
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.focus(window, cx)));
+    cx.simulate_keystrokes("ctrl-v");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let actions = std::mem::take(&mut *rig.core.actions.lock().unwrap());
+    let Some(teams_core::Action::Send { conversation, text }) = actions.first() else {
+        panic!("a post: {actions:?}");
+    };
+    assert_eq!(conversation, OTHER_GROUP);
+    assert_eq!(
+        text.bots().get(&teams_proto::Mri::new(POLLS_BOT)).map(String::as_str),
+        Some(POLLS)
+    );
+}

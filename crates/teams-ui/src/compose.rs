@@ -74,7 +74,7 @@ mod pictures;
 mod translated;
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::BuildHasher;
 use std::ops::Range;
 use std::rc::Rc;
@@ -684,6 +684,8 @@ pub struct Compose {
     candidates: Option<Vec<Candidate>>,
     /// The app of each bot the box may mention, by the bot's MRI: a bot's mention is written with it.
     bots: BTreeMap<Mri, String>,
+    /// The bots of mentions in the box whose app the box asked the engine for ([`Compose::learn_bots`]).
+    asked_bots: BTreeSet<Mri>,
     reading: Option<Task<()>>,
     /// What the last send couldn't do, shown over the box.
     problem: Option<SharedString>,
@@ -804,6 +806,7 @@ impl Compose {
                     .record(&TraceLine::new("compose", "changed").conversation(&this.conversation));
                 this.correction_follows_draft(cx);
                 this.draft_translation_follows_draft(cx);
+                this.learn_bots(cx);
                 this.refresh_picker(cx);
                 this.fit_pictures(cx);
                 this.typed(window, cx);
@@ -856,6 +859,7 @@ impl Compose {
             picker: None,
             candidates: None,
             bots: BTreeMap::new(),
+            asked_bots: BTreeSet::new(),
             reading: None,
             problem: None,
             translated: translated::Translated::default(),
@@ -939,7 +943,10 @@ impl Compose {
             cx.notify();
             return;
         }
+        let bots = self.bots.clone();
         other.update(cx, |other, cx| {
+            // the apps of the bots the text mentions go with it
+            other.know_bots(bots);
             other.editor.update(cx, |editor, cx| {
                 let doc = if editor.is_empty() {
                     doc
@@ -983,8 +990,11 @@ impl Compose {
         let mode = std::mem::replace(&mut self.mode, Mode::New);
         let mut routes = std::mem::take(&mut self.routes);
         let sending_files = std::mem::take(&mut self.sending_files);
+        let bots = self.bots.clone();
         self.editor.update(cx, |editor, cx| editor.set_doc(Doc::default(), cx));
         other.update(cx, |other, cx| {
+            // the apps of the bots the draft mentions go with it
+            other.know_bots(bots);
             let to = cx.weak_entity();
             let sending = other.editor.update(cx, |editor, cx| editor.take_doc(doc, pictures, cx));
             for (old, id) in sending {
@@ -1651,6 +1661,37 @@ impl Compose {
     /// named.
     pub fn know_bots(&mut self, bots: impl IntoIterator<Item = (Mri, String)>) {
         self.bots.extend(bots);
+    }
+
+    /// Asks the engine, once for each bot, for the app of a bot that a mention in the box names and the box doesn't
+    /// know (a mention pasted from another box): a bot's mention is sent with its app's id.
+    fn learn_bots(&mut self, cx: &mut Context<Self>) {
+        if !self.core.capabilities().apps {
+            return;
+        }
+        let unknown: BTreeSet<Mri> = self
+            .editor
+            .read(cx)
+            .doc()
+            .blocks
+            .iter()
+            .flat_map(|block| &block.runs)
+            .filter_map(|run| run.attrs.mention.as_deref())
+            .filter(|mri| crate::bot_face::is_bot(mri))
+            .map(Mri::new)
+            .filter(|bot| !self.bots.contains_key(bot) && !self.asked_bots.contains(bot))
+            .collect();
+        for bot in unknown {
+            self.asked_bots.insert(bot.clone());
+            let app = self.core.bot_app(bot.as_str().to_owned());
+            cx.spawn(async move |this, cx: &mut AsyncApp| {
+                let Some(app) = app.await.ok().flatten() else {
+                    return;
+                };
+                let _ = this.update(cx, |this, _| this.know_bots([(bot, app.app.id)]));
+            })
+            .detach();
+        }
     }
 
     fn close_picker(&mut self, cx: &mut Context<Self>) {

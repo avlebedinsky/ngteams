@@ -10,7 +10,7 @@
 //! it brings, so a bot's chat, its messages and the mention picker show the app's name and icon, as Teams does. A bot
 //! the reads haven't brought is looked for in the account's apps (all of them, Teams' own and the store's offers too,
 //! read at most once a minute), then, for a bot known to be one (a `28:` member or sender), by its id as an app's id
-//! (many apps' bot has the app's id), once a run.
+//! (many apps' bot has the app's id), until a read of it is answered.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -345,8 +345,10 @@ pub(crate) struct BotIndex {
     /// When the account's apps were last read, and whether that read was answered; held across the read, so asks at
     /// once send one.
     account: tokio::sync::Mutex<Option<(Instant, bool)>>,
-    /// The bots whose id was read as an app's and named none.
+    /// The bots whose id was read as an app's and named none; a read that failed is no miss.
     missed: std::sync::Mutex<BTreeSet<String>>,
+    /// One lock per bot across the read by its id, so asks at once for one bot send one read and all get its answer.
+    reading: std::sync::Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 /// A bot's id as the index keys it: without its `28:`, in lower case.
@@ -399,18 +401,42 @@ impl BotIndex {
         if let Some(app) = self.known(&key) {
             return Some(app);
         }
-        if known
-            || !self
-                .missed
+        if known || self.missed(&key) {
+            return None;
+        }
+        let reading = Arc::clone(
+            self.reading
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(key.clone())
-        {
+                .entry(key.clone())
+                .or_default(),
+        );
+        let _reading = reading.lock().await;
+        // an ask that waited on another's read takes its answer
+        if let Some(app) = self.known(&key) {
+            return Some(app);
+        }
+        if self.missed(&key) {
             return None;
         }
         let body = send_body(client, &AppDefinitions { ids: vec![key.clone()] }).await?;
         self.keep(&AppDefinitions::read_answer(&body));
-        self.known(&key)
+        let app = self.known(&key);
+        if app.is_none() {
+            self.missed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(key);
+        }
+        app
+    }
+
+    /// Whether `key`'s id was read as an app's and named none.
+    fn missed(&self, key: &str) -> bool {
+        self.missed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(key)
     }
 
     /// Reads the account's apps into the index, unless a read was answered this run or one was sent less than
@@ -440,15 +466,14 @@ async fn mentionable<C: Credentials + 'static>(
 ) -> Vec<StoreApp> {
     let apps = if team {
         let read = TeamApps { team: place };
-        send_body(client, &read)
-            .await
-            .map_or_else(Vec::new, |body| read.read_defined(&body))
+        bots.kept(
+            send_body(client, &read)
+                .await
+                .map_or_else(Vec::new, |body| read.read_defined(&body)),
+        )
     } else {
-        read_body(client, &ChatApps { chat: place })
-            .await
-            .map_or_else(Vec::new, |body| ChatApps::read_answer(&body))
+        chat_apps(client, bots, place).await
     };
-    bots.keep(&apps);
     apps.into_iter()
         .filter(|app| app.definition.mentionable_bot(team).is_some())
         .collect()

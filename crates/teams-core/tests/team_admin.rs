@@ -706,6 +706,28 @@ async fn a_bot_is_known_by_its_app_from_the_account_s_apps_and_the_definitions_r
     );
 }
 
+/// A read by the bot's id that failed is no miss: an ask that waited on it reads again; one answered is the last.
+#[tokio::test]
+async fn a_bot_s_read_by_its_id_that_failed_is_read_again() {
+    let rig = setup().await;
+    let requests = rig.handle.requests();
+    // the account's apps first, so the reads after are the bot's alone
+    assert!(requests.bot_app(APPROVALS_BOT).await.unwrap().is_some());
+    rig.mock
+        .refuse_next_after("POST", "users/apps/batchedDefinitions", 500, Duration::from_millis(200))
+        .await;
+    let (first, second) = tokio::join!(requests.bot_app(HELPER_BOT), requests.bot_app(HELPER_BOT));
+    assert!(first.unwrap().is_none() && second.unwrap().is_none());
+    assert!(requests.bot_app(HELPER_BOT).await.unwrap().is_none());
+    let sent = rig.mock.received_requests().await;
+    let reads = sent
+        .iter()
+        .filter(|request| request.url.path().ends_with("users/apps/batchedDefinitions"))
+        .filter(|request| String::from_utf8_lossy(&request.body).contains("b004"))
+        .count();
+    assert_eq!(reads, 2, "the refused read, then the one answered; none after");
+}
+
 #[tokio::test]
 async fn the_bots_people_can_mention_are_those_of_the_chat_s_or_the_team_s_apps() {
     let rig = setup().await;
