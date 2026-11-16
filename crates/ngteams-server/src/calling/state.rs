@@ -149,6 +149,9 @@ pub(crate) struct Party {
     /// What a group call party sends, as its media descriptions said last.
     #[serde(default)]
     pub showing: Showing,
+    /// Its share is the call's: the newest one started. The roster lists no other party's.
+    #[serde(default)]
+    pub presenting: bool,
 }
 
 /// What a group call party sends besides its audio: its camera, its screen.

@@ -819,7 +819,9 @@ lines and the sharing line, each both ways and H.264 at `107` (retransmissions `
 lines ids of their own from the party's block (a party's ids are 20 apart: audio, video, sharing, data, then its
 receiving lines). The camera and the screen go on as the party describes its lines (`updateMediaDescriptions`: a line
 other than the sharing line sending is the camera, the sharing line sending is the screen); the roster then says so
-(`main-video` `sendrecv`, an `applicationsharing-video` stream `sendonly` with the sharing source) and the others ask
+(`main-video` `sendrecv`, an `applicationsharing-video` stream `sendonly` with the sharing source; as in Teams, one
+share at a time: a share that starts takes over the one going, whose stream the roster no longer lists, and that
+sharer's client stops its share) and the others ask
 the node for it with source requests on the control plane (`sr`: a receiving line's stream id and the source to show,
 `-1` for none; each is answered `sr_res` `ok`, and one naming no receiving line of the party's changes nothing). The node writes each frame of a camera or a screen onto every line
 whose last request named it, from that source's next keyframe on (it asks the source for one by PLI, or FIR where

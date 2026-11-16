@@ -313,6 +313,55 @@ async fn a_group_call_shares_on_its_sharing_line_by_describing_it_without_a_rene
     }
 }
 
+/// As in Teams, a share that starts while the account shares in a group call takes over: b shares, then the roster
+/// lists c sharing; b's share stops, told and described `recvonly` again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_share_another_starts_in_a_group_call_takes_over_the_account_s() {
+    let lab = Lab::start_group_video().await;
+    let mut a = lab.account(LAB_A, A_TONE).await;
+    let mut b = lab.account(LAB_B, B_TONE).await;
+    let mut c = lab.account(LAB_C, PEER_TONE).await;
+    let call_a = a
+        .handle
+        .requests()
+        .call(CallAction::Call { chat: ABC_CHAT.into() })
+        .await
+        .unwrap();
+    let (ringing_b, ringing_c) = (b.incoming().await, c.incoming().await);
+    let mut answered = Vec::new();
+    for (account, ringing) in [(&mut b, ringing_b.call), (&mut c, ringing_c.call)] {
+        let call = account
+            .handle
+            .requests()
+            .call(CallAction::Answer { call: ringing })
+            .await
+            .unwrap();
+        account.status(call, &CallStatus::Connected).await;
+        answered.push(call);
+    }
+    a.status(call_a, &CallStatus::Connected).await;
+    let (call_b, call_c) = (answered[0], answered[1]);
+    let share = CallAction::Share { call: call_b, on: true };
+    assert_eq!(b.handle.requests().call(share).await.unwrap(), call_b);
+    assert!(share_told(&mut b, call_b, true).await, "b shares");
+    shares_described(&lab, "sendonly").await;
+
+    let id = lab.mock.calls().last().unwrap().id.clone();
+    assert!(lab.mock.share_made_up(&id, LAB_C, true));
+    assert!(!share_told(&mut b, call_b, true).await, "c's share took over b's");
+    shares_described(&lab, "recvonly").await;
+
+    for (account, call) in [(&mut a, call_a), (&mut b, call_b), (&mut c, call_c)] {
+        account
+            .handle
+            .requests()
+            .call(CallAction::HangUp { call })
+            .await
+            .unwrap();
+        assert_eq!(account.ended(call).await, End::HungUp);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_call_without_video_shares_nothing() {
     let lab = Lab::start().await;

@@ -1322,11 +1322,21 @@ where
         self.show_participants(now);
     }
 
-    /// Who is in `call` now, as its roster told it: the gallery follows, its source requests go.
+    /// Who is in `call` now, as its roster told it: the gallery follows, its source requests go. As in Teams, someone's
+    /// share that starts while the account shares in a group call takes over: the account's share stops.
     fn participants(&mut self, call: CallId, participants: Vec<Participant>, now: Instant) {
-        if let Some(live) = self.live.as_mut().filter(|live| live.call == call) {
-            live.gallery.set_participants(participants);
-            self.show_participants(now);
+        let Some(live) = self.live.as_mut().filter(|live| live.call == call) else {
+            return;
+        };
+        let taken_over = live.gallery.set_participants(participants) && live.is_group() && live.shares.own;
+        self.show_participants(now);
+        if taken_over {
+            log::info!(
+                "call {}: another participant's share took over the account's",
+                call.get()
+            );
+            let (reply, _) = oneshot::channel();
+            self.share(call, false, reply);
         }
     }
 

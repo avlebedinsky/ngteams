@@ -814,7 +814,6 @@ async fn a_shared_screen_reaches_the_others_until_stop_sharing_with_the_cameras_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "QA 187 Q1: a second sharer doesn't take over; both share, the viewers keep the first one's screen"]
 async fn a_second_sharer_takes_over_the_share_as_in_teams() {
     let Some(group) = Group::start(Layout::All, "second-sharer", 3).await else {
         return;
@@ -847,6 +846,7 @@ async fn a_second_sharer_takes_over_the_share_as_in_teams() {
     );
     assert_eq!(b_view(&*a), Some(false), "a's view: b still shares beside c");
     assert!(b_told, "b's client still shares after c took over");
+    sees_share(b, calls[1], &mc).await;
     for (phone, call) in [(&mut *b, calls[1]), (&mut *c, calls[2]), (&mut *a, calls[0])] {
         hang_up(phone, call).await;
     }

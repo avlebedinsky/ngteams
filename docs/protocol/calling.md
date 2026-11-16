@@ -784,7 +784,10 @@ a alone). What each of Teams' remaining call controls sends:
   a renegotiation answered) keep it so while the share lasts. Stop sharing (or the screen ending at the desktop)
   stops the frames and describes it `recvonly`, unlabelled, with the same tag. The sharer's window keeps the people's
   gallery with the red Stop sharing in Share's place, as the web client's; a viewer names the share by whoever the
-  roster says shares. Run natively 2026-11-06 (lab a, b, c, all native, a's group call in their chat): a (its own
+  roster says shares, the newest share if it lists more. One share at a time, as in Teams: a share that starts while
+  the account shares takes over, and the account's share stops as Stop sharing does (no capture shows what Teams
+  sends a sharer whose share another took over; the native client goes by the roster, and the own server lists only
+  the newest share). Run natively 2026-11-06 (lab a, b, c, all native, a's group call in their chat): a (its own
   offer's line) shared, `screenSharerAttributes` `202`, the descriptions `200`; b and c showed the share named AI with
   the people beside it and decoded its stream; Stop sharing ended it at both. c (the mixer's offered line, turned to
   send) shared the same way and a showed it. The sandbox's synthetic screen delivered no picture in that run (its

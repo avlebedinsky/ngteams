@@ -215,6 +215,7 @@ impl Call {
     fn let_go(party: &mut Party, out: &mut Out) {
         party.ring_due = None;
         party.showing = Showing::default();
+        party.presenting = false;
         if let Some(leg) = party.leg.take() {
             out.released.extend(leg.ids().map(str::to_owned));
         }
@@ -482,10 +483,24 @@ impl Call {
         out: &mut Out,
     ) -> Result<(), Refusal> {
         self.in_call(seat)?;
-        if self.party(seat).showing != showing {
-            self.party_mut(seat).showing = showing;
-            self.tell_group(at.origin, &[seat], None, out);
+        let before = self.party(seat).showing;
+        if before == showing {
+            return Ok(());
         }
+        let mut changed = vec![seat];
+        if showing.sharing && !before.sharing {
+            // as in Teams, a new share takes over the one going: that sharer's client stops it once it hears
+            for (number, party) in self.parties.iter_mut().enumerate() {
+                if party.presenting {
+                    party.presenting = false;
+                    changed.push(Seat(number));
+                }
+            }
+        }
+        let party = self.party_mut(seat);
+        party.showing = showing;
+        party.presenting = showing.sharing && (party.presenting || !before.sharing);
+        self.tell_group(at.origin, &changed, None, out);
         Ok(())
     }
 
@@ -1414,5 +1429,52 @@ mod tests {
         );
         call.group_leave(Seat(1), &json!({}), at(1_008_000), &mut Out::default());
         assert_eq!(call.party(Seat(1)).showing, Showing::default());
+    }
+
+    /// The roster's sharing stream of `party` (its first endpoint's), if it lists one.
+    fn shares(call: &Call, seat: usize) -> bool {
+        let party = call.party(Seat(seat));
+        let streams = &wire::roster(call, &[Seat(seat)])["participants"][party.mri()]["endpoints"];
+        streams
+            .as_object()
+            .into_iter()
+            .flat_map(|endpoints| endpoints.values())
+            .filter_map(|endpoint| endpoint["call"]["mediaStreams"].as_array())
+            .flatten()
+            .any(|stream| stream["label"] == "applicationsharing-video")
+    }
+
+    #[test]
+    fn a_new_share_takes_over_the_one_going_and_the_old_sharer_s_next_description_takes_nothing_back() {
+        let (mut call, _) = started();
+        accepted(&mut call, 1, "B", 1_005_000);
+        accepted(&mut call, 2, "C", 1_005_000);
+        let sharing = |camera| Showing { camera, sharing: true };
+        call.group_described(Seat(1), sharing(false), at(1_006_000), &mut Out::default())
+            .unwrap();
+        assert!(shares(&call, 1));
+        // c shares while b does: the roster lists c's share alone, told of both
+        let mut out = Out::default();
+        call.group_described(Seat(2), sharing(false), at(1_007_000), &mut out)
+            .unwrap();
+        assert!(shares(&call, 2) && !shares(&call, 1));
+        let told = &out.deliveries[0].body["participants"];
+        assert!(
+            told.get("8:orgid:b").is_some() && told.get("8:orgid:c").is_some(),
+            "{told}"
+        );
+        // b, which didn't hear it yet, turns its camera on with its sharing line still described: c keeps the share
+        call.group_described(Seat(1), sharing(true), at(1_007_500), &mut Out::default())
+            .unwrap();
+        assert!(shares(&call, 2) && !shares(&call, 1));
+        // b stops, then shares again: its new share takes over c's
+        call.group_described(Seat(1), Showing::default(), at(1_008_000), &mut Out::default())
+            .unwrap();
+        call.group_described(Seat(1), sharing(false), at(1_009_000), &mut Out::default())
+            .unwrap();
+        assert!(shares(&call, 1) && !shares(&call, 2));
+        // the sharer leaves: nobody's share is listed
+        call.group_leave(Seat(1), &json!({}), at(1_010_000), &mut Out::default());
+        assert!(!shares(&call, 2));
     }
 }

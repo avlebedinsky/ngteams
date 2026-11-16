@@ -436,8 +436,8 @@ pub(crate) fn music_entry(version: u64, playing: bool) -> Value {
 }
 
 /// What an endpoint in the call sends and takes: a 1:1 call's lists no media streams (its media goes through no
-/// mixer); a group call's its main audio, its main video (sent while its camera is on) and, while it shares its
-/// screen, its sharing stream, by the party's sources: what the others' source requests name.
+/// mixer); a group call's its main audio, its main video (sent while its camera is on) and, while its share is the
+/// call's, its sharing stream, by the party's sources: what the others' source requests name.
 fn endpoint_call(kind: Kind, party: &Party) -> Value {
     let Some(leg) = party.leg.as_ref().filter(|_| kind == Kind::Group) else {
         return json!({"serverMuteVersion": 0});
@@ -448,7 +448,7 @@ fn endpoint_call(kind: Kind, party: &Party) -> Value {
             "serverMuted": false}),
         json!({"type": "video", "label": "main-video", "sourceId": leg.sources.video, "direction": camera}),
     ];
-    if party.showing.sharing {
+    if party.presenting {
         streams.push(
             json!({"type": "video", "label": SHARING_LABEL, "sourceId": leg.sources.sharing,
             "direction": "sendonly"}),
