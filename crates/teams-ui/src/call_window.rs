@@ -100,6 +100,20 @@ pub fn present(cx: &App) -> bool {
         .is_some_and(|raiser| raiser.0.upgrade().is_some())
 }
 
+/// Whether a call window shows `calls`' call `call`, its end included: the end of a call that no window showed (a
+/// ring that failed before its answer) is the main window's to tell.
+#[must_use]
+pub fn shows(calls: &Entity<Calls>, call: CallId, cx: &App) -> bool {
+    let Some(windows) = cx.try_global::<Raiser>().and_then(|raiser| raiser.0.upgrade()) else {
+        return false;
+    };
+    let windows = windows.read(cx);
+    windows
+        .open
+        .as_ref()
+        .is_some_and(|open| open.call == call && windows.calls_of(&open.key).is_some_and(|of| of == calls))
+}
+
 /// Brings the call window to the front ("Return to call"), opened again when its call is still up and it was closed;
 /// nothing in an app without call windows.
 pub fn raise(cx: &mut App) {

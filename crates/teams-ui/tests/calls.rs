@@ -2391,6 +2391,37 @@ fn a_call_the_far_end_hung_up_keeps_its_window_on_who_ended_it_with_call_back() 
 }
 
 #[test]
+fn a_ring_that_failed_before_it_had_a_window_says_call_failed_in_the_main_window() {
+    let rig = calling();
+    let (trace, written) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    // the caller cancels: a missed ring, nothing to tell
+    rig.send(Event::IncomingCall(invitation(1, Some(CALLER_NAME), None)));
+    rig.send(Event::RingEnded {
+        call: call(1),
+        end: RemoteEnd::default(),
+    });
+    assert!(!window_open(&rig, &windows));
+    assert!(
+        !drawn(cx, "call-after") && !drawn(cx, "in-call"),
+        "a cancelled ring is no failed call"
+    );
+
+    // the service refuses the ring's progress: no window showed the call, so the main window says it failed
+    rig.send(Event::IncomingCall(invitation(2, Some(CALLER_NAME), None)));
+    status(&rig, 2, CallStatus::Ended(End::Failed("progress")));
+    assert!(!window_open(&rig, &windows), "an unanswered ring opens no window");
+    let ended = rig.cx.read(|cx| calls_of(&rig).read(cx).ended().cloned()).unwrap();
+    assert_eq!(teams_ui::calls::end_text(&ended.end, ended.voicemail), "Call failed");
+    assert!(drawn(cx, "call-after"), "the callee is told");
+    click(cx, "call-dismiss");
+    assert!(!drawn(cx, "call-after"), "dismissed");
+    no_name_in(&written);
+}
+
+#[test]
 fn a_call_s_end_closes_by_itself_or_by_close() {
     let rig = calling();
     let (trace, written) = trace();

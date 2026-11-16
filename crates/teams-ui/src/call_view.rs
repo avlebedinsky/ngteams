@@ -15,7 +15,8 @@
 //!   say Mute or Unmute and Turn camera on or off, Leave in Teams' red, and why an ask went nowhere while it is up.
 //!   Once a call ended, why a later ask went nowhere until the next call or Dismiss (an ✕). How a call ended is its
 //!   window's to tell ([`crate::call_stage`]: who ended it, a test call's results), so in an app with call windows the
-//!   strip says nothing of it; a view without them (tests of the shell alone) says it here in a few words.
+//!   strip says nothing of it, except an end the user did not choose of a call that no window showed (a ring that
+//!   failed before its answer: "Call failed"); a view without them (tests of the shell alone) says it here.
 //!
 //! A build that shows no calls draws none of it.
 //!
@@ -703,13 +704,17 @@ impl CallBar {
     }
 
     /// How the last call ended, or why the last ask went nowhere, with Dismiss. In an app with call windows the end is
-    /// the window's to tell ([`crate::call_stage`]), as Teams' main window says nothing of it; elsewhere, nothing for a
-    /// test call's end either, whose results its window shows.
+    /// the window's to tell ([`crate::call_stage`]), as Teams' main window says nothing of it, unless no window showed
+    /// the call and the user did not end it (a ring that failed before its answer); never a test call's end, whose
+    /// results its window shows.
     fn after(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
         let windows = crate::call_window::present(cx);
         let model = self.calls.read(cx);
         let refused = model.refused().map(refusal_text);
-        let ended = model.ended().filter(|ended| ended.check.is_none() && !windows);
+        let ended = model.ended().filter(|ended| {
+            ended.check.is_none()
+                && (!windows || (ended.stays_in_window() && !crate::call_window::shows(&self.calls, ended.id, cx)))
+        });
         let text = refused.or_else(|| ended.map(|ended| calls::end_text(&ended.end, ended.voicemail)))?;
         Some(
             strip(palette)

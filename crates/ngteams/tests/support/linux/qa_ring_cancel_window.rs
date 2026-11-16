@@ -550,7 +550,7 @@ fn microsoft_rings(mock: &ChatServiceMock, b: &mut Callee, sandbox: &Sandbox) ->
     for line in &b.trace.seen[mark..] {
         say(&format!("qa: microsoft: the failed ring's trace: {line}"));
     }
-    // the whole screen: no call window opened, and the main window draws no "Call failed"
+    // the whole screen: no call window opened, and the main window says "Call failed"
     shot_of(sandbox, "qa371-microsoft-progress-failed-screen.png", false)?;
     both_themes(b, sandbox, "microsoft-progress-failed")?;
     let _ = mock.end_ring(&id, 487, CANCELLED);
