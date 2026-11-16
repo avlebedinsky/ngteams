@@ -139,15 +139,6 @@ impl InvokeKind {
         }
     }
 
-    /// Whether it may make the app change something (a submit, a card action), rather than only read.
-    #[must_use]
-    pub const fn writes(&self) -> bool {
-        !matches!(
-            self,
-            Self::FetchCommands { .. } | Self::FetchTask { .. } | Self::Query { .. } | Self::TaskFetch(_)
-        )
-    }
-
     /// The card message the invoke acts on, when it acts on one.
     fn card_message(&self) -> Option<&str> {
         match self {
@@ -594,7 +585,7 @@ mod tests {
         assert_eq!(made.app_id(), "00000000-0000-4000-8000-0000000000a0");
         assert_eq!(made.conversation(), Some("19:c@thread.v2"));
         assert_eq!(made.bot().as_str(), "28:00000000-0000-4000-8000-0000000000b0");
-        assert!(!made.kind().writes());
+        assert_eq!(made.kind().name(), "composeExtension/fetchCommands");
     }
 
     #[test]

@@ -230,6 +230,7 @@ accounts by a part of their name or address.
 | `POST` | provisioning `groups/<group>/clone` | a team copied from another | `TeamWrite::Copy` | answered `{groupId, threadId, workflowId}`; then `GET workflow/status/<workflowId>` until `Completed` | seen, 200 |
 | `POST` | middle tier `beta/teams/apps/aggregatedEntitlements?appbarview=userpinned`, `beta/users/apps/store`, `beta/users/apps/batchedDefinitions?includeblockedapps=true` | a team's apps, the store's apps, their definitions | plain (`TeamApps`, `AppStore`, `AppDefinitions`); Activity caches definitions per account by `teamsAppId` |  | seen |
 | `POST` | middle tier `beta/users/apps/entitlements` | an app added for the account itself (the store's Add) | not used |  | seen, 201 |
+| `POST` | middle tier `beta/chats/<chat>/apps/entitlements` | an app added to a chat by just-in-time install, before Teams sends the `submitAction` again | not used | [bots.md](bots.md) | seen (Approvals, 2026-11-16) |
 | `GET` | provisioning `teamtemplates/v1.0/en-us`, `teamtemplates/v1.0/<id>/Public/en-US`; middle tier `beta/teams/usergroups?teamType=undefined`, `beta/teams/defaultProfilePicture?displayName&highResolution=true`, `beta/analytics/teams/<group>/channels/<channel>/summary-timeseries` | templates, a template's channels and apps, the groups a team could be made of, Teams' picture for a name, a channel's analytics | Read (`TeamTemplates`) | `usergroups` only seen empty | seen |
 
 ## A new channel

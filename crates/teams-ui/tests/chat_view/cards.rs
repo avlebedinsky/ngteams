@@ -152,17 +152,37 @@ fn a_cards_buttons_open_links_toggle_and_show_cards_and_send_to_teams_on_the_web
     );
 }
 
+/// An input takes no place in the elements' paths: the text after it is still the first element.
 #[test]
 fn a_card_with_an_input_says_it_has_content_it_cant_show() {
     let card = json!({
         "type": "AdaptiveCard",
-        "body": [{"type": "TextBlock", "text": "Your answer"}, {"type": "Input.Text", "id": "answer"}]
+        "body": [{"type": "Input.Text", "id": "answer"}, {"type": "TextBlock", "text": "Your answer"}]
     });
     let rig = rig_with(vec![card_message(ID, &card)]);
     let (written_trace, _) = trace();
     let (_view, cx) = chat_window(&rig, written_trace);
     assert!(bounds(cx, &format!("card-{ID}-c0b0.")).is_some());
+    assert!(bounds(cx, &format!("card-{ID}-c0b1.")).is_none());
     assert!(bounds(cx, &format!("card-{ID}-c0unshown")).is_some());
+}
+
+#[test]
+fn an_input_with_a_fallback_shows_its_fallback() {
+    let card = json!({
+        "type": "AdaptiveCard",
+        "body": [
+            {"type": "Input.Text", "id": "answer", "fallback": {"type": "TextBlock", "text": "Answer in Teams"}},
+            {"type": "Input.Toggle", "id": "agree", "title": "Agree", "fallback": "drop"},
+            {"type": "TextBlock", "text": "kept"}
+        ]
+    });
+    let rig = rig_with(vec![card_message(ID, &card)]);
+    let (written_trace, _) = trace();
+    let (_view, cx) = chat_window(&rig, written_trace);
+    assert!(bounds(cx, &format!("card-{ID}-c0b0.")).is_some(), "the fallback");
+    assert!(bounds(cx, &format!("card-{ID}-c0b1.")).is_some(), "the text");
+    assert!(bounds(cx, &format!("card-{ID}-c0unshown")).is_none());
 }
 
 #[test]

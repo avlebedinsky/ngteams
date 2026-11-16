@@ -552,6 +552,33 @@ fn reads_choice_sets() {
     assert!(people.asks_for_people());
 }
 
+/// An input with a `fallback` gets its fallback, as an element of a type the chat view doesn't draw does: `"drop"`
+/// leaves it out quietly, an element takes its place, and the card is not unshown.
+#[test]
+fn an_input_with_a_fallback_gets_its_fallback() {
+    let message = adaptive(&json!({
+        "type": "AdaptiveCard",
+        "body": [
+            {"type": "Input.Text", "id": "comment", "fallback": "drop"},
+            {"type": "Input.Toggle", "id": "agree", "title": "Agree",
+             "fallback": {"type": "TextBlock", "text": "Answer in Teams"}},
+            {"type": "TextBlock", "text": "kept"},
+        ]
+    }));
+    let card = &message.cards[0];
+    assert!(!card.unshown);
+    assert_eq!(card.body.len(), 2);
+    let texts: Vec<&str> = card
+        .body
+        .iter()
+        .map(|element| match &element.kind {
+            Kind::Text(text) => text.text.as_str(),
+            other => panic!("not a text: {other:?}"),
+        })
+        .collect();
+    assert_eq!(texts, ["Answer in Teams", "kept"]);
+}
+
 /// An input without its id, or of a kind not read, isn't one; in a card it is unshown.
 #[test]
 fn inputs_not_read() {

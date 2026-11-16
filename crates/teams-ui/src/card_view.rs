@@ -15,10 +15,9 @@
 //!   values.
 //! - **Actions**: `Action.OpenUrl` opens its link (GPUI's `open_url`); `Action.ShowCard` shows its card under the
 //!   buttons, and hides it again; `Action.ToggleVisibility` shows, hides or flips the elements it names. Both change
-//!   only what this view shows ([`CardState`], held by the view per message). `Action.Submit`/`Execute` send to the
-//!   bot through Teams' bot path, which hands the account's token to the app's backend and is never sent natively
-//!   (`AGENTS.md`'s hard rules): such a button opens the message in Teams on the web, where it runs, and says so in
-//!   its tooltip. A `selectAction` does what its action does on a click anywhere on its element.
+//!   only what this view shows ([`CardState`], held by the view per message). `Action.Submit`/`Execute` are bot
+//!   invokes (`docs/protocol/bots.md`). No view sends one yet, so such a button opens the message in Teams on the
+//!   web, where it runs, and its tooltip says so. A `selectAction` does what its action does on a click anywhere on its element.
 //! - **What it can't show** (an input, an element or action of a type no capture showed, an attachment that isn't a
 //!   card) is never guessed at: the card says the message has content that can't be shown here
 //!   (`chat_view::UNSHOWN_CONTENT`), under what it does show.
@@ -356,9 +355,10 @@ fn unshown_line(palette: Palette) -> AnyElement {
 /// The visible ones of `items`, each after its spacing (and its line, for a separator); the first has no space above.
 fn elements(draw: &Draw<'_>, path: &str, items: &[Element], cx: &mut App) -> Vec<AnyElement> {
     let mut drawn = Vec::new();
-    for (at, element) in items.iter().enumerate() {
-        // inputs aren't drawn yet: their card says it has content it can't show
-        if matches!(element.kind, Kind::Input(_)) || !draw.state.shown(element.id.as_deref(), element.visible) {
+    // inputs aren't drawn yet (their card says it has content it can't show), and they take no place in the paths
+    let drawable = |element: &&Element| !matches!(element.kind, Kind::Input(_));
+    for (at, element) in items.iter().filter(drawable).enumerate() {
+        if !draw.state.shown(element.id.as_deref(), element.visible) {
             continue;
         }
         if !drawn.is_empty() {

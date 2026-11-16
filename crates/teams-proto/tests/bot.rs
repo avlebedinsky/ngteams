@@ -155,23 +155,6 @@ fn documented_invokes_match_their_fixtures() {
     assert_eq!(invoke("Lab A", submit, bot_chat), fixture(INVOKES, "submit"));
 }
 
-#[test]
-fn invokes_that_only_read_are_told_from_those_that_write() {
-    let reads = [
-        InvokeKind::FetchCommands {
-            context: CommandContext::Compose,
-        },
-        InvokeKind::TaskFetch(CardInvoke::default()),
-    ];
-    assert!(reads.iter().all(|kind| !kind.writes()));
-    let writes = [
-        InvokeKind::Execute(CardInvoke::default()),
-        InvokeKind::Submit(CardInvoke::default()),
-        InvokeKind::SelectItem { value: Value::Null },
-    ];
-    assert!(writes.iter().all(InvokeKind::writes));
-}
-
 fn answer(name: &str) -> InvokeAnswer {
     InvokeAnswer::read(200, fixture(ANSWERS, name).to_string().as_bytes())
 }

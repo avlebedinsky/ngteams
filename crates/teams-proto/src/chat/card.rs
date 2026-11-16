@@ -10,7 +10,8 @@
 //! type it doesn't know (without a `fallback` to take its place), or an attachment of another kind marks the card
 //! [`Card::unshown`], and a view says the message has content it can't show. Inputs (`Input.*`, [`Input`]) are read
 //! into the model, and the same `Input` model serves a workflow's trigger card; a chat card with an input is still
-//! marked unshown, since the chat view doesn't draw inputs yet.
+//! marked unshown, since the chat view doesn't draw inputs yet. An input with a `fallback` is not read: its fallback
+//! takes its place, as for an element of a type this build doesn't draw.
 //!
 //! A button that sends to the bot ([`ActionKind::Submit`]) keeps what an invoke needs (`docs/protocol/bots.md`): its
 //! `data` as given, its `Action.Execute` `verb`, its `msteams` kind ([`Via`]) and whether the card's answers go with
@@ -750,9 +751,11 @@ impl Reader {
             ),
             "ActionSet" => Kind::Actions(self.actions(item.get("actions"), depth)),
             "Table" => Kind::Table(self.table(item, depth)),
-            kind if kind.starts_with("Input.") => {
+            // the chat view doesn't draw inputs yet: an input with a `fallback` gets its fallback, as an element of a
+            // type this build doesn't draw does
+            kind if kind.starts_with("Input.") && item.get("fallback").is_none() => {
                 let input = input(item)?;
-                // the chat view doesn't draw inputs yet: the card says it has content it can't show
+                // without a fallback, the card says it has content it can't show
                 self.unshown = true;
                 Kind::Input(input)
             }
