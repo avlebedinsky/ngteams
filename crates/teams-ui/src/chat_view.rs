@@ -572,6 +572,9 @@ pub struct MessageItem {
     pub files: Arc<Vec<SharedFile>>,
     /// The previews of the links it carries (`crate::link_preview::previews_of`), each drawn as its card under its text.
     pub links: Arc<Vec<LinkPreview>>,
+    /// The app cards its links got (`properties.cards`, [`ShownCards::of_properties`]), drawn under its text as Teams
+    /// draws a YouTube link's card.
+    pub app_cards: Option<ShownCards>,
     /// What it carries beside its text that this build can't show ([`unshown_of`]): a file entry of a shape no message
     /// showed, a card. With any, it shows [`UNSHOWN_CONTENT`] and a way to open the chat in Teams on the web, never a
     /// guess at the part.
@@ -2919,14 +2922,15 @@ impl ChatView {
         }
         let me = self.core.me().to_owned();
         let body = self.body(message)?;
-        let (files, links, unshown) = if matches!(body, Body::Text(_)) {
+        let (files, links, app_cards, unshown) = if matches!(body, Body::Text(_)) {
             (
                 Arc::new(files_of(message)),
                 Arc::new(link_preview::previews_of(message.properties.as_deref())),
+                ShownCards::of_properties(message.properties.as_deref()),
                 unshown_of(message),
             )
         } else {
-            (Arc::default(), Arc::default(), UnshownParts::default())
+            (Arc::default(), Arc::default(), None, UnshownParts::default())
         };
         let (sender_name, named) = self.sender_of(message);
         let picture = message
@@ -2969,6 +2973,7 @@ impl ChatView {
             outbox: notes.get(&message.id).cloned().unwrap_or_default(),
             files,
             links,
+            app_cards,
             unshown,
             writes: if self.core.read_only() {
                 ChatWrites::AppReadOnly
@@ -3597,7 +3602,8 @@ impl ChatView {
                     open: Some(Self::picture_opener(&item.id, cx)),
                     quoted: Some(Self::quote_opener(cx)),
                     ring: self.flash_ring(item, palette, cx),
-                    cards: matches!(item.body, Body::Cards(_)).then(|| self.card_hook(&item.id, cx)),
+                    cards: (matches!(item.body, Body::Cards(_)) || item.app_cards.is_some())
+                        .then(|| self.card_hook(&item.id, cx)),
                     root: self.place.in_channel().then(|| self.root_of(&item.id)),
                     meeting: Self::meeting_view(item, palette, cx),
                     bots: self.core.capabilities().apps,
@@ -4928,24 +4934,7 @@ fn bubble_content(
             }
         }
         Body::Deleted => muted(DELETED, palette),
-        Body::Cards(cards) => {
-            let drawn = CardsElement::new(item.id.clone(), cards.clone(), palette, HourCycle::Twelve)
-                // a button that sends to the bot opens the card's message in Teams on the web, where it runs
-                .in_teams(Some(teams_proto::workflow::MessageRun::link_to(
-                    chat.conversation,
-                    &item.id,
-                    chat.root,
-                )))
-                .submits(chat.bots);
-            match chat.cards.take() {
-                Some(hook) => drawn
-                    .state(hook.state.clone(), Rc::clone(&hook.on_state))
-                    .source(Some(hook.source.clone()))
-                    .clock(hook.cycle),
-                None => drawn,
-            }
-            .into_any_element()
-        }
+        Body::Cards(cards) => cards_element(item, cards.clone(), chat, palette),
         Body::Meeting(_) => chat.meeting.take().unwrap_or_else(|| div().into_any_element()),
         Body::Unsupported(_) => web_line(
             &format!("unsupported-{}", item.id),
@@ -4958,6 +4947,26 @@ fn bubble_content(
             div().into_any_element()
         }
     }
+}
+
+/// `item`'s cards (its card message's, or its links' app cards), drawn with the view's card hook.
+fn cards_element(item: &MessageItem, cards: ShownCards, chat: &mut InChat<'_>, palette: Palette) -> AnyElement {
+    let drawn = CardsElement::new(item.id.clone(), cards, palette, HourCycle::Twelve)
+        // a button that sends to the bot opens the card's message in Teams on the web, where it runs
+        .in_teams(Some(teams_proto::workflow::MessageRun::link_to(
+            chat.conversation,
+            &item.id,
+            chat.root,
+        )))
+        .submits(chat.bots);
+    match chat.cards.take() {
+        Some(hook) => drawn
+            .state(hook.state.clone(), Rc::clone(&hook.on_state))
+            .source(Some(hook.source.clone()))
+            .clock(hook.cycle),
+        None => drawn,
+    }
+    .into_any_element()
 }
 
 fn bubble(
@@ -4977,6 +4986,15 @@ fn bubble(
         _ => (None, None),
     };
     let content = bubble_content(item, &mut chat, &id, palette, forward);
+    // as wide as Teams draws a link's app card, however short the text over it
+    let app_cards = item.app_cards.clone().map(|cards| {
+        div()
+            .pt_2()
+            .w(px(crate::card_view::CARD_WIDTH))
+            .max_w_full()
+            .child(cards_element(item, cards, &mut chat, palette))
+            .into_any_element()
+    });
     let selector = format!("bubble-{}", item.id);
     let bubble = div()
         .debug_selector(move || selector)
@@ -5008,6 +5026,7 @@ fn bubble(
         .children(notice)
         .child(content)
         .children(links)
+        .children(app_cards)
         .children(files)
         .children(item.unshown.any().then(|| {
             div()

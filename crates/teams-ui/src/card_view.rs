@@ -19,6 +19,11 @@
 //!   invokes (`docs/protocol/bots.md`). No view sends one yet, so such a button opens the message in Teams on the
 //!   web, where it runs, and its tooltip says so. A `selectAction` does what its action does on a click anywhere on
 //!   its element.
+//! - **A link's app card** (`properties.cards` of a text message, `card::message_cards`) is drawn under the message's
+//!   text, in its bubble: the app's icon and name over the card's body, as Teams draws a YouTube link's card.
+//! - **Media** (`Media`) is its picture (its poster, else YouTube's picture of its video), cropped to 16:9, with a play
+//!   mark; a click opens it in the browser, as the app's Open button (`ActionKind::OpenTab`) does. Teams plays it in
+//!   the card or in the app's view; this build has no web player for it.
 //! - **What it can't show** (an input, an element or action of a type no capture showed, an attachment that isn't a
 //!   card) is never guessed at: the card says the message has content that can't be shown here
 //!   (`chat_view::UNSHOWN_CONTENT`), under what it does show.
@@ -37,9 +42,9 @@ use gpui_component::button::Button;
 use gpui_component::{Selectable as _, Sizable as _};
 use teams_proto::LinkPreviewPicture;
 use teams_proto::chat::card::{
-    self, Action, ActionKind, Card, CardMessage, Column, ColumnSet, Container, ContainerStyle, DateFormat, Element,
-    Frame, HAlign, Image, ImageSize, Kind, RichTextBlock, Spacing, Table, TextBlock, TextColor, TextLook, TextPart,
-    TextSize, TextWeight, VAlign, Width,
+    self, Action, ActionKind, Card, CardApp, CardMessage, Column, ColumnSet, Container, ContainerStyle, DateFormat,
+    Element, Frame, HAlign, Image, ImageSize, Kind, Media, RichTextBlock, Spacing, Table, TextBlock, TextColor,
+    TextLook, TextPart, TextSize, TextWeight, VAlign, Width,
 };
 use teams_proto::chat::parse_html;
 
@@ -53,6 +58,12 @@ use crate::theme::{self, Palette};
 pub const CARD_WIDTH: f32 = 448.0;
 /// A card's padding, px (Teams' host config `spacing.padding`).
 pub const PADDING: f32 = 16.0;
+/// The size of an app's icon over its card, px.
+pub const APP_ICON: f32 = 20.0;
+/// The size of the play mark on a video's picture, px.
+pub const PLAY_MARK: f32 = 56.0;
+/// The tooltip of a video's picture: it plays in the browser, not in the card.
+pub const PLAYS_IN_BROWSER: &str = "Play in the browser";
 /// What a card's preview line in the chat list says, as Teams' does.
 pub const SENT_A_CARD: &str = "Sent a card";
 /// The tooltip of a button that sends to the bot: it opens the message in Teams on the web.
@@ -82,6 +93,16 @@ impl ShownCards {
     pub fn of(content: &str) -> Option<Self> {
         card::card_message(content)
             .filter(|message| !message.cards.is_empty())
+            .map(|message| Self(Arc::new(message)))
+    }
+
+    /// The app cards of a text message's `properties` (its JSON text): `None` without one, or when one of them is a
+    /// card this build doesn't draw (the message then says it has content it can't show).
+    #[must_use]
+    pub fn of_properties(properties: Option<&str>) -> Option<Self> {
+        let properties = serde_json::from_str::<serde_json::Value>(properties?).ok()?;
+        card::message_cards(properties.get("cards"))
+            .filter(|message| message.drawn() && !message.cards.is_empty())
             .map(|message| Self(Arc::new(message)))
     }
 
@@ -329,7 +350,124 @@ fn card_surface(draw: &Draw<'_>, path: &str, shown: &Card, cx: &mut App) -> AnyE
         .bg(rgb(palette.surface))
         .shadow_xs()
         .p(px(PADDING))
+        .children(shown.app.as_ref().map(|app| app_header(draw, path, app, cx)))
         .child(card_body(draw, path, shown, cx))
+        .into_any_element()
+}
+
+/// The app's icon and name over its card.
+fn app_header(draw: &Draw<'_>, path: &str, app: &CardApp, cx: &mut App) -> AnyElement {
+    let icon = app
+        .icon_picture()
+        .map(|picture| card_picture(&picture, draw.source, cx))
+        .and_then(|state| {
+            let frame = div().flex_none().size(px(APP_ICON)).rounded_sm().overflow_hidden();
+            let frame = match state {
+                PictureState::Missing => return None,
+                PictureState::Reading => frame.bg(tint(draw.palette.foreground, 0.06)),
+                PictureState::Shown(image, _) => frame.child(img(image).size_full().object_fit(ObjectFit::Contain)),
+            };
+            let selector = draw.selector(&format!("{path}app-icon"));
+            Some(frame.debug_selector(move || selector))
+        });
+    let selector = draw.selector(&format!("{path}app"));
+    div()
+        .debug_selector(move || selector)
+        .flex()
+        .items_center()
+        .gap_3()
+        .h(px(24.0))
+        .mb(px(spacing_px(Spacing::Medium)))
+        .children(icon)
+        .children(app.name.clone().map(|name| {
+            div()
+                .min_w_0()
+                .truncate()
+                .text_size(px(14.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(draw.palette.foreground))
+                .child(SharedString::from(name))
+        }))
+        .into_any_element()
+}
+
+/// The width and height, as shares of a 16:9 box, that a picture of `natural_w` by `natural_h` takes to fill it,
+/// cropped equally on both sides (GPUI's `Cover` keeps a picture's top and left edges).
+#[must_use]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a picture's sides are far below f32's exact range"
+)]
+pub fn cropped_16_9(natural_w: u32, natural_h: u32) -> (f32, f32) {
+    if natural_w == 0 || natural_h == 0 {
+        return (1.0, 1.0);
+    }
+    let taller = (natural_h as f32 / natural_w as f32) / (9.0 / 16.0);
+    if taller >= 1.0 {
+        (1.0, taller)
+    } else {
+        (1.0 / taller, 1.0)
+    }
+}
+
+/// A media element: its picture, cropped to fill 16:9, with a play mark over it; a click opens it in the browser.
+fn media_view(draw: &Draw<'_>, path: &str, media: &Media, cx: &mut App) -> AnyElement {
+    let picture = match media.picture().map(|picture| card_picture(&picture, draw.source, cx)) {
+        Some(PictureState::Shown(image, (natural_w, natural_h))) => {
+            let selector = draw.selector(&format!("{path}picture"));
+            let (width, height) = cropped_16_9(natural_w, natural_h);
+            Some(
+                div()
+                    .debug_selector(move || selector)
+                    .absolute()
+                    .top(relative((1.0 - height) / 2.0))
+                    .left(relative((1.0 - width) / 2.0))
+                    .w(relative(width))
+                    .h(relative(height))
+                    .child(img(image).size_full().object_fit(ObjectFit::Fill)),
+            )
+        }
+        _ => None,
+    };
+    let play_selector = draw.selector(&format!("{path}play"));
+    let play = div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .debug_selector(move || play_selector)
+                .size(px(PLAY_MARK))
+                .rounded_full()
+                .bg(rgb(0x00ff_ffff))
+                .shadow_md()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(Glyph::PLAY_FILLED.icon().size(px(24.0)).text_color(rgb(0x0000_0000))),
+        );
+    let link = media.link().map(str::to_owned);
+    div()
+        .id(SharedString::from(draw.selector(&format!("{path}media"))))
+        .relative()
+        .w_full()
+        .overflow_hidden()
+        .bg(tint(draw.palette.foreground, 0.08))
+        .child(div().w_full().pb(relative(9.0 / 16.0)))
+        .children(picture)
+        .child(play)
+        .cursor_pointer()
+        .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new(PLAYS_IN_BROWSER).build(window, cx))
+        .on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            if let Some(link) = &link {
+                cx.open_url(link);
+            }
+        })
         .into_any_element()
 }
 
@@ -433,6 +571,7 @@ fn element_view(draw: &Draw<'_>, path: &str, element: &Element, cx: &mut App) ->
             placed(draw, path, set.into_any_element())
         }
         Kind::Table(table) => placed(draw, path, table_view(draw, path, table, cx)),
+        Kind::Media(media) => placed(draw, path, media_view(draw, path, media, cx)),
         Kind::Input(_) => div().into_any_element(),
     }
 }
@@ -1005,7 +1144,7 @@ fn action_glyph(action: &Action) -> Option<Glyph> {
 fn click_of(draw: &Draw<'_>, key: &str, action: &Action, set: &[String]) -> OnClick {
     let on_state = draw.on_state.cloned();
     match &action.kind {
-        ActionKind::OpenUrl(url) => {
+        ActionKind::OpenUrl(url) | ActionKind::OpenTab(url) => {
             let url = url.clone();
             Rc::new(move |_, cx| cx.open_url(&url))
         }

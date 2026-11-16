@@ -171,6 +171,12 @@ name = "workflow_message_window"
 harness = false
 
 [[test]]
+# a YouTube link's app card in a chat over the fake engine, in the UI sandbox, screenshotted in each theme under
+# `target/ui-shots/app-card-*.png`
+name = "app_card_window"
+harness = false
+
+[[test]]
 # the Workflows app in the main window over the fake engine, in the UI sandbox, screenshotted in each theme under
 # `target/ui-shots/workflows-app-*.png`
 name = "workflows_app_window"

@@ -14,6 +14,9 @@ mod common;
 // the shell's and a chat view's parts over the rig
 #[path = "common/parts.rs"]
 mod parts;
+// a link's app card (a YouTube link's), under the text
+#[path = "chat_view/app_cards.rs"]
+mod app_cards;
 // a 1:1 call's recording and transcript, as their recap cards
 #[path = "chat_view/call_recap.rs"]
 mod call_recap;
@@ -374,6 +377,7 @@ fn row(id: &str, sender: &str, at: i64) -> MessageItem {
         outbox: Vec::new(),
         files: Arc::default(),
         links: Arc::default(),
+        app_cards: None,
         unshown: UnshownParts::default(),
         writes: ChatWrites::Taken,
         forwarded: None,

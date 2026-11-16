@@ -178,6 +178,8 @@ impl Glyph {
     pub const PHONE_MISSED: Self = Self(include_bytes!("../assets/icons/phone-missed.svg"));
     pub const PLAY: Self = Self(include_bytes!("../assets/icons/circle-play.svg"));
     pub const PLAY_MEDIA: Self = Self(include_bytes!("../assets/icons/play.svg"));
+    /// Lucide's play, filled: the mark on a video's picture in a card.
+    pub const PLAY_FILLED: Self = Self(include_bytes!("../assets/icons/play-filled.svg"));
     pub const PLUS: Self = Self(include_bytes!("../assets/icons/plus.svg"));
     pub const POWER: Self = Self(include_bytes!("../assets/icons/power.svg"));
     pub const POP_OUT: Self = Self(include_bytes!("../assets/icons/square-arrow-out-up-right.svg"));
