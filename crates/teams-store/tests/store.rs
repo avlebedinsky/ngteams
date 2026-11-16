@@ -418,6 +418,22 @@ fn an_unknown_conversation_kind_is_kept_as_text() {
 }
 
 #[test]
+fn a_meeting_chat_is_one_by_its_own_kind_or_by_the_thread_type_sync_kept() {
+    let meetings = [
+        ConversationKind::Meeting,
+        ConversationKind::Other("thread_type:meeting".to_owned()),
+    ];
+    assert!(meetings.iter().all(ConversationKind::is_meeting));
+    let others = [
+        ConversationKind::OneToOne,
+        ConversationKind::Group,
+        ConversationKind::Channel,
+        ConversationKind::Other("thread_type:chat".to_owned()),
+    ];
+    assert!(!others.iter().any(ConversationKind::is_meeting));
+}
+
+#[test]
 fn members_are_replaced_only_by_a_newer_roster() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut store = open(&dir).expect("open the store");

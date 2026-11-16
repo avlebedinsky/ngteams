@@ -29,6 +29,16 @@ impl ConversationKind {
         }
     }
 
+    /// Whether it is a meeting's chat: sync keeps one by the thread type the list gave it (`thread_type:meeting`).
+    #[must_use]
+    pub fn is_meeting(&self) -> bool {
+        match self {
+            Self::Meeting => true,
+            Self::Other(text) => text == "thread_type:meeting",
+            Self::OneToOne | Self::Group | Self::Channel => false,
+        }
+    }
+
     /// The kind a stored text names; any other text is [`ConversationKind::Other`].
     #[must_use]
     pub fn from_text(text: &str) -> Self {

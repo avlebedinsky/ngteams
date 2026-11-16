@@ -135,8 +135,7 @@ impl RowKind {
             ConversationKind::OneToOne => Self::OneToOne,
             ConversationKind::Group => Self::Group,
             ConversationKind::Meeting => Self::Meeting,
-            // the store keeps a meeting's chat by the thread type the list gave it
-            ConversationKind::Other(kind) if kind == "thread_type:meeting" => Self::Meeting,
+            ConversationKind::Other(_) if kind.is_meeting() => Self::Meeting,
             ConversationKind::Channel => Self::Channel,
             ConversationKind::Other(_) => Self::Other,
         }

@@ -330,7 +330,7 @@ impl ChatServiceMock {
     }
 
     /// A scheduled meeting's chat `id` (`19:meeting_<id>@thread.v2`) of `members` (its organizer first) called
-    /// `topic`, with no messages yet, as the conversation list then gives it; its thread read names the meeting
+    /// `topic`, with no messages yet, as the conversation list then gives it (`threadType` `meeting`); its thread read names the meeting
     /// (`properties.meeting`: the organizer's object id, the tenant, the subject). `false` when the fixtures have no
     /// empty chat to make its list entry from.
     #[must_use = "false says no chat was made"]
@@ -342,6 +342,7 @@ impl ChatServiceMock {
         let time = state.tick();
         let mut conversation = world::created(&empty, id, world::Kind::Group, members, time);
         conversation.entry["threadProperties"]["topic"] = serde_json::json!(topic);
+        conversation.entry["threadProperties"]["threadType"] = serde_json::json!("meeting");
         let organizer = members
             .first()
             .and_then(|mri| mri.rsplit(':').next())

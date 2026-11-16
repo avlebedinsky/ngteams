@@ -4490,7 +4490,6 @@ async fn repeated_updates_of_one_group_chat_read_its_people_once_per_newer_roste
 }
 
 #[tokio::test]
-#[ignore = "QA 267 Q1: a meeting chat is never stored as one (sync stores it as `Other`), so its update reads nothing"]
 async fn an_update_of_a_stored_meeting_chat_reads_its_people_and_one_of_a_1_1_chat_does_not() {
     let lab = Lab::start().await;
     let meeting = "19:meeting_qa-made-up-0001@thread.v2";

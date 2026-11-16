@@ -3307,7 +3307,7 @@ where
             return;
         }
         match self.store.conversation(thread) {
-            Ok(Some(stored)) if matches!(stored.kind, ConversationKind::Group | ConversationKind::Meeting) => {}
+            Ok(Some(stored)) if stored.kind == ConversationKind::Group || stored.kind.is_meeting() => {}
             Ok(_) => return,
             Err(error) => return self.missed("reading a changed thread's chat", error),
         }
