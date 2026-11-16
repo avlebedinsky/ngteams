@@ -114,8 +114,12 @@ impl AppDetailsDialog {
         }
     }
 
-    /// "Add to a chat" (`team` false) or "Add to a team": the place's picker in the dialog's place.
+    /// "Add to a chat" (`team` false) or "Add to a team": the place's picker in the dialog's place. Not while an Add
+    /// is in flight: the picker drops the dialog and its reply, and the store would not read the account's apps again.
     pub fn add_to(&mut self, team: bool, cx: &mut Context<Self>) {
+        if self.adding {
+            return;
+        }
         cx.emit(TeamDialogEvent::AddAppTo {
             app: Box::new(self.store.clone()),
             team,
@@ -170,6 +174,7 @@ impl AppDetailsDialog {
                     Button::new("app-details-add-chat")
                         .outline()
                         .label("Add to a chat")
+                        .disabled(self.adding)
                         .on_click(cx.listener(|this, _, _, cx| this.add_to(false, cx))),
                 ));
             }
@@ -179,6 +184,7 @@ impl AppDetailsDialog {
                     Button::new("app-details-add-team")
                         .outline()
                         .label("Add to a team")
+                        .disabled(self.adding)
                         .on_click(cx.listener(|this, _, _, cx| this.add_to(true, cx))),
                 ));
             }

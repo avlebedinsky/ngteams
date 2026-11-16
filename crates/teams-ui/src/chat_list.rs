@@ -720,6 +720,9 @@ pub struct ChatList {
     /// Which of them are shown.
     window: ChatWindow,
     cache: HashMap<String, Cached>,
+    /// The other member of each 1:1 chat a load built, a bot too, by the chat's id. A catch-up does not clear it, as
+    /// it clears `cache`: [`ChatList::one_to_one_with`] still finds the chat while the rows are built again.
+    one_to_ones: HashMap<String, String>,
     /// Moves when the cache is dropped: a load that started before keeps none of its rows.
     generation: u64,
     selected: Option<String>,
@@ -772,6 +775,7 @@ impl ChatList {
             opened_empty: Vec::new(),
             window: ChatWindow::default(),
             cache: HashMap::new(),
+            one_to_ones: HashMap::new(),
             generation: 0,
             selected,
             loading: None,
@@ -875,10 +879,9 @@ impl ChatList {
     /// The 1:1 chat with `mri`, when the list built its row: a bot's too, which the row's `partner` never is.
     #[must_use]
     pub fn one_to_one_with(&self, mri: &str) -> Option<&str> {
-        self.cache
-            .values()
-            .find(|cached| cached.row.kind == RowKind::OneToOne && cached.people == [mri])
-            .map(|cached| cached.row.id.as_str())
+        self.findable_rows()
+            .find(|row| row.kind == RowKind::OneToOne && self.one_to_ones.get(&row.id).is_some_and(|with| with == mri))
+            .map(|row| row.id.as_str())
     }
 
     /// Whether the stored chat identifies whom a call would ring, even while catch-up is still reading its roster.
@@ -1011,11 +1014,20 @@ impl ChatList {
             notes,
         }) = rows
         {
+            // a chat's members do not change with names: a load of an older generation still tells them
+            for (conversation, people) in &built {
+                if let [with] = people.as_slice()
+                    && RowKind::of(&conversation.kind) == RowKind::OneToOne
+                {
+                    self.one_to_ones.insert(conversation.id.clone(), with.clone());
+                }
+            }
             if generation == self.generation {
                 self.keep_built(&rows, built, at);
             }
             let listed: HashSet<&str> = rows.iter().map(|row| row.id.as_str()).collect();
             self.cache.retain(|id, _| listed.contains(id.as_str()));
+            self.one_to_ones.retain(|id, _| listed.contains(id.as_str()));
             let arranged = arrange(rows, &listing, notes, &self.opened());
             self.show(arranged);
             self.trace_rows();

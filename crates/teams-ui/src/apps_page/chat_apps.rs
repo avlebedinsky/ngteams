@@ -116,6 +116,12 @@ impl ChatAppsDialog {
         self.pictures.contains_key(id)
     }
 
+    /// Whether Remove's question shows, and whether its write failed.
+    #[must_use]
+    pub fn removing(&self) -> Option<(&StoreApp, bool)> {
+        self.removing.as_ref().map(|store| (store, self.failed))
+    }
+
     /// A row's Remove: asks first.
     pub fn ask_remove(&mut self, store: StoreApp, cx: &mut Context<Self>) {
         self.removing = Some(store);
@@ -142,20 +148,28 @@ impl ChatAppsDialog {
         cx.notify();
         self.removing_now = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let answer = reply.await;
-            let _ = this.update(cx, |this, cx| {
-                this.removing_now = None;
-                if answer.is_ok() {
-                    this.removing = None;
-                    this.changed = true;
-                    this.apps
-                        .iter_mut()
-                        .for_each(|apps| apps.retain(|listed| listed.app.id != id));
-                } else {
-                    this.failed = true;
-                }
-                cx.notify();
-            });
+            let _ = this.update(cx, |this, cx| this.removed(&id, answer.is_ok(), cx));
         }));
+    }
+
+    /// The reply to the Remove of the app with `id`: gone from the list when `taken`. The question may now be about a
+    /// different app, or closed: only its own reply changes it.
+    fn removed(&mut self, id: &str, taken: bool, cx: &mut Context<Self>) {
+        self.removing_now = None;
+        let asked = self.removing.as_ref().is_some_and(|open| open.app.id == id);
+        if taken {
+            self.changed = true;
+            self.apps
+                .iter_mut()
+                .for_each(|apps| apps.retain(|listed| listed.app.id != id));
+        }
+        if asked {
+            self.failed = !taken;
+            if taken {
+                self.removing = None;
+            }
+        }
+        cx.notify();
     }
 
     fn close(&mut self, cx: &mut Context<Self>) {

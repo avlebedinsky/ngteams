@@ -310,20 +310,27 @@ impl AppsPage {
         cx.notify();
         self.removing_now = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let answer = reply.await;
-            let _ = this.update(cx, |this, cx| {
-                this.removing_now = None;
-                if answer.is_ok() {
-                    this.removing = None;
-                    this.remove_failed = false;
-                    this.mine
-                        .iter_mut()
-                        .for_each(|mine| mine.retain(|listed| listed.app.id != id));
-                } else {
-                    this.remove_failed = true;
-                }
-                cx.notify();
-            });
+            let _ = this.update(cx, |this, cx| this.removed(&id, answer.is_ok(), cx));
         }));
+    }
+
+    /// The reply to the Remove of the app with `id`: gone from the list when `taken`. The question may now be about a
+    /// different app, or closed: only its own reply changes it.
+    fn removed(&mut self, id: &str, taken: bool, cx: &mut Context<Self>) {
+        self.removing_now = None;
+        let asked = self.removing.as_ref().is_some_and(|open| open.app.id == id);
+        if taken {
+            self.mine
+                .iter_mut()
+                .for_each(|mine| mine.retain(|listed| listed.app.id != id));
+        }
+        if asked {
+            self.remove_failed = !taken;
+            if taken {
+                self.removing = None;
+            }
+        }
+        cx.notify();
     }
 
     /// Whether Remove's question shows, and whether its write failed.

@@ -18,7 +18,8 @@ use std::sync::Arc;
 use common::Rig;
 use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext};
 use serde_json::json;
-use teams_core::{AppListing, TeamWritten};
+use teams_core::sync::CatchUpReport;
+use teams_core::{AppListing, Cause, Event, TeamWritten};
 use teams_proto::{StoreApp, StoreSections, TeamWrite};
 use teams_store::{Conversation, ConversationKind, Member};
 use teams_ui::ViewTrace;
@@ -208,6 +209,25 @@ fn an_added_bot_app_s_details_open_the_chat_with_its_bot() {
         last_activity: Some(50),
     };
     let (shell, cx) = shell_window_with(&rig, true, vec![bot_chat]);
+    // a catch-up drops the list's built rows: the bot's chat is still found while they are built again
+    cx.update(|_, cx| {
+        rig.models.apply(
+            Event::CaughtUp {
+                cause: Cause::Connected,
+                report: CatchUpReport::default(),
+            },
+            cx,
+        );
+    });
+    assert_eq!(
+        cx.update(|_, cx| shell
+            .read(cx)
+            .list()
+            .read(cx)
+            .one_to_one_with("28:b4")
+            .map(str::to_owned)),
+        Some(BOT_CHAT.to_owned())
+    );
     open_store(&shell, cx);
     click(cx, "apps-org-0");
     assert!(bounds(cx, "app-details-added").is_none());
@@ -239,6 +259,30 @@ fn an_add_before_add_to_a_chat_shows_the_app_added_in_the_store() {
         cx.update(|_, cx| page.read(cx).added(HELPER)),
         "the store reads the account's apps again"
     );
+}
+
+#[test]
+fn add_to_a_chat_waits_for_an_add_in_flight() {
+    let rig = Rig::start();
+    let (shell, cx) = shell_window(&rig, true);
+    open_store(&shell, cx);
+    click(cx, "apps-org-0");
+    let dialog = cx
+        .update(|_, cx| shell.read(cx).team_dialog().cloned())
+        .and_then(|dialog| dialog.downcast::<AppDetailsDialog>().ok())
+        .expect("the details");
+    cx.update(|_, cx| {
+        dialog.update(cx, |dialog, cx| {
+            dialog.add(cx);
+            dialog.add_to(false, cx);
+        });
+    });
+    cx.run_until_parked();
+    assert!(
+        bounds(cx, "app-place-dialog").is_none(),
+        "the details stay while Add runs"
+    );
+    assert!(cx.update(|_, cx| dialog.read(cx).added()));
 }
 
 #[test]
@@ -300,6 +344,168 @@ fn a_refused_removal_says_so_and_keeps_the_app() {
     click(cx, "apps-remove-confirm");
     assert!(bounds(cx, "apps-remove-problem").is_some());
     assert!(bounds(cx, "apps-mine-0").is_some());
+}
+
+fn manage_page(rig: &Rig, mine: Vec<StoreApp>) -> (Entity<AppsPage>, &'static mut VisualTestContext) {
+    *rig.core.user_apps.lock().unwrap() = mine;
+    let (shell, cx) = shell_window(rig, true);
+    open_store(&shell, cx);
+    click(cx, "apps-manage");
+    let page = cx.update(|_, cx| shell.read(cx).apps().cloned()).expect("the page");
+    (page, cx)
+}
+
+fn removes(rig: &Rig) -> usize {
+    writes(rig)
+        .iter()
+        .filter(|write| {
+            matches!(
+                write,
+                TeamWrite::RemovePersonalApp { .. } | TeamWrite::RemoveChatApp { .. }
+            )
+        })
+        .count()
+}
+
+#[test]
+fn a_second_remove_before_the_reply_sends_no_second_write() {
+    let rig = Rig::start();
+    let (page, cx) = manage_page(&rig, vec![app(HELPER)]);
+    cx.update(|_, cx| {
+        page.update(cx, |page, cx| {
+            page.ask_remove(app(HELPER), cx);
+            page.remove(cx);
+            page.remove(cx);
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(removes(&rig), 1, "{:?}", writes(&rig));
+    assert!(cx.update(|_, cx| page.read(cx).removing().is_none()));
+}
+
+#[test]
+fn a_refresh_keeps_the_remove_in_flight() {
+    let rig = Rig::start();
+    let (page, cx) = manage_page(&rig, vec![app(HELPER)]);
+    cx.update(|_, cx| {
+        page.update(cx, |page, cx| {
+            page.ask_remove(app(HELPER), cx);
+            page.remove(cx);
+            page.refresh(cx);
+        });
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.update(|_, cx| page.read(cx).removing().is_none()),
+        "the reply came through: the question closed"
+    );
+}
+
+#[test]
+fn a_failed_remove_can_be_tried_again() {
+    let rig = Rig::start();
+    let (page, cx) = manage_page(&rig, vec![app(HELPER)]);
+    *rig.core.team_written.lock().unwrap() = None;
+    click(cx, "apps-mine-0-expand");
+    click(cx, "apps-mine-0-remove");
+    click(cx, "apps-remove-confirm");
+    assert!(bounds(cx, "apps-remove-problem").is_some());
+    click(cx, "apps-remove-confirm");
+    assert_eq!(removes(&rig), 2, "{:?}", writes(&rig));
+    assert!(cx.update(|_, cx| page.read(cx).removing().is_some_and(|(_, failed)| failed)));
+}
+
+#[test]
+fn a_remove_s_reply_leaves_the_question_about_another_app() {
+    let rig = Rig::start();
+    let (page, cx) = manage_page(&rig, vec![app(HELPER), app(POLLS)]);
+    cx.update(|_, cx| {
+        page.update(cx, |page, cx| {
+            page.ask_remove(app(HELPER), cx);
+            page.remove(cx);
+            page.keep(cx);
+            page.ask_remove(app(POLLS), cx);
+        });
+    });
+    cx.run_until_parked();
+    assert!(!cx.update(|_, cx| page.read(cx).added(HELPER)), "the first app went");
+    assert!(
+        cx.update(|_, cx| page
+            .read(cx)
+            .removing()
+            .is_some_and(|(store, failed)| store.app.id == POLLS && !failed)),
+        "the question about the second app stays, with no problem"
+    );
+    *rig.core.team_written.lock().unwrap() = None;
+    cx.update(|_, cx| {
+        page.update(cx, |page, cx| {
+            page.ask_remove(app(POLLS), cx);
+            page.remove(cx);
+            page.ask_remove(app(HELPER), cx);
+        });
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.update(|_, cx| page
+            .read(cx)
+            .removing()
+            .is_some_and(|(store, failed)| store.app.id == HELPER && !failed)),
+        "a failure of the other app's write does not show on this question"
+    );
+}
+
+fn chat_apps(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<ChatAppsDialog> {
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| shell.open_chat_apps(GROUP_CHAT.to_owned(), window, cx));
+    });
+    cx.run_until_parked();
+    cx.update(|_, cx| shell.read(cx).team_dialog().cloned())
+        .and_then(|dialog| dialog.downcast::<ChatAppsDialog>().ok())
+        .expect("the chat's apps")
+}
+
+#[test]
+fn a_chat_s_second_remove_before_the_reply_sends_no_second_write() {
+    let rig = Rig::start();
+    *rig.core.chat_apps.lock().unwrap() = vec![app(POLLS)];
+    let (shell, cx) = shell_window(&rig, true);
+    let dialog = chat_apps(&shell, cx);
+    cx.update(|_, cx| {
+        dialog.update(cx, |dialog, cx| {
+            dialog.ask_remove(app(POLLS), cx);
+            dialog.remove(cx);
+            dialog.remove(cx);
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(removes(&rig), 1, "{:?}", writes(&rig));
+}
+
+#[test]
+fn a_chat_s_remove_reply_leaves_the_question_about_another_app() {
+    let rig = Rig::start();
+    *rig.core.chat_apps.lock().unwrap() = vec![app(POLLS), app(HELPER)];
+    let (shell, cx) = shell_window(&rig, true);
+    let dialog = chat_apps(&shell, cx);
+    cx.update(|_, cx| {
+        dialog.update(cx, |dialog, cx| {
+            dialog.ask_remove(app(POLLS), cx);
+            dialog.remove(cx);
+            dialog.ask_remove(app(HELPER), cx);
+        });
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.update(|_, cx| dialog
+            .read(cx)
+            .removing()
+            .is_some_and(|(store, failed)| store.app.id == HELPER && !failed)),
+        "the question about the second app stays"
+    );
+    assert!(
+        cx.update(|_, cx| dialog.read(cx).shown(cx).iter().all(|store| store.app.id != POLLS)),
+        "the first app went"
+    );
 }
 
 #[test]
