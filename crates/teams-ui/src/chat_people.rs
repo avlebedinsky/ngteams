@@ -252,6 +252,10 @@ impl Placed {
 /// A 1:1 chat's partner as the chat names them: the list row's (its name, its picture), else the one its id names.
 fn partner_of(list: &Entity<ChatList>, chat: &str, me: &str, cx: &gpui::App) -> Option<Recipient> {
     let row = list.read(cx).row(chat);
+    // a bot's chat is with no person
+    if row.is_some_and(|row| row.bot.is_some()) {
+        return None;
+    }
     let mri = row
         .and_then(|row| row.partner.clone())
         .or_else(|| chat_list::one_to_one_partner(chat, me))

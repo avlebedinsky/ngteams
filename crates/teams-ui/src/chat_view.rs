@@ -152,6 +152,7 @@ use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::{presence, presence_badge};
 
+mod bot_chat;
 mod bots;
 pub mod channel;
 mod events;
@@ -1013,6 +1014,10 @@ pub struct ChatView {
     /// People as the engine has them, by MRI: the ask whose answer the entry takes, and that answer (`None`: asked,
     /// no answer yet or none).
     people: HashMap<String, (u64, Option<Shown>)>,
+    /// The apps of the bots among them, as the engine found them ([`crate::bot_face`]).
+    bot_apps: HashMap<String, crate::bot_face::BotApp>,
+    /// A 1:1 chat's bot and its app, once found: its intro shows while the chat holds no message.
+    chat_bot: Option<(String, Option<crate::bot_face::BotApp>)>,
     /// The last ask's number: an answer to an earlier ask of someone asked again since is dropped.
     asks: u64,
     /// The models' revision the people were last asked at: someone renamed since is asked again.
@@ -1224,6 +1229,8 @@ impl ChatView {
             history: History::More,
             horizon: None,
             people: HashMap::new(),
+            bot_apps: HashMap::new(),
+            chat_bot: None,
             asks: 0,
             people_seen,
             rendered: HashMap::new(),
@@ -1293,6 +1300,7 @@ impl ChatView {
         self.typing_changed(cx);
         self.sync_on_open(cx);
         self.read_saved(cx);
+        self.ask_chat_bot(cx);
         self
     }
 
@@ -2042,9 +2050,13 @@ impl ChatView {
             .text_of(held)
             .map_or_else(|| compose::rich_text_of(held), |shown| shown.as_ref().clone());
         let loaded = compose::load(&text, &mentioned);
+        let bots = rich_text::mentioned_bots(held.properties.as_deref());
         let id = held.id.clone();
         self.compose.update(cx, |compose, cx| match loaded {
-            Ok(loaded) => compose.edit(id, loaded, window, cx),
+            Ok(loaded) => {
+                compose.know_bots(bots);
+                compose.edit(id, loaded, window, cx);
+            }
             Err(why) => compose.show_problem(format!("This message can't be edited here: {why}"), cx),
         });
     }
@@ -2665,15 +2677,23 @@ impl ChatView {
         let core = Arc::clone(&self.core);
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             let mut found = Vec::new();
+            let mut bots = Vec::new();
             for mri in asked {
-                if let Ok(person) = core.person(mri.clone()).await {
+                // a bot is shown by its app, a bot no app names as a person is
+                if let Some(app) = crate::bot_face::bot_app(core.as_ref(), &mri).await {
+                    found.push((mri.clone(), bot_chat::shown(&app)));
+                    bots.push((mri, app));
+                } else if let Ok(person) = core.person(mri.clone()).await {
                     found.push((mri, Shown::of(person)));
                 }
             }
             if found.is_empty() {
                 return;
             }
-            let _ = this.update(cx, |view, cx| view.answered(ask, found, cx));
+            let _ = this.update(cx, |view, cx| {
+                view.bot_apps.extend(bots);
+                view.answered(ask, found, cx);
+            });
         })
         .detach();
     }
@@ -2744,9 +2764,17 @@ impl ChatView {
         if mri == self.core.me() {
             return "You".to_owned();
         }
-        self.shown(mri)
-            .and_then(|shown| shown.name.as_ref())
-            .map_or_else(|| mri.to_owned(), ToString::to_string)
+        self.shown(mri).and_then(|shown| shown.name.as_ref()).map_or_else(
+            // a bot is never named by its MRI
+            || {
+                if crate::bot_face::is_bot(mri) {
+                    crate::chat_list::unnamed(mri).to_owned()
+                } else {
+                    mri.to_owned()
+                }
+            },
+            ToString::to_string,
+        )
     }
 
     /// A person as the engine last answered, if it has.
@@ -3536,6 +3564,8 @@ impl ChatView {
             .is_some_and(crate::workflows_app::is_workflows_bot)
         {
             crate::workflows_app::bot_avatar(AVATAR, palette).into_any_element()
+        } else if let Some(bot) = item.sender.as_deref().filter(|sender| crate::bot_face::is_bot(sender)) {
+            crate::bot_face::tile(self.bot_apps.get(bot), AVATAR, palette).into_any_element()
         } else {
             item.face
                 .avatar(&item.sender_name, Size::Medium)
@@ -5364,6 +5394,7 @@ impl Render for ChatView {
             .flex_1()
             .min_h_0()
             .child(rows)
+            .children(self.bot_intro(palette))
             .children(pill);
         Self::file_drop_target(cx)
             // Escape the compose box handed on (nothing to cancel there): the list takes the focus

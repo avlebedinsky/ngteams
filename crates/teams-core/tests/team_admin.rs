@@ -654,6 +654,81 @@ fn app_ids(apps: &[teams_proto::StoreApp]) -> Vec<&str> {
     apps.iter().map(|app| app.app.id.as_str()).collect()
 }
 
+const HELPER_BOT: &str = "28:00000000-0000-4000-8000-00000000b004";
+const APPROVALS_BOT: &str = "28:00000000-0000-4000-8000-00000000b006";
+
+#[tokio::test]
+async fn a_bot_is_known_by_its_app_from_the_account_s_apps_and_the_definitions_read() {
+    let rig = setup().await;
+    let requests = rig.handle.requests();
+    let id_of = |app: Option<teams_proto::StoreApp>| app.map(|app| app.app.id);
+
+    // the account's apps (Teams' and pre-consented ones too) name the bot
+    assert_eq!(
+        id_of(requests.bot_app(APPROVALS_BOT).await.unwrap()),
+        Some(PRE_CONSENTED.to_owned())
+    );
+    assert_eq!(
+        id_of(requests.known_bot_app("00000000-0000-4000-8000-00000000B006").await.unwrap()),
+        Some(PRE_CONSENTED.to_owned()),
+        "a 1:1 chat's id names the bot bare, in any case"
+    );
+    // a person's id is never read as an app's
+    let b = LAB_B.trim_start_matches("8:orgid:");
+    assert!(requests.known_bot_app(b).await.unwrap().is_none());
+    // a bot no read brought is read by its id as an app's, once a run
+    assert!(requests.bot_app(HELPER_BOT).await.unwrap().is_none());
+    assert!(requests.bot_app(HELPER_BOT).await.unwrap().is_none());
+    let sent = rig.mock.received_requests().await;
+    let posted = |path: &str, body: Option<&str>| {
+        sent.iter()
+            .filter(|request| request.url.path().ends_with(path))
+            .filter(|request| body.is_none_or(|body| String::from_utf8_lossy(&request.body).contains(body)))
+            .count()
+    };
+    assert_eq!(posted("users/apps/aggregatedEntitlements", None), 1, "the account's apps once");
+    assert_eq!(posted("users/apps/batchedDefinitions", Some("b004")), 1);
+    assert_eq!(posted("users/apps/batchedDefinitions", Some(b)), 0);
+    // the store's apps bring its app: found from then on
+    requests.app_listing().await.unwrap();
+    assert_eq!(
+        id_of(requests.bot_app(HELPER_BOT).await.unwrap()),
+        Some(HELPER.to_owned())
+    );
+}
+
+#[tokio::test]
+async fn the_bots_people_can_mention_are_those_of_the_chat_s_or_the_team_s_apps() {
+    let rig = setup().await;
+    let requests = rig.handle.requests();
+    let listing = requests.app_listing().await.unwrap();
+    let definition = |id: &str| listing.app(id).expect("defined").definition.clone();
+    assert!(requests.mentionable_bots(CHAT, false).await.unwrap().is_empty());
+    for app in [POLLS, HELPER] {
+        requests
+            .team_write(
+                TeamWrite::AddChatApp {
+                    chat: CHAT.to_owned(),
+                    app: definition(app),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    // Helper's bot is for 1:1 chats only
+    assert_eq!(app_ids(&requests.mentionable_bots(CHAT, false).await.unwrap()), [POLLS]);
+    // the team's Made-up Updates has a bot for teams; Made-up Planner none
+    assert_eq!(
+        app_ids(&requests.mentionable_bots(TEAM, true).await.unwrap()),
+        ["00000000-0000-4000-8000-00000000a002"]
+    );
+    // what they read is known by its bots from then on, a failed read is nothing
+    assert!(requests.known_bot_app("00000000-0000-4000-8000-00000000b002").await.unwrap().is_some());
+    rig.mock.refuse_next("GET", "chatentitlements", 500).await;
+    assert!(requests.mentionable_bots(CHAT, false).await.unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn a_team_write_is_sent_and_its_change_is_listed_at_once() {
     let mut rig = setup().await;

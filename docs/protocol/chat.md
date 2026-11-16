@@ -962,6 +962,15 @@ The bundle names more `mentionType`s than `person` (`bot` with an `appId`, `ever
 `community`, `nearby`, `share-contact`) and a reader that accepts `mentions` as a string or a list; of those only
 `everyone` was seen ([A mention of everyone](#a-mention-of-everyone-abc-everyone)).
 
+**A bot's mention** (from the bundle and the Bot Framework's documentation, **unseen**: no bot in the lab tenant can
+be mentioned within the lab rule, `docs/protocol/bots.md`): the span as a person's, and the entry `{"@type":
+"http://schema.skype.com/Mention", "itemid": "0", "mri": "28:<bot id>", "mentionType": "bot", "displayName": "<the
+app's name>", "appId": "<the app's id>"}`. The native client sends it in that form behind `NGTEAMS_BOTS=1`
+(`MessageText::new_with_bots`): its picker offers, after a group chat's members, the bots of the apps added to the chat
+(`chats/<chat>/apps/chatentitlements`, those `Installed`) or to a channel's team (`teams/apps/aggregatedEntitlements`)
+whose definition gives the bot the `groupChat` or `team` scope and doesn't make it notification-only, by the app's name
+and icon. A capture that differs changes the client and the own server together.
+
 Mention wire entries name an MRI. A person mention reaches that person; an `everyone` entry naming the destination
 group chat reaches its members. The native composer only builds captured mention forms, and the agent's lab check
 must include these recipients. There is no membership classifier on the outgoing request.

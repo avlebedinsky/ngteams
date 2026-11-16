@@ -84,6 +84,31 @@ impl TeamApps {
         apps.sort_by_key(|app| app.name.to_lowercase());
         apps
     }
+
+    /// The apps installed on the team with their definitions, by name, as its answer `body` lists them; one whose
+    /// definition [`crate::AppDefinition`] doesn't take is left out.
+    #[must_use]
+    pub fn read_defined(&self, body: &[u8]) -> Vec<StoreApp> {
+        let Ok(answer) = serde_json::from_slice::<Value>(body) else {
+            return Vec::new();
+        };
+        let value = answer.get("value").unwrap_or(&answer);
+        let definitions = value.get("definitions");
+        let mut apps: Vec<StoreApp> = value
+            .pointer("/teamsEntitlements")
+            .and_then(|teams| teams.get(&self.team))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|entitlement| entitlement.get("state").and_then(Value::as_str) == Some("Installed"))
+            .filter_map(|entitlement| {
+                let id = entitlement.get("id")?.as_str()?;
+                store_app(definitions?.get(id)?)
+            })
+            .collect();
+        apps.sort_by_key(|app| app.app.name.to_lowercase());
+        apps
+    }
 }
 
 impl Request for TeamApps {

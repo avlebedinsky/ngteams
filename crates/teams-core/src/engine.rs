@@ -1636,6 +1636,26 @@ impl EngineRequests {
         self.ask(|reply| Request::TeamApps(Box::new(TeamAppsAsk::ChatApps { chat, reply })))
     }
 
+    /// The app of `bot` (`28:<id>`), from the app definitions this run read, else the account's apps, else its id read
+    /// as an app's (`team_apps`'s bot index); `None` when none names it.
+    pub fn bot_app(&self, bot: impl Into<String>) -> Reply<Option<StoreApp>> {
+        let bot = bot.into();
+        self.ask(|reply| Request::TeamApps(Box::new(TeamAppsAsk::BotApp { bot, known: false, reply })))
+    }
+
+    /// [`Self::bot_app`] for an id that may be a bot's or a person's (a 1:1 chat's other one): found only among the
+    /// definitions read and the account's apps, never by reading the id as an app's.
+    pub fn known_bot_app(&self, id: impl Into<String>) -> Reply<Option<StoreApp>> {
+        let bot = id.into();
+        self.ask(|reply| Request::TeamApps(Box::new(TeamAppsAsk::BotApp { bot, known: true, reply })))
+    }
+
+    /// The apps added to `place` (a chat, or a team when `team`) whose bot people can mention there, read now.
+    pub fn mentionable_bots(&self, place: impl Into<String>, team: bool) -> Reply<Vec<StoreApp>> {
+        let place = place.into();
+        self.ask(|reply| Request::TeamApps(Box::new(TeamAppsAsk::MentionableBots { place, team, reply })))
+    }
+
     /// How a team's channel did over `period`, read now.
     pub fn channel_analytics(
         &self,
@@ -2943,7 +2963,8 @@ where
             .ok_or(EngineError::ActivityAppUnavailable)?;
         let client = Arc::clone(&self.channels.client);
         let cache = Arc::clone(&self.channels.app_definitions);
-        let mut reading = std::pin::pin!(crate::team_apps::definition(&client, &cache, id));
+        let bots = Arc::clone(&self.channels.bots);
+        let mut reading = std::pin::pin!(crate::team_apps::definition(&client, &cache, &bots, id));
         let definition = tokio::select! {
             result = &mut reading => result,
             () = self.inbox.serve(&mut self.store) => reading.await,

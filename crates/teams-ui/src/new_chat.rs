@@ -405,6 +405,7 @@ impl NewChat {
             named: true,
             picture: None,
             partner: None,
+            bot: None,
             faces,
             members: self.people.len() + 1,
             chat_with: None,

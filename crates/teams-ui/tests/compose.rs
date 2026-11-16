@@ -696,10 +696,12 @@ fn the_picker_offers_the_names_holding_the_query() {
         Candidate {
             mri: LAB_B.to_owned(),
             name: "Lab Bee".into(),
+            app: None,
         },
         Candidate {
             mri: "8:orgid:00000000-0000-4000-8000-00000000000c".to_owned(),
             name: "Lab Sea".into(),
+            app: None,
         },
     ];
     assert_eq!(matching(&candidates, "").len(), 2);
@@ -713,6 +715,7 @@ fn a_group_chat_s_picker_offers_everyone_after_its_members_and_a_one_to_one_chat
     let members = [Candidate {
         mri: LAB_B.to_owned(),
         name: "Lab Bee".into(),
+        app: None,
     }];
     let names = |offered: Vec<Candidate>| offered.into_iter().map(|c| c.name.to_string()).collect::<Vec<_>>();
     assert_eq!(names(offered(GROUP, &members, "")), ["Lab Bee", "Everyone"]);
@@ -735,6 +738,7 @@ fn a_group_chat_s_picker_offers_everyone_after_its_members_and_a_one_to_one_chat
         .map(|n| Candidate {
             mri: format!("8:orgid:00000000-0000-4000-8000-{n:012x}"),
             name: format!("Member {n}").into(),
+            app: None,
         })
         .collect();
     assert!(

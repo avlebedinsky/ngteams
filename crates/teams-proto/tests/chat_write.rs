@@ -658,6 +658,83 @@ async fn a_mention_of_everyone_goes_only_to_the_chat_it_names() -> TestResult {
     Ok(())
 }
 
+/// A made-up bot and its app (`teams-mock`'s Made-up Polls).
+const POLLS_BOT: &str = "28:00000000-0000-4000-8000-00000000b005";
+const POLLS_APP: &str = "00000000-0000-4000-8000-00000000a005";
+
+/// "Made-up Polls\u{a0}a made-up question" in the mock's group chat, mentioning the made-up bot.
+fn mentioning_polls() -> MessageText {
+    MessageText::new_with_bots(
+        rich(vec![Node::Paragraph(vec![
+            mention("p", "Made-up Polls"),
+            run("\u{a0}a made-up question"),
+        ])]),
+        [("p".to_owned(), mri(POLLS_BOT))],
+        &std::collections::BTreeMap::from([(mri(POLLS_BOT), POLLS_APP.to_owned())]),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_bot_s_mention_is_sent_as_a_person_s_with_its_type_and_app() -> TestResult {
+    let request = SendMessage::new(ABC_CHAT, lab_a(), mentioning_polls())
+        .composed_at(NEW_YEAR_MS + 180_000)
+        .with_client_message_id("7777777777777777777");
+
+    let sent = read_listed(sent(ChatWrite::Send(request)).await?)?;
+
+    // the post of a mention of everyone, key for key, but for the span's name, the text and the entry: the web
+    // bundle's bot entry (`docs/protocol/chat.md`, "Mentions"), no capture of one yet
+    let mut expected = read_listed(recorded(&fixture("mention-everyone.json")?["request"])?)?;
+    let body = expected.body.as_mut().ok_or("no body")?;
+    body["content"] = json!(
+        "<p><readonly class=\"skipProofing\" itemtype=\"http://schema.skype.com/Mention\" spellcheck=\"false\"><span \
+         itemtype=\"http://schema.skype.com/Mention\" itemscope itemid=\"0\">Made-up Polls</span></readonly>&nbsp;a \
+         made-up question</p>"
+    );
+    body["properties"]["mentions"] = json!([{
+        "@type": "http://schema.skype.com/Mention",
+        "itemid": "0",
+        "mri": POLLS_BOT,
+        "mentionType": "bot",
+        "displayName": "Made-up Polls",
+        "appId": POLLS_APP,
+    }]);
+    assert_eq!(sent, expected);
+    Ok(())
+}
+
+#[test]
+fn a_bot_is_mentioned_only_with_its_app_and_keeps_it_when_stored() -> TestResult {
+    let text = mentioning_polls();
+    assert_eq!(text.participants(), &BTreeSet::from([mri(POLLS_BOT)]));
+    assert!(text.everyone().is_empty());
+    assert_eq!(text.bots().get(&mri(POLLS_BOT)).map(String::as_str), Some(POLLS_APP));
+    // the outbox's stored form and a check against the account's cloud keep the app
+    let stored: MessageText = serde_json::from_value(serde_json::to_value(&text)?)?;
+    assert_eq!(stored, text);
+    assert_eq!(text.clone().for_cloud(&teams_proto::Cloud::Microsoft)?, text);
+    let paragraph = || rich(vec![Node::Paragraph(vec![mention("p", "Made-up Polls")])]);
+    let apps = |app: &str| std::collections::BTreeMap::from([(mri(POLLS_BOT), app.to_owned())]);
+    // without its app, or with one that isn't an app's id, it has no wire form
+    for refused in [
+        MessageText::new(paragraph(), [("p".to_owned(), mri(POLLS_BOT))]),
+        MessageText::new_with_bots(paragraph(), [("p".to_owned(), mri(POLLS_BOT))], &apps("")),
+        MessageText::new_with_bots(paragraph(), [("p".to_owned(), mri(POLLS_BOT))], &apps("a\"b")),
+        MessageText::new_with_bots(paragraph(), [("p".to_owned(), mri("28:not a bot"))], &apps(POLLS_APP)),
+    ] {
+        assert!(matches!(refused, Err(ComposeError::NotAPerson(_))), "{refused:?}");
+    }
+    // an app given for a bot the text doesn't mention is left out
+    let person = MessageText::new_with_bots(
+        rich(vec![Node::Paragraph(vec![mention("m", "Lab B")])]),
+        [("m".to_owned(), mri(LAB_B))],
+        &apps(POLLS_APP),
+    )?;
+    assert!(person.bots().is_empty());
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_quoted_reply_is_sent_as_the_reply_fixture() -> TestResult {
     let request = SendMessage::new(AB_CHAT, lab_a(), reply())

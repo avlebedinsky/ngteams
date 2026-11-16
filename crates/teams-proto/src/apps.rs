@@ -43,6 +43,23 @@ impl UserApps {
             definitions.and_then(|definitions| definitions.get(id))
         })
     }
+
+    /// Every app its answer `body` defines (`definitions`), whatever the account's entitlement to it: Teams' own and
+    /// the store's offers too, as Teams finds a bot's app among them.
+    #[must_use]
+    pub fn defined(body: &[u8]) -> Vec<StoreApp> {
+        let Ok(answer) = serde_json::from_slice::<Value>(body) else {
+            return Vec::new();
+        };
+        let value = answer.get("value").unwrap_or(&answer);
+        value
+            .get("definitions")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flat_map(serde_json::Map::values)
+            .filter_map(store_app)
+            .collect()
+    }
 }
 
 impl Request for UserApps {
@@ -441,6 +458,25 @@ impl AppDefinition {
     #[must_use]
     pub fn language_count(&self) -> usize {
         self.listed("supportedLanguages").count()
+    }
+
+    /// The bot it brings that people can mention in a group chat (`groupChat` scope) or a team's channel (`team`), as
+    /// its MRI: one that isn't notification-only, as Teams' picker offers none of those.
+    #[must_use]
+    pub fn mentionable_bot(&self, team: bool) -> Option<crate::Mri> {
+        let wanted = if team { "team" } else { "groupchat" };
+        self.listed("bots").find_map(|bot| {
+            let scoped = bot
+                .get("scopes")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .any(|scope| scope.eq_ignore_ascii_case(wanted));
+            let quiet = bot.get("isNotificationOnly").and_then(Value::as_bool) == Some(true);
+            let id = bot.get("id")?.as_str().filter(|id| !id.is_empty())?;
+            (scoped && !quiet).then(|| crate::Mri::new(format!("28:{id}")))
+        })
     }
 
     /// The bot it brings that a person can chat with one to one (a bot with the `personal` scope that isn't

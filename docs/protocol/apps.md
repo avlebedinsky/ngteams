@@ -88,6 +88,18 @@ apps", Sort, "Find by name", and a row per app with a "..." of Copy link and **R
   "Installed", "installedVersion", "createdTime", "installedBy", "installerIdentity", "botMetadata"}}`. The chat then
   showed "<name> added <app> here. Try an action below to see how it works."
 
+## A bot's app
+
+A bot's chat with the account (`19:<account>_<bot id>@unq.gbl.spaces`, the bot by its bare id as a person is) and a
+bot's messages (`28:<bot id>`) are shown by the app whose definition names the bot in `bots[].id`, as Teams shows them:
+the app's name and its picture on a tile, the app's details under the chat's About. The native engine keeps every
+definition its reads bring (the store, the account's apps, a chat's and a team's) by its bots' ids for the run; a bot
+none of them names is looked for in the account's apps (`aggregatedEntitlements`, every definition in its answer, Teams'
+own and the store's offers too), then, for an id known to be a bot's (a `28:` member or sender of the chat), by its id as
+an app's in `batchedDefinitions`, once a run (many apps' bot has the app's id). An id that may be a person's is never
+read as an app's. A 1:1 chat whose other one is neither a stored `28:` member, nor a `28:` sender, nor a bot of a known
+app is with a person.
+
 ## Own servers
 
 An own-server account's definitions name their pictures on the server's own origin under `/teamsappdata/` (the CDN's

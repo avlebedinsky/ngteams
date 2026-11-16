@@ -15,7 +15,7 @@ pub(super) const STORE: RailItem = RailItem {
 };
 
 /// Whether the account offers the Store and its dialogs: the flag is on and its cloud serves apps.
-fn apps_offered(core: &dyn Core, cx: &App) -> bool {
+pub(super) fn apps_offered(core: &dyn Core, cx: &App) -> bool {
     bots_on(cx) && core.capabilities().apps
 }
 
@@ -81,6 +81,18 @@ impl Shell {
 
     /// An app's details over the window.
     pub fn open_app_details(&mut self, store: teams_proto::StoreApp, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_app_details_from(store, None, window, cx);
+    }
+
+    /// [`Self::open_app_details`], from `chat` (the app's bot's chat, whose About opened it): the app is the account's,
+    /// and Open goes back to that chat.
+    pub(super) fn open_app_details_from(
+        &mut self,
+        store: teams_proto::StoreApp,
+        chat: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !apps_offered(self.core.as_ref(), cx) {
             return;
         }
@@ -93,9 +105,16 @@ impl Shell {
                 picture: page.picture_of(&store.app.id),
             }
         });
-        let known = DetailsContext {
-            bot_chat: self.bot_chat(&store, cx),
-            ..known
+        let known = match chat {
+            Some(chat) => DetailsContext {
+                added: true,
+                bot_chat: Some(chat),
+                ..known
+            },
+            None => DetailsContext {
+                bot_chat: self.bot_chat(&store, cx),
+                ..known
+            },
         };
         let core = Arc::clone(&self.core);
         let dialog = cx.new(|cx| AppDetailsDialog::new(core, store, known, window, cx));

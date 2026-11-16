@@ -32,8 +32,12 @@
 //! - **Names** (M2 Task 12): a 1:1 chat by the other member's name as the engine has it ([`Core::person`]: their
 //!   profile's, else their newest message's, else one the binary knew); a group or meeting chat by its topic, else its
 //!   other members' first names as Teams joins them ("Evgenia and Sean"). Someone without a name is never shown by
-//!   MRI: "Unknown user", a bot "Bot" (the test call's echo service "Test call").
+//!   MRI: "Unknown user", a bot "Bot" (the test call's echo service "Test call"). A 1:1 chat with a bot
+//!   ([`ChatRow::bot`]) is named by the bot's app, as the engine finds it ([`crate::bot_face`]); its id names the bot by
+//!   its bare id, as a person's names them (`19:<account>_<bot>@unq.gbl.spaces`), so the other one is a bot when it is a
+//!   `28:` member, a `28:` sender in the chat, or a bot of an app the engine knows of.
 //! - **Avatars** ([`AVATAR`] across): a 1:1 chat's other member's picture, else the initials of a name, else nothing;
+//!   a bot's chat its app's icon on a rounded tile ([`crate::bot_face::tile`]);
 //!   a group chat's two of its other members, half each, as Teams splits it; a meeting chat Teams' calendar. Every
 //!   place that draws a chat draws it by the same rule ([`chat_avatar`]): its header, search, New message, its call.
 //! - **Presence** (M2 Task 17): a 1:1 chat's avatar carries its other member's presence badge
@@ -176,6 +180,8 @@ pub struct ChatRow {
     pub picture: Option<Picture>,
     /// A 1:1 chat's other member (the account itself for its notes), whose presence the row shows; never a bot.
     pub partner: Option<String>,
+    /// A 1:1 chat's bot, when the other one is a bot or a service.
+    pub bot: Option<ChatBot>,
     /// A group chat's two members its avatar shows, half each (none for any other chat, or a group of one other).
     pub faces: Vec<HalfFace>,
     /// How many people the store lists in the chat, the account among them (0 when it lists none: a channel, the
@@ -196,6 +202,13 @@ pub struct ChatRow {
     pub unread: u64,
 }
 
+/// The bot a 1:1 chat is with: its MRI, and its app when the engine found one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatBot {
+    pub mri: String,
+    pub app: Option<crate::bot_face::BotApp>,
+}
+
 /// A member a group chat's avatar shows half of: the initial of their name, or their picture.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HalfFace {
@@ -203,32 +216,68 @@ pub struct HalfFace {
     pub picture: Option<Picture>,
 }
 
-/// The other member of a 1:1 chat its id names (`19:<oid>_<oid>@unq.gbl.spaces`), when one of the two is `me`.
+/// The other member of a 1:1 chat its id names (`19:<oid>_<oid>@unq.gbl.spaces`), when one of the two is `me`, as a
+/// work account: a bot's chat names its bot the same way, which only [`ChatRow::bot`] tells apart.
 #[must_use]
 pub fn one_to_one_partner(id: &str, me: &str) -> Option<String> {
+    one_to_one_other(id, me).map(|other| format!("8:orgid:{other}"))
+}
+
+/// The bare id of the other one a 1:1 chat's id names, when one of the two is `me`.
+#[must_use]
+pub fn one_to_one_other<'a>(id: &'a str, me: &str) -> Option<&'a str> {
     let pair = id.strip_prefix("19:")?.strip_suffix("@unq.gbl.spaces")?;
     let (first, second) = pair.split_once('_')?;
     let mine = me.strip_prefix("8:orgid:")?;
-    let other = match (first == mine, second == mine) {
-        (true, false) => second,
-        (false, true) => first,
-        _ => return None,
-    };
-    Some(format!("8:orgid:{other}"))
+    match (first == mine, second == mine) {
+        (true, false) => Some(second),
+        (false, true) => Some(first),
+        _ => None,
+    }
 }
 
-/// The chat's members other than `me`; a 1:1 chat without stored members gives the one its id names.
+/// The chat's members other than `me`; a 1:1 chat without stored members gives the one its id names, as `bot` when
+/// that is known to be a bot's MRI.
 #[must_use]
-pub fn others(conversation: &Conversation, members: &[Member], me: &str) -> Vec<String> {
+pub fn others(conversation: &Conversation, members: &[Member], me: &str, bot: Option<&str>) -> Vec<String> {
     let mut others: Vec<String> = members
         .iter()
         .map(|member| member.mri.clone())
         .filter(|mri| mri != me)
         .collect();
     if others.is_empty() && conversation.kind == ConversationKind::OneToOne {
-        others.extend(one_to_one_partner(&conversation.id, me));
+        others.extend(bot.map(str::to_owned).or_else(|| one_to_one_partner(&conversation.id, me)));
     }
     others
+}
+
+/// The bot a 1:1 chat is with, by its MRI (see the module docs): a `28:` member; with no other member stored, the one
+/// its id names when a message `page` holds came from them as a bot, or the engine knows them as an app's bot.
+async fn chat_bot(core: &dyn Core, conversation: &Conversation, members: &[Member], page: &[Message]) -> Option<String> {
+    if conversation.kind != ConversationKind::OneToOne {
+        return None;
+    }
+    one_to_one_bot(core, &conversation.id, members, page).await
+}
+
+/// The bot the 1:1 chat `id` is with, as [`ChatRow::bot`] finds it from the chat's `members` and a `page` of its
+/// messages; `None` when it is with a person.
+pub(crate) async fn one_to_one_bot(core: &dyn Core, id: &str, members: &[Member], page: &[Message]) -> Option<String> {
+    let me = core.me();
+    let mut others = members.iter().filter(|member| member.mri != me);
+    if let Some(other) = others.next() {
+        return crate::bot_face::is_bot(&other.mri).then(|| other.mri.clone());
+    }
+    let other = one_to_one_other(id, me)?;
+    let bot = format!("28:{other}");
+    let sent = page
+        .iter()
+        .filter_map(|message| message.sender.as_deref())
+        .any(|sender| sender.eq_ignore_ascii_case(&bot));
+    if sent || crate::bot_face::known_bot_app(core, other).await.is_some() {
+        return Some(bot);
+    }
+    None
 }
 
 /// A message the list previews (and the store counts unread): text, deleted or not.
@@ -283,7 +332,7 @@ fn withheld(message: &Message) -> Option<crate::policy_notice::PolicyNotice> {
 /// What a chat is called, as its row in the list names it (see the module docs).
 pub async fn chat_name(core: &dyn Core, conversation: &Conversation) -> SharedString {
     let members = core.members(conversation.id.clone()).await.unwrap_or_default();
-    name_of(core, conversation, &members).await.name
+    name_of(core, conversation, &members, &[]).await.name
 }
 
 /// The preview line of a chat from its newest messages (newest first), as Teams' list words it: the newest text
@@ -344,6 +393,7 @@ struct Naming {
     picture: Option<Picture>,
     /// A 1:1 chat's other member, when they have a presence.
     partner: Option<String>,
+    bot: Option<ChatBot>,
     faces: Vec<HalfFace>,
     /// The members whose names the name or the avatar read.
     people: Vec<String>,
@@ -384,14 +434,15 @@ pub fn joined(names: &[String], more: usize) -> String {
 }
 
 /// What a chat is called (see the module docs).
-async fn name_of(core: &dyn Core, conversation: &Conversation, members: &[Member]) -> Naming {
+async fn name_of(core: &dyn Core, conversation: &Conversation, members: &[Member], page: &[Message]) -> Naming {
     let topic = conversation
         .topic
         .as_deref()
         .map(str::trim)
         .filter(|topic| !topic.is_empty())
         .filter(|_| conversation.kind != ConversationKind::OneToOne);
-    let others = others(conversation, members, core.me());
+    let bot = chat_bot(core, conversation, members, page).await;
+    let others = others(conversation, members, core.me(), bot.as_deref());
     let kind = RowKind::of(&conversation.kind);
     // a meeting's chat shows its calendar, never its people: only its topic is read
     if let Some(topic) = topic
@@ -402,6 +453,7 @@ async fn name_of(core: &dyn Core, conversation: &Conversation, members: &[Member
             named: true,
             picture: None,
             partner: None,
+            bot: None,
             faces: Vec::new(),
             people: Vec::new(),
             chat_with: None,
@@ -413,6 +465,7 @@ async fn name_of(core: &dyn Core, conversation: &Conversation, members: &[Member
             named: topic.is_some(),
             picture: None,
             partner: None,
+            bot: None,
             faces: Vec::new(),
             people: Vec::new(),
             chat_with: None,
@@ -423,15 +476,19 @@ async fn name_of(core: &dyn Core, conversation: &Conversation, members: &[Member
         shown.push((mri.clone(), core.person(mri.clone()).await.ok().map(Shown::of)));
     }
     let people: Vec<String> = shown.iter().map(|(mri, _)| mri.clone()).collect();
-    // a 1:1 chat shows the other member's picture and presence (a bot has none to read)
+    // a 1:1 chat shows the other member's picture and presence (a bot has none to read), a bot's chat its app
     if conversation.kind == ConversationKind::OneToOne && others.len() == 1 {
         let (mri, person) = shown.swap_remove(0);
+        if crate::bot_face::is_bot(&mri) {
+            return bot_named(core, mri, person, people).await;
+        }
         let name = person.as_ref().and_then(|person| person.name.clone());
         return Naming {
             named: name.is_some(),
             name: name.unwrap_or_else(|| unnamed(&mri).into()),
             picture: person.and_then(|person| person.picture),
             partner: has_presence(&mri).then_some(mri),
+            bot: None,
             faces: Vec::new(),
             people,
             chat_with: None,
@@ -451,9 +508,29 @@ async fn name_of(core: &dyn Core, conversation: &Conversation, members: &[Member
         named,
         picture: None,
         partner: None,
+        bot: None,
         faces,
         people,
         chat_with,
+    }
+}
+
+/// A 1:1 chat with the bot `mri`: named by its app, else by the name its messages gave (`person`), else "Bot".
+async fn bot_named(core: &dyn Core, mri: String, person: Option<Shown>, people: Vec<String>) -> Naming {
+    let app = crate::bot_face::bot_app(core, &mri).await;
+    let name = app
+        .as_ref()
+        .map(|app| SharedString::from(app.name().to_owned()))
+        .or_else(|| person.as_ref().and_then(|person| person.name.clone()));
+    Naming {
+        named: name.is_some(),
+        name: name.unwrap_or_else(|| unnamed(&mri).into()),
+        picture: app.as_ref().and_then(|app| app.picture.clone()),
+        partner: None,
+        bot: Some(ChatBot { mri, app }),
+        faces: Vec::new(),
+        people,
+        chat_with: None,
     }
 }
 
@@ -513,6 +590,7 @@ pub async fn notes_row(core: &dyn Core) -> ChatRow {
         name: name.map_or_else(|| "You".into(), |name| format!("{name} (You)").into()),
         picture: person.and_then(|person| person.picture),
         partner: Some(me.clone()),
+        bot: None,
         faces: Vec::new(),
         members: 0,
         chat_with: None,
@@ -541,6 +619,7 @@ pub async fn channel_row(core: &dyn Core, team: &Team, channel: &TeamChannel, la
         named: true,
         picture: None,
         partner: None,
+        bot: None,
         faces: Vec::new(),
         members: 0,
         chat_with: None,
@@ -653,10 +732,11 @@ async fn build(core: &dyn Core, conversation: &Conversation) -> (ChatRow, Vec<St
         named,
         picture,
         partner,
+        bot,
         faces,
         people,
         chat_with,
-    } = name_of(core, conversation, &members).await;
+    } = name_of(core, conversation, &members, &page).await;
     let (preview, previewed) = previewing(&page, core.me());
     let row = ChatRow {
         kind: RowKind::of(&conversation.kind),
@@ -664,6 +744,7 @@ async fn build(core: &dyn Core, conversation: &Conversation) -> (ChatRow, Vec<St
         named,
         picture,
         partner,
+        bot,
         faces,
         members: members.len(),
         chat_with,
@@ -887,7 +968,10 @@ impl ChatList {
     /// Whether the stored chat identifies whom a call would ring, even while catch-up is still reading its roster.
     #[must_use]
     pub fn can_call(&self, id: &str) -> bool {
-        one_to_one_partner(id, self.core.me()).is_some() || self.row(id).is_some_and(|row| row.members > 1)
+        match self.row(id) {
+            Some(row) if row.bot.is_some() => false,
+            row => one_to_one_partner(id, self.core.me()).is_some() || row.is_some_and(|row| row.members > 1),
+        }
     }
 
     #[must_use]
@@ -1223,6 +1307,13 @@ pub fn chat_avatar(row: &ChatRow, palette: Palette, size: Size, place: &'static 
             .flex_none()
             .child(crate::workflows_app::bot_avatar(across, palette))
             .into_any_element(),
+        // a bot's chat: its app's icon on a tile, as Teams draws an app
+        (RowKind::OneToOne, _) if row.bot.is_some() => {
+            let app = row.bot.as_ref().and_then(|bot| bot.app.as_ref());
+            crate::bot_face::tile(app, across, palette)
+                .debug_selector(move || format!("{place}-app"))
+                .into_any_element()
+        }
         // a 1:1 chat whose other member has no presence: a bot or a service
         (RowKind::OneToOne, _) if row.partner.is_none() && row.picture.is_none() => mark_avatar(
             Glyph::BOT,

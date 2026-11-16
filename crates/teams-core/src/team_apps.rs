@@ -5,9 +5,16 @@
 //! Microsoft 365 groups the account could make a team of, and the picture Teams makes for a team from its name.
 //! App definitions are cached per account by id for Activity preferences and icons. The writes these pages send go
 //! as every team write does ([`crate::team_admin`]).
+//!
+//! **Bots by their app** ([`BotIndex`]): every definition these reads bring is kept for the run by the ids of the bots
+//! it brings, so a bot's chat, its messages and the mention picker show the app's name and icon, as Teams does. A bot
+//! the reads haven't brought is looked for in the account's apps (all of them, Teams' own and the store's offers too,
+//! read at most once a minute), then, for a bot known to be one (a `28:` member or sender), by its id as an app's id
+//! (many apps' bot has the app's id), once a run.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use teams_proto::{
     AnalyticsPeriod, AppDefinitions, AppStore, ChannelAnalyticsRead, ChatApps, Credentials, DEFINITIONS_PAGE,
@@ -50,6 +57,18 @@ pub(crate) enum TeamAppsAsk {
         chat: String,
         reply: Responder<Vec<StoreApp>>,
     },
+    /// A bot's app ([`BotIndex`]); `known` only: never read by the bot's id as an app's.
+    BotApp {
+        bot: String,
+        known: bool,
+        reply: Responder<Option<StoreApp>>,
+    },
+    /// The apps added to a chat (`team` false) or a team whose bot people can mention there.
+    MentionableBots {
+        place: String,
+        team: bool,
+        reply: Responder<Vec<StoreApp>>,
+    },
     ChannelAnalytics {
         group: String,
         channel: String,
@@ -83,7 +102,16 @@ where
             TeamAppsAsk::NotificationSettings { reply } => self.spawn_read(reply, notification_settings),
             TeamAppsAsk::Definition { id, reply } => {
                 let cache = Arc::clone(&self.app_definitions);
-                self.spawn_read(reply, async move |client| definition(client, &cache, &id).await);
+                let bots = Arc::clone(&self.bots);
+                self.spawn_read(reply, async move |client| definition(client, &cache, &bots, &id).await);
+            }
+            TeamAppsAsk::BotApp { bot, known, reply } => {
+                let bots = Arc::clone(&self.bots);
+                self.spawn_read(reply, async move |client| bots.app_of(client, &bot, known).await);
+            }
+            TeamAppsAsk::MentionableBots { place, team, reply } => {
+                let bots = Arc::clone(&self.bots);
+                self.spawn_read(reply, async move |client| mentionable(client, &bots, place, team).await);
             }
             TeamAppsAsk::CachedDefinition { id, reply } => {
                 // the cache is never held across a read, so this answers at once
@@ -96,29 +124,45 @@ where
                     .await
                     .map_or_else(Vec::new, |body| read.read_answer(&body))
             }),
-            TeamAppsAsk::Store { reply } => self.spawn_read(reply, async move |client| {
-                let ids = send_body(client, &AppStore)
-                    .await
-                    .map_or_else(Vec::new, |body| AppStore::read_answer(&body));
-                definitions_of(client, &ids).await
-            }),
-            TeamAppsAsk::Listing { reply } => self.spawn_read(reply, async move |client| {
-                let sections = send_body(client, &AppStore)
-                    .await
-                    .map_or_else(StoreSections::default, |body| StoreSections::read(&body));
-                let apps = definitions_of(client, &sections.ids()).await;
-                AppListing { sections, apps }
-            }),
-            TeamAppsAsk::UserApps { reply } => self.spawn_read(reply, async move |client| {
-                send_body(client, &UserApps)
-                    .await
-                    .map_or_else(Vec::new, |body| UserApps::read_answer(&body))
-            }),
-            TeamAppsAsk::ChatApps { chat, reply } => self.spawn_read(reply, async move |client| {
-                read_body(client, &ChatApps { chat })
-                    .await
-                    .map_or_else(Vec::new, |body| ChatApps::read_answer(&body))
-            }),
+            TeamAppsAsk::Store { reply } => {
+                let bots = Arc::clone(&self.bots);
+                self.spawn_read(reply, async move |client| {
+                    let ids = send_body(client, &AppStore)
+                        .await
+                        .map_or_else(Vec::new, |body| AppStore::read_answer(&body));
+                    bots.kept(definitions_of(client, &ids).await)
+                });
+            }
+            TeamAppsAsk::Listing { reply } => {
+                let bots = Arc::clone(&self.bots);
+                self.spawn_read(reply, async move |client| {
+                    let sections = send_body(client, &AppStore)
+                        .await
+                        .map_or_else(StoreSections::default, |body| StoreSections::read(&body));
+                    let apps = bots.kept(definitions_of(client, &sections.ids()).await);
+                    AppListing { sections, apps }
+                });
+            }
+            TeamAppsAsk::UserApps { reply } => {
+                let bots = Arc::clone(&self.bots);
+                self.spawn_read(reply, async move |client| {
+                    let Some(body) = send_body(client, &UserApps).await else {
+                        return Vec::new();
+                    };
+                    bots.keep(&UserApps::defined(&body));
+                    UserApps::read_answer(&body)
+                });
+            }
+            TeamAppsAsk::ChatApps { chat, reply } => {
+                let bots = Arc::clone(&self.bots);
+                self.spawn_read(reply, async move |client| {
+                    bots.kept(
+                        read_body(client, &ChatApps { chat })
+                            .await
+                            .map_or_else(Vec::new, |body| ChatApps::read_answer(&body)),
+                    )
+                });
+            }
             TeamAppsAsk::ChannelAnalytics {
                 group,
                 channel,
@@ -239,6 +283,7 @@ impl AppDefinitionsCache {
 pub(crate) async fn definition<C: Credentials + 'static>(
     client: &teams_proto::Client<teams_proto::HttpTransport<C>>,
     cache: &AppDefinitionsCache,
+    bots: &BotIndex,
     id: &str,
 ) -> Option<teams_proto::AppDefinition> {
     if let Some(definition) = cache.cached(id) {
@@ -256,10 +301,124 @@ pub(crate) async fn definition<C: Credentials + 'static>(
         },
     )
     .await?;
-    let definition = AppDefinitions::read_answer(&body)
+    let app = AppDefinitions::read_answer(&body)
         .into_iter()
-        .find(|app| app.definition.id() == id)?
-        .definition;
-    cache.insert(id, definition.clone());
-    Some(definition)
+        .find(|app| app.definition.id() == id)?;
+    bots.keep(std::slice::from_ref(&app));
+    cache.insert(id, app.definition.clone());
+    Some(app.definition)
+}
+
+/// How long after an unanswered read of the account's apps [`BotIndex`] reads them again.
+const ACCOUNT_APPS_AGAIN: Duration = Duration::from_secs(60);
+
+/// The apps this run read, by the ids of the bots they bring (lower case), and what it looked for in vain (see the
+/// module docs).
+#[derive(Default)]
+pub(crate) struct BotIndex {
+    apps: std::sync::Mutex<BTreeMap<String, StoreApp>>,
+    /// When the account's apps were last read, and whether that read was answered; held across the read, so asks at
+    /// once send one.
+    account: tokio::sync::Mutex<Option<(Instant, bool)>>,
+    /// The bots whose id was read as an app's and named none.
+    missed: std::sync::Mutex<BTreeSet<String>>,
+}
+
+/// A bot's id as the index keys it: without its `28:`, in lower case.
+fn bot_key(bot: &str) -> String {
+    bot.strip_prefix("28:").unwrap_or(bot).to_ascii_lowercase()
+}
+
+impl BotIndex {
+    /// Keeps `apps` by their bots' ids.
+    pub(crate) fn keep(&self, apps: &[StoreApp]) {
+        let mut known = self.apps.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for app in apps {
+            for bot in app.definition.bots() {
+                known.insert(bot_key(bot.as_str()), app.clone());
+            }
+        }
+    }
+
+    /// [`Self::keep`], handing `apps` back.
+    fn kept(&self, apps: Vec<StoreApp>) -> Vec<StoreApp> {
+        self.keep(&apps);
+        apps
+    }
+
+    /// The app of `bot` when this run has it.
+    pub(crate) fn known(&self, bot: &str) -> Option<StoreApp> {
+        self.apps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&bot_key(bot))
+            .cloned()
+    }
+
+    /// The app of `bot` (`28:<id>`, or the id alone): as kept, else after reading the account's apps, else (unless
+    /// `known` only) after reading the bot's id as an app's.
+    async fn app_of<C: Credentials + 'static>(
+        &self,
+        client: &teams_proto::Client<teams_proto::HttpTransport<C>>,
+        bot: &str,
+        known: bool,
+    ) -> Option<StoreApp> {
+        let key = bot_key(bot);
+        if key.is_empty() {
+            return None;
+        }
+        if let Some(app) = self.known(&key) {
+            return Some(app);
+        }
+        self.read_account(client).await;
+        if let Some(app) = self.known(&key) {
+            return Some(app);
+        }
+        if known || !self.missed.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key.clone()) {
+            return None;
+        }
+        let body = send_body(client, &AppDefinitions { ids: vec![key.clone()] }).await?;
+        self.keep(&AppDefinitions::read_answer(&body));
+        self.known(&key)
+    }
+
+    /// Reads the account's apps into the index, unless a read was answered this run or one was sent less than
+    /// [`ACCOUNT_APPS_AGAIN`] ago.
+    async fn read_account<C: Credentials + 'static>(
+        &self,
+        client: &teams_proto::Client<teams_proto::HttpTransport<C>>,
+    ) {
+        let mut account = self.account.lock().await;
+        if account.is_some_and(|(at, answered)| answered || at.elapsed() < ACCOUNT_APPS_AGAIN) {
+            return;
+        }
+        let body = send_body(client, &UserApps).await;
+        if let Some(body) = &body {
+            self.keep(&UserApps::defined(body));
+        }
+        *account = Some((Instant::now(), body.is_some()));
+    }
+}
+
+/// The apps added to `place` (a chat, or a team when `team`) whose bot people can mention there, kept in the index.
+async fn mentionable<C: Credentials + 'static>(
+    client: &teams_proto::Client<teams_proto::HttpTransport<C>>,
+    bots: &BotIndex,
+    place: String,
+    team: bool,
+) -> Vec<StoreApp> {
+    let apps = if team {
+        let read = TeamApps { team: place };
+        send_body(client, &read)
+            .await
+            .map_or_else(Vec::new, |body| read.read_defined(&body))
+    } else {
+        read_body(client, &ChatApps { chat: place })
+            .await
+            .map_or_else(Vec::new, |body| ChatApps::read_answer(&body))
+    };
+    bots.keep(&apps);
+    apps.into_iter()
+        .filter(|app| app.definition.mentionable_bot(team).is_some())
+        .collect()
 }

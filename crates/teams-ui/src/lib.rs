@@ -92,6 +92,7 @@ pub mod app_icon;
 pub mod apps_page;
 pub mod assets;
 pub mod bot_card;
+pub mod bot_face;
 pub mod bots_flag;
 pub mod bridge;
 pub mod bus;

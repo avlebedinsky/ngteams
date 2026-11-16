@@ -60,7 +60,7 @@ impl AppDetailsDialog {
     ) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
-        Self {
+        let dialog = Self {
             core,
             store,
             known,
@@ -69,7 +69,35 @@ impl AppDetailsDialog {
             failed: false,
             working: None,
             focus,
-        }
+        };
+        dialog.ask_picture(cx);
+        dialog
+    }
+
+    /// Reads the app's picture when the dialog wasn't given it (opened from its bot's chat, not the store).
+    fn ask_picture(&self, cx: &mut Context<Self>) {
+        let Some(url) = self
+            .store
+            .definition
+            .large_image_url()
+            .filter(|_| self.known.picture.is_none())
+        else {
+            return;
+        };
+        let reply = self.core.app_picture(url.to_owned());
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let Ok(Some(bytes)) = reply.await else { return };
+            let decoded = cx
+                .background_executor()
+                .spawn(async move { crate::inline::decode_app_tile(&bytes, super::DECODED_SIDE) })
+                .await;
+            let Some((image, _)) = decoded else { return };
+            let _ = this.update(cx, |this, cx| {
+                this.known.picture = Some(Arc::new(image));
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Whether the account has the app now.

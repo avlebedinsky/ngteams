@@ -97,7 +97,7 @@ impl Compose {
             },
             Ok(Some(translation)) => {
                 let mentioned = built.mentioned().clone();
-                match MessageText::new(translation, mentioned) {
+                match MessageText::new_with_bots(translation, mentioned, built.bots()) {
                     Ok(text) => Sending {
                         text: text.with_files(built.files().to_vec()),
                         original: Some(built.rich_text().clone()),

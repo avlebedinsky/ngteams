@@ -187,6 +187,12 @@ name = "bot_cards_window"
 harness = false
 
 [[test]]
+# a bot's chat, its intro and the mention picker's bot, with the bots shown, over the fake engine, in the UI sandbox,
+# screenshotted in each theme under `target/ui-shots/bot-chat-*.png`
+name = "bot_chat_window"
+harness = false
+
+[[test]]
 # the Workflows app in the main window over the fake engine, in the UI sandbox, screenshotted in each theme under
 # `target/ui-shots/workflows-app-*.png`
 name = "workflows_app_window"

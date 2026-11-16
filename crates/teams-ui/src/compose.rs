@@ -11,7 +11,10 @@
 //!   it; the picker shows each member's presence dot (M2 Task 17: the engine is asked about the people offered each
 //!   time they are shown). In a group chat it offers Everyone after the members ([`offered`]), as the web client does:
 //!   it names the chat's id, and the message mentions everyone in the chat (`docs/protocol/chat.md`, "A mention of
-//!   everyone"). `teams-proto`'s [`MessageText`] renders the HTML, the mentions and the reply's quote from that one
+//!   everyone"). With `NGTEAMS_BOTS=1` ([`crate::bots_flag`]) it offers, after the members, the bots of the apps added
+//!   to the group chat or to the channel's team that can be mentioned there ([`Core::mentionable_bots`]), each by its
+//!   app's name and icon; a bot's mention is written with its app's id (`docs/protocol/chat.md`, "Mentions"), and an
+//!   edit keeps the apps its message named. `teams-proto`'s [`MessageText`] renders the HTML, the mentions and the reply's quote from that one
 //!   value. A send the engine refuses before it makes a row gives the box its draft back.
 //! - **Keys** (the editor's, `crate::editor`): Enter sends and Shift+Enter starts a new paragraph, as Teams' box
 //!   first shows; Ctrl+Shift+X (or the Format button) expands the box with its format bar, as Teams' does, and then
@@ -71,7 +74,7 @@ mod pictures;
 mod translated;
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::hash::BuildHasher;
 use std::ops::Range;
 use std::rc::Rc;
@@ -89,7 +92,7 @@ use gpui_component::tooltip::Tooltip;
 use gpui_component::{Selectable as _, Sizable as _, Size};
 use teams_core::{Action, Availability, NOTES, Transient};
 use teams_proto::chat::{ComposeError, Marks, MessageText, MessageType, Node, Quote, RichText, parse_html};
-use teams_proto::is_group_chat_id;
+use teams_proto::{Mri, is_group_chat_id};
 use teams_store::Message;
 
 pub use correction::{CorrectDraft, CorrectionStatus, KeepOriginal, SendCorrection, UseCorrection};
@@ -186,7 +189,7 @@ pub const MAX_ROWS: usize = 8;
 /// What `teams-proto` refuses in a message's text ([`ComposeError`]): a mention of anyone but a work account or
 /// everyone in a group chat, a text too long, …
 pub fn message_of(doc: &Doc, quotes: &[Node]) -> Result<Option<MessageText>, ComposeError> {
-    message_of_with(doc, quotes, &|_| None)
+    message_of_with(doc, quotes, &|_| None, &BTreeMap::new())
 }
 
 /// [`message_of`], each picture in `doc` as `pictures` gives it by its id (the editor's, once sent:
@@ -198,6 +201,7 @@ pub fn message_of_with(
     doc: &Doc,
     quotes: &[Node],
     pictures: &dyn Fn(u64) -> Option<teams_proto::chat::Image>,
+    bots: &BTreeMap<Mri, String>,
 ) -> Result<Option<MessageText>, ComposeError> {
     let (nodes, mentioned) = convert::to_nodes_with(doc, pictures);
     if nodes.is_empty() {
@@ -205,12 +209,13 @@ pub fn message_of_with(
     }
     let mut all = quotes.to_vec();
     all.extend(nodes);
-    MessageText::new(
+    MessageText::new_with_bots(
         RichText {
             nodes: all,
             truncated: false,
         },
         mentioned,
+        bots,
     )
     .map(Some)
 }
@@ -421,13 +426,18 @@ pub fn mention_query<'a>(text: &'a str, cursor: usize, mentions: &[Range<usize>]
     (starts_word && !crossed && !query.starts_with(char::is_whitespace)).then_some((at, query))
 }
 
-/// Someone the mention picker offers: a member of the chat, by MRI, with the name shown; or everyone in a group chat
-/// ([`Candidate::everyone`]), by the chat's id.
+/// Someone the mention picker offers: a member of the chat, by MRI, with the name shown; a bot, by its MRI, with its
+/// app; or everyone in a group chat ([`Candidate::everyone`]), by the chat's id.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Candidate {
     pub mri: String,
     pub name: SharedString,
+    /// A bot's app.
+    pub app: Option<crate::bot_face::BotApp>,
 }
+
+/// What the picker says under a bot's name.
+pub const BOT_LABEL: &str = "Bot";
 
 /// What the picker's Everyone says under its name, as the web client's does (`compose_mention_everyone_tag_label`).
 pub const EVERYONE_LABEL: &str = "Notify everyone in the chat";
@@ -443,6 +453,17 @@ impl Candidate {
         Self {
             mri: conversation.to_owned(),
             name: rich_text::EVERYONE.into(),
+            app: None,
+        }
+    }
+
+    /// A bot, by its MRI and its app's name.
+    #[must_use]
+    pub fn bot(mri: &str, app: crate::bot_face::BotApp) -> Self {
+        Self {
+            mri: mri.to_owned(),
+            name: app.name().to_owned().into(),
+            app: Some(app),
         }
     }
 
@@ -450,6 +471,12 @@ impl Candidate {
     #[must_use]
     pub fn is_everyone(&self) -> bool {
         is_group_chat_id(&self.mri)
+    }
+
+    /// Whether it is a person (not everyone, not a bot): one with a presence.
+    #[must_use]
+    pub fn is_person(&self) -> bool {
+        self.app.is_none() && !self.is_everyone()
     }
 }
 
@@ -470,7 +497,8 @@ pub fn matching(candidates: &[Candidate], query: &str) -> Vec<Candidate> {
 /// (any case), as the web client's picker lists them (`abc-everyone`, `docs/protocol/chat.md`).
 #[must_use]
 pub fn offered(conversation: &str, members: &[Candidate], query: &str) -> Vec<Candidate> {
-    let everyone = (is_group_chat_id(conversation) && members.len() < EVERYONE_MAX_MEMBERS)
+    let people = members.iter().filter(|member| member.is_person()).count();
+    let everyone = (is_group_chat_id(conversation) && people < EVERYONE_MAX_MEMBERS)
         .then(|| Candidate::everyone(conversation))
         .filter(|everyone| everyone.name.to_lowercase().contains(&query.to_lowercase()));
     matching(members, query).into_iter().chain(everyone).collect()
@@ -652,8 +680,10 @@ pub struct Compose {
     /// Where the answers on their way go ([`Routes`]).
     routes: Routes,
     picker: Option<Picker>,
-    /// The chat's members the picker offers, once read.
+    /// The chat's members the picker offers, once read, and the bots people can mention there.
     candidates: Option<Vec<Candidate>>,
+    /// The app of each bot the box may mention, by the bot's MRI: a bot's mention is written with it.
+    bots: BTreeMap<Mri, String>,
     reading: Option<Task<()>>,
     /// What the last send couldn't do, shown over the box.
     problem: Option<SharedString>,
@@ -706,10 +736,49 @@ async fn read_candidates(core: Arc<dyn Core>, conversation: String) -> Vec<Candi
         found.push(Candidate {
             name: name.unwrap_or_else(|| member.mri.clone()).into(),
             mri: member.mri,
+            app: None,
         });
     }
     found.sort_by(|one, other| one.name.cmp(&other.name));
     found
+}
+
+/// The bots people can mention in `conversation` (a group chat, or a channel or a post's thread in one), each with
+/// its app, by name: the bots of the apps added to the chat, or to the channel's team.
+async fn read_bots(core: Arc<dyn Core>, conversation: String) -> Vec<Candidate> {
+    let place = if is_group_chat_id(&conversation) {
+        Some((conversation, false))
+    } else {
+        channel_team(core.as_ref(), &conversation).await.map(|team| (team, true))
+    };
+    let Some((place, team)) = place else {
+        return Vec::new();
+    };
+    let apps = core.mentionable_bots(place, team).await.unwrap_or_default();
+    let mut found = Vec::new();
+    for app in apps {
+        let Some(bot) = app.definition.mentionable_bot(team) else {
+            continue;
+        };
+        let app = crate::bot_face::with_picture(core.as_ref(), app).await;
+        found.push(Candidate::bot(bot.as_str(), app));
+    }
+    found.sort_by(|one, other| one.name.cmp(&other.name));
+    found.dedup_by(|one, other| one.mri == other.mri);
+    found
+}
+
+/// The team whose channel `conversation` is (or a post's thread in), by the team's thread id.
+async fn channel_team(core: &dyn Core, conversation: &str) -> Option<String> {
+    let channel = conversation.split(';').next().unwrap_or(conversation);
+    if !teams_proto::is_team_thread_id(channel) {
+        return None;
+    }
+    let teams = core.teams().await.ok().flatten()?;
+    teams
+        .into_iter()
+        .find(|team| team.id == channel || team.channels.iter().any(|known| known.id == channel))
+        .map(|team| team.id)
 }
 
 impl Compose {
@@ -784,6 +853,7 @@ impl Compose {
             routes: Routes::default(),
             picker: None,
             candidates: None,
+            bots: BTreeMap::new(),
             reading: None,
             problem: None,
             translated: translated::Translated::default(),
@@ -1076,7 +1146,7 @@ impl Compose {
         self.picker
             .iter()
             .flat_map(|picker| &picker.matches)
-            .filter(|candidate| !candidate.is_everyone())
+            .filter(|candidate| candidate.is_person())
             .map(|candidate| (candidate.mri.clone(), presence.of(&candidate.mri)))
             .collect()
     }
@@ -1234,7 +1304,7 @@ impl Compose {
             Mode::Edit { quotes, .. } => quotes.clone(),
         };
         let editor = self.editor.read(cx);
-        let built = match message_of_with(&doc, &quotes, &|id| editor.picture_node(id)) {
+        let built = match message_of_with(&doc, &quotes, &|id| editor.picture_node(id), &self.bots) {
             Ok(Some(built)) => built,
             Ok(None) if !self.attachments.is_empty() => match empty_file_text() {
                 Ok(text) => text,
@@ -1531,7 +1601,7 @@ impl Compose {
             self.core.as_ref(),
             matches
                 .iter()
-                .filter(|candidate| !candidate.is_everyone())
+                .filter(|candidate| candidate.is_person())
                 .map(|candidate| &candidate.mri),
         );
         let selected = self
@@ -1549,20 +1619,36 @@ impl Compose {
         cx.notify();
     }
 
-    /// Reads the chat's members for the picker, once.
+    /// Reads the chat's members for the picker, once, and the bots people can mention there while the bots are shown
+    /// (`NGTEAMS_BOTS=1`) and the account's cloud serves apps.
     fn read_candidates(&mut self, cx: &mut Context<Self>) {
         if self.candidates.is_some() || self.reading.is_some() {
             return;
         }
         let read = read_candidates(Arc::clone(&self.core), self.conversation.clone());
+        let bots = (crate::bots_flag::bots_on(cx) && self.core.capabilities().apps)
+            .then(|| read_bots(Arc::clone(&self.core), self.conversation.clone()));
         self.reading = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let found = read.await;
+            let mut found = read.await;
+            if let Some(bots) = bots {
+                found.extend(bots.await);
+            }
             let _ = this.update(cx, |this, cx| {
+                this.know_bots(found.iter().filter_map(|candidate| {
+                    let app = candidate.app.as_ref()?;
+                    Some((Mri::new(candidate.mri.clone()), app.app.app.id.clone()))
+                }));
                 this.candidates = Some(found);
                 this.reading = None;
                 this.refresh_picker(cx);
             });
         }));
+    }
+
+    /// The apps of bots the box may mention, by the bot's MRI: those the picker offers, and those an edited message
+    /// named.
+    pub fn know_bots(&mut self, bots: impl IntoIterator<Item = (Mri, String)>) {
+        self.bots.extend(bots);
     }
 
     fn close_picker(&mut self, cx: &mut Context<Self>) {
@@ -2038,6 +2124,8 @@ impl Compose {
                 .on_click(cx.listener(move |this, _, window, cx| this.choose(index, window, cx)));
             if candidate.is_everyone() {
                 row.child(everyone_row(&candidate.name, palette))
+            } else if let Some(app) = &candidate.app {
+                row.child(bot_row(&candidate.name, app, palette))
             } else {
                 // the dot in a slot as wide as Everyone's icon, so every name starts in one column
                 row.child(
@@ -2095,6 +2183,23 @@ fn send_to_line(palette: Palette) -> gpui::Div {
         .text_color(rgb(palette.brand))
         .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Send to:"))
         .child(SEND_TO_THREAD)
+}
+
+/// A bot in the picker: its app's icon on a tile where a person's dot would be, its name, and under it [`BOT_LABEL`].
+fn bot_row(name: &SharedString, app: &crate::bot_face::BotApp, palette: Palette) -> impl IntoElement {
+    div()
+        .debug_selector(|| "mention-bot".to_owned())
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(crate::bot_face::tile(Some(app), EVERYONE_ICON, palette))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .child(name.clone())
+                .child(div().text_xs().text_color(rgb(palette.muted_foreground)).child(BOT_LABEL)),
+        )
 }
 
 /// The picker's Everyone, as the web client's: an outlined people icon where a person's picture would be, the name,

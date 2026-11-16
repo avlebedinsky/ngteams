@@ -325,7 +325,7 @@ impl Shell {
         cx: &App,
     ) -> Option<gpui::Div> {
         let row = self.list.read(cx).row(id)?;
-        if row.kind != crate::chat_list::RowKind::OneToOne {
+        if row.kind != crate::chat_list::RowKind::OneToOne || row.bot.is_some() {
             return None;
         }
         let mri = row

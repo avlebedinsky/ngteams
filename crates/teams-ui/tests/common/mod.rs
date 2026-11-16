@@ -201,6 +201,10 @@ pub struct FakeCore {
     pub app_listing: Mutex<teams_core::AppListing>,
     pub user_apps: Mutex<Vec<teams_proto::StoreApp>>,
     pub chat_apps: Mutex<Vec<teams_proto::StoreApp>>,
+    /// The bots' apps, by the bot's bare id in lower case: `Core::bot_app` and `Core::known_bot_app` answer from it.
+    pub bot_apps: Mutex<HashMap<String, teams_proto::StoreApp>>,
+    /// The apps whose bot people can mention, by chat or team.
+    pub mentionable_bots: Mutex<HashMap<String, Vec<teams_proto::StoreApp>>>,
     /// Teams' templates, and what one makes.
     pub templates: Mutex<(
         Vec<teams_proto::TeamTemplateCard>,
@@ -697,6 +701,23 @@ impl Core for FakeCore {
 
     fn chat_apps(&self, _chat: String) -> Reply<Vec<teams_proto::StoreApp>> {
         Reply::ready(Ok(locked(&self.chat_apps).clone()))
+    }
+
+    fn bot_app(&self, bot: String) -> Reply<Option<teams_proto::StoreApp>> {
+        let key = bot.trim_start_matches("28:").to_ascii_lowercase();
+        // not among `asked`: the chat list asks about its 1:1 chats' bots as it builds them
+        Reply::ready(Ok(locked(&self.bot_apps).get(&key).cloned()))
+    }
+
+    fn known_bot_app(&self, id: String) -> Reply<Option<teams_proto::StoreApp>> {
+        let key = id.to_ascii_lowercase();
+        Reply::ready(Ok(locked(&self.bot_apps).get(&key).cloned()))
+    }
+
+    fn mentionable_bots(&self, place: String, _team: bool) -> Reply<Vec<teams_proto::StoreApp>> {
+        self.answer("mentionable_bots", || {
+            locked(&self.mentionable_bots).get(&place).cloned().unwrap_or_default()
+        })
     }
 
     fn team_templates(&self) -> Reply<Vec<teams_proto::TeamTemplateCard>> {

@@ -1,7 +1,8 @@
 //! The rail's Store on GPUI's test context, over a fake core (`teams_ui::apps_page`): it shows only with
 //! `NGTEAMS_BOTS=1`; its sections and search; an app's details and Add, which adds it for the account; "Add to a chat"
 //! and its picker's Go; "Manage your apps" and a chat's apps, whose Remove asks first; nothing offered that writes in
-//! the read-only mode.
+//! the read-only mode. A bot's chat with the bot its id names, by its app's name and tile, its intro, About and typing
+//! line; a group chat's picker offering its apps' bots and the bot's mention it sends.
 //!
 //! Every app, chat and id here is made up.
 
@@ -742,4 +743,241 @@ fn the_read_only_mode_offers_nothing_that_adds_or_removes() {
     click(cx, "apps-mine-0-expand");
     assert!(bounds(cx, "apps-mine-0-places").is_some());
     assert!(bounds(cx, "apps-mine-0-remove").is_none());
+}
+
+// --- bot chats and bot mentions ---
+
+/// Made-up Helper's bot (`b4`) and Made-up Polls' (`b5`), and the account's 1:1 chats with them as Teams names them.
+const HELPER_BOT: &str = "28:b4";
+const POLLS_BOT: &str = "28:b5";
+const HELPER_CHAT: &str = "19:00000000-0000-4000-8000-00000000000a_b4@unq.gbl.spaces";
+const POLLS_CHAT: &str = "19:00000000-0000-4000-8000-00000000000a_b5@unq.gbl.spaces";
+/// A 1:1 chat with a person whose members aren't stored.
+const PERSON_CHAT: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces";
+
+fn one_to_one(id: &str, last: i64) -> Conversation {
+    Conversation {
+        id: id.to_owned(),
+        kind: ConversationKind::OneToOne,
+        topic: None,
+        version: 1,
+        last_activity: Some(last),
+    }
+}
+
+fn text_message(conversation: &str, id: i64, sender: &str, name: Option<&str>) -> teams_store::Message {
+    teams_store::Message {
+        conversation_id: conversation.to_owned(),
+        id: id.to_string(),
+        version: 1,
+        client_message_id: None,
+        sender: Some(sender.to_owned()),
+        sender_name: name.map(str::to_owned),
+        message_type: "RichText/Html".to_owned(),
+        content: "<p>made up</p>".to_owned(),
+        properties: None,
+        arrival_time: id,
+        compose_time: Some(id),
+        edit_time: None,
+        delete_time: None,
+    }
+}
+
+/// The bots' apps the fake engine knows, by the bot's bare id.
+fn know_bots(rig: &Rig) {
+    let mut bots = rig.core.bot_apps.lock().unwrap();
+    bots.insert("b4".to_owned(), app(HELPER));
+    bots.insert("b5".to_owned(), app(POLLS));
+}
+
+fn row(shell: &Entity<Shell>, cx: &mut VisualTestContext, id: &str) -> teams_ui::chat_list::ChatRow {
+    cx.update(|_, cx| shell.read(cx).list().read(cx).row(id).cloned())
+        .unwrap_or_else(|| panic!("{id} has a row"))
+}
+
+/// A bot's chat whose members aren't stored is with the bot its id names, not with a made-up person of the bot's id:
+/// named by its app, drawn with its tile, with no call, no people and no profile card; a person's is as it was.
+#[test]
+fn a_bot_s_chat_is_with_the_bot_named_by_its_app_with_its_tile() {
+    let rig = Rig::start();
+    know_bots(&rig);
+    rig.core.messages.lock().unwrap().insert(
+        HELPER_CHAT.to_owned(),
+        vec![text_message(HELPER_CHAT, 300, HELPER_BOT, Some("Helper bot"))],
+    );
+    rig.core
+        .messages
+        .lock()
+        .unwrap()
+        .insert(PERSON_CHAT.to_owned(), vec![text_message(PERSON_CHAT, 200, common::LAB_B, None)]);
+    let (shell, cx) = shell_window_with(
+        &rig,
+        false,
+        vec![one_to_one(HELPER_CHAT, 300), one_to_one(PERSON_CHAT, 200)],
+    );
+    let helper = row(&shell, cx, HELPER_CHAT);
+    assert_eq!((helper.name.as_ref(), helper.named), ("Made-up Helper", true));
+    let bot = helper.bot.as_ref().expect("a bot's chat");
+    assert_eq!(bot.mri, HELPER_BOT);
+    assert_eq!(bot.app.as_ref().map(|app| app.app.app.id.as_str()), Some(HELPER));
+    assert_eq!(helper.partner, None, "a bot has no presence");
+    assert!(!cx.update(|_, cx| shell.read(cx).list().read(cx).can_call(HELPER_CHAT)));
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).list().read(cx).one_to_one_with(HELPER_BOT).map(str::to_owned)),
+        Some(HELPER_CHAT.to_owned())
+    );
+    assert!(bounds(cx, "avatar-app").is_some(), "its app's tile in the list");
+    let person = row(&shell, cx, PERSON_CHAT);
+    assert!(person.bot.is_none());
+    assert_eq!(person.partner.as_deref(), Some(common::LAB_B));
+
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(HELPER_CHAT.to_owned(), window, cx)));
+    assert!(bounds(cx, "chat-header-avatar-app").is_some(), "its tile in the header");
+    assert!(bounds(cx, "chat-bot-tab-chat shown").is_some());
+    assert!(bounds(cx, "chat-bot-tab-about").is_none(), "About is the Store's, behind the flag");
+    assert!(bounds(cx, "chat-header-people").is_none());
+    assert!(bounds(cx, "profile-card-from-header-name").is_none());
+    assert!(bounds(cx, "avatar-300").is_some(), "the bot's message has its avatar");
+}
+
+/// Without a stored member or a message, a 1:1 chat's other one is a bot when the engine knows its app; a `28:` sender
+/// without an app is a bot by the name its message carried.
+#[test]
+fn a_bot_s_chat_is_found_by_its_app_or_its_messages() {
+    let rig = Rig::start();
+    know_bots(&rig);
+    let unknown = "19:00000000-0000-4000-8000-00000000000a_bb@unq.gbl.spaces";
+    rig.core
+        .messages
+        .lock()
+        .unwrap()
+        .insert(unknown.to_owned(), vec![text_message(unknown, 100, "28:bb", Some("Beeper"))]);
+    // the engine names a sender by the name its newest message carried
+    rig.core.names.lock().unwrap().insert("28:bb".to_owned(), "Beeper".to_owned());
+    let (shell, cx) = shell_window_with(&rig, false, vec![one_to_one(POLLS_CHAT, 200), one_to_one(unknown, 100)]);
+    let polls = row(&shell, cx, POLLS_CHAT);
+    assert_eq!(polls.bot.map(|bot| bot.mri), Some(POLLS_BOT.to_owned()));
+    assert_eq!(polls.name.as_ref(), "Made-up Polls");
+    let beeper = row(&shell, cx, unknown);
+    assert_eq!(
+        beeper.bot.as_ref().map(|bot| (bot.mri.as_str(), bot.app.is_none())),
+        Some(("28:bb", true))
+    );
+    assert_eq!(beeper.name.as_ref(), "Beeper");
+}
+
+/// A bot's chat nobody wrote in shows its app's intro; About opens the app's details, added, Open going back to it.
+#[test]
+fn an_empty_bot_chat_shows_its_app_s_intro_and_about_opens_its_details() {
+    let rig = Rig::start();
+    know_bots(&rig);
+    let (shell, cx) = shell_window_with(&rig, true, vec![one_to_one(HELPER_CHAT, 300)]);
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(HELPER_CHAT.to_owned(), window, cx)));
+    assert!(bounds(cx, "chat-bot-intro").is_some());
+    let chat = cx.update(|_, cx| shell.read(cx).chat().cloned()).expect("the chat");
+    assert_eq!(cx.update(|_, cx| chat.read(cx).chat_bot().map(str::to_owned)), Some(HELPER_BOT.to_owned()));
+    click(cx, "chat-bot-tab-about");
+    let details = cx
+        .update(|_, cx| shell.read(cx).team_dialog().cloned())
+        .and_then(|dialog| dialog.downcast::<AppDetailsDialog>().ok())
+        .expect("the app's details");
+    assert!(cx.update(|_, cx| details.read(cx).added()), "the app of a chat the account has");
+}
+
+/// A bot typing is named by its app, never by its MRI.
+#[test]
+fn a_bot_s_typing_line_names_its_app() {
+    let rig = Rig::start();
+    know_bots(&rig);
+    rig.core.messages.lock().unwrap().insert(
+        POLLS_CHAT.to_owned(),
+        vec![text_message(POLLS_CHAT, 100, POLLS_BOT, None)],
+    );
+    let (shell, cx) = shell_window_with(&rig, false, vec![one_to_one(POLLS_CHAT, 100)]);
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(POLLS_CHAT.to_owned(), window, cx)));
+    cx.run_until_parked();
+    for (bot, said) in [(POLLS_BOT, "Made-up Polls is typing…"), ("28:cc", "Bot is typing…")] {
+        rig.send(Event::Typing {
+            conversation: POLLS_CHAT.to_owned(),
+            from: Some(bot.to_owned()),
+            typing: true,
+        });
+        cx.run_until_parked();
+        let chat = cx.update(|_, cx| shell.read(cx).chat().cloned()).expect("the chat");
+        assert_eq!(cx.update(|_, cx| chat.read(cx).typing_text(cx)).as_deref(), Some(said));
+        rig.send(Event::Typing {
+            conversation: POLLS_CHAT.to_owned(),
+            from: Some(bot.to_owned()),
+            typing: false,
+        });
+        cx.run_until_parked();
+    }
+}
+
+fn picker_in_group(bots: bool) -> (Rig, Entity<Shell>, &'static mut VisualTestContext) {
+    let rig = Rig::start();
+    rig.core.members.lock().unwrap().insert(
+        GROUP_CHAT.to_owned(),
+        vec![Member::new(common::LAB_A, None), Member::new(common::LAB_B, None)],
+    );
+    rig.core
+        .names
+        .lock()
+        .unwrap()
+        .insert(common::LAB_B.to_owned(), "Lab Bee".to_owned());
+    rig.core
+        .mentionable_bots
+        .lock()
+        .unwrap()
+        .insert(GROUP_CHAT.to_owned(), vec![app(POLLS)]);
+    let (shell, cx) = shell_window(&rig, bots);
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(GROUP_CHAT.to_owned(), window, cx)));
+    cx.run_until_parked();
+    let chat = cx.update(|_, cx| shell.read(cx).chat().cloned()).expect("the chat");
+    let compose = cx.update(|_, cx| chat.read(cx).compose().clone());
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.focus(window, cx)));
+    cx.simulate_input("Who's in? @");
+    cx.run_until_parked();
+    (rig, shell, cx)
+}
+
+fn offered(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
+    let chat = cx.update(|_, cx| shell.read(cx).chat().cloned()).expect("the chat");
+    let compose = cx.update(|_, cx| chat.read(cx).compose().clone());
+    cx.update(|_, cx| {
+        compose
+            .read(cx)
+            .picker()
+            .map(|picker| picker.matches.iter().map(|candidate| candidate.name.to_string()).collect())
+            .unwrap_or_default()
+    })
+}
+
+/// With the bots shown, a group chat's picker offers the bots of its apps after its members and before Everyone; the
+/// bot picked is sent as a bot's mention with its app's id. Without the flag, no bot is offered.
+#[test]
+fn a_group_chat_s_picker_offers_its_apps_bots_and_sends_a_bot_s_mention() {
+    let (_rig, shell, cx) = picker_in_group(false);
+    assert_eq!(offered(&shell, cx), ["Lab Bee", "Everyone"]);
+
+    let (rig, shell, cx) = picker_in_group(true);
+    assert_eq!(offered(&shell, cx), ["Lab Bee", "Made-up Polls", "Everyone"]);
+    assert!(bounds(cx, "mention-bot").is_some());
+    cx.simulate_input("poll");
+    cx.run_until_parked();
+    assert_eq!(offered(&shell, cx), ["Made-up Polls"]);
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let actions = std::mem::take(&mut *rig.core.actions.lock().unwrap());
+    let Some(teams_core::Action::Send { text, .. }) = actions.first() else {
+        panic!("a post: {actions:?}");
+    };
+    assert!(text.html().contains("itemid=\"0\">Made-up Polls</span>"), "{}", text.html());
+    assert_eq!(
+        text.bots().get(&teams_proto::Mri::new(POLLS_BOT)).map(String::as_str),
+        Some(POLLS)
+    );
+    assert!(text.participants().contains(&teams_proto::Mri::new(POLLS_BOT)));
 }

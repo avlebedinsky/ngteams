@@ -119,6 +119,18 @@ pub fn image_of(picture: &StoredPicture) -> Option<Picture> {
     Some(Picture(Arc::new(Image::from_bytes(format, picture.bytes.clone()))))
 }
 
+/// The picture of an app's tile as the engine read it: PNG, JPEG and WebP.
+#[must_use]
+pub fn app_image(picture: &teams_proto::PastedPicture) -> Option<Picture> {
+    let format = match picture.format {
+        teams_proto::PastedFormat::Png => ImageFormat::Png,
+        teams_proto::PastedFormat::Jpeg => ImageFormat::Jpeg,
+        teams_proto::PastedFormat::Webp => ImageFormat::Webp,
+        teams_proto::PastedFormat::Gif => return None,
+    };
+    Some(Picture(Arc::new(Image::from_bytes(format, picture.bytes.clone()))))
+}
+
 /// An avatar of `size`: the picture when there is one, else the initials of `name`, else a blank one.
 #[must_use]
 pub fn avatar(name: Option<&SharedString>, picture: Option<&Picture>, size: Size) -> Avatar {

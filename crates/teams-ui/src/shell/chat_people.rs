@@ -25,6 +25,8 @@ impl Shell {
     pub(super) fn people_header_button(&self, id: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
         let row = self.list.read(cx).row(id)?;
         let count = match row.kind {
+            // a bot's chat takes no people
+            RowKind::OneToOne if row.bot.is_some() => return None,
             RowKind::OneToOne => None,
             RowKind::Group => Some(row.members).filter(|count| *count > 0),
             _ => return None,

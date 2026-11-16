@@ -14,7 +14,9 @@
 //!   itemtype Mention inside a `readonly` element, and its `properties.mentions` entry ([`mention_span`],
 //!   [`mention_entry`], the only place it is built); a no-break space (U+00A0) as `&nbsp;`, as the web client writes
 //!   the one after a mention; a mention of everyone in a group chat in the same form, its MRI the chat's id and its
-//!   `mentionType` `everyone` (`mention-everyone.json`, captured in `abc-everyone` on 2026-10-29);
+//!   `mentionType` `everyone` (`mention-everyone.json`, captured in `abc-everyone` on 2026-10-29); a bot's mention in
+//!   the same form, its MRI `28:<bot id>`, its `mentionType` `bot` and its app's id as `appId` (the web bundle's
+//!   shape, no capture yet: `docs/protocol/chat.md`, "Mentions");
 //! - a picture sent to the media service (`crate::ams::sent_picture`: itemtype `AMSImage`, its `imgo` view on an AMS
 //!   host, `itemid` its object) as the web client writes a pasted picture, its object in the post's `amsreferences`
 //!   ([`MessageText::pictures`]); any other image is refused.
@@ -54,9 +56,9 @@ pub enum ComposeError {
     /// An `item_id` given twice, or held by two mentions in the text.
     #[error("the mention {0:?} is there twice")]
     RepeatedMention(String),
-    /// A mention of anyone but a work account (`8:orgid:<object id>`) or everyone in a group chat (the chat's id): a
-    /// bot's mention needs its app id, which isn't modelled.
-    #[error("a mention of {0}, which isn't a work account or a group chat")]
+    /// A mention of anyone but a work account (`8:orgid:<object id>`), everyone in a group chat (the chat's id) or a
+    /// bot whose app is given (`28:<bot id>`, [`MessageText::new_with_bots`]).
+    #[error("a mention of {0}, which isn't a work account, a group chat or a bot with its app")]
     NotAPerson(Mri),
     /// An image that isn't a picture sent to the media service for this message ([`crate::ams::sent_picture`]).
     #[error("an image can't be sent in a message's text")]
@@ -91,6 +93,8 @@ pub struct MessageText {
     files: Vec<crate::UploadedFile>,
     text: RichText,
     mentioned: BTreeMap<String, Mri>,
+    /// The app of each bot it mentions, by the bot's MRI.
+    bots: BTreeMap<Mri, String>,
     pictures: Vec<String>,
     html: String,
     mentions: Vec<Value>,
@@ -119,9 +123,37 @@ impl MessageText {
         text: RichText,
         mentioned: impl IntoIterator<Item = (String, Mri)>,
     ) -> Result<Self, ComposeError> {
+        Self::build(cloud, text, mentioned, &BTreeMap::new())
+    }
+
+    /// [`Self::new`], its mentions of bots (`28:<bot id>`) each written with its app's id as `bots` gives it by the
+    /// bot's MRI; an entry no mention names is left out.
+    ///
+    /// # Errors
+    /// As [`Self::new`]; a bot mentioned without its app is [`ComposeError::NotAPerson`].
+    pub fn new_with_bots(
+        text: RichText,
+        mentioned: impl IntoIterator<Item = (String, Mri)>,
+        bots: &BTreeMap<Mri, String>,
+    ) -> Result<Self, ComposeError> {
+        Self::build(&crate::Cloud::Microsoft, text, mentioned, bots)
+    }
+
+    fn build(
+        cloud: &crate::Cloud,
+        text: RichText,
+        mentioned: impl IntoIterator<Item = (String, Mri)>,
+        apps: &BTreeMap<Mri, String>,
+    ) -> Result<Self, ComposeError> {
         let mut table = BTreeMap::new();
+        let mut bots = BTreeMap::new();
         for (item_id, mri) in mentioned {
-            if !is_work_account(&mri) && !is_group_chat_id(mri.as_str()) {
+            if is_bot(&mri) {
+                let Some(app) = apps.get(&mri).filter(|app| is_app_id(app)) else {
+                    return Err(ComposeError::NotAPerson(mri));
+                };
+                bots.insert(mri.clone(), app.clone());
+            } else if !is_work_account(&mri) && !is_group_chat_id(mri.as_str()) {
                 return Err(ComposeError::NotAPerson(mri));
             }
             if table.insert(item_id.clone(), mri).is_some() {
@@ -131,7 +163,7 @@ impl MessageText {
         if text.truncated {
             return Err(ComposeError::Truncated);
         }
-        let mut render = Render::new(cloud, &table);
+        let mut render = Render::new(cloud, &table, &bots);
         render.nodes(&text.nodes, 0)?;
         if let Some(unused) = table.keys().find(|item_id| !render.used.contains(item_id.as_str())) {
             return Err(ComposeError::UnusedMention(unused.clone()));
@@ -153,6 +185,7 @@ impl MessageText {
             files: Vec::new(),
             text,
             mentioned: table,
+            bots,
             pictures,
             html,
             mentions,
@@ -176,7 +209,7 @@ impl MessageText {
         if !cloud.is_microsoft() {
             pictures_on(cloud, &mut text.nodes);
         }
-        Self::new_in(cloud, text, self.mentioned).map(|text| text.with_files(self.files))
+        Self::build(cloud, text, self.mentioned, &self.bots).map(|text| text.with_files(self.files))
     }
 
     /// Plain text as one paragraph, no mention.
@@ -218,6 +251,12 @@ impl MessageText {
     #[must_use]
     pub fn mentioned(&self) -> &BTreeMap<String, Mri> {
         &self.mentioned
+    }
+
+    /// The app of each bot it mentions, by the bot's MRI.
+    #[must_use]
+    pub fn bots(&self) -> &BTreeMap<Mri, String> {
+        &self.bots
     }
 
     /// The media service's objects of the pictures it shows, in order: the post's `amsreferences`.
@@ -273,6 +312,9 @@ struct Stored {
     files: Vec<crate::UploadedFile>,
     text: RichText,
     mentioned: BTreeMap<String, String>,
+    /// The app of each bot mentioned, by the bot's MRI.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    bots: BTreeMap<String, String>,
 }
 
 impl TryFrom<Stored> for MessageText {
@@ -287,13 +329,19 @@ impl TryFrom<Stored> for MessageText {
         if stored.files.iter().any(|file| file.site_in(&cloud).is_none()) {
             return Err(ComposeError::FileCloud);
         }
-        Self::new_in(
+        let bots = stored
+            .bots
+            .into_iter()
+            .map(|(bot, app)| (Mri::new(bot), app))
+            .collect();
+        Self::build(
             &cloud,
             stored.text,
             stored
                 .mentioned
                 .into_iter()
                 .map(|(item_id, mri)| (item_id, Mri::new(mri))),
+            &bots,
         )
         .map(|text| text.with_files(stored.files))
     }
@@ -309,6 +357,11 @@ impl From<MessageText> for Stored {
                 .mentioned
                 .into_iter()
                 .map(|(item_id, mri)| (item_id, mri.as_str().to_owned()))
+                .collect(),
+            bots: text
+                .bots
+                .into_iter()
+                .map(|(bot, app)| (bot.as_str().to_owned(), app))
                 .collect(),
         }
     }
@@ -336,17 +389,41 @@ fn mention_entry(index: usize, mri: &Mri, kind: &MentionKind, name: &str) -> Val
     })
 }
 
+/// A bot's mention entry: a person's with `mentionType` `bot` and its app's id (`appId`), as the web bundle names it.
+fn bot_entry(index: usize, bot: &Mri, app: &str, name: &str) -> Value {
+    let mut entry = mention_entry(index, bot, &MentionKind::Bot, name);
+    entry["appId"] = json!(app);
+    entry
+}
+
 /// A work account's MRI: `8:orgid:` and an object id (hex digits and dashes).
 fn is_work_account(mri: &Mri) -> bool {
-    mri.as_str()
-        .strip_prefix("8:orgid:")
-        .is_some_and(|oid| !oid.is_empty() && oid.bytes().all(|byte| byte.is_ascii_hexdigit() || byte == b'-'))
+    mri.as_str().strip_prefix("8:orgid:").is_some_and(is_guid_like)
+}
+
+/// A bot's MRI: `28:` and its id (hex digits and dashes).
+fn is_bot(mri: &Mri) -> bool {
+    mri.as_str().strip_prefix("28:").is_some_and(is_guid_like)
+}
+
+fn is_guid_like(id: &str) -> bool {
+    !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+}
+
+/// An app's id as the catalogue gives one: a GUID, or a name like `com.microsoft.teamspace.tab.planner`.
+fn is_app_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 256
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_'))
 }
 
 /// Renders the model into HTML and collects what the properties and the target need.
 struct Render<'a> {
     cloud: &'a crate::Cloud,
     table: &'a BTreeMap<String, Mri>,
+    bots: &'a BTreeMap<Mri, String>,
     html: String,
     mentions: Vec<Value>,
     used: BTreeSet<&'a str>,
@@ -367,10 +444,11 @@ const MARK_TAGS: [(Marks, &str); 5] = [
 ];
 
 impl<'a> Render<'a> {
-    fn new(cloud: &'a crate::Cloud, table: &'a BTreeMap<String, Mri>) -> Self {
+    fn new(cloud: &'a crate::Cloud, table: &'a BTreeMap<String, Mri>, bots: &'a BTreeMap<Mri, String>) -> Self {
         Self {
             cloud,
             table,
+            bots,
             html: String::new(),
             mentions: Vec::new(),
             used: BTreeSet::new(),
@@ -562,6 +640,9 @@ impl<'a> Render<'a> {
             self.mentions
                 .push(mention_entry(index, mri, &MentionKind::Everyone, name));
             self.everyone.insert(mri.as_str().to_owned());
+        } else if let Some(app) = self.bots.get(mri) {
+            self.mentions.push(bot_entry(index, mri, app, name));
+            self.participants.insert(mri.clone());
         } else {
             self.mentions
                 .push(mention_entry(index, mri, &MentionKind::Person, name));

@@ -492,6 +492,19 @@ pub trait Core: Send + Sync + 'static {
     fn chat_apps(&self, _chat: String) -> Reply<Vec<StoreApp>> {
         Reply::ready(Ok(Vec::new()))
     }
+    /// The app of a bot (`28:<id>`), as the engine finds it (its bot index). A fake core knows no bot's.
+    fn bot_app(&self, _bot: String) -> Reply<Option<StoreApp>> {
+        Reply::ready(Ok(None))
+    }
+    /// The app of an id that may be a bot's or a person's, among the apps the engine already knows of and the
+    /// account's own; never read by the id. A fake core knows no bot's.
+    fn known_bot_app(&self, _id: String) -> Reply<Option<StoreApp>> {
+        Reply::ready(Ok(None))
+    }
+    /// The apps added to a chat (`team` false) or a team whose bot people can mention there. A fake core has none.
+    fn mentionable_bots(&self, _place: String, _team: bool) -> Reply<Vec<StoreApp>> {
+        Reply::ready(Ok(Vec::new()))
+    }
     /// How a team's channel did. A fake core doesn't know.
     fn channel_analytics(
         &self,
@@ -780,6 +793,18 @@ impl Core for EngineRequests {
 
     fn chat_apps(&self, chat: String) -> Reply<Vec<StoreApp>> {
         EngineRequests::chat_apps(self, chat)
+    }
+
+    fn bot_app(&self, bot: String) -> Reply<Option<StoreApp>> {
+        EngineRequests::bot_app(self, bot)
+    }
+
+    fn known_bot_app(&self, id: String) -> Reply<Option<StoreApp>> {
+        EngineRequests::known_bot_app(self, id)
+    }
+
+    fn mentionable_bots(&self, place: String, team: bool) -> Reply<Vec<StoreApp>> {
+        EngineRequests::mentionable_bots(self, place, team)
     }
 
     fn channel_analytics(

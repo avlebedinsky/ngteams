@@ -103,6 +103,7 @@ use crate::trace::{TraceLine, ViewTrace};
 use crate::view::status_text;
 
 mod apps;
+mod bot_chat;
 mod channel_management;
 mod chat_people;
 mod meeting_tabs;
@@ -3320,7 +3321,8 @@ impl Shell {
         // Teams' chat header: the chat's picture and name (a meeting's tabs after it), the other member's
         // presence, the call on the right
         let header = self
-            .partner_header(id, &name, palette, cx)
+            .bot_header(id, palette, cx)
+            .or_else(|| self.partner_header(id, &name, palette, cx))
             .unwrap_or_else(|| pane_header_led(face, name, palette))
             .children(tabs)
             .children(presence)

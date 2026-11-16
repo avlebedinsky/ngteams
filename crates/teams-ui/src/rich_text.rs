@@ -620,6 +620,19 @@ pub fn mentioned(properties: Option<&str>) -> std::collections::HashMap<String, 
         .collect()
 }
 
+/// The app of each bot a message's `properties.mentions` names (`mentionType` `bot` with its `appId`), by the bot's
+/// MRI: an edit of the message mentions them again.
+pub fn mentioned_bots(properties: Option<&str>) -> std::collections::BTreeMap<teams_proto::Mri, String> {
+    read_mentions(properties)
+        .into_iter()
+        .filter(|mention| mention.kind == teams_proto::chat::MentionKind::Bot)
+        .filter_map(|mention| {
+            let app = mention.extra.get("appId")?.as_str()?.to_owned();
+            Some((teams_proto::Mri::new(mention.mri?), app))
+        })
+        .collect()
+}
+
 /// `properties.mentions` read by `teams-proto`'s own message reader; nothing when it isn't in a captured form.
 fn read_mentions(properties: Option<&str>) -> Vec<Mention> {
     let Some(properties) = properties.and_then(|text| serde_json::from_str::<Value>(text).ok()) else {
