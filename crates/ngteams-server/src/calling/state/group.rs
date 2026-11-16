@@ -232,6 +232,7 @@ impl Call {
         party.ring_due = None;
         party.showing = Showing::default();
         party.presenting = false;
+        party.hand = None;
         if let Some(leg) = party.leg.take() {
             out.released.extend(leg.ids().map(str::to_owned));
         }

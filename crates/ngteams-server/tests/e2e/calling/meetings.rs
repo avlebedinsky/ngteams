@@ -239,3 +239,84 @@ async fn an_outsider_waits_in_the_lobby_until_the_organizer_admits_it_and_one_tu
         shut_down(vec![ada, bert, dan, eve], mixed).await;
     }
 }
+
+/// Until `person`'s view of `call` shows `mri` with its hand raised (`raised`) or not.
+async fn hand_shown(person: &mut Person, call: CallId, mri: &str, raised: bool) {
+    person
+        .engine
+        .view(call, |view| {
+            view.participants
+                .iter()
+                .any(|party| party.mri == mri && party.hand_raised == raised)
+        })
+        .await;
+}
+
+/// Until `person` is told `from` reacted with `reaction` in `call`.
+async fn reaction_told(person: &mut Person, call: CallId, from: &str, reaction: &str) {
+    person
+        .engine
+        .next(|event| match event {
+            Event::CallReaction {
+                call: of,
+                from: by,
+                reaction: told,
+                ..
+            } if *of == call && by.as_str() == from && told == reaction => Some(()),
+            _ => None,
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_raised_hand_and_a_reaction_reach_everyone_in_the_meeting() {
+    for backend in backends() {
+        let mixed = Mixed::start(backend).await;
+        let mut ada = Person::new(&mixed, "Ada", A_TONE).await;
+        let mut bert = Person::new(&mixed, "Bert", B_TONE).await;
+        let mut cora = Person::new(&mixed, "Cora", C_TONE).await;
+        let event = schedule(&ada, &[&bert, &cora]).await;
+        let join = join_of(&event);
+        let a_call = joined(&mut ada, &join).await;
+        let b_call = joined(&mut bert, &join).await;
+        let c_call = joined(&mut cora, &join).await;
+        let b = bert.engine.mri.clone();
+        bert.engine
+            .call(CallAction::RaiseHand {
+                call: b_call,
+                raised: true,
+            })
+            .await;
+        hand_shown(&mut ada, a_call, &b, true).await;
+        hand_shown(&mut cora, c_call, &b, true).await;
+        bert.engine
+            .next(|event| match event {
+                Event::CallOwn {
+                    call,
+                    hand_raised: true,
+                    ..
+                } if *call == b_call => Some(()),
+                _ => None,
+            })
+            .await;
+        let c = cora.engine.mri.clone();
+        let react = CallAction::React {
+            call: c_call,
+            reaction: "applause".to_owned(),
+        };
+        cora.engine.call(react).await;
+        reaction_told(&mut ada, a_call, &c, "applause").await;
+        reaction_told(&mut bert, b_call, &c, "applause").await;
+        reaction_told(&mut cora, c_call, &c, "applause").await;
+        bert.engine
+            .call(CallAction::RaiseHand {
+                call: b_call,
+                raised: false,
+            })
+            .await;
+        hand_shown(&mut ada, a_call, &b, false).await;
+        hand_shown(&mut cora, c_call, &b, false).await;
+        leave_all(&mut [&mut ada, &mut bert, &mut cora], &[a_call, b_call, c_call]).await;
+        shut_down(vec![ada, bert, cora], mixed).await;
+    }
+}

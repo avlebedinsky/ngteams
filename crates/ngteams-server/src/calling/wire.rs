@@ -13,6 +13,9 @@ use teams_sdp::sdp::SHARING_LABEL;
 /// A party's callbacks, by the name its request gave each.
 pub(crate) type Links = BTreeMap<String, String>;
 
+/// The published state of a raised hand.
+pub(crate) const RAISE_HANDS: &str = "raiseHands";
+
 /// The names the conversation service and the call controller have behind the flight proxy.
 pub(crate) const CONVERSATION_HOST: &str = "conv.own";
 pub(crate) const CONTROLLER_HOST: &str = "cc.own";
@@ -130,6 +133,9 @@ fn conversation_links(origin: &str, call: &Call) -> Value {
     if call.kind == Kind::Group {
         links["addParticipant"] = json!(link("add"));
         links["addParticipantAndModality"] = json!(link("add"));
+        for op in ["publishState", "removeState", "sendMessage"] {
+            links[op] = json!(link(op));
+        }
     }
     if call.meeting.is_some() {
         for op in ["admit", "removeParticipant"] {
@@ -536,6 +542,11 @@ fn roster_entry(call: &Call, party: &Party, version: u64) -> Value {
         "details": {"id": party.mri(), "displayName": party.name},
         "endpoints": endpoints,
     });
+    if let Some(hand) = &party.hand {
+        entry["publishedStates"] = json!([{
+            "typeRank": hand.rank, "stateType": RAISE_HANDS, "content": hand.content, "stateId": hand.id,
+        }]);
+    }
     if let Some(role) = call.role_of(party) {
         entry["meetingRole"] = json!(role);
         entry["advancedMeetingRole"] = json!(role);

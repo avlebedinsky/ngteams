@@ -169,6 +169,18 @@ pub(crate) struct Party {
     /// While it waits in a meeting's lobby: the offer its join carried, which its leg is made with once it is let in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<Value>,
+    /// Its raised hand, while it is up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hand: Option<Hand>,
+}
+
+/// A raised hand: the state the roster names it by, its rank among the hands raised (the first is 1), and what its
+/// raise sent along (`content`: the skin tone).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Hand {
+    pub id: String,
+    pub rank: u64,
+    pub content: Value,
 }
 
 /// What a group call party sends besides its audio: its camera, its screen.

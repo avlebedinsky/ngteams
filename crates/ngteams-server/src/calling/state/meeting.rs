@@ -4,7 +4,9 @@
 
 use serde_json::Value;
 
-use super::{At, Call, KEEP_ALIVE, KEEP_ALIVE_SLACK, Kind, Out, Party, Phase, Refusal, Seat, Status};
+use serde_json::json;
+
+use super::{At, Call, Hand, KEEP_ALIVE, KEEP_ALIVE_SLACK, Kind, Out, Party, Phase, Refusal, Seat, Status};
 use crate::calling::wire::{self, Links};
 
 /// What someone turned away from the lobby is told at its `end` callback.
@@ -93,5 +95,90 @@ impl Call {
             self.tell_presence(at.origin, wire::LEFT, seat, out);
         }
         Ok(())
+    }
+
+    /// The party at `seat` raises its hand (`publishState` of `raiseHands`) as the state `id`: the roster tells everyone,
+    /// and its answer names the state. A hand that is up already stays as it was.
+    pub(crate) fn raise_hand(
+        &mut self,
+        seat: Seat,
+        id: &str,
+        body: &Value,
+        at: At<'_>,
+        out: &mut Out,
+    ) -> Result<Value, Refusal> {
+        self.group_in_call(seat)?;
+        let published = body.get("publishedState").ok_or(Refusal::Bad)?;
+        if published.get("stateType").and_then(Value::as_str) != Some(wire::RAISE_HANDS) {
+            return Err(Refusal::Bad);
+        }
+        if self.party(seat).hand.is_none() {
+            let rank = self
+                .parties
+                .iter()
+                .filter_map(|party| party.hand.as_ref())
+                .map(|hand| hand.rank)
+                .max();
+            self.party_mut(seat).hand = Some(Hand {
+                id: id.to_owned(),
+                rank: rank.unwrap_or_default() + 1,
+                content: published.get("content").cloned().unwrap_or_else(|| json!({})),
+            });
+            self.tell_group(at.origin, &[seat], None, out);
+        }
+        let hand = self.party(seat).hand.as_ref().ok_or(Refusal::Gone)?;
+        Ok(json!({"publishStateResponse": {"typeRank": hand.rank, "stateId": hand.id}}))
+    }
+
+    /// The party at `seat` lowers its hand (`removeState` naming the hand's state): the roster tells everyone. The
+    /// answer names each state with how its removal went.
+    pub(crate) fn lower_hand(&mut self, seat: Seat, body: &Value, at: At<'_>, out: &mut Out) -> Result<Value, Refusal> {
+        self.group_in_call(seat)?;
+        let ids = body.get("stateIds").and_then(Value::as_array).ok_or(Refusal::Bad)?;
+        let mut results = Vec::new();
+        for id in ids.iter().filter_map(Value::as_str) {
+            let own = self.party(seat).hand.as_ref().is_some_and(|hand| hand.id == id);
+            if own {
+                self.party_mut(seat).hand = None;
+                self.tell_group(at.origin, &[seat], None, out);
+            }
+            let (code, phrase) = if own { (200, "Success") } else { (404, "NotFound") };
+            results.push(json!({"stateId": id, "result": {"code": code, "phrase": phrase}}));
+        }
+        Ok(json!({"removeStateResponse": {"results": results}}))
+    }
+
+    /// The party at `seat` sends live reactions (`sendMessage`): each reaction goes to everyone in the call, its
+    /// sender too, at their `receiveMessage` callback, named by who sent it.
+    pub(crate) fn react(&self, seat: Seat, body: &Value, at: At<'_>, out: &mut Out) -> Result<(), Refusal> {
+        self.group_in_call(seat)?;
+        let messages = body
+            .get("messageContent")
+            .and_then(Value::as_array)
+            .ok_or(Refusal::Bad)?;
+        let sender = self.party(seat);
+        let from = json!({"id": sender.mri(), "displayName": sender.name,
+            "participantId": sender.participant.get("participantId")});
+        for message in messages
+            .iter()
+            .filter(|message| message.get("type").and_then(Value::as_str) == Some("Reaction"))
+        {
+            let told = json!({
+                "from": from, "type": "Reaction", "payload": message.get("payload"),
+                "operationId": message.get("operationId"),
+            });
+            for party in self.parties.iter().filter(|party| party.status == Status::InCall) {
+                out.call_back(at.origin, party.link("receiveMessage"), told.clone());
+            }
+        }
+        Ok(())
+    }
+
+    /// The party at `seat` is in the call, which is a group call's.
+    fn group_in_call(&self, seat: Seat) -> Result<(), Refusal> {
+        if self.kind != Kind::Group {
+            return Err(Refusal::Missing);
+        }
+        self.in_call(seat)
     }
 }

@@ -301,6 +301,28 @@ pub(super) async fn conversation(
         }
         "add" => return super::group::add(&app, &caller, key, &body).await,
         "admit" => return super::meeting::admit(&app, &caller, key, &body).await,
+        "publishState" => {
+            let id = uuid::Uuid::new_v4().to_string();
+            let answer = step(&app, key, &caller, |call, seat, at, out| {
+                call.raise_hand(seat, &id, &body, at, out)
+            })
+            .await?;
+            return Ok(Json(answer).into_response());
+        }
+        "removeState" => {
+            let answer = step(&app, key, &caller, |call, seat, at, out| {
+                call.lower_hand(seat, &body, at, out)
+            })
+            .await?;
+            return Ok(Json(answer).into_response());
+        }
+        "sendMessage" => {
+            step(&app, key, &caller, |call, seat, at, out| {
+                call.react(seat, &body, at, out)
+            })
+            .await?;
+            return Ok(status(StatusCode::ACCEPTED));
+        }
         "removeParticipant" => return super::meeting::remove(&app, &caller, key, &body).await,
         "updateEndpointMetadata" | "updateParticipantProperties" => {}
         _ => return Err(Refusal::Missing.into()),
