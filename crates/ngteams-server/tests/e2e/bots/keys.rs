@@ -245,6 +245,11 @@ async fn keys_made_within_one_second_keep_the_order_they_were_made_in_and_the_fi
         let server = &registry.server;
         let first = kids(server).await;
         assert_eq!(first.len(), 1, "{first:?}");
+        // the first key is set an hour ahead, so each new key is made in a second at or before the time of the
+        // newest key, the same as a tie in one second (or a node whose clock is behind): this does not depend on
+        // how long the setup takes
+        let ahead = ngteams_server::db::now() + 3600;
+        assert_eq!(set_created_at(server, &first[0], ahead).await.unwrap(), 1);
         let mut made = Vec::new();
         for _ in 0..4 {
             made.push(server.app.bot_keys.rotate().await.unwrap());
@@ -252,6 +257,10 @@ async fn keys_made_within_one_second_keep_the_order_they_were_made_in_and_the_fi
         made.reverse();
         made.extend(first.iter().cloned());
         assert_eq!(kids(server).await, made);
+        let stored = created(server).await.unwrap();
+        assert_eq!(stored.iter().map(|(kid, _)| kid.clone()).collect::<Vec<_>>(), made);
+        let times: Vec<i64> = stored.iter().map(|(_, at)| *at).collect();
+        assert_eq!(times, (0..5).rev().map(|step| ahead + step).collect::<Vec<_>>());
         server.app.bot_keys.reload().await.unwrap();
         let token = server
             .app
@@ -266,6 +275,7 @@ async fn keys_made_within_one_second_keep_the_order_they_were_made_in_and_the_fi
 diesel::table! {
     bot_signing_keys (kid) {
         kid -> Text,
+        created_at -> BigInt,
         retired_at -> Nullable<BigInt>,
     }
 }
@@ -278,6 +288,26 @@ async fn retire(server: &TestServer, kid: &str, at: i64) -> Result<usize, ngteam
         diesel::update(bot_signing_keys::table.find(kid.to_owned())).set(bot_signing_keys::retired_at.eq(Some(at)));
     let db = &server.app.db;
     ngteams_server::with_conn!(db, |conn| Ok(query.execute(conn).await?))
+}
+
+/// Sets the time the bot signing key `kid` was made to `at`.
+async fn set_created_at(server: &TestServer, kid: &str, at: i64) -> Result<usize, ngteams_server::db::DbError> {
+    use diesel::{ExpressionMethods as _, QueryDsl as _};
+    use diesel_async::RunQueryDsl as _;
+    let query = diesel::update(bot_signing_keys::table.find(kid.to_owned())).set(bot_signing_keys::created_at.eq(at));
+    let db = &server.app.db;
+    ngteams_server::with_conn!(db, |conn| Ok(query.execute(conn).await?))
+}
+
+/// The `kid` and the time made of each bot signing key, newest first, as the server orders them.
+async fn created(server: &TestServer) -> Result<Vec<(String, i64)>, ngteams_server::db::DbError> {
+    use diesel::{ExpressionMethods as _, QueryDsl as _};
+    use diesel_async::RunQueryDsl as _;
+    let query = bot_signing_keys::table
+        .order((bot_signing_keys::created_at.desc(), bot_signing_keys::kid.desc()))
+        .select((bot_signing_keys::kid, bot_signing_keys::created_at));
+    let db = &server.app.db;
+    ngteams_server::with_conn!(db, |conn| Ok(query.load(conn).await?))
 }
 
 #[tokio::test(flavor = "multi_thread")]
