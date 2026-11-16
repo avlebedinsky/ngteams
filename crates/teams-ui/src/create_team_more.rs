@@ -30,7 +30,7 @@ use teams_store::Team;
 use crate::bridge::Core;
 use crate::icons::{Glyph, icon_button, selected_by};
 use crate::keyboard;
-use crate::people::team_initials as initials;
+use crate::people::team_initials;
 use crate::team_dialogs::{team_description_problem, team_name_problem};
 use crate::teams_page::centered;
 use crate::theme::{self, Palette};
@@ -525,7 +525,7 @@ impl CreateTeamMore {
                     id.clone(),
                     card(
                         id,
-                        initials(&template.name),
+                        team_initials(&template.name),
                         &template.name,
                         &template.category,
                         &template.summary,
@@ -566,7 +566,7 @@ impl CreateTeamMore {
                     id.clone(),
                     card(
                         id,
-                        initials(&team.name),
+                        team_initials(&team.name),
                         &team.name,
                         if team.about.public { "Public" } else { "Private" },
                         &team.about.description,

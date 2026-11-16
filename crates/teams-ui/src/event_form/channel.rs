@@ -14,7 +14,7 @@ use teams_core::MeetingChannel;
 
 use super::EventForm;
 use crate::icons::{Glyph, selected_by};
-use crate::people::team_initials as initials;
+use crate::people::team_initials;
 use crate::teams_list::team_colour;
 use crate::theme::Palette;
 
@@ -47,7 +47,7 @@ impl EventForm {
             .text_size(px(8.0))
             .bg(rgb(team_colour(&place.team)))
             .text_color(rgb(palette.on_brand))
-            .child(initials(&place.team));
+            .child(team_initials(&place.team));
         let named = div()
             .debug_selector(|| "event-channel".to_owned())
             .flex_1()

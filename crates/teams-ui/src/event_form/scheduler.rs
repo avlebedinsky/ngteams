@@ -313,7 +313,10 @@ fn column_heads(columns: &[Column], palette: Palette) -> gpui::Div {
                         .rounded_full()
                         .bg(rgb(mix(palette.surface, palette.brand, 350)))
                         .text_xs()
-                        .child(crate::people::initials(&column.name)),
+                        .child(crate::people::initials_or_face(
+                            crate::people::initials(&column.name),
+                            px(12.0),
+                        )),
                 )
                 .child(
                     div()

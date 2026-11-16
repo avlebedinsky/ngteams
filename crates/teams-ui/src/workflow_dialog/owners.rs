@@ -353,7 +353,7 @@ async fn owner_name(core: &Arc<dyn Core>, id: &str, cx: &mut AsyncApp) -> Option
     None
 }
 
-/// Teams' owner picture when it has none: their first letter in a grey circle.
+/// Teams' owner picture when it has none: their first letter in a grey circle (the blank face for a name with none).
 pub(super) fn initial(name: &str, palette: Palette) -> gpui::Div {
     div()
         .size(px(32.0))
@@ -365,7 +365,10 @@ pub(super) fn initial(name: &str, palette: Palette) -> gpui::Div {
         .bg(rgb(palette.hover))
         .text_sm()
         .font_weight(gpui::FontWeight::SEMIBOLD)
-        .child(crate::people::first_initial(name))
+        .child(crate::people::initials_or_face(
+            crate::people::first_initial(name),
+            px(16.0),
+        ))
 }
 
 /// What owners may do, with Teams' "Learn more" link at its end, in the same run of text.

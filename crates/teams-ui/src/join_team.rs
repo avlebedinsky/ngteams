@@ -18,7 +18,7 @@ use teams_proto::{JoinableTeam, TeamWrite};
 
 use crate::bridge::Core;
 use crate::icons::{Glyph, icon_button, selected_by};
-use crate::people::team_initials as initials;
+use crate::people::team_initials;
 use crate::teams_page::centered;
 use crate::theme::{self, Palette};
 
@@ -128,7 +128,7 @@ impl JoinTeam {
         let joining = self.joining.as_deref() == Some(group.as_str());
         let can_join = !self.core.read_only();
         card_frame(format!("join-card-{at}"), palette)
-            .child(card_badge(initials(&team.name), palette))
+            .child(card_badge(team_initials(&team.name), palette))
             .child(
                 div()
                     .font_weight(gpui::FontWeight::SEMIBOLD)

@@ -28,8 +28,8 @@ pub fn team_initials(name: &str) -> String {
     words(name).iter().take(2).map(|word| upper(word)).collect()
 }
 
-/// `initials` as the kit's avatar is handed them: the kit makes its own of the name it gets, which for one word of
-/// two letters keeps only the first unless the letters are apart.
+/// `initials` as the kit's avatar is handed them: the kit makes its own of the name it gets. Of one word it keeps the
+/// first letter, and keeps a second only when the first is one byte, so initials not in ASCII ("ИП") must come apart.
 #[must_use]
 pub(crate) fn kit_name(initials: &str) -> String {
     let letters: Vec<String> = initials.chars().map(String::from).collect();
@@ -56,17 +56,21 @@ fn words(name: &str) -> Vec<String> {
         .collect()
 }
 
-/// `name` without the text from each opening bracket to the next closing one.
+/// `name` without the text from each opening bracket to the next closing one. An opening bracket that no closing one
+/// follows ("Ann :( Lee") keeps the text after it, as Teams does.
 fn without_brackets(name: &str) -> String {
     let mut kept = String::with_capacity(name.len());
-    let mut inside = false;
+    let mut open: Option<String> = None;
     for c in name.chars() {
-        match c {
-            '(' | '[' | '{' | '<' => inside = true,
-            ')' | ']' | '}' | '>' if inside => inside = false,
-            _ if !inside => kept.push(c),
-            _ => {}
+        match (&mut open, c) {
+            (None, '(' | '[' | '{' | '<') => open = Some(String::from(c)),
+            (Some(_), ')' | ']' | '}' | '>') => open = None,
+            (Some(inside), _) => inside.push(c),
+            (None, _) => kept.push(c),
         }
+    }
+    if let Some(unclosed) = open {
+        kept.push_str(&unclosed);
     }
     kept
 }
@@ -119,6 +123,18 @@ mod tests {
         assert_eq!(initials("Ann {Ops} Lee"), "AL");
         assert_eq!(initials("Ann Lee <Contoso>"), "AL");
         assert_eq!(initials("(Guest) Ann Lee"), "AL");
+    }
+
+    #[test]
+    fn an_opening_bracket_with_no_closing_one_keeps_the_text_after_it() {
+        assert_eq!(initials("Ann (Lee"), "AL");
+        assert_eq!(initials("Ann :( Lee"), "AL");
+        assert_eq!(initials(":-( Bob Smith"), "BS");
+        assert_eq!(initials("(Ann Lee"), "AL");
+        assert_eq!(initials("Bob <3 Alice"), "BA");
+        assert_eq!(initials("Ann (Guest) :( Lee"), "AL");
+        assert_eq!(first_initial(":-( Bob Smith"), "B");
+        assert_eq!(team_initials("(Archived Sales"), "AS");
     }
 
     #[test]

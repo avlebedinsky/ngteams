@@ -1316,7 +1316,7 @@ fn half(face: &HalfFace, left: bool, dark: bool, size: f32) -> AnyElement {
         .bg(rgb(background))
         .text_color(rgb(foreground))
         .text_size(px(size * 0.4))
-        .child(initial);
+        .child(people::initials_or_face(initial, px(size * 0.4)));
     if left {
         half.rounded_tl(radius).rounded_bl(radius).into_any_element()
     } else {

@@ -10,15 +10,28 @@ use std::fmt;
 use std::ops::Deref;
 use std::sync::Arc;
 
-use gpui::{Image, ImageFormat, SharedString};
+use gpui::{AnyElement, Image, ImageFormat, IntoElement as _, Pixels, SharedString, Styled as _};
 use gpui_component::avatar::Avatar;
 use gpui_component::{Sizable as _, Size};
 use teams_core::{NameFrom, Person};
 use teams_store::StoredPicture;
 
+use crate::icons::Glyph;
+
 mod initials;
 
 pub use initials::{first_initial, initials, team_initials};
+
+/// What an avatar a view draws itself holds when it has no picture: `initials`, else (a name in a script Teams draws
+/// no initials for, a phone number) the blank face the kit's avatar shows, `size` across.
+#[must_use]
+pub fn initials_or_face(initials: String, size: Pixels) -> AnyElement {
+    if initials.is_empty() {
+        Glyph::USER.icon().size(size).into_any_element()
+    } else {
+        initials.into_any_element()
+    }
+}
 
 /// Someone as a view shows them.
 #[derive(Clone, Debug, PartialEq, Eq)]

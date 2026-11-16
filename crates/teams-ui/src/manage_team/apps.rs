@@ -22,7 +22,7 @@ use teams_store::Team;
 use super::{FUN_BOXES, ManageTeam, ManageTeamEvent, setting_on};
 use crate::icons::{Glyph, icon_button, selected_by};
 use crate::keyboard;
-use crate::people::team_initials as initials;
+use crate::people::team_initials;
 use crate::shell::menu_row;
 use crate::teams_page::{centered, popup_menu, with_popup};
 use crate::theme::Palette;
@@ -593,7 +593,7 @@ pub(crate) fn app_tile(app: &InstalledApp, size: f32, palette: Palette) -> gpui:
         .text_color(rgb(0x00ff_ffff))
         .text_sm()
         .font_weight(gpui::FontWeight::SEMIBOLD)
-        .child(initials(&app.name))
+        .child(team_initials(&app.name))
 }
 
 #[cfg(test)]
