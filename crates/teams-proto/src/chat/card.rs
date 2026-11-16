@@ -95,24 +95,12 @@ pub struct CardApp {
 }
 
 impl CardApp {
-    /// The icon's picture: the link inside the async gateway's copy, or the icon's own link; `None` without an `http`
-    /// or `https` one.
+    /// The icon's picture: the link inside the async gateway's copy (`crate::urlp`), or the icon's own link; `None`
+    /// without an `http` or `https` one.
     #[must_use]
     pub fn icon_picture(&self) -> Option<String> {
         let icon = self.icon.as_deref()?;
-        let url = url::Url::parse(icon).ok()?;
-        let copied = url
-            .host_str()
-            .is_some_and(|host| host.ends_with(".asyncgw.teams.microsoft.com"))
-            && url.path().starts_with("/urlp/v1/url/");
-        let picture = if copied {
-            url.query_pairs()
-                .find(|(name, _)| name == "url")
-                .map(|(_, picture)| picture.into_owned())?
-        } else {
-            icon.to_owned()
-        };
-        is_picture_link(&picture).then_some(picture)
+        crate::urlp::content_picture(icon).or_else(|| is_picture_link(icon).then(|| icon.to_owned()))
     }
 }
 

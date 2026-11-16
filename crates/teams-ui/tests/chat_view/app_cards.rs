@@ -2,8 +2,9 @@
 //! YouTube link's card, on GPUI's test context over the fake engine: in the bubble under the text, the app's icon and
 //! name over the card, the video's picture (asked of the engine by the gateway's thumbnail of YouTube's picture of the
 //! video) 16:9 wide with a play mark, the title, the channel and the counts, the Open button; a click on the picture
-//! or on Open opens the video in the browser; nothing says the message has content that can't be shown. The message
-//! is the synthetic fixture `tests/fixtures/chatsvc/app-card.json`: every word, link and id is made up.
+//! opens the video in the browser, a click on Open opens Open's link, a click elsewhere on the card opens the card's
+//! link; nothing says the message has content that can't be shown. The message is the synthetic fixture
+//! `tests/fixtures/chatsvc/app-card.json`: every word, link and id is made up.
 
 use std::sync::Arc;
 
@@ -19,15 +20,31 @@ use super::{NOON, chat_window, draw, message, rig_with, trace};
 const FIXTURE: &str = include_str!("../../../../tests/fixtures/chatsvc/app-card.json");
 const ID: &str = "405";
 const WATCH: &str = "https://www.youtube.com/watch?v=Ab3_dEf-Gh9";
+/// The Open button's link and the card's `selectAction` link in the test's copy of the fixture: each differs from the
+/// video's, so each click must open its own link (the test context keeps the last link opened).
+const OPEN_LINK: &str = "https://www.youtube.com/watch?v=Ab3_dEf-Gh9&from=open";
+const SELECT_LINK: &str = "https://www.youtube.com/watch?v=Ab3_dEf-Gh9&from=card";
 const VIDEO_PICTURE: &str = "https://i.ytimg.com/vi/Ab3_dEf-Gh9/hqdefault.jpg";
 const ICON: &str = "https://res.cdn.office.net/teamsappdata/made-up/com.microsoft.teamspace.tab.youtube_largeimage.png";
 
-/// The fixture's message, from b, as the store keeps it (its `properties` JSON text).
+/// The fixture's message, from b, as the store keeps it (its `properties` JSON text), with the Open button's link
+/// changed to [`OPEN_LINK`] and the card's `selectAction` link changed to [`SELECT_LINK`].
 fn app_card_message() -> Message {
     let fixture: Value = serde_json::from_str(FIXTURE).unwrap();
     let read_back = &fixture["read_back"];
+    let mut properties = read_back["properties"].clone();
+    let mut cards: Value = serde_json::from_str(properties["cards"].as_str().unwrap()).unwrap();
+    let content = &mut cards[0]["content"];
+    let website = "/data/msteams/value/tabInfo/websiteUrl";
+    *content
+        .pointer_mut(&format!("/body/4/actions/0{website}"))
+        .expect("the Open button's link") = Value::from(OPEN_LINK);
+    *content
+        .pointer_mut(&format!("/selectAction{website}"))
+        .expect("the card's selectAction link") = Value::from(SELECT_LINK);
+    properties["cards"] = Value::from(cards.to_string());
     let mut stored = message(ID, LAB_B, read_back["content"].as_str().unwrap(), NOON);
-    stored.properties = Some(read_back["properties"].to_string());
+    stored.properties = Some(properties.to_string());
     stored
 }
 
@@ -105,12 +122,20 @@ fn a_youtube_link_s_card_is_drawn_under_the_text_and_opens_the_video() {
 
     cx.simulate_click(media.center(), Modifiers::none());
     draw(cx);
-    assert_eq!(cx.opened_url().as_deref(), Some(WATCH));
+    assert_eq!(cx.opened_url().as_deref(), Some(WATCH), "the picture opens the video");
 
     let open = bounds(cx, &format!("card-{ID}-c0b4.0")).expect("the Open button");
     cx.simulate_click(open.center(), Modifiers::none());
     draw(cx);
-    assert_eq!(cx.opened_url().as_deref(), Some(WATCH));
+    assert_eq!(cx.opened_url().as_deref(), Some(OPEN_LINK), "Open opens its own link");
+
+    cx.simulate_click(title.center(), Modifiers::none());
+    draw(cx);
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some(SELECT_LINK),
+        "the rest of the card opens the card's selectAction link"
+    );
 }
 
 #[test]

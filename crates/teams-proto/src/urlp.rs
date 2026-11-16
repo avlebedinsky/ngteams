@@ -19,6 +19,9 @@ const MAX_LINK: usize = 2048;
 /// The thumbnail's path on the async gateway.
 const THUMBNAIL_PATH: [&str; 5] = ["urlp", "v1", "url", "image", "Thumbnail"];
 
+/// The path of the async gateway's copy of a picture (a link's app card's `appIcon`).
+const CONTENT_PATH: [&str; 4] = ["urlp", "v1", "url", "content"];
+
 /// `GET urlp/v1/url/image/Thumbnail?url=<picture>` on the account's async gateway: a link preview's picture. Its answer
 /// is read with [`LinkPreviewPicture::read_answer`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -44,30 +47,7 @@ impl LinkPreviewPicture {
             let projected = cloud.project(&url, "/ams", "https://urlp.asyncgw.teams.microsoft.com")?;
             return Self::of(projected.as_str());
         }
-        let url = Url::parse(src.trim()).ok()?;
-        let host = url.host_str()?;
-        let on_gateway = host
-            .strip_suffix(".asyncgw.teams.microsoft.com")
-            .is_some_and(is_host_name);
-        let plain = url.scheme() == "https"
-            && on_gateway
-            && url.port().is_none()
-            && url.username().is_empty()
-            && url.password().is_none()
-            && url.fragment().is_none();
-        let segments: Vec<&str> = url.path_segments()?.collect();
-        if !plain || segments != THUMBNAIL_PATH {
-            return None;
-        }
-        let mut pairs = url.query_pairs();
-        let (name, picture) = pairs.next()?;
-        if name != "url" || pairs.next().is_some() || picture.len() > MAX_LINK {
-            return None;
-        }
-        let parsed = Url::parse(&picture).ok()?;
-        matches!(parsed.scheme(), "http" | "https").then(|| Self {
-            picture: picture.into_owned(),
-        })
+        gateway_picture(src, &THUMBNAIL_PATH).map(|picture| Self { picture })
     }
 
     /// The `src` a card's picture (`picture`, an `http` or `https` link of at most 2048 bytes) is asked for by
@@ -124,6 +104,40 @@ impl Read for LinkPreviewPicture {
     fn endpoint(&self) -> Endpoint {
         Endpoint::new(THUMBNAIL_PATH).with_query("url", self.picture.as_str())
     }
+}
+
+/// The picture inside the async gateway's copy of it (`urlp/v1/url/content?url=<picture>`, as a link's app card's
+/// `appIcon` names it), with the same rules as [`LinkPreviewPicture::of`]. `None` for anything else.
+pub(crate) fn content_picture(src: &str) -> Option<String> {
+    gateway_picture(src, &CONTENT_PATH)
+}
+
+/// The picture link of an async gateway URL at `path`: `https` on an async gateway host
+/// (`<name>.asyncgw.teams.microsoft.com`), no port, user info or fragment, the path exactly `path` and the query one
+/// `url`, an `http` or `https` link of at most 2048 bytes. `None` for anything else.
+fn gateway_picture(src: &str, path: &[&str]) -> Option<String> {
+    let url = Url::parse(src.trim()).ok()?;
+    let host = url.host_str()?;
+    let on_gateway = host
+        .strip_suffix(".asyncgw.teams.microsoft.com")
+        .is_some_and(is_host_name);
+    let plain = url.scheme() == "https"
+        && on_gateway
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.fragment().is_none();
+    let segments: Vec<&str> = url.path_segments()?.collect();
+    if !plain || segments != path {
+        return None;
+    }
+    let mut pairs = url.query_pairs();
+    let (name, picture) = pairs.next()?;
+    if name != "url" || pairs.next().is_some() || picture.len() > MAX_LINK {
+        return None;
+    }
+    let parsed = Url::parse(&picture).ok()?;
+    matches!(parsed.scheme(), "http" | "https").then(|| picture.into_owned())
 }
 
 /// A host's own name before the async gateway's domain: lowercase ASCII letters, digits and `-` (`us-prod`).

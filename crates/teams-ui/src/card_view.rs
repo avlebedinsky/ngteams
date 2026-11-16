@@ -102,14 +102,14 @@ impl ShownCards {
     pub fn of_properties(properties: Option<&str>) -> Option<Self> {
         let properties = serde_json::from_str::<serde_json::Value>(properties?).ok()?;
         card::message_cards(properties.get("cards"))
-            .filter(|message| message.drawn() && !message.cards.is_empty())
+            .filter(card::CardMessage::drawn)
             .map(|message| Self(Arc::new(message)))
     }
 
     /// It has a part this build can't show.
     #[must_use]
     pub fn unshown(&self) -> bool {
-        self.0.unshown || self.0.cards.iter().any(|card| card.unshown)
+        !self.0.drawn()
     }
 }
 
@@ -392,7 +392,7 @@ fn app_header(draw: &Draw<'_>, path: &str, app: &CardApp, cx: &mut App) -> AnyEl
 }
 
 /// The width and height, as shares of a 16:9 box, that a picture of `natural_w` by `natural_h` takes to fill it,
-/// cropped equally on both sides (GPUI's `Cover` keeps a picture's top and left edges).
+/// cropped equally on both sides.
 #[must_use]
 #[expect(
     clippy::cast_precision_loss,

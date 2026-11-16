@@ -768,6 +768,31 @@ fn a_link_s_app_card_is_shown_but_a_card_this_build_cannot_draw_is_not() {
 }
 
 #[test]
+fn an_app_icon_s_gateway_copy_is_read_by_the_gateway_s_rules() {
+    let picture = |icon: &str| {
+        teams_proto::chat::card::CardApp {
+            icon: Some(icon.to_owned()),
+            ..Default::default()
+        }
+        .icon_picture()
+    };
+    let inner = "https://res.cdn.office.net/made-up/icon.png";
+    let gateway = "https://us-prod.asyncgw.teams.microsoft.com/urlp/v1/url/content";
+    let copy = format!("{gateway}?url=https%3a%2f%2fres.cdn.office.net%2fmade-up%2ficon.png");
+    assert_eq!(picture(&copy).as_deref(), Some(inner));
+    assert_eq!(picture(inner).as_deref(), Some(inner), "the app's own icon");
+    // a gateway link the gateway's rules refuse is not read through: it stays a link of its own
+    for refused in [
+        copy.replacen("https://", "http://", 1),
+        format!("{copy}&url=https%3a%2f%2fother.example%2fx.png"),
+        format!("{gateway}/more?url=https%3a%2f%2fres.cdn.office.net%2fmade-up%2ficon.png"),
+    ] {
+        assert_ne!(picture(&refused).as_deref(), Some(inner), "{refused}");
+    }
+    assert_eq!(picture("data:image/png;base64,AAAA"), None);
+}
+
+#[test]
 fn a_tab_action_without_a_website_link_stays_a_bot_action() {
     let message = adaptive(&json!({
         "type": "AdaptiveCard",
