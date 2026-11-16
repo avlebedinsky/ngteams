@@ -331,8 +331,8 @@ async fn serve_api(
     let indexing = tokio::spawn(async move {
         match crate::search::backfill(&db).await {
             Ok(0) => {}
-            Ok(indexed) => tracing::info!(indexed, "the search indexed the messages from before its index"),
-            Err(error) => tracing::warn!(%error, "the search couldn't index the messages from before its index"),
+            Ok(indexed) => tracing::info!(indexed, "the search indexed the messages and names it lacked"),
+            Err(error) => tracing::warn!(%error, "the search couldn't index the messages and names it lacked"),
         }
     });
     let shutdown = app::closing(std::sync::Arc::clone(app), shutdown);

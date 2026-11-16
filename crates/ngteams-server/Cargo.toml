@@ -60,6 +60,7 @@ tower.workspace = true
 tower-http.workspace = true
 tracing = { workspace = true, features = ["std", "attributes"] }
 tracing-subscriber.workspace = true
+unicode-normalization.workspace = true
 url = { workspace = true, features = ["serde"] }
 uuid.workspace = true
 # Teams app packages

@@ -1,5 +1,9 @@
-//! What a search looks for: the user's text as words, never a query syntax, each matched as the start of a word; and
-//! the text around a message's match, marked up as Substrate marks it (`<c0>` around a match, `<ddd/>` at a cut).
+//! What a search looks for: the user's text as words, never a query syntax, each matched as the start of a word, case
+//! and accents aside ([`folded`]); and the text around a message's match, marked up as Substrate marks it (`<c0>`
+//! around a match, `<ddd/>` at a cut).
+
+use unicode_normalization::UnicodeNormalization as _;
+use unicode_normalization::char::is_combining_mark;
 
 /// The most words of a query looked for; the rest are left out.
 const MAX_TERMS: usize = 16;
@@ -17,14 +21,15 @@ const NOT_DELETED: &str = "NOT (isClientSoftDeleted:TRUE) AND ";
 pub struct Terms(Vec<String>);
 
 impl Terms {
-    /// The words of `query`: its runs of letters and digits; an asked-for exclusion of deleted messages is no word.
+    /// The words of `query`, folded: its runs of letters and digits; an asked-for exclusion of deleted messages is no
+    /// word.
     #[must_use]
     pub fn of(query: &str) -> Self {
         let query = query.trim();
         let query = query.strip_prefix(NOT_DELETED).unwrap_or(query);
         let mut terms: Vec<String> = Vec::new();
-        for word in words(query) {
-            let word: String = word.to_lowercase().chars().take(MAX_TERM).collect();
+        for word in words(&folded(query)) {
+            let word: String = word.chars().take(MAX_TERM).collect();
             if !terms.contains(&word) && terms.len() < MAX_TERMS {
                 terms.push(word);
             }
@@ -37,17 +42,21 @@ impl Terms {
         self.0.is_empty()
     }
 
+    /// The `LIKE` patterns of the words, one each: a text of folded words holds each word it starts.
     #[must_use]
-    pub fn first(&self) -> Option<&str> {
-        self.0.first().map(String::as_str)
+    pub fn patterns(&self) -> Vec<String> {
+        self.0.iter().map(|term| format!("%{term}%")).collect()
     }
 
     /// Whether every word starts a word of one of `texts`.
     #[must_use]
     pub fn all_in(&self, texts: &[&str]) -> bool {
-        self.0
-            .iter()
-            .all(|term| texts.iter().any(|text| words(text).any(|word| starts(word, term))))
+        let texts: Vec<String> = texts.iter().map(|text| folded(text)).collect();
+        self.0.iter().all(|term| {
+            texts
+                .iter()
+                .any(|text| words(text).any(|word| word.starts_with(term.as_str())))
+        })
     }
 
     /// Postgres' `to_tsquery` of the words: each a prefix, all of them.
@@ -111,7 +120,10 @@ impl Terms {
     fn matches(&self, text: &str) -> Vec<(usize, usize)> {
         let base = text.as_ptr() as usize;
         words(text)
-            .filter(|word| self.0.iter().any(|term| starts(word, term)))
+            .filter(|word| {
+                let word = folded(word);
+                words(&word).any(|word| self.0.iter().any(|term| word.starts_with(term.as_str())))
+            })
             .map(|word| {
                 let start = word.as_ptr() as usize - base;
                 (start, start + word.len())
@@ -120,21 +132,53 @@ impl Terms {
     }
 }
 
-/// The words of `text` as the index holds them: its runs of letters and digits, lower-cased, apart by a space.
+/// The words of `text` as the index holds them: its runs of letters and digits, folded, apart by a space.
 #[must_use]
 pub fn indexed(text: &str) -> String {
-    words(text).map(str::to_lowercase).collect::<Vec<_>>().join(" ")
+    words(&folded(text)).collect::<Vec<_>>().join(" ")
 }
 
-/// The runs of letters and digits of `text`.
+/// `text` as the search compares it: lower-cased, its compatibility forms decomposed (NFKD), its Latin letters
+/// without their accents and with the letters that have none as their base (`ø` as `o`, `ß` as `ss`); so a word
+/// typed without accents finds what was written with them, the same on both backends. Other scripts keep their
+/// marks: they change the letter, not its accent.
+#[must_use]
+pub fn folded(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut after_latin = false;
+    for c in text.nfkd() {
+        if after_latin && ('\u{300}'..='\u{36F}').contains(&c) {
+            continue;
+        }
+        after_latin = is_latin(c);
+        for c in c.to_lowercase() {
+            match c {
+                'ø' => out.push('o'),
+                'đ' | 'ð' => out.push('d'),
+                'ł' => out.push('l'),
+                'ħ' => out.push('h'),
+                'ŧ' => out.push('t'),
+                'ı' => out.push('i'),
+                'ß' => out.push_str("ss"),
+                'æ' => out.push_str("ae"),
+                'œ' => out.push_str("oe"),
+                'þ' => out.push_str("th"),
+                c => out.push(c),
+            }
+        }
+    }
+    out.nfc().collect()
+}
+
+/// Whether `c` is a letter of the Latin script.
+fn is_latin(c: char) -> bool {
+    c.is_ascii_alphabetic() || ('\u{C0}'..='\u{24F}').contains(&c) || ('\u{1E00}'..='\u{1EFF}').contains(&c)
+}
+
+/// The runs of letters and digits of `text`, with the marks on them.
 fn words(text: &str) -> impl Iterator<Item = &str> + Clone {
-    text.split(|c: char| !c.is_alphanumeric())
+    text.split(|c: char| !(c.is_alphanumeric() || is_combining_mark(c)))
         .filter(|word| !word.is_empty())
-}
-
-/// Whether `word` starts with `term`, case aside.
-fn starts(word: &str, term: &str) -> bool {
-    word.to_lowercase().starts_with(term)
 }
 
 /// `text` with `&`, `<`, `>` and `"` as entities.
@@ -155,7 +199,7 @@ pub fn escaped(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::Terms;
+    use super::{Terms, folded, indexed};
 
     #[test]
     fn a_query_is_its_words_never_a_syntax() {
@@ -175,7 +219,7 @@ mod tests {
         assert!(terms.all_in(&["Bert Sample"]));
         assert!(terms.all_in(&["Ada", "bert@own.test", "Sam"]));
         assert!(!terms.all_in(&["Robert Jones"]));
-        assert_eq!(terms.first(), Some("bert"));
+        assert_eq!(terms.patterns(), ["%bert%", "%s%"]);
     }
 
     #[test]
@@ -192,5 +236,30 @@ mod tests {
         assert!(summary.contains("<c0>rocket</c0>"));
         assert_eq!(Terms::of("zz").summary("plain \"text\""), "plain &quot;text&quot;");
         assert_eq!(terms.summary(""), "");
+    }
+
+    #[test]
+    fn accents_and_case_fold_away_in_latin_only() {
+        assert_eq!(folded("Zoë Ångström-Øvergaard"), "zoe angstrom-overgaard");
+        assert_eq!(
+            folded("Crème BRÛLÉE, Straße, Æsir, Œuvre, Þór, Łódź, Đorđe"),
+            "creme brulee, strasse, aesir, oeuvre, thor, lodz, dorde"
+        );
+        assert_eq!(folded("Cafe\u{301} ﬁne ２"), "cafe fine 2");
+        assert_eq!(folded("Йод ё が 한국 🚀"), "йод ё が 한국 🚀");
+        assert_eq!(indexed("Café Ünïcode 🚀 ☕"), "cafe unicode");
+        let terms = Terms::of("CAFE unicode");
+        assert!(terms.all_in(&["Café Ünïcode"]));
+        assert!(Terms::of("angstrom overg").all_in(&["Zoë Ångström-Øvergaard"]));
+        assert!(Terms::of("Ångs").all_in(&["Zoe Angstrom"]));
+        assert!(!Terms::of("йод").all_in(&["иод"]));
+        assert_eq!(
+            Terms::of("creme brulee").summary("Crème brûlée for dessert at the cafe\u{301}"),
+            "<c0>Crème</c0> <c0>brûlée</c0> for dessert at the cafe\u{301}"
+        );
+        assert_eq!(
+            Terms::of("cafe").summary("the cafe\u{301}!"),
+            "the <c0>cafe\u{301}</c0>!"
+        );
     }
 }

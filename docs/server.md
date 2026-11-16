@@ -1176,8 +1176,10 @@ is answered 400; a kind the server doesn't search (`Event`, `App`, `Text`) finds
 entity set, and the suggestions give it no group. A request takes at most 50
 of its kind, from at most the 1000th.
 
-The query is the user's words, never a syntax: each run of letters and digits (at most 16, lower-cased) must start a
-word, all of them. Each kind finds only what the reader may see:
+The query is the user's words, never a syntax: each run of letters and digits (at most 16) must start a word, all of
+them. Words are compared folded, the same on both backends: lower-cased, compatibility forms decomposed (NFKD), and
+Latin letters without their accents (`é` as `e`, `ø` as `o`, `ß` as `ss`), so "creme" finds "Crème"; other scripts
+keep their marks. Each kind finds only what the reader may see:
 
 | Kind | What it finds |
 |---|---|
@@ -1188,10 +1190,12 @@ word, all of them. Each kind finds only what the reader may see:
 | `File` | the files the reader owns or was sent, by name, with their sharing link |
 
 Message text is indexed in the message's own transaction (`message_search`): as the reader sees it (a rich
-message's text, a mention's name, an emoji's `alt`, a post's subject), replaced on an edit, emptied on a delete, with its words (its runs of letters and digits, lower-cased, as the query is split);
-Postgres finds the words by full-text search (`to_tsvector('simple', words)`, a GIN index, each word a prefix), SQLite
-by FTS5 (`unicode61`, diacritics removed). Names are short and few, so they are matched in the server. At its start the
-server indexes the messages from before the index.
+message's text, a mention's name, an emoji's `alt`, a post's subject), replaced on an edit, emptied on a delete, with
+its folded words (as the query is split); Postgres finds the words by full-text search (`to_tsvector('simple',
+words)`, a GIN index, each word a prefix), SQLite by FTS5. Names are short and few: their folded words
+(`search_names`, with the text they were folded from) pick the candidates, and the server matches each name. A name
+changed since it was folded is a candidate of every search until the search that reads it folds it again. At its
+start the server indexes the messages from before the index and folds the names not yet folded.
 
 ## Chat events
 

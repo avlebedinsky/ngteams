@@ -503,7 +503,6 @@ async fn a_file_sent_to_a_chat_is_found_by_its_people_alone() {
 
 /// What a person without accents on the keyboard types finds what was written with them, as Teams finds it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "QA 188 Q1: names never match without accents; messages do on SQLite only"]
 async fn words_typed_without_accents_find_what_was_written_with_them() {
     let mut all_misses = Vec::new();
     for backend in backends() {
