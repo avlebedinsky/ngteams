@@ -143,6 +143,10 @@ name = "own_group_call_window"
 harness = false
 
 [[test]]
+name = "initials_ring_window"
+harness = false
+
+[[test]]
 name = "share_window"
 harness = false
 
