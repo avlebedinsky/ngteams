@@ -1,5 +1,5 @@
 {
-  "_synthetic": "Made up, in the shape of the chat service's answers to POST v1/agents/28:<bot>/invoke (docs/protocol/bots.md), every value made up. Seen in the lab's Workflows runs of 2026-11-05: HTTP 200 with the envelope {\"responseType\": <kind>, <kind>: ...} for commands (composeExtension type command) and a dialog (task type continue with an Adaptive Card), and HTTP 200 with an empty text/plain body (done: a submitAction, or an app with no commands). The others follow the public Teams and Bot Framework documentation in the same envelope and are unseen: results (composeExtension type result), message (composeExtension type message), taskMessage (task type message), and the universal action responses of adaptiveCard/action (card, executeMessage, error, signIn).",
+  "_synthetic": "Made up, in the shape of the chat service's answers to POST v1/agents/28:<bot>/invoke (docs/protocol/bots.md), every value made up. Seen in the lab's Workflows runs of 2026-11-05: HTTP 200 with the envelope {\"responseType\": <kind>, <kind>: ...} for commands (composeExtension type command), a dialog (task type continue with an Adaptive Card), the just-in-time install dialog (installDialog: the app asks to be added first, its Submit data carrying msteams.justInTimeInstall; seen in the Approvals run of 2026-11-16), and HTTP 200 with an empty text/plain body (done: a submitAction, or an app with no commands). The others follow the public Teams and Bot Framework documentation in the same envelope and are unseen: results (composeExtension type result), message (composeExtension type message), taskMessage (task type message), and the universal action responses of adaptiveCard/action (card, executeMessage, error, signIn).",
   "commands": {
     "responseType": "composeExtension",
     "composeExtension": {
@@ -29,6 +29,23 @@
               {"type": "Input.Text", "id": "notes", "placeholder": "Notes for reminder", "isMultiline": true, "maxLength": 500}
             ],
             "actions": [{"type": "Action.Submit", "title": "Submit", "data": {"hostEvent": "RunFlow"}}]
+          }
+        }
+      }
+    }
+  },
+  "installDialog": {
+    "responseType": "task",
+    "task": {
+      "type": "continue",
+      "value": {
+        "card": {
+          "contentType": "application/vnd.microsoft.card.adaptive",
+          "content": {
+            "type": "AdaptiveCard",
+            "version": "1.2",
+            "body": [{"type": "TextBlock", "text": "Continue to add this app to the chat.", "wrap": true}],
+            "actions": [{"type": "Action.Submit", "title": "Continue", "data": {"Title": "A made-up request", "msteams": {"justInTimeInstall": true}}}]
           }
         }
       }

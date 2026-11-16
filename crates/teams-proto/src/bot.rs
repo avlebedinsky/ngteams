@@ -8,8 +8,8 @@
 //! sends ([`crate::Transport::deliver_bot_invoke`]), so no value here ever holds one.
 //!
 //! The `composeExtension/fetchCommands`, `fetchTask` and `submitAction` shapes and their answers were seen in the lab
-//! (the Workflows app, 2026-11-05); the others follow the public Teams and Bot Framework documentation and are marked
-//! unseen in `bots.md` until a capture shows them.
+//! (the Workflows and Approvals apps); the others follow the public Teams and Bot Framework documentation and are
+//! marked unseen in `bots.md` until a capture shows them.
 use serde_json::{Map, Value, json};
 use teams_auth::secrets::Secret;
 
@@ -83,7 +83,7 @@ pub enum CommandContext {
     /// On a message ("More actions" on it).
     #[default]
     Message,
-    /// From the compose box.
+    /// From the compose box (seen).
     Compose,
     /// From the command box.
     CommandBox,

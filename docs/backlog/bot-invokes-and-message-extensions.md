@@ -18,7 +18,8 @@ What stays open, because no capture shows it (each is in `bots.md` as unseen or 
 
 - **A card's `Action.Execute`** (`adaptiveCard/action`): where Teams names the card's message in the request (the
   native body says `messageId`), and whether the chat service wraps the bot's `{statusCode, type, value}` in its
-  `responseType` envelope. An Approvals request from lab account a to b gives the only in-tenant card with one.
+  `responseType` envelope. The Approvals request tried on 2026-11-16 (lab a to b) gave a card with no action and no
+  `refresh`, which stayed "Requesting", so the lab tenant has no card with one.
 - **A plain `Action.Submit` and `messageBack`**: which request Teams sends for them (the native body is an invoke
   named `message`).
 - **A search command** (`composeExtension/query`, `selectItem`), `task/fetch` and `task/submit` with a card,

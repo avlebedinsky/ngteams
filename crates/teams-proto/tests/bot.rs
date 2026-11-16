@@ -9,7 +9,7 @@ use teams_proto::Mri;
 use teams_proto::bot::{
     BotInvoke, CardInvoke, CommandContext, DialogSize, InvokeAnswer, InvokeKind, MessagePayload, PayloadSender,
 };
-use teams_proto::chat::card::{InputKind, Kind, adaptive_card};
+use teams_proto::chat::card::{ActionKind, InputKind, Kind, Via, adaptive_card};
 
 const INVOKES: &str = include_str!("../../../tests/fixtures/bots/invokes.json");
 const ANSWERS: &str = include_str!("../../../tests/fixtures/bots/answers.json");
@@ -216,6 +216,24 @@ fn seen_answers_read() {
             ..
         }
     ));
+}
+
+/// An app not yet in the chat asks to be added first; its Continue sends the data back as the card gives it.
+#[test]
+fn the_just_in_time_install_dialog_keeps_its_data() {
+    let InvokeAnswer::Dialog(install) = answer("installDialog") else {
+        panic!("the install dialog")
+    };
+    let card = adaptive_card(install.card.as_ref().unwrap());
+    let ActionKind::Submit(continue_button) = &card.actions[0].kind else {
+        panic!("its Continue")
+    };
+    assert_eq!(continue_button.via, Via::Submit);
+    assert_eq!(
+        continue_button.data.as_ref().unwrap()["msteams"]["justInTimeInstall"],
+        true,
+        "the data goes back as the card gives it"
+    );
 }
 
 #[test]

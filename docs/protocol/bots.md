@@ -6,7 +6,9 @@ service, and the service reaches the bot. The same request serves a Microsoft ac
 only the token rule below differs.
 
 What was seen: the Workflows app's message extension in the lab's runs (lab account a, `team-manage`, 2026-11-05):
-`composeExtension/fetchCommands`, `fetchTask` and `submitAction`, with their answers. Everything marked **unseen**
+`composeExtension/fetchCommands`, `fetchTask` and `submitAction`, with their answers; and the Approvals app's request
+from the compose box's "+" (a to b in their 1:1 chat, 2026-11-16): `submitAction` from the compose box and the
+just-in-time install below. Everything marked **unseen**
 below follows the public Teams and Bot Framework documentation and waits for a capture: no bot in the lab tenant
 shows those parts within the lab rule (`docs/lab-rules.md`). The own server follows this page, so a later capture
 that differs changes the client and the server together.
@@ -55,8 +57,8 @@ audience to the app) and any on-behalf-of token for an app.
 | `name` | When | `value` | Seen |
 |---|---|---|---|
 | `composeExtension/fetchCommands` | an editor opens (the compose box, a message's actions): the app's commands for that context | `{"commandContext": "Message"}` (capitalised; `Compose`, `CommandBox` by analogy, unseen) | seen |
-| `composeExtension/fetchTask` | an action command is chosen: its dialog | `commandId`, `commandContext` (`message`; `compose`, `commandbox` unseen), `context` `{"theme": "default"}` (`dark`, `contrast`), and on a message `messagePayload` | seen |
-| `composeExtension/submitAction` | the dialog's submit | the same, with `data`: the card's `Action.Submit` `data` merged with the answers by input id, each a string (a date `2026-01-03`, a time `08:00`, a switch's value) | seen |
+| `composeExtension/fetchTask` | an action command is chosen: its dialog | `commandId`, `commandContext` (`message`, `compose`; `commandbox` unseen), `context` `{"theme": "default"}` (`dark`, `contrast`), and on a message `messagePayload` | seen |
+| `composeExtension/submitAction` | the dialog's submit | the same, with `data`: the card's `Action.Submit` `data` merged with the answers by input id, each a string (a date `2026-01-03`, a time `08:00`, a switch's value); an app's own web-page dialog submits its own JSON there (Approvals: lists and numbers too) | seen |
 | `composeExtension/query` | a search command's query | `commandId`, `commandContext` `compose`, `parameters` (`[{name, value}]`), `queryOptions` (`skip`, `count`), `context` | unseen |
 | `composeExtension/selectItem` | a search result is chosen | the result preview's `tap` value | unseen |
 | `adaptiveCard/action` | a card's `Action.Execute` is pressed, or its `refresh` runs | `{"action": {"type": "Action.Execute", "id", "verb", "data"}, "trigger": "manual" \| "automatic"}` | unseen |
@@ -76,6 +78,12 @@ What a card's buttons carry (`teams_proto::chat::card::BotAction`): an `Action.S
 button's type and `value`; and a card's `refresh` (its `Action.Execute` and the `userIds` it runs for by itself).
 `imBack` and `messageBack`'s `displayText` post a visible message as the user, through the ordinary message write.
 
+**Just-in-time install** (seen, Approvals, 2026-11-16): an app not yet in the chat answers a `submitAction` with a
+dialog card (`task` `continue`) that asks to add it, its `Action.Submit` `data` the submitted data plus
+`"msteams": {"justInTimeInstall": true}`. On that button Teams adds the app to the chat (`POST
+<middle tier>/beta/chats/<chat>/apps/entitlements`) and sends the `submitAction` again with that data, answered 200
+with an empty body. The app then posts its card as the user ("<name> via <app>"), with `properties.onbehalfof`.
+
 ## The answers
 
 The chat service answers with the bot's status and body. Seen: HTTP 200 with
@@ -92,6 +100,11 @@ The chat service answers with the bot's status and body. Seen: HTTP 200 with
 | sign-in | `composeExtension` `{"type": "auth" \| "config", "suggestedActions"}` | unseen |
 | `Action.Execute`'s | the bot's own `{"statusCode", "type", "value"}`: `application/vnd.microsoft.card.adaptive` (a card that takes the pressed card's place), `…activity.message` (a line of text), `application/vnd.microsoft.error` (`{code, message}`), `…activity.loginRequest` (sign in) | unseen, and whether the service wraps it in `responseType` isn't known: the native client reads both |
 | an error status | 4xx or 5xx | unseen; the native client shows it and sends nothing again |
+
+**`Action.Execute` is still unseen.** The Approvals request card of 2026-11-16 (from a to b, in their chat) carried no
+action and no `refresh`, and stayed "Requesting" for the approver after a reload some minutes later: the lab
+tenant's Approvals never offered Approve or Reject on it. A test bot of our own in the lab tenant is the way to see
+it (`docs/backlog/bot-invokes-and-message-extensions.md`).
 
 An answer of another shape is kept as it came (`InvokeAnswer::Unknown`), never guessed at.
 
