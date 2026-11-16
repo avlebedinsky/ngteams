@@ -831,6 +831,12 @@ impl Lobby {
         .await;
         hang_up(&mut self.b, b_call).await;
         hang_up(&mut self.a, a_call).await;
+        // the meeting started while b waited alone: its chat tells the start and the end all the same
+        let chat = event.meeting_chat.clone().unwrap();
+        let both = [self.a.mri.clone(), self.b.mri.clone()];
+        self.a.sync().await;
+        eprintln!("the early meeting's call lines: {:?}", self.a.stored_lines(&chat).await);
+        self.a.shows_lines(&chat, &[&started, &ended_with(&both)]).await;
     }
 
     async fn close(mut self) {
