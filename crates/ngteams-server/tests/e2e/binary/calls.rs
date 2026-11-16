@@ -15,6 +15,7 @@ mod nodes;
 mod own_relay;
 mod qa_net;
 mod qa_ring_cancel;
+mod qa_windows_far_end;
 mod relay;
 pub(super) mod support;
 

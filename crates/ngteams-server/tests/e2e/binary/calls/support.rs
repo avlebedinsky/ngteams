@@ -358,6 +358,8 @@ pub struct Phone {
     pub camera: PatternCamera,
     name: String,
     tone: Tone,
+    /// A WAV its microphone plays once in place of [`Self::tone`] ([`Self::speak`]).
+    speech: Option<PathBuf>,
     engine: Option<EngineHandle>,
     session: Arc<Session<MemorySecretStore>>,
     origin: String,
@@ -398,6 +400,7 @@ impl Phone {
             camera: PatternCamera::default(),
             name: name.into(),
             tone,
+            speech: None,
             engine: None,
             session,
             origin: origin.into(),
@@ -408,6 +411,11 @@ impl Phone {
             whole: false,
             dir,
         }
+    }
+
+    /// Its microphone plays the WAV at `wav` (48 kHz) once, then silence, from its next start on.
+    pub fn speak(&mut self, wav: PathBuf) {
+        self.speech = Some(wav);
     }
 
     /// Its engine waits as long as the app's for a catch-up a delivery made due, from its next start on.
@@ -505,7 +513,7 @@ impl Phone {
     fn media(&self) -> CallMedia {
         CallMedia {
             devices: Arc::new(FileDevices {
-                input: AudioInput::Tone(self.tone),
+                input: self.speech.clone().map_or(AudioInput::Tone(self.tone), AudioInput::Wav),
                 recording: Some(self.recording.clone()),
                 camera: self.camera,
                 pacing: Pacing::RealTime,
@@ -602,7 +610,8 @@ impl Phone {
         self.log.len()
     }
 
-    async fn pump(&mut self, wait: Duration) -> bool {
+    /// Takes the client's next event into its log, waiting up to `wait`: whether one came.
+    pub async fn pump(&mut self, wait: Duration) -> bool {
         let engine = self.engine.as_mut().unwrap();
         match tokio::time::timeout(wait, engine.next_event()).await {
             Ok(Some(event)) => {

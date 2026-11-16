@@ -12,7 +12,7 @@
 //!
 //! - a calls b (Ctrl+Shift+C in the a–b chat a's settings open); b's banner, ringtone and notification come, and
 //!   the ringtone is in b's recording; b answers from the notification's Answer; both connect, and each one's tone is
-//!   in the other's recording; while the call runs, a's microphone moves (M3 Task 20): to a USB microphone a's
+//!   in the other's recording, clean in each 20 ms (no noise, gap or click near its level); while the call runs, a's microphone moves (M3 Task 20): to a USB microphone a's
 //!   settings choose (the sandbox adds the node; the choice goes through the settings model, as the settings view
 //!   makes it), back to the system's when the settings follow it again, to a headset plugged in above the system's
 //!   (following the system), and back once the headset is unplugged, b hearing each one's tone alone in turn and the
@@ -59,7 +59,7 @@ use teams_media::devices::{Devices, SAMPLE_RATE, wav};
 use teams_media::processing::ProcessingConfig;
 use teams_media::relay::RelayServer;
 use teams_media::session::SessionConfig;
-use teams_media::tone::{Tone, amplitude_at};
+use teams_media::tone::{Tone, amplitude_at, purity};
 use teams_mock::{AB_CHAT, CHAT_BASE, ChatServiceMock, ECHO, LAB_A, LAB_B, LAB_C, TENANT};
 use teams_proto::Mri;
 use teams_proto::{Author, Client, Credentials, HttpTransport};
@@ -134,6 +134,14 @@ const HEADSET_TONE: Tone = Tone {
 };
 /// A tone quieter than this in a recording isn't there.
 const QUIET: f32 = 0.03;
+/// The windows a heard tone is judged in: 20 ms.
+const JUDGED_MS: usize = 20;
+/// A window is disturbed (a gap, a click, noise) when what the tone does not explain is within this of the tone.
+const DISTURBED_DB: f32 = 20.0;
+/// The median of a clean tone after Opus, over the windows: noise that buries the tone reads near 0 dB.
+const CLEAN_DB: f32 = 30.0;
+/// The share of windows that may be disturbed: one in twenty.
+const DISTURBED_SHARE: f32 = 0.05;
 
 pub(super) fn main() -> ExitCode {
     let outcome = match std::env::var(CHILD_ENV).as_deref() {
@@ -462,6 +470,35 @@ fn loudest(path: &Path, hz: f32, stretch: Duration) -> SandboxResult<f32> {
         .fold(0.0, f32::max))
 }
 
+/// Judges the last 2 s of the recording at `path` in 20 ms windows: the tone at `hz` fits each window, and the rest
+/// (a gap, a click, noise) stays far under it.
+fn heard_clean(path: &Path, hz: f32, who: &str) -> SandboxResult {
+    let samples = wav::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let window = usize::try_from(SAMPLE_RATE / 1_000)? * JUDGED_MS;
+    let tail = &samples[samples.len().saturating_sub(window * 100)..];
+    let mut decibels: Vec<f32> = tail.chunks_exact(window).map(|chunk| purity(chunk, hz).1).collect();
+    if decibels.len() < 50 {
+        return Err(format!("{who}'s recording holds {} samples", samples.len()).into());
+    }
+    decibels.sort_by(f32::total_cmp);
+    let median = decibels[decibels.len() / 2];
+    let disturbed = decibels.iter().filter(|db| **db < DISTURBED_DB).count();
+    #[expect(clippy::cast_precision_loss, reason = "a count of windows")]
+    let share = disturbed as f32 / decibels.len() as f32;
+    say(&format!(
+        "{who} heard {hz} Hz at a median of {median:.1} dB over the rest, {disturbed} of {} windows disturbed",
+        decibels.len()
+    ));
+    if median < CLEAN_DB || share > DISTURBED_SHARE {
+        return Err(format!(
+            "{who} heard {hz} Hz buried: median {median:.1} dB, {disturbed} of {} windows disturbed",
+            decibels.len()
+        )
+        .into());
+    }
+    Ok(())
+}
+
 fn recording(sandbox: &Sandbox) -> SandboxResult<PathBuf> {
     Ok(sandbox.pipewire().ok_or("no PipeWire")?.recording())
 }
@@ -541,6 +578,9 @@ fn calls(a: &mut AppUnderTest, b: &mut AppUnderTest, a_box: &Sandbox, b_box: &Sa
     if a_heard < HEARD || b_heard < HEARD {
         return Err(format!("the tones didn't cross: a heard b at {a_heard:.3}, b heard a at {b_heard:.3}").into());
     }
+    // each hears the other's tone clean, not buried in noise or cut
+    heard_clean(&recording(a_box)?, B_TONE.hz, "a")?;
+    heard_clean(&recording(b_box)?, A_TONE.hz, "b")?;
 
     microphones_mid_call(a, a_box, b_box)?;
 

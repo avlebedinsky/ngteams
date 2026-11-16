@@ -36,6 +36,9 @@ const RING: u64 = 12;
 /// Set, the nodes keep the media node's addresses at their defaults (the host's outward address): the run's coturn
 /// must then relay from that address, as a coturn beside a server on one host does (`commands.md` of QA 297).
 const MEDIA_DEFAULTS: &str = "NGTS_TEST_MEDIA_DEFAULTS";
+/// The transport the clients reach the coturn by (`udp`, the default, or `tcp`): `tcp` lets a client in a VM reach it
+/// through an SSH tunnel (QA 422).
+const TURN_TRANSPORT: &str = "NGTS_TEST_TURN_TRANSPORT";
 
 const fn tone(hz: f32, amplitude: f32) -> Tone {
     Tone { hz, amplitude }
@@ -96,6 +99,14 @@ fn added_id(line: &str) -> String {
     line[start..end].to_owned()
 }
 
+/// The `[calling]` tables of the nodes' configuration: the ring timeout and the run's coturn.
+fn calling(relay: std::net::SocketAddr, secret: &str) -> String {
+    let transport = std::env::var(TURN_TRANSPORT).unwrap_or_else(|_| "udp".to_owned());
+    format!(
+        "[calling]\nring_timeout = {RING}\n[calling.turn]\nsecret = {secret:?}\nurls = [\"turn:{relay}?transport={transport}\"]\n"
+    )
+}
+
 impl Group {
     /// `None` (skipped, and said) without a coturn, or for [`Layout::Split`] without Postgres and Redis.
     pub async fn start(layout: Layout, flow: &str, people: &[(&str, &str)], api_only: bool) -> Option<Self> {
@@ -115,9 +126,7 @@ impl Group {
         eprintln!("group calls, {flow}: {layout:?}");
         let mut deployment = Deployment::new(backend, false, redis).await;
         deployment.origin = deployment.origin.replacen("http:", "https:", 1);
-        let mut config = format!(
-            "[calling]\nring_timeout = {RING}\n[calling.turn]\nsecret = {secret:?}\nurls = [\"turn:{relay}?transport=udp\"]\n"
-        );
+        let mut config = calling(relay, &secret);
         config.push_str("[mixer]\n");
         if std::env::var_os(MEDIA_DEFAULTS).is_none() {
             // the loopback coturn relays from 127.0.0.1: the node's candidate and its replies are there too
