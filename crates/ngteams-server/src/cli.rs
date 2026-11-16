@@ -327,11 +327,20 @@ async fn serve_api(
     crate::admin::setup::announce(app).await;
     tracing::info!(address = %listener.local_addr()?, origin = %app.config.origin(), tls = tls.is_some(), "serving");
     let sweeper = tokio::spawn(crate::calling::keep_sweeping(std::sync::Arc::clone(app)));
+    let db = app.db.clone();
+    let indexing = tokio::spawn(async move {
+        match crate::search::backfill(&db).await {
+            Ok(0) => {}
+            Ok(indexed) => tracing::info!(indexed, "the search indexed the messages from before its index"),
+            Err(error) => tracing::warn!(%error, "the search couldn't index the messages from before its index"),
+        }
+    });
     let shutdown = app::closing(std::sync::Arc::clone(app), shutdown);
     let served = listener
         .serve(app::router(std::sync::Arc::clone(app)), tls, shutdown)
         .await;
     sweeper.abort();
+    indexing.abort();
     Ok(served?)
 }
 

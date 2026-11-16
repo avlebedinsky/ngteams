@@ -44,6 +44,18 @@ const LONG: Duration = Duration::from_secs(600);
 /// The chat service's audience, which AMS takes too.
 const IC3: &str = <crate::auth::extract::Ic3 as crate::auth::extract::Audience>::AUDIENCE;
 
+/// Where a file of `owner`'s drive named `name` opens: its sharing link.
+pub(crate) fn file_url(app: &App, owner: &str, name: &str) -> Option<String> {
+    let item = repo::Item {
+        id: String::new(),
+        owner_id: owner.to_owned(),
+        name: name.to_owned(),
+        size: 0,
+        created_at: 0,
+    };
+    drive::web_url(app, &item).ok()
+}
+
 pub(crate) fn router(app: &App) -> Router<Arc<App>> {
     let small = Router::new()
         .merge(graph::router())

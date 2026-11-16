@@ -203,6 +203,7 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(crate::people::router(&app))
         .merge(crate::presence::router(&app))
         .merge(crate::registrar::router())
+        .merge(crate::search::router())
         .merge(crate::trouter::router())
         .merge(crate::calling::router())
         .merge(crate::workflows::router(&app.config))

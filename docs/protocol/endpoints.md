@@ -58,7 +58,7 @@ the own origin rather than a Microsoft SharePoint origin:
 | Graph | `/graph/v1.0/` | transport fixed base; `FileThumbnails::of_in` and `FileDownload::of_in` retain the cloud when validating response links |
 | Files and thumbnails | `/sp/` | `shared_files_in`, `DriveSite::from_web_url_in`, `UploadedFile::from_entry_in`, `DriveWrite::share_in`; personal sites at `/sp/personal/<account>/`, unchanged `_api/v2.0/` drive paths; thumbnail/download links stay under `/sp/` and are fetched without account credentials |
 | Loki | `/loki/` | `with_loki`, `set_loki_region` |
-| Search | `/search/` | transport fixed base |
+| Search | `/search/` | transport fixed base; served ([server.md](../server.md#search)) |
 | Calling | `/flightproxy/api/v2/` | `CallContext::for_cloud`, `CallLink::parse_in`; typed starts and operations, machine and tracker retain exact same-origin links; callbacks use `/trouter/v4/f/<endpoint>/callAgent/…` |
 | TURN credentials | `/trap/tokens` | `RelayTokens` |
 
@@ -446,8 +446,8 @@ These endpoints use distinct service credentials and bases. Native use is limite
 
 | Method | Path | What it does | Native | Notes · task | Evidence |
 | --- | --- | --- | --- | --- | --- |
-| `POST` | `https://substrate.office.com/search/api/v1/suggestions` `?scenario` (also `…/query`) | search suggestions: at load the people and files caches (`peoplecache`, `filescache`, empty query); as the user types in the title bar (`powerbar`) a few people, files, chats, teams, channels, messages, events and apps | `SubstrateSearch::suggestions` | [search.md](search.md#the-suggestions) · M0 T11, 2026-10-31 | seen (all; `search`) |
-| `POST` | `https://substrate.office.com/searchservice/api/v2/query` | the title bar's results: one entity request per kind (`Message`, `People`, `File`, `Chat`, `TeamsChannel`), a few of each for All, a page of one for its tab; also an empty `PowerbarContextual` ask when the box opens (answered 400) | `SubstrateSearch::query` | [search.md](search.md#the-results) · 2026-10-31 | seen (`search`; denied as unreadable before 2026-10-31) |
+| `POST` | `https://substrate.office.com/search/api/v1/suggestions` `?scenario` (also `…/query`) | search suggestions: at load the people and files caches (`peoplecache`, `filescache`, empty query); as the user types in the title bar (`powerbar`) a few people, files, chats, teams, channels, messages, events and apps | `SubstrateSearch::suggestions` | [search.md](search.md#the-suggestions) · M0 T11, 2026-10-31; own server: served ([server.md](../server.md#search)) | seen (all; `search`) |
+| `POST` | `https://substrate.office.com/searchservice/api/v2/query` | the title bar's results: one entity request per kind (`Message`, `People`, `File`, `Chat`, `TeamsChannel`), a few of each for All, a page of one for its tab; also an empty `PowerbarContextual` ask when the box opens (answered 400) | `SubstrateSearch::query` | [search.md](search.md#the-results) · 2026-10-31; own server: served ([server.md](../server.md#search)) | seen (`search`; denied as unreadable before 2026-10-31) |
 | `POST` | `https://substrate.office.com/search/api/v1/events` (and `…/events/`) `?scenario` | the search's own telemetry: what was asked, shown and clicked | not used | [search.md](search.md#what-else-the-web-client-sends) · 2026-10-31 | seen (`search`; denied as unreadable before 2026-10-31) |
 | `GET` | `https://substrate.office.com/search/api/v2/init` `?scenario&cvid` | initialises a search session (the box opened) | not used | [search.md](search.md#what-else-the-web-client-sends) | seen (`ab-chat`, `ab-chat-full`, `echo-call`, `search`) |
 | `GET` | `https://substrate.office.com/search/api/v1/suggestions` `?scenario=powerbar&query&cvid&logicalId` | the zero-query suggestions as the box opens | not used | [search.md](search.md#what-else-the-web-client-sends) | seen (`search`) |

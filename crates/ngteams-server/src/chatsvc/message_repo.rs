@@ -137,6 +137,7 @@ pub(super) async fn insert_by(db: &Db, draft: &Message, base: &str, poster: Post
                 .values(&row)
                 .execute(conn)
                 .await?;
+            crate::search::index::index!(conn, &row.chat_id, row.id, &body);
             diesel::update(chats::table.find(&row.chat_id))
                 .set(chats::version.eq(version))
                 .execute(conn)
@@ -348,6 +349,7 @@ where
                 .set((chat_messages::version.eq(version), chat_messages::body.eq(&row.body)))
                 .execute(conn)
                 .await?;
+            crate::search::index::index!(conn, chat, id, &body);
             diesel::update(chats::table.find(chat))
                 .set(chats::version.eq(version))
                 .execute(conn)

@@ -18,6 +18,7 @@
 //!   and the reads people are named and drawn from;
 //! - `teams`: teams and channels (CSA, the middle tier's and the provisioning service's team routes); a channel
 //!   is a thread of the chat service;
+//! - [`search`]: the title bar's search (Substrate's suggestions and results) over a full-text index of the messages;
 //! - [`workflows`]: Workflows with incoming webhooks (the Flow API subset the client uses, and the webhooks);
 //! - [`apps`]: the app registry, a bot's credentials and the keys activities to bots are signed with.
 
@@ -38,6 +39,7 @@ pub mod people;
 pub mod presence;
 pub mod registrar;
 pub mod routes;
+pub mod search;
 pub mod serve;
 pub mod services;
 pub mod storage;

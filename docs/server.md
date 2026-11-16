@@ -595,7 +595,7 @@ hands out its GTM where it has one.
 | User profiles | `userProfileService` | `/api/userprofilesvc/<region>/` | a team's people search |
 | Files | (the origin) | `/sp/` | yes |
 | Loki | (the origin) | `/loki/` | yes |
-| Search | (the origin) | `/search/` | no |
+| Search | (the origin) | `/search/` | the title bar's suggestions and results ([Search](#search)) |
 | Flight proxy | (the origin) | `/flightproxy/api/v2/` | 1:1 calls |
 | TURN credentials | (the origin) | `/trap/tokens` | yes |
 | Power Automate (Flow API), webhooks | (the client's fixed base) | `/workflows/` | the webhook workflows' subset, while `workflows.enabled` |
@@ -1144,6 +1144,32 @@ The reads, each for any account that can sign in:
   - `api/v1/oofstatus`: `outOfOfficeState` `Disabled`, or `AlwaysEnabled` while automatic replies are on.
 
 The team pickers' people searches are in [Teams and channels](#teams-and-channels).
+
+## Search
+
+The title bar's search is Substrate's (`docs/protocol/search.md`), under `/search/` with the token of
+`https://outlook.office.com/search`: `POST search/search/api/v1/suggestions` as the query is typed (`Groups`, one
+per kind asked) and `POST searchservice/api/v2/query` once it is entered (`EntitySets`, one per entity request, with
+`MoreResultsAvailable`). An ask without entity requests (the web client's empty contextual one) or with more than 16
+is answered 400; a kind the server doesn't search (`Event`, `App`, `Text`) finds nothing. A request takes at most 50
+of its kind, from at most the 1000th.
+
+The query is the user's words, never a syntax: each run of letters and digits (at most 16, lower-cased) must start a
+word, all of them. Each kind finds only what the reader may see:
+
+| Kind | What it finds |
+|---|---|
+| `Message` | the text of the messages of the threads the reader sits in, within the history they were given and up to when they left, the newest first; the text around the match marked (`<c0>`), with the thread, the id, the sender and the thread's other people, and in a channel the post it belongs to |
+| `People` | the accounts that can sign in, by name, given name, surname or address, with their title and department |
+| `Chat` | the reader's group chats (not a 1:1 chat, a channel or a team) by topic or another of their people's names |
+| `Team`, `Channel`, `TeamsChannel` | the teams the reader is on, and the channels of them the reader sits in, by name, with the team's name |
+| `File` | the files the reader owns or was sent, by name, with their sharing link |
+
+Message text is indexed in the message's own transaction (`message_search`): as the reader sees it (a rich
+message's text, a mention's name, an emoji's `alt`, a post's subject), replaced on an edit, emptied on a delete, with its words (its runs of letters and digits, lower-cased, as the query is split);
+Postgres finds the words by full-text search (`to_tsvector('simple', words)`, a GIN index, each word a prefix), SQLite
+by FTS5 (`unicode61`, diacritics removed). Names are short and few, so they are matched in the server. At its start the
+server indexes the messages from before the index.
 
 ## Chat events
 

@@ -25,6 +25,7 @@ clap = { workspace = true, features = ["env"] }
 diesel.workspace = true
 diesel-async.workspace = true
 diesel_migrations.workspace = true
+ego-tree.workspace = true
 figment.workspace = true
 flate2.workspace = true
 futures-util.workspace = true

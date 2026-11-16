@@ -23,6 +23,7 @@ mod migrations;
 mod node;
 mod people;
 mod presence;
+mod search;
 mod shared;
 mod sign_in;
 mod support;
