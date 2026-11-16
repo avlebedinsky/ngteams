@@ -25,21 +25,28 @@ use crate::support::{CLIENT_ID, PASSWORD};
 const CHILD: &str = "NGTEAMS_FIRST_WRITE_CHILD";
 /// The child's threads' stack: half of Rust's default 2 MiB.
 const HALF_STACK: &str = "1048576";
-const ADA: &str = "ada@own.test";
-const BOB: &str = "bob@own.test";
+pub(crate) const ADA: &str = "ada@own.test";
+pub(crate) const BOB: &str = "bob@own.test";
 
 #[test]
 fn an_engines_first_write_refreshes_its_token_and_goes_out_over_tls() {
-    if std::env::var_os(CHILD).is_some() {
+    if in_child() {
         first_write();
         return;
     }
+    run_in_child("first_write::an_engines_first_write_refreshes_its_token_and_goes_out_over_tls");
+}
+
+/// Whether this process is the child [`run_in_child`] started.
+pub(crate) fn in_child() -> bool {
+    std::env::var_os(CHILD).is_some()
+}
+
+/// Runs the test `exact` (its path in this binary) again in a child process with [`HALF_STACK`], and fails unless it
+/// ran and passed there.
+pub(crate) fn run_in_child(exact: &str) {
     let output = Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "first_write::an_engines_first_write_refreshes_its_token_and_goes_out_over_tls",
-            "--nocapture",
-        ])
+        .args(["--exact", exact, "--nocapture"])
         .env(CHILD, "1")
         .env("RUST_MIN_STACK", HALF_STACK)
         .stdin(Stdio::null())
@@ -57,63 +64,12 @@ fn an_engines_first_write_refreshes_its_token_and_goes_out_over_tls() {
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn first_write() {
-    let dir = tempfile::tempdir().unwrap();
-    let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
-    let pem = certified.cert.pem();
-    let tls = TlsConfig {
-        cert: dir.path().join("cert.pem"),
-        key: dir.path().join("key.pem"),
-    };
-    std::fs::write(&tls.cert, &pem).unwrap();
-    std::fs::write(&tls.key, certified.signing_key.serialize_pem()).unwrap();
-    let listener = Listener::bind(([127, 0, 0, 1], 0).into()).unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let origin = format!("https://localhost:{port}");
-    let config = Config {
-        public_origin: url::Url::parse(&origin).unwrap(),
-        database_url: format!("sqlite://{}", dir.path().join("db.sqlite").display()),
-        tls: Some(tls.clone()),
-        ..Config::default()
-    };
-    let app = App::start(config).await.unwrap();
-    for (upn, name) in [(ADA, "Ada"), (BOB, "Bob")] {
-        let new = NewAccount {
-            upn,
-            display_name: name,
-            password: PASSWORD,
-            admin: false,
-            must_change_password: false,
-        };
-        admin::create_user(&app.db, Actor::CLI, &new).await.unwrap();
-    }
-    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let served = tokio::spawn(listener.serve(app::router(app), Some(tls), async move {
-        let _ = stopped.await;
-    }));
-    let cloud = Cloud::own(&origin).unwrap().trusting(pem.as_bytes()).unwrap();
-    let grant = Grant::new(&origin, &pem);
-
-    let (ada, region) = grant.mri_and_region(ADA, &cloud).await;
-    let (bob, _) = grant.mri_and_region(BOB, &cloud).await;
+    let server = OwnServer::start(None).await;
+    let (ada, region) = server.mri_and_region(ADA).await;
+    let (bob, _) = server.mri_and_region(BOB).await;
 
     // only a refresh token, as after a sign-in: the write's token is the engine's first refresh
-    let started = account::start_for_cloud(
-        Account {
-            upn: ADA.into(),
-            mri: ada.clone(),
-            display_name: "Ada".into(),
-            store_file: dir.path().join("account.sqlite"),
-            region,
-            secrets: grant.signed_in(ADA).await,
-            push: false,
-            known_names: vec![(ada, "Ada".into())],
-            calls: None,
-            read_only: false,
-        },
-        teams_core::CallFloor::new(),
-        &cloud,
-    )
-    .unwrap();
+    let started = server.start_engine(ADA, &ada, region, server.signed_in(ADA).await);
     let row = started
         .handle
         .write(Action::CreateChat {
@@ -124,8 +80,109 @@ async fn first_write() {
         .unwrap();
     assert_eq!(row.state, OutboxState::Sent);
     started.handle.shutdown();
-    stop.send(()).unwrap();
-    served.await.unwrap().unwrap();
+    server.stop().await;
+}
+
+/// An own server over TLS on loopback, its users Ada and Bob, and its certificate's PEM for the clients to trust.
+pub(crate) struct OwnServer {
+    pub dir: tempfile::TempDir,
+    /// The port it listens on itself.
+    pub port: u16,
+    cloud: Cloud,
+    grant: Grant,
+    stop: tokio::sync::oneshot::Sender<()>,
+    served: tokio::task::JoinHandle<Result<(), ngteams_server::serve::ServeError>>,
+}
+
+impl OwnServer {
+    /// Starts it; the clients reach it at `public_port` on localhost (a proxy in front of it), or at its own port.
+    pub(crate) async fn start(public_port: Option<u16>) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        let pem = certified.cert.pem();
+        let tls = TlsConfig {
+            cert: dir.path().join("cert.pem"),
+            key: dir.path().join("key.pem"),
+        };
+        std::fs::write(&tls.cert, &pem).unwrap();
+        std::fs::write(&tls.key, certified.signing_key.serialize_pem()).unwrap();
+        let listener = Listener::bind(([127, 0, 0, 1], 0).into()).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let origin = format!("https://localhost:{}", public_port.unwrap_or(port));
+        let config = Config {
+            public_origin: url::Url::parse(&origin).unwrap(),
+            database_url: format!("sqlite://{}", dir.path().join("db.sqlite").display()),
+            tls: Some(tls.clone()),
+            ..Config::default()
+        };
+        let app = App::start(config).await.unwrap();
+        for (upn, name) in [(ADA, "Ada"), (BOB, "Bob")] {
+            let new = NewAccount {
+                upn,
+                display_name: name,
+                password: PASSWORD,
+                admin: false,
+                must_change_password: false,
+            };
+            admin::create_user(&app.db, Actor::CLI, &new).await.unwrap();
+        }
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let served = tokio::spawn(listener.serve(app::router(app), Some(tls), async move {
+            let _ = stopped.await;
+        }));
+        let cloud = Cloud::own(&origin).unwrap().trusting(pem.as_bytes()).unwrap();
+        let grant = Grant::new(&origin, &pem);
+        Self {
+            dir,
+            port,
+            cloud,
+            grant,
+            stop,
+            served,
+        }
+    }
+
+    /// `upn`'s MRI and region.
+    pub(crate) async fn mri_and_region(&self, upn: &str) -> (String, Region) {
+        self.grant.mri_and_region(upn, &self.cloud).await
+    }
+
+    /// A store holding only `upn`'s refresh token, as after a sign-in.
+    pub(crate) async fn signed_in(&self, upn: &str) -> MemorySecretStore {
+        self.grant.signed_in(upn).await
+    }
+
+    /// `upn`'s engine, started with `secrets`.
+    pub(crate) fn start_engine(
+        &self,
+        upn: &str,
+        mri: &str,
+        region: Region,
+        secrets: MemorySecretStore,
+    ) -> account::AccountEngine<MemorySecretStore> {
+        account::start_for_cloud(
+            Account {
+                upn: upn.into(),
+                mri: mri.to_owned(),
+                display_name: upn.into(),
+                store_file: self.dir.path().join(format!("{upn}.sqlite")),
+                region,
+                secrets,
+                push: false,
+                known_names: vec![(mri.to_owned(), upn.into())],
+                calls: None,
+                read_only: false,
+            },
+            teams_core::CallFloor::new(),
+            &self.cloud,
+        )
+        .unwrap()
+    }
+
+    pub(crate) async fn stop(self) {
+        self.stop.send(()).unwrap();
+        self.served.await.unwrap().unwrap();
+    }
 }
 
 /// The password grant over TLS, as the client's sign-in form posts it.
