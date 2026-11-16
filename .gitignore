@@ -4,6 +4,7 @@
 *.har
 captures/
 .env*
+!.env.example
 .claude/settings.local.json
 .dispatch/
 .agents/skills/sound-pack/

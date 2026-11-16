@@ -1,0 +1,188 @@
+# ngteams-server behind Caddy: two API nodes, one media node, Postgres, Redis, RustFS (S3) and coturn.
+# Write .env beside this file first (from .env.example), then: docker compose up -d   (docs/server.md, "Operations")
+name: ngteams
+
+x-server: &server
+  image: ${NGTEAMS_SERVER_IMAGE:-ngteams-server:latest}
+  build:
+    context: ../..
+    dockerfile: packaging/server/Dockerfile
+  restart: unless-stopped
+  environment: &server-env
+    NGTEAMS_SERVER_CONFIG: /etc/ngteams-server/server.toml
+    NGTEAMS_SERVER_LOG: ${NGTEAMS_SERVER_LOG:-info}
+    NGTEAMS_SERVER_PUBLIC_ORIGIN: ${NGTEAMS_PUBLIC_ORIGIN:-https://${NGTEAMS_DOMAIN:?set NGTEAMS_DOMAIN in .env}}
+    NGTEAMS_SERVER_DATABASE_URL: postgres://ngteams:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/ngteams
+    NGTEAMS_SERVER_REDIS_URL: redis://redis:6379
+    NGTEAMS_SERVER_STORAGE_URL: s3://${S3_BUCKET:-ngteams}
+    NGTEAMS_SERVER_STORAGE_OPTIONS__AWS_ENDPOINT: http://rustfs:9000
+    NGTEAMS_SERVER_STORAGE_OPTIONS__AWS_REGION: us-east-1
+    NGTEAMS_SERVER_STORAGE_OPTIONS__AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY in .env}
+    NGTEAMS_SERVER_STORAGE_OPTIONS__AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY in .env}
+    NGTEAMS_SERVER_STORAGE_OPTIONS__AWS_VIRTUAL_HOSTED_STYLE_REQUEST: '"false"'
+    NGTEAMS_SERVER_STORAGE_OPTIONS__AWS_ALLOW_HTTP: '"true"'
+    NGTEAMS_SERVER_CALLING__TURN__URLS: '["turn:${NGTEAMS_DOMAIN}:${TURN_PORT:-3478}?transport=udp", "turn:${NGTEAMS_DOMAIN}:${TURN_PORT:-3478}?transport=tcp"]'
+    NGTEAMS_SERVER_CALLING__TURN__SECRET: ${TURN_SECRET:?set TURN_SECRET in .env}
+  volumes:
+    - ./server.toml:/etc/ngteams-server/server.toml:ro
+  command: ["serve", "--role", "api"]
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+    bucket:
+      condition: service_completed_successfully
+    redis:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: docker.io/library/postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ngteams
+      POSTGRES_DB: ngteams
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "ngteams", "-d", "ngteams"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Fan-out, the push journal, presence and counters only: nothing in it needs keeping.
+  redis:
+    image: docker.io/library/redis:7
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  rustfs:
+    image: docker.io/rustfs/rustfs:1.0.5
+    restart: unless-stopped
+    environment:
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY in .env}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY in .env}
+    volumes:
+      - rustfs:/data
+
+  bucket:
+    image: docker.io/rustfs/rustfs:1.0.5
+    restart: "no"
+    environment:
+      S3_BUCKET: ${S3_BUCKET:-ngteams}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        for attempt in $$(seq 60); do
+          code=$$(curl -sS -o /dev/null -w '%{http_code}' -X PUT --aws-sigv4 aws:amz:us-east-1:s3 \
+            --user "$$S3_ACCESS_KEY:$$S3_SECRET_KEY" "http://rustfs:9000/$$S3_BUCKET")
+          case "$$code" in
+            200|409) echo "bucket $$S3_BUCKET ready"; exit 0 ;;
+          esac
+          sleep 1
+        done
+        echo "bucket $$S3_BUCKET not made (last answer $$code)" >&2
+        exit 1
+    depends_on:
+      - rustfs
+
+  migrate:
+    <<: *server
+    restart: "no"
+    command: ["migrate"]
+    healthcheck:
+      disable: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api-1:
+    <<: *server
+
+  api-2:
+    <<: *server
+
+  media:
+    <<: *server
+    command: ["serve", "--role", "media"]
+    environment:
+      <<: *server-env
+      NGTEAMS_SERVER_MIXER__UDP_LISTEN: 0.0.0.0:${MEDIA_UDP_PORT:-50000}
+      NGTEAMS_SERVER_MIXER__PUBLIC_ADDRS: '["${HOST_IP:?set HOST_IP in .env}"]'
+      NGTEAMS_SERVER_MIXER__INTERNAL_LISTEN: 0.0.0.0:9090
+      NGTEAMS_SERVER_MIXER__INTERNAL_URL: http://media:9090
+    ports:
+      - ${MEDIA_UDP_PORT:-50000}:${MEDIA_UDP_PORT:-50000}/udp
+    # A media node serves no HTTP API: any answer of its internal API (401 without a token) means it is up.
+    healthcheck:
+      test: ["CMD", "curl", "-sS", "-o", "/dev/null", "http://127.0.0.1:9090/"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    # A stopping media node serves its calls for mixer.drain_timeout (300 s) before it ends them.
+    stop_grace_period: 310s
+
+  # TURN uses a wide UDP range and must see clients' and the media node's real addresses: host networking.
+  coturn:
+    image: docker.io/coturn/coturn:4.19
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      TURN_SECRET: ${TURN_SECRET:?set TURN_SECRET in .env}
+      TURN_PORT: ${TURN_PORT:-3478}
+      TURN_MIN_PORT: ${TURN_MIN_PORT:-49160}
+      TURN_MAX_PORT: ${TURN_MAX_PORT:-49359}
+      HOST_IP: ${HOST_IP:?set HOST_IP in .env}
+      TURN_EXTERNAL_IP: ${TURN_EXTERNAL_IP:-}
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        cat > /tmp/turnserver.conf <<EOF
+        listening-port=$$TURN_PORT
+        min-port=$$TURN_MIN_PORT
+        max-port=$$TURN_MAX_PORT
+        realm=rtcmedia
+        use-auth-secret
+        static-auth-secret=$$TURN_SECRET
+        fingerprint
+        no-tls
+        no-multicast-peers
+        denied-peer-ip=10.0.0.0-10.255.255.255
+        denied-peer-ip=172.16.0.0-172.31.255.255
+        denied-peer-ip=192.168.0.0-192.168.255.255
+        denied-peer-ip=169.254.0.0-169.254.255.255
+        allowed-peer-ip=$$HOST_IP
+        $${TURN_EXTERNAL_IP:+external-ip=$$TURN_EXTERNAL_IP}
+        EOF
+        exec turnserver -c /tmp/turnserver.conf --log-file=stdout
+
+  caddy:
+    image: docker.io/library/caddy:2.11
+    restart: unless-stopped
+    environment:
+      NGTEAMS_DOMAIN: ${NGTEAMS_DOMAIN}
+      CADDY_GLOBAL_OPTIONS: ${CADDY_GLOBAL_OPTIONS:-}
+    ports:
+      - ${HTTP_PORT:-80}:80
+      - ${HTTPS_PORT:-443}:443
+      - ${HTTPS_PORT:-443}:443/udp
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - api-1
+      - api-2
+
+volumes:
+  postgres:
+  rustfs:
+  caddy-data:
+  caddy-config:

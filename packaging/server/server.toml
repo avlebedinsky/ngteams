@@ -1,0 +1,9 @@
+# Settings for every node of the deployment beside those compose.yaml sets in the environment (which win).
+# The keys are in docs/server.md, "Configuration". Nodes read this file at start: restart them after a change.
+
+# [media]
+# user_quota_bytes = 5368709120
+
+# [[rooms]]
+# name = "Room 4"
+# address = "room4@example.com"

@@ -1,0 +1,13 @@
+/target
+/.git
+/.teamlead
+/.dispatch
+/.ci-cache
+/.claude
+/.agents
+/.revmux
+/.github
+**/captures
+**/*.har
+**/.env*
+**/__pycache__

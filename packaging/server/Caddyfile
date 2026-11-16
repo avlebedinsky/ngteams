@@ -1,0 +1,17 @@
+{
+	{$CADDY_GLOBAL_OPTIONS}
+}
+
+{$NGTEAMS_DOMAIN} {
+	# WebSockets (the Trouter push socket under /trouter/) pass through as any request.
+	reverse_proxy api-1:8080 api-2:8080 {
+		lb_policy round_robin
+		lb_try_duration 5s
+		health_uri /health/ready
+		health_interval 5s
+		health_timeout 2s
+		fail_duration 30s
+		# Keeps push sockets open across a config reload.
+		stream_close_delay 5m
+	}
+}
