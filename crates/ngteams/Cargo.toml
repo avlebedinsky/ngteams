@@ -159,6 +159,10 @@ name = "own_meeting_window"
 harness = false
 
 [[test]]
+name = "apps_window"
+harness = false
+
+[[test]]
 name = "reactors_window"
 harness = false
 
