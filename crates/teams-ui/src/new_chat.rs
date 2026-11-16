@@ -26,6 +26,10 @@
 //!   is then not opened over the place shown) or given back, which New message opened again shows
 //!   ([`NewChat::keeps_going`]).
 //!
+//! - **Left for another place**, a chat not made yet stays as Teams keeps it: a new group chat, or New message with
+//!   people and a draft, keeps a row in the chats ([`NewChat::kept_row`]) that opens it again as it was left (the
+//!   shell's `new_chat` module).
+//!
 //! - **A new group chat from a 1:1 chat** ([`NewChat::start_draft`]: its header's "Start a group chat" when the
 //!   account has no unnamed group chat of exactly those people) is New message with its people fixed, as Teams draws
 //!   it: no To: line, but a chat's header (the group's face, the people's first names, the people button with their
@@ -140,6 +144,17 @@ enum Kind {
     GroupDraft,
 }
 
+/// What became of New message's first message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Outcome {
+    /// None was sent, or one is on its way.
+    None,
+    /// It was given back since New message was last shown.
+    GivenBack,
+    /// It made the chat: New message is done, and the shell keeps it no longer.
+    Made,
+}
+
 /// The chat the people are, while one is found, shown under the line.
 struct Found {
     id: String,
@@ -171,8 +186,8 @@ pub struct NewChat {
     /// New message's own box, for a chat not made yet.
     draft: Entity<Compose>,
     starting: Option<Task<()>>,
-    /// A first message given back since New message was last shown.
-    given_back: bool,
+    /// What became of its last first message.
+    outcome: Outcome,
     /// New message's own, or a new group chat from a 1:1 chat (its people fixed, its header drawn in place of To:).
     kind: Kind,
     /// Its people flyout, while it is open.
@@ -241,7 +256,7 @@ impl NewChat {
             found: None,
             draft,
             starting: None,
-            given_back: false,
+            outcome: Outcome::None,
             kind: Kind::NewMessage,
             people_flyout: None,
             people_button: Placed::default(),
@@ -252,7 +267,9 @@ impl NewChat {
 
     /// Gives the To: box the keyboard, its suggestions open.
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.given_back = false;
+        if self.outcome == Outcome::GivenBack {
+            self.outcome = Outcome::None;
+        }
         self.to.update(cx, |to, cx| to.focus(window, cx));
         self.suggesting = true;
         self.refresh_suggestions(cx);
@@ -342,9 +359,11 @@ impl NewChat {
     /// A new group chat's row in the list, as Teams names it: the people's first names joined.
     #[must_use]
     pub fn draft_row(&self) -> Option<ChatRow> {
-        if self.kind != Kind::GroupDraft {
-            return None;
-        }
+        (self.kind == Kind::GroupDraft).then(|| self.people_row())
+    }
+
+    /// A row of the people, named by their first names joined, its face their first two.
+    fn people_row(&self) -> ChatRow {
         let names: Vec<String> = self
             .people
             .iter()
@@ -359,7 +378,7 @@ impl NewChat {
                 picture: person.picture.clone(),
             })
             .collect();
-        Some(ChatRow {
+        ChatRow {
             id: String::new(),
             kind: RowKind::Group,
             name: chat_list::joined(&names, 0).into(),
@@ -374,7 +393,52 @@ impl NewChat {
             previewed: None,
             last_activity: None,
             unread: 0,
-        })
+        }
+    }
+
+    /// Its row in the chats while the shell keeps it out of sight, as Teams lists a chat not made yet: a new group
+    /// chat's ([`Self::draft_row`]), or New message's while it names people and holds a draft for a chat not made
+    /// yet, named by its group name, else by its people. None while its first message is on its way.
+    #[must_use]
+    pub fn kept_row(&self, cx: &gpui::App) -> Option<ChatRow> {
+        if self.is_starting() || self.outcome == Outcome::Made || self.found.is_some() {
+            return None;
+        }
+        if self.kind == Kind::GroupDraft {
+            return self.draft_row();
+        }
+        if self.people.is_empty() || !self.draft.read(cx).has_draft(cx) {
+            return None;
+        }
+        let mut row = self.people_row();
+        let name = self.group_name(cx);
+        if !name.is_empty() {
+            row.name = name.into();
+        } else if let [person] = self.people.as_slice() {
+            row.name = person.name.clone();
+            row.picture.clone_from(&person.picture);
+            row.faces.clear();
+        }
+        Some(row)
+    }
+
+    /// Whether the shell keeps it when another place is shown: its first message is on its way or was given back, or
+    /// it is a chat not made yet that is a new group chat or holds a draft.
+    #[must_use]
+    pub fn worth_keeping(&self, cx: &gpui::App) -> bool {
+        self.keeps_going()
+            || (self.outcome != Outcome::Made
+                && self.found.is_none()
+                && (self.kind == Kind::GroupDraft || self.draft.read(cx).has_draft(cx)))
+    }
+
+    /// The chat found for the people and its box, while that box holds a draft: the shell keeps the draft with that
+    /// chat, as Teams opens that chat with it.
+    #[must_use]
+    pub fn found_draft(&self, cx: &gpui::App) -> Option<(String, Entity<Compose>)> {
+        let found = self.found.as_ref()?;
+        let compose = found.view.read(cx).compose().clone();
+        compose.read(cx).has_draft(cx).then(|| (found.id.clone(), compose))
     }
 
     /// Opens the new group chat's people, or closes them; they don't open while its first message makes the chat.
@@ -747,7 +811,7 @@ impl NewChat {
     /// New message's box handed on its first message: the chat is made, then the message sent to it (see the module
     /// docs).
     fn start(&mut self, text: MessageText, window: &mut Window, cx: &mut Context<Self>) {
-        self.given_back = false;
+        self.outcome = Outcome::None;
         let topic = self.group_name(cx);
         let refused = if self.people.is_empty() {
             Some(NOBODY)
@@ -788,9 +852,10 @@ impl NewChat {
                     this.trace
                         .record(&TraceLine::new("new-chat", "started").conversation(&chat));
                     draft.update(cx, |draft, cx| draft.started(Ok(()), window, cx));
+                    this.outcome = Outcome::Made;
                     cx.emit(NewChatEvent::Open(chat));
                 } else {
-                    this.given_back = true;
+                    this.outcome = Outcome::GivenBack;
                     draft.update(cx, |draft, cx| draft.started(Err(NOT_STARTED.into()), window, cx));
                 }
             });
@@ -808,7 +873,7 @@ impl NewChat {
     /// on its way, or was given back since it was last shown.
     #[must_use]
     pub fn keeps_going(&self) -> bool {
-        self.starting.is_some() || self.given_back
+        self.starting.is_some() || self.outcome == Outcome::GivenBack
     }
 
     // --- drawing ---

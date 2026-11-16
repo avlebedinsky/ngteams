@@ -9,6 +9,9 @@
 //! when they are old). The rows themselves are the lists': a chat clicked is the [`ChatList`]'s to tell, a channel the
 //! [`TeamsList`]'s. The chat that becomes selected is scrolled into view, wherever it was opened from.
 //!
+//! New message's row heads the chats while it is shown; under it, the new chats that the shell keeps (chats not made
+//! yet, see `shell/new_chat.rs`) each have a row, whose click opens it and whose "..." offers "Discard", as Teams'.
+//!
 //! The keyboard reaches every row as Teams' tree of chats, teams and channels does: Ctrl+2 gives the list the keyboard
 //! ([`Sidebar::focus_list`]), its row ringed; the keys are `on_key`'s; a team's "..." menu opened by Shift+F10 or the menu
 //! key starts on its first entry, and closing it gives the keyboard back to the team's line.
@@ -25,6 +28,8 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, list, px, rgb,
 };
 use gpui_component::Sizable as _;
+use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_component::tooltip::Tooltip;
 use teams_store::Team;
 
@@ -131,6 +136,11 @@ enum Entry {
     SeeAllTeams,
     /// New message's row, at the top of the chats while it is open, as Teams adds it.
     NewMessage,
+    /// The kept new chat at `index` of [`Sidebar::kept_new_chats`], `id` its entity's.
+    KeptNewChat {
+        index: usize,
+        id: String,
+    },
     CustomSection {
         id: String,
         name: String,
@@ -152,6 +162,7 @@ impl Entry {
             Self::SeeAllChannels { id, .. } => (7, id),
             Self::SeeAllTeams => (8, SEE_ALL_TEAMS),
             Self::NewMessage => (10, "new-message"),
+            Self::KeptNewChat { id, .. } => (11, id),
         }
     }
 
@@ -160,7 +171,7 @@ impl Entry {
     fn height(&self) -> f32 {
         match self {
             Self::Section(_) | Self::Note(_) | Self::CustomSection { .. } => SECTION_HEIGHT,
-            Self::Favorite { .. } | Self::Chat { .. } | Self::NewMessage => ROW_HEIGHT,
+            Self::Favorite { .. } | Self::Chat { .. } | Self::NewMessage | Self::KeptNewChat { .. } => ROW_HEIGHT,
             Self::SeeMore | Self::SeeAllChannels { .. } | Self::SeeAllTeams => SEE_MORE_HEIGHT,
             Self::Team { .. } => TEAM_HEIGHT,
             Self::Channel { .. } => CHANNEL_HEIGHT,
@@ -202,8 +213,10 @@ pub struct Sidebar {
     cursor: Option<(u8, String)>,
     /// New message is open: its row heads the chats, selected.
     new_message: NewMessageRow,
-    /// New message is a new group chat not made yet: its row is this chat's, named after its people.
+    /// New message is a new chat not made yet: its row is this chat's, named after it.
     new_message_draft: Option<ChatRow>,
+    /// The new chats kept out of sight, the latest first, by their entities' ids.
+    kept: Vec<(u64, ChatRow)>,
     _observing: [Subscription; 2],
 }
 
@@ -212,6 +225,10 @@ pub struct Sidebar {
 pub enum SidebarEvent {
     /// The header's New message.
     NewMessage,
+    /// A kept new chat's row: open it again.
+    OpenKept(u64),
+    /// A kept new chat's "Discard".
+    DiscardKept(u64),
 }
 
 impl gpui::EventEmitter<SidebarEvent> for Sidebar {}
@@ -260,6 +277,20 @@ impl Sidebar {
         self.new_message_draft.as_ref()
     }
 
+    /// Draws a row for each new chat kept out of sight (`kept`: by their entities' ids, the latest first).
+    pub fn set_kept_new_chats(&mut self, kept: Vec<(u64, ChatRow)>, cx: &mut Context<Self>) {
+        if self.kept != kept {
+            self.kept = kept;
+            self.rebuild(cx);
+        }
+    }
+
+    /// The new chats kept out of sight, the latest first, by their entities' ids.
+    #[must_use]
+    pub fn kept_new_chats(&self) -> &[(u64, ChatRow)] {
+        &self.kept
+    }
+
     /// The sidebar over the chat list and the Teams list, both sections unfolded.
     pub fn new(
         list: Entity<ChatList>,
@@ -290,6 +321,7 @@ impl Sidebar {
             cursor: None,
             new_message: NewMessageRow::Hidden,
             new_message_draft: None,
+            kept: Vec::new(),
             _observing: [chats, teamed],
         };
         sidebar.rebuild(cx);
@@ -436,6 +468,10 @@ impl Sidebar {
             if self.new_message == NewMessageRow::Shown {
                 entries.push(Entry::NewMessage);
             }
+            entries.extend(self.kept.iter().enumerate().map(|(index, (id, _))| Entry::KeptNewChat {
+                index,
+                id: id.to_string(),
+            }));
             let list = self.list.read(cx);
             entries.extend(list.shown_rows().into_iter().filter_map(|index| {
                 let id = list.rows().get(index)?.id.clone();
@@ -598,6 +634,7 @@ impl Sidebar {
                 Some(draft) => draft_row(draft, palette),
                 None => new_message_row(palette),
             },
+            Entry::KeptNewChat { index, .. } => self.kept_new_chat_row(index, palette, cx),
             Entry::Note(text) => div()
                 .debug_selector(|| "teams-note".to_owned())
                 .px_3()
@@ -1016,6 +1053,10 @@ impl Sidebar {
         }
         match event.keystroke.key.as_str() {
             "enter" | "space" => self.activate(entry, cx),
+            "delete" => match entry {
+                Entry::KeptNewChat { index, .. } => self.discard_kept(index, cx),
+                _ => return false,
+            },
             "right" => match entry {
                 Entry::Section(section) if !self.is_open(section) => self.toggle(section, cx),
                 Entry::CustomSection { id, .. } if !self.custom_section_open(&id, cx) => {
@@ -1049,6 +1090,11 @@ impl Sidebar {
             Entry::Favorite { id, .. } | Entry::Chat { id, .. } => self.list.update(cx, |list, cx| list.open(id, cx)),
             Entry::SeeMore => self.list.update(cx, ChatList::see_more),
             Entry::Note(_) | Entry::NewMessage => {}
+            Entry::KeptNewChat { index, .. } => {
+                if let Some((id, _)) = self.kept.get(index) {
+                    cx.emit(SidebarEvent::OpenKept(*id));
+                }
+            }
             Entry::Team { id, .. } => self.toggle_team(&id, cx),
             Entry::Channel { id, .. } => self.teams.update(cx, |teams, cx| teams.open(&id, cx)),
             Entry::SeeAllChannels { id, .. } => self.teams.update(cx, |teams, cx| teams.see_all_channels(&id, cx)),
@@ -1135,6 +1181,91 @@ impl Sidebar {
         Some(pill.into_any_element())
     }
 }
+
+impl Sidebar {
+    /// A kept new chat's row, as Teams lists a chat not made yet: its face and name; a click opens it again, its "..."
+    /// (shown while the row is under the pointer) offers "Discard".
+    fn kept_new_chat_row(&self, index: usize, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let Some((id, row)) = self.kept.get(index) else {
+            return div().into_any_element();
+        };
+        let id = *id;
+        let selector = format!("chat-row-draft-{index}");
+        let group = SharedString::from(selector.clone());
+        let sidebar = cx.entity().downgrade();
+        let more = Button::new(SharedString::from(format!("{selector}-more")))
+            .ghost()
+            .xsmall()
+            .icon(Glyph::ELLIPSIS.icon())
+            .tab_stop(false)
+            .tooltip("More options")
+            .dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |menu: PopupMenu, _, _| {
+                let sidebar = sidebar.clone();
+                menu.min_w(px(160.0)).item(
+                    PopupMenuItem::element(|_, _| {
+                        div()
+                            .debug_selector(|| "chat-row-draft-discard".to_owned())
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(Glyph::TRASH.icon().size(px(14.0)))
+                            .child(DISCARD)
+                    })
+                    .on_click(move |_, _, cx| {
+                        let _ = sidebar.update(cx, |_, cx| cx.emit(SidebarEvent::DiscardKept(id)));
+                    }),
+                )
+            });
+        let more = div()
+            .id(SharedString::from(format!("{selector}-more-wrap")))
+            .flex_none()
+            .invisible()
+            .group_hover(group.clone(), gpui::Styled::visible)
+            // the "..." takes its own clicks: the row under it doesn't open
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .child(selected_by(format!("{selector}-more"), more));
+        div()
+            .id(SharedString::from(format!("{selector}-{id}")))
+            .debug_selector(move || selector.clone())
+            .group(group)
+            .relative()
+            .w_full()
+            .h(px(ROW_HEIGHT))
+            .px_3()
+            .flex()
+            .items_center()
+            .gap_3()
+            .rounded_md()
+            .cursor_pointer()
+            .hover(move |style| style.bg(rgb(palette.hover)))
+            .on_click(cx.listener(move |_, _, _, cx| cx.emit(SidebarEvent::OpenKept(id))))
+            .child(crate::chat_list::chat_avatar(
+                row,
+                palette,
+                gpui_component::Size::Size(px(crate::chat_list::AVATAR)),
+                "avatar",
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(rgb(palette.foreground))
+                    .child(row.name.clone()),
+            )
+            .child(more)
+            .into_any_element()
+    }
+
+    fn discard_kept(&self, index: usize, cx: &mut Context<Self>) {
+        if let Some((id, _)) = self.kept.get(index) {
+            cx.emit(SidebarEvent::DiscardKept(*id));
+        }
+    }
+}
+
+/// A kept new chat's menu item, as Teams words it.
+pub const DISCARD: &str = "Discard";
 
 /// A new group chat's row at the top of the chats while it isn't made yet, as Teams adds it: the group's face and the
 /// people's names, selected.

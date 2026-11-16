@@ -295,6 +295,117 @@ fn people_with_no_group_chat_get_a_new_one_its_first_message_makes_partner_last(
     assert!(cx.debug_bounds("chat-row-new-group").is_none());
 }
 
+/// a–b's "Start a group chat" with d, "half a thought" typed in its box, then the a–c chat opened: the new group chat
+/// not made yet.
+fn group_draft_left(rig: &Rig) -> (Entity<Shell>, Entity<NewChat>, &'static mut VisualTestContext) {
+    let (shell, cx) = shell_window(rig);
+    open(&shell, cx, AB);
+    click(cx, "chat-header-people");
+    click(cx, "chat-people-start-group");
+    take(cx, "Dee");
+    click(cx, "chat-people-confirm");
+    let new_chat = cx.update(|_, cx| shell.read(cx).new_chat().cloned()).unwrap();
+    let compose = cx.update(|_, cx| new_chat.read(cx).compose(cx));
+    compose.update_in(cx, |compose, window, cx| compose.focus(window, cx));
+    cx.simulate_input("half a thought");
+    draw(cx);
+    open(&shell, cx, AC);
+    (shell, new_chat, cx)
+}
+
+#[test]
+fn a_new_group_chat_left_for_another_chat_keeps_its_row_and_draft_and_its_first_message_makes_it() {
+    let rig = seeded();
+    let mut made = common::outbox_row(41, OutboxKind::CreateChat, OutboxState::Sent);
+    made.message_id = Some(MADE.to_owned());
+    rig.core.write_answers.lock().unwrap().push_back(made);
+    let (shell, new_chat, cx) = group_draft_left(&rig);
+    assert_eq!(main(&shell, cx), Main::Chat(AC.to_owned()));
+    // as Teams keeps it: its row in the chats, named after its people
+    assert!(
+        cx.debug_bounds("chat-row-draft-0").is_some(),
+        "the new chat's row stays"
+    );
+    let row = cx.update(|_, cx| new_chat.read(cx).kept_row(cx)).expect("a row");
+    assert_eq!(row.name.as_ref(), "Dee and Lab");
+    assert!(rig.core.actions.lock().unwrap().is_empty(), "nothing written");
+    click(cx, "chat-row-draft-0");
+    assert_eq!(main(&shell, cx), Main::NewChat);
+    let shown = cx.update(|_, cx| shell.read(cx).new_chat().cloned()).unwrap();
+    assert_eq!(shown.entity_id(), new_chat.entity_id(), "the same new chat");
+    assert!(
+        cx.debug_bounds("chat-row-draft-0").is_none(),
+        "its row is the one selected now"
+    );
+    draft_of_d_and_b(&shown, cx);
+    let compose = cx.update(|_, cx| shown.read(cx).compose(cx));
+    assert_eq!(cx.update(|_, cx| compose.read(cx).value(cx)).trim(), "half a thought");
+    // its first message makes the chat with the draft's text
+    compose.update_in(cx, |compose, window, cx| compose.focus(window, cx));
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    let actions = rig.core.actions.lock().unwrap().clone();
+    let [Action::CreateChat { .. }, Action::Send { conversation, text }] = actions.as_slice() else {
+        panic!("the chat made, then the message sent: {actions:?}");
+    };
+    assert_eq!(conversation, MADE);
+    assert_eq!(text.html(), "<p>half a thought</p>");
+    assert_eq!(main(&shell, cx), Main::Chat(MADE.to_owned()));
+    assert!(cx.debug_bounds("chat-row-new-group").is_none());
+    assert!(cx.debug_bounds("chat-row-draft-0").is_none());
+}
+
+#[test]
+fn a_new_group_chat_s_discard_takes_its_row_and_draft_away() {
+    let rig = seeded();
+    let (shell, new_chat, cx) = group_draft_left(&rig);
+    let row = cx.debug_bounds("chat-row-draft-0").expect("the new chat's row");
+    cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+    draw(cx);
+    click(cx, "chat-row-draft-0-more");
+    click(cx, "chat-row-draft-discard");
+    assert!(cx.debug_bounds("chat-row-draft-0").is_none(), "the row is gone");
+    assert_eq!(main(&shell, cx), Main::Chat(AC.to_owned()), "the chat shown stays");
+    assert!(cx.update(|_, cx| shell.read(cx).kept_new_chats(cx).is_empty()));
+    assert!(!cx.update(|_, cx| shell.read(cx).has_unsent(cx)), "no draft left");
+    // New message opens a new one, its box empty
+    cx.simulate_keystrokes("ctrl-n");
+    draw(cx);
+    let fresh = cx.update(|_, cx| shell.read(cx).new_chat().cloned()).unwrap();
+    assert_ne!(fresh.entity_id(), new_chat.entity_id());
+    assert!(!cx.update(|_, cx| fresh.read(cx).drafting()));
+    assert!(rig.core.actions.lock().unwrap().is_empty(), "nothing written");
+}
+
+#[test]
+fn a_kept_new_group_chat_s_row_answers_the_keyboard_and_back_returns_to_it() {
+    let rig = seeded();
+    let (shell, new_chat, cx) = group_draft_left(&rig);
+    let sidebar = cx.update(|_, cx| shell.read(cx).sidebar().clone());
+    let shown = |shell: &Entity<Shell>, cx: &mut VisualTestContext| {
+        cx.update(|_, cx| shell.read(cx).new_chat().map(Entity::entity_id))
+    };
+    // the row under the chats' header: Enter opens it
+    cx.update(|window, cx| sidebar.update(cx, |sidebar, cx| sidebar.focus_list(window, cx)));
+    cx.simulate_keystrokes("home down enter");
+    draw(cx);
+    assert_eq!(shown(&shell, cx), Some(new_chat.entity_id()));
+    // another chat, then Back: the new chat as it was left
+    open(&shell, cx, AC);
+    shell.update_in(cx, Shell::go_back);
+    draw(cx);
+    assert_eq!(main(&shell, cx), Main::NewChat);
+    assert_eq!(shown(&shell, cx), Some(new_chat.entity_id()));
+    // Delete on its row discards it
+    open(&shell, cx, AC);
+    cx.update(|window, cx| sidebar.update(cx, |sidebar, cx| sidebar.focus_list(window, cx)));
+    cx.simulate_keystrokes("home down delete");
+    draw(cx);
+    assert!(cx.debug_bounds("chat-row-draft-0").is_none());
+    assert!(cx.update(|_, cx| shell.read(cx).kept_new_chats(cx).is_empty()));
+    assert_eq!(main(&shell, cx), Main::Chat(AC.to_owned()));
+}
+
 #[test]
 fn a_group_chat_s_add_people_sends_them_with_the_history_chosen() {
     let rig = seeded();

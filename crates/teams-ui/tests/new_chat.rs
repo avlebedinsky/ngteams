@@ -457,6 +457,87 @@ fn a_first_message_given_back_while_new_message_was_left_is_there_when_it_opens_
     );
 }
 
+fn open(shell: &Entity<Shell>, cx: &mut VisualTestContext, id: &str) {
+    shell.update_in(cx, |shell, window, cx| shell.open_chat(id.to_owned(), window, cx));
+    draw(cx);
+}
+
+fn typed(view: &Entity<NewChat>, cx: &mut VisualTestContext) -> String {
+    let compose = cx.update(|_, cx| view.read(cx).compose(cx));
+    cx.update(|_, cx| compose.read(cx).value(cx)).trim().to_owned()
+}
+
+#[test]
+fn a_new_chat_with_a_draft_left_for_another_chat_keeps_its_row_and_comes_back_with_it() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig);
+    cx.simulate_keystrokes("ctrl-n");
+    draw(cx);
+    let view = new_chat(&shell, cx);
+    add(cx, "Bee");
+    add(cx, "Sea");
+    click(cx, "new-chat-group-name-toggle");
+    cx.simulate_input("Draft probe");
+    draw(cx);
+    let compose = cx.update(|_, cx| view.read(cx).compose(cx));
+    compose.update_in(cx, |compose, window, cx| compose.focus(window, cx));
+    cx.simulate_input("group draft probe");
+    draw(cx);
+    open(&shell, cx, AC);
+    assert_eq!(main(&shell, cx), Main::Chat(AC.to_owned()));
+    // as Teams keeps it: a row named as the chat will be
+    assert!(
+        cx.debug_bounds("chat-row-draft-0").is_some(),
+        "the new chat's row stays"
+    );
+    let row = cx.update(|_, cx| view.read(cx).kept_row(cx)).expect("a row");
+    assert_eq!(row.name.as_ref(), "Draft probe");
+    // New message opens a new one beside it
+    cx.simulate_keystrokes("ctrl-n");
+    draw(cx);
+    assert_ne!(new_chat(&shell, cx).entity_id(), view.entity_id());
+    assert!(cx.debug_bounds("chat-row-draft-0").is_some(), "the row stays");
+    // its row opens it again, as it was left
+    click(cx, "chat-row-draft-0");
+    assert_eq!(main(&shell, cx), Main::NewChat);
+    assert_eq!(new_chat(&shell, cx).entity_id(), view.entity_id());
+    assert_eq!(cx.update(|_, cx| view.read(cx).people().len()), 2);
+    assert!(cx.update(|_, cx| view.read(cx).naming()));
+    assert_eq!(typed(&view, cx), "group draft probe");
+    assert!(
+        cx.debug_bounds("chat-row-draft-0").is_none(),
+        "the empty New message isn't kept"
+    );
+    assert!(rig.core.actions.lock().unwrap().is_empty(), "nothing written");
+}
+
+#[test]
+fn a_draft_typed_to_the_chat_new_message_found_stays_with_that_chat() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig);
+    cx.simulate_keystrokes("ctrl-n");
+    draw(cx);
+    let view = new_chat(&shell, cx);
+    add(cx, "Bee");
+    assert_eq!(
+        cx.update(|_, cx| view.read(cx).found().map(str::to_owned)),
+        Some(AB.to_owned())
+    );
+    let compose = cx.update(|_, cx| view.read(cx).compose(cx));
+    compose.update_in(cx, |compose, window, cx| compose.focus(window, cx));
+    cx.simulate_input("for bee");
+    draw(cx);
+    open(&shell, cx, TALK);
+    assert!(
+        cx.debug_bounds("chat-row-draft-0").is_none(),
+        "the chat is listed already"
+    );
+    open(&shell, cx, AB);
+    let chat = cx.update(|_, cx| shell.read(cx).chat().cloned()).unwrap();
+    let compose = cx.update(|_, cx| chat.read(cx).compose().clone());
+    assert_eq!(cx.update(|_, cx| compose.read(cx).value(cx)).trim(), "for bee");
+}
+
 /// A made-up picture, `width` by `height`, as PNG bytes.
 fn png(width: u32, height: u32) -> Vec<u8> {
     let picture = image::RgbaImage::from_pixel(width, height, image::Rgba([40, 120, 200, 255]));

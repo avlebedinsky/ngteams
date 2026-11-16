@@ -189,7 +189,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 305 + 8 + 5 + 15] = [
+const STEPS: [Step; 5 + 309 + 8 + 5 + 15] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -1258,10 +1258,43 @@ const STEPS: [Step; 5 + 305 + 8 + 5 + 15] = [
     ("chat-people-draft-flyout", |shell, window, cx| {
         with_new_chat(shell, cx, |view, cx| view.toggle_people(window, cx));
     }),
+    // the new group chat left with a draft for the a–b chat: its row stays in the chats, as Teams keeps it
+    ("new-chat-kept", |shell, window, cx| {
+        with_new_chat(shell, cx, |view, cx| {
+            if view.people_flyout().is_some() {
+                view.toggle_people(window, cx);
+            }
+            let compose = view.compose(cx);
+            compose.update(cx, |compose, cx| {
+                compose.focus(window, cx);
+                compose
+                    .editor()
+                    .update(cx, |editor, cx| editor.insert("Lunch on Friday?", cx));
+            });
+        });
+        shell.update(cx, |shell, cx| shell.open_chat(AB_CHAT.to_owned(), window, cx));
+        show_chats_section(shell, cx);
+    }),
+    // its row opens it again, its draft as it was left
+    ("new-chat-kept-back", |shell, window, cx| {
+        open_kept_new_chat(shell, window, cx);
+    }),
+    ("new-chat-kept-dark", |shell, window, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
+        shell.update(cx, |shell, cx| shell.open_chat(AB_CHAT.to_owned(), window, cx));
+    }),
+    ("new-chat-kept-back-dark", |shell, window, cx| {
+        open_kept_new_chat(shell, window, cx);
+    }),
     // the a–b–c chat's people, counted on the button, and its "Add" with the history choices
     ("chat-people-group", |shell, window, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
         shell.update(cx, |shell, cx| {
             shell.open_chat(ABC_CHAT.to_owned(), window, cx);
+            // the kept new chat discarded: the shots after this one show the chats as they were
+            for view in shell.kept_new_chats(cx) {
+                shell.discard_kept_new_chat(view.entity_id().as_u64(), cx);
+            }
             shell.toggle_people(window, cx);
         });
         with_people(shell, cx, |people, cx| {
@@ -4072,6 +4105,15 @@ fn with_people(shell: &Entity<Shell>, cx: &mut App, change: impl FnOnce(&mut Cha
     if let Some(view) = shell.read(cx).people().cloned() {
         view.update(cx, change);
     }
+}
+
+/// Opens the latest kept new chat again: its row's click.
+fn open_kept_new_chat(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) {
+    shell.update(cx, |shell, cx| {
+        if let Some(view) = shell.kept_new_chats(cx).last() {
+            shell.open_kept_new_chat(view.entity_id().as_u64(), window, cx);
+        }
+    });
 }
 
 /// Changes New message, while it is open.

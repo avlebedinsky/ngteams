@@ -29,7 +29,8 @@
 //! header's presence and whether its name and avatar came from people's names and a picture, never the name).
 //!
 //! New message (Ctrl+N, the list header's pen; [`crate::new_chat`]) takes the conversation pane with its row at the
-//! top of the chats (`Main::NewChat`); a chat it names opens in its place.
+//! top of the chats (`Main::NewChat`); a chat it names opens in its place. A new chat not made yet that the user
+//! leaves stays as a row in the chats with its draft, as in Teams (`shell/new_chat.rs`).
 //!
 //! Calls (M3 Task 17), in a build that shows them (in one that doesn't, the call keys do nothing here): the chat's
 //! header offers Call once the chat identifies whom it calls, or Join when an invitation named a running group call.
@@ -382,6 +383,8 @@ pub struct Shell {
     channel_events: Option<Subscription>,
     /// New message, while it is open.
     new_chat: new_chat::Open,
+    /// The new chats kept out of sight, the latest last (`shell/new_chat.rs`).
+    kept_new: new_chat::Kept,
     /// The chat header's people flyout, while it is open, and where its button was last drawn.
     people: chat_people::State,
     /// The window's profile card, while one is open, and the pointer's way over faces and names.
@@ -483,6 +486,7 @@ impl Shell {
             chat_events,
             channel_events: None,
             new_chat: None,
+            kept_new: Vec::new(),
             people: chat_people::State::default(),
             _subscriptions: [
                 cx.observe_window_activation(window, Self::sync_activity_active),
@@ -2678,7 +2682,7 @@ impl Shell {
         match std::mem::replace(&mut self.before_settings, Main::Nothing) {
             Main::Chat(id) => self.open_chat(id, window, cx),
             Main::Channel(id) => self.open_channel_id(id, window, cx),
-            Main::NewChat => self.open_new_chat(window, cx),
+            Main::NewChat => self.resume_new_chat(window, cx),
             Main::Nothing
             | Main::Settings
             | Main::Calendar

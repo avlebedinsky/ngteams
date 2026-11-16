@@ -168,7 +168,7 @@ impl Shell {
             Main::CreateTeamMore => self.open_create_team_more(window, cx),
             Main::Workflows => self.resume_workflows(window, cx),
             Main::Apps => self.open_apps(window, cx),
-            Main::NewChat => self.open_new_chat(window, cx),
+            Main::NewChat => self.resume_new_chat(window, cx),
             Main::Nothing => {}
         }
         // what was shown is the history's place now, whatever the opening made of it
@@ -299,7 +299,7 @@ impl Shell {
             .channel
             .as_ref()
             .is_some_and(|(view, _)| !view.read(cx).drafts(cx).is_empty());
-        let new_chat = self.new_chat.as_ref().is_some_and(|(view, _)| {
+        let new_chat = self.new_chat.iter().chain(&self.kept_new).any(|(view, _)| {
             let view = view.read(cx);
             view.is_starting() || view.compose(cx).read(cx).has_draft(cx)
         });
