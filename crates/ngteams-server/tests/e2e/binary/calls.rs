@@ -5,6 +5,7 @@
 
 mod access;
 mod accounts;
+mod call_log;
 mod coturn_log;
 mod flows;
 mod nodes;

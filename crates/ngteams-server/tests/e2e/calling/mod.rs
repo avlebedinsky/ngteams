@@ -7,6 +7,7 @@ mod engines;
 mod group_signaling;
 mod history;
 mod mixer;
+mod qa_group_log;
 mod raw;
 mod redelivery;
 mod relay;

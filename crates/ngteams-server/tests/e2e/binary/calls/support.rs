@@ -312,6 +312,10 @@ pub struct Phone {
     session: Arc<Session<MemorySecretStore>>,
     origin: String,
     http: String,
+    /// Where its push sockets connect, when not straight to its node (`ws://…`): a proxy in front of the node.
+    socket: Option<String>,
+    /// Its engine's `catch_up_retry`: 2 s unless set ([`Self::catch_up_as_the_app`]).
+    catch_up_retry: Duration,
     dir: TempDir,
 }
 
@@ -343,8 +347,20 @@ impl Phone {
             session,
             origin: origin.into(),
             http: node.endpoint.clone(),
+            socket: None,
+            catch_up_retry: Duration::from_secs(2),
             dir,
         }
+    }
+
+    /// Its engine waits as long as the app's for a catch-up a delivery made due, from its next start on.
+    pub fn catch_up_as_the_app(&mut self) {
+        self.catch_up_retry = EngineOptions::default().catch_up_retry;
+    }
+
+    /// Its push sockets connect to `socket` (`ws://127.0.0.1:<port>`) from its next start on.
+    pub fn connect_through(&mut self, socket: &str) {
+        self.socket = Some(socket.to_owned());
     }
 
     /// The account's object id.
@@ -409,7 +425,10 @@ impl Phone {
         let mri = Mri::new(self.mri.clone());
         let tracker = Arc::new(Tracker::for_cloud(mri.clone(), cloud));
         let transport = Arc::new(self.transport(&tracker));
-        let socket = self.http.replacen("http://", "ws://", 1);
+        let socket = self
+            .socket
+            .clone()
+            .unwrap_or_else(|| self.http.replacen("http://", "ws://", 1));
         let trouter = || {
             Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&self.session), &socket)
                 .unwrap()
@@ -443,7 +462,7 @@ impl Phone {
             push: Some(Push::new(trouter())),
             options: EngineOptions {
                 tick: Duration::from_millis(50),
-                catch_up_retry: Duration::from_secs(2),
+                catch_up_retry: self.catch_up_retry,
                 ..EngineOptions::default()
             },
             known_names: Vec::new(),
