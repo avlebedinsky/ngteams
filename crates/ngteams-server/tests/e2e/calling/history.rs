@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
-use teams_call::CallState;
+use teams_call::{CallState, End};
 use teams_core::Outbox;
 use teams_core::activity::{ActivityFeed, ActivityItem, ActivityKind};
 use teams_core::engine::{self, EngineHandle, EngineOptions, Parts, Push};
@@ -254,6 +254,8 @@ async fn every_party_of_a_group_call_finds_it_in_its_call_log() {
         group.b.client.state(CallState::Connected).await;
         let declined = group.c.client.incoming().await;
         group.c.client.decline(declined.call);
+        // her decline is the service's before the call ends, else she missed it
+        assert_eq!(group.c.client.ended().await, End::Declined);
         group.b.client.hang_up(rings.call);
         group.b.client.ended().await;
         group.a.client.hang_up(call);
@@ -356,6 +358,28 @@ async fn each_member_a_group_call_rang_in_vain_has_it_as_a_missed_call() {
     assert!(missed_from(&feed).is_empty(), "Bert answered: {:#?}", feed.items);
     bert.stop();
     cora.stop();
+    group.server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_caller_of_a_group_call_nobody_took_has_it_as_missed() {
+    let mut group = Group::start_with(Backend::Sqlite, |config| config.calling.ring_timeout = 4).await;
+    let server = &group.server;
+    let ada = Reader::start(server, server, &group.a.upn, &group.a.id).await;
+    group.a.client.call_group(&group.chat, &group.others);
+    let call = group.a.client.state(CallState::Connected).await;
+    // both rings run out; the caller stays in the call alone, then hangs up
+    group.b.client.incoming().await;
+    group.c.client.incoming().await;
+    group.b.client.ring_ended().await;
+    group.c.client.ring_ended().await;
+    group.a.client.hang_up(call);
+    group.a.client.ended().await;
+    let log = ada.log_until(true, |log| log.len() == 1).await;
+    assert!(log[0].says("outgoing", "missed"), "{:?}", log[0]);
+    assert!(!log[0].connected, "nobody came in: no connect time, {:?}", log[0]);
+    assert_eq!(log[0].kind, "multiParty");
+    ada.stop();
     group.server.stop().await;
 }
 

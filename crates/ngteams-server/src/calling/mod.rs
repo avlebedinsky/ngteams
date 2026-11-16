@@ -238,7 +238,8 @@ async fn needed_links(app: &App, caller: &Caller, body: &Value) -> Result<(Strin
 }
 
 /// Drops the media legs and the room a step let go of, publishes what it tells the parties, and writes the call's end
-/// to its chat.
+/// to its chat and what the call leaves each party in its own streams: its call log entry, and a missed call's
+/// activity item to each callee who never took it ([`history::tell`]).
 async fn carry_out(app: &App, call: &Call, out: Out) {
     release(app, call, &out).await;
     for delivery in &out.deliveries {

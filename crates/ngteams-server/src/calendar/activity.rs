@@ -12,8 +12,6 @@ use crate::chatsvc::service::{self, Activity};
 use crate::db::DbError;
 use crate::db::users::User;
 
-const FEED: &str = "48:notifications";
-
 /// What happened to the meeting, as the Meet app's activity types name it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Change {
@@ -36,7 +34,6 @@ fn item(app: &App, to: &str, change: Change, event: &Event, actor: &User, at: i6
         iso(event.start_ms),
         iso(event.end_ms)
     );
-    let base = format!("{}/api/chatsvc/{}", app.config.origin(), app.config.region);
     let details = format!("{}/l/meeting/details/?eventId={}", app.config.origin(), event.id);
     let actor_mri = format!("8:orgid:{}", actor.id);
     let activity = json!({
@@ -53,15 +50,8 @@ fn item(app: &App, to: &str, change: Change, event: &Event, actor: &User, at: i6
         },
         "customTapAction": details,
     });
-    json!({
-        "type": "Message", "id": at.to_string(), "version": at.to_string(), "sequenceId": at,
-        "clientmessageid": at.to_string(), "messagetype": "Text", "contenttype": "Text", "content": "",
-        "conversationid": FEED, "to": FEED, "threadtype": "streamofnotifications",
-        "conversationLink": format!("{base}/v1/users/ME/conversations/{FEED}"),
-        "from": format!("{base}/v1/users/ME/contacts/8:orgid:{to}"), "imdisplayname": "",
-        "composetime": iso(at), "originalarrivaltime": iso(at),
-        "properties": {"activity": activity, "isread": false, "messageUpdatePolicyValue": 1},
-    })
+    let properties = json!({"activity": activity, "isread": false, "messageUpdatePolicyValue": 1});
+    service::stream_message(app, service::FEED, (at, &format!("8:orgid:{to}")), "", &properties)
 }
 
 /// Tells each of `people` but `actor` of `change` to `event` in their activity feed. An invitation names the

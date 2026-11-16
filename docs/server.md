@@ -18,8 +18,8 @@ reactions, transient typing, account preferences and message pages (newest, back
 requested time) under `/api/chatsvc/<region>/v1/`. These routes require an IC3 bearer token and current membership;
 disabled users are refused even while their token is live. A repeated 1:1 roster returns the existing chat, and
 group rosters and names persist in SQLite or PostgreSQL. Requests are limited to 64 KiB. Authz advertises
-`chatServiceAfd`. It also serves the account's own streams (notes, the activity feed, the mentions stream) and a
-group chat's people (below). Mentions and quotes are stored as Teams gives them back
+`chatServiceAfd`. It also serves the account's own streams (notes, the activity feed, the mentions stream, the call
+log) and a group chat's people (below). Mentions and quotes are stored as Teams gives them back
 ([Rich messages](#rich-messages)).
 
 ## Stack

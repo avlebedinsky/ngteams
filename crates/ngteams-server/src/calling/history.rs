@@ -30,6 +30,21 @@ impl Taken {
         }
     }
 
+    /// How the call went for the party at `seat`: the caller of a group call is in it from its start, but it took
+    /// the call only when some other party came in too, else it is `missed`, as the caller of a 1:1 call nobody took.
+    fn in_call(call: &Call, seat: Seat) -> Self {
+        let others_in = || {
+            call.parties
+                .iter()
+                .enumerate()
+                .any(|(number, party)| number != Seat::CALLER.0 && party.joined.is_some())
+        };
+        if seat == Seat::CALLER && call.kind == Kind::Group && !others_in() {
+            return Self::Missed;
+        }
+        Self::of(call.party(seat))
+    }
+
     fn name(self) -> &'static str {
         match self {
             Self::Accepted => "accepted",
@@ -54,6 +69,7 @@ fn entry(call: &Call, seat: Seat, tenant: &str) -> Value {
         Kind::OneToOne => ("twoParty", Some(call.party(Seat::CALLEE)), None, None),
         Kind::Group => ("multiParty", None, Some(&call.parties), call.chat.as_deref()),
     };
+    let taken = Taken::in_call(call, seat);
     let participant_id = party
         .participant
         .get("participantId")
@@ -61,12 +77,12 @@ fn entry(call: &Call, seat: Seat, tenant: &str) -> Value {
         .map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_owned);
     json!({
         "startTime": iso(call.started_at),
-        "connectTime": party.joined,
+        "connectTime": party.joined.as_ref().filter(|_| taken == Taken::Accepted),
         "endTime": iso(call.ended_at.unwrap_or(call.started_at)),
         "callId": call.id,
         "callDirection": if seat == Seat::CALLER { "outgoing" } else { "incoming" },
         "callType": kind,
-        "callState": Taken::of(party).name(),
+        "callState": taken.name(),
         "originator": caller.mri(),
         "originatorParticipant": participant(caller, tenant, true),
         "target": target.map(Party::mri),
@@ -106,8 +122,8 @@ fn missed(call: &Call, to: &str, at: i64) -> Value {
 /// each callee who never took it. One not written is logged: the call itself is over either way.
 pub(super) async fn tell(app: &App, call: &Call) {
     let logged = log(app, call).await;
-    let missed = tell_missed(app, call).await;
-    for (what, written) in [("the call log", logged), ("a missed call's activity", missed)] {
+    let fed = tell_missed(app, call).await;
+    for (what, written) in [("the call log", logged), ("a missed call's activity", fed)] {
         if let Err(error) = written {
             tracing::warn!(%error, what, "a call's end wasn't written to its parties' streams");
         }
@@ -120,12 +136,12 @@ async fn log(app: &App, call: &Call) -> Result<(), DbError> {
     let caller = call.party(Seat::CALLER).mri();
     let people: Vec<String> = call.parties.iter().map(|party| party.id.clone()).collect();
     let content = format!("Call Logs for Call {}", call.id);
-    let entry = |to: &str, at: i64| {
+    let logged_for = |to: &str, at: i64| {
         let seat = call.seat_of(to).unwrap_or(Seat::CALLER);
         let properties = json!({"call-log": entry(call, seat, &tenant).to_string(), "s2spartnername": "concore_gvc"});
         service::stream_message(app, service::CALL_LOG, (at, &caller), &content, &properties)
     };
-    service::tell_call_log(app, &people, &entry).await
+    service::tell_call_log(app, &people, &logged_for).await
 }
 
 /// A missed call's activity item for each callee who never took the call.

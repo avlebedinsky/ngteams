@@ -106,3 +106,33 @@ async fn the_node_that_holds_the_callees_socket_delivers_its_invitation_again() 
         node_a.stop().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_invitation_goes_no_more_to_an_account_disabled_while_it_rings() {
+    let server = crate::trouter::server_with(Backend::Sqlite, |_| {}).await;
+    let a_id = server.add_user("a@own.test", "Ada").await;
+    let b_id = server.add_user("b@own.test", "Bert").await;
+    let mut a = super::client(&server, &server, "a@own.test", &a_id, "Ada").await;
+    let mut b = holding(&server, &server, "b@own.test", &b_id, "Bert", usize::MAX).await;
+    a.call(&mri(&b_id));
+    a.state(CallState::Ringing).await;
+    b.incoming().await;
+    let open = server.app.trouter.open();
+    // the database alone changes, as when the operator's command runs beside a node without Redis: no socket hears
+    // of it, so the redelivery's own look at the account is what stops it
+    ngteams_server::admin::set_disabled(
+        &server.app.db,
+        &ngteams_server::fanout::Local::new(),
+        "b@own.test",
+        true,
+    )
+    .await
+    .unwrap();
+    b.events_within(REDELIVERIES).await;
+    assert_eq!(b.invitations(), 1, "no redelivery to a disabled account");
+    assert!(
+        server.app.trouter.open() < open,
+        "the callee's socket ended when its invitation was due again"
+    );
+    server.stop().await;
+}

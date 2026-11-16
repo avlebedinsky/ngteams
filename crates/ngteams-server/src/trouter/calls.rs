@@ -32,6 +32,17 @@ pub(super) struct Published {
     pub body: String,
 }
 
+impl Published {
+    /// An invitation (`evt` 107 of a 1:1 call, 109 of a group call) at the endpoint's root: the one delivery that
+    /// waits for its answer. A group call's presence (`evt` 115, 116) goes to the root too, but nothing answers it.
+    fn invitation(&self) -> bool {
+        let evt = serde_json::from_str::<Value>(&self.body)
+            .ok()
+            .and_then(|body| body.get("evt").and_then(Value::as_u64));
+        self.path.is_empty() && matches!(evt, Some(107 | 109))
+    }
+}
+
 /// A socket's call deliveries: their numbers, the call each was of, and the invitations that wait for an answer.
 #[derive(Debug, Default)]
 pub(super) struct Sent {
@@ -70,7 +81,7 @@ impl Sent {
 
     /// The delivery `id` of `published` went out at `now`: an invitation waits for its answer.
     pub(super) fn sent(&mut self, id: i64, published: &Published, now: Instant) {
-        if !published.path.is_empty() {
+        if !published.invitation() {
             return;
         }
         if let Some(waiting) = self
@@ -159,10 +170,14 @@ mod tests {
     use super::*;
 
     fn published(path: &str) -> Published {
+        at_root(path, 107)
+    }
+
+    fn at_root(path: &str, evt: u64) -> Published {
         Published {
             call: "call-1".to_owned(),
             path: path.to_owned(),
-            body: r#"{"evt":107}"#.to_owned(),
+            body: json!({"evt": evt}).to_string(),
         }
     }
 
@@ -205,6 +220,15 @@ mod tests {
             sent.sent(id, &invitation, later);
         }
         assert_eq!(sent.next_due(), None, "three times again, no more");
+        let mut group = Sent::default();
+        group.sent(1, &at_root("", 109), start);
+        group.sent(2, &at_root("", 115), start);
+        group.sent(3, &at_root("", 116), start);
+        assert_eq!(
+            group.due(start + REDELIVER_AFTER).len(),
+            1,
+            "a group call's invitation goes again, its presence does not"
+        );
         let mut answered = Sent::default();
         answered.sent(1, &invitation, start);
         answered.sent(2, &invitation, start + REDELIVER_AFTER);
