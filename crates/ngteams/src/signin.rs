@@ -462,8 +462,7 @@ fn form_failure(setup: &Setup, account: &PersonalAccount, server: &OwnServer, er
 /// What the user is told when an own server's sign-in stored nothing: a password that must change
 /// ([`PASSWORD_MUST_CHANGE`]), an account turned off ([`ACCOUNT_TURNED_OFF`]), a wrong user name or password, a wait
 /// the server asked for, a certificate that isn't trusted or a server that can't be reached (with where a self-signed
-/// deployment's certificate authority goes, or the one its entry names already), own servers turned off, else the
-/// error.
+/// deployment's certificate authority goes, or the one its entry names already), else the error.
 #[must_use]
 pub fn own_failure(setup: &Setup, account: &PersonalAccount, error: &SignInError) -> String {
     let server = account.server.as_deref().unwrap_or_default();

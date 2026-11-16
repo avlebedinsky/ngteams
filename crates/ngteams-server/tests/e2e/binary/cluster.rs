@@ -4,7 +4,7 @@
 //! connection to a node that takes it, as the reverse proxy does. The server is seeded first with hundreds of
 //! synthetic accounts, their chats, a team, files and events ([`seed`]). The people `srv-a`, `srv-b` and `srv-c` run
 //! the client as the app runs it (session, engine with its calling stack and push channels, media on the file
-//! devices), each through the front of a different node.
+//! devices): `srv-a` and `srv-c` through the front of one node, `srv-b` through the other's.
 //!
 //! - chat both ways, each push in under two seconds across the nodes;
 //! - reactions, edits, an account's read on its other device, presence;

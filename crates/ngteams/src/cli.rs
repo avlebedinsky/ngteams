@@ -162,7 +162,7 @@ impl Cli {
         }))
     }
 
-    /// Whether either the app or the credential-broker subcommand explicitly selects lab mode.
+    /// Whether the app, the credential-broker subcommand or `sign-in --lab` explicitly selects lab mode.
     #[must_use]
     pub fn lab_requested(&self) -> bool {
         self.lab.is_some()

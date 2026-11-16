@@ -263,8 +263,7 @@ impl Cluster {
         phone
     }
 
-    /// The API node that holds the account's push socket now, as its node's connections tell it: the node `index`
-    /// whose front last sent a socket of the account's there.
+    /// The front of API node `node` (modulo the nodes there are).
     pub fn front(&self, node: usize) -> &Front {
         &self.fronts[node % self.fronts.len()]
     }
