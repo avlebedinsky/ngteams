@@ -409,6 +409,57 @@ fn own_picture_compose_round_trips_and_refuses_a_different_account_origin() {
 }
 
 #[test]
+fn a_picture_composed_in_microsofts_form_is_sent_on_the_own_servers_media_service() {
+    use crate::chat::{MessageText, Node, RichText};
+
+    // the compose box knows no account: its pasted picture is in Microsoft's form, its object the own server's
+    let object = "0-own-d1-0a56c46309364577b47881c59dae75a7";
+    let image = crate::sent_picture(object, (240, 160)).unwrap();
+    let rich = RichText {
+        nodes: vec![Node::Paragraph(vec![Node::Image(image)])],
+        truncated: false,
+    };
+    let composed = MessageText::new(rich, []).unwrap();
+    let sent = composed.clone().for_cloud(&cloud()).unwrap();
+    let on_own = format!("https://chat.example:8443/ams/v1/objects/{object}/views/imgo");
+    assert!(sent.html().contains(&on_own), "{}", sent.html());
+    assert!(!sent.html().contains("asm.skype.com"), "{}", sent.html());
+    assert_eq!(sent.pictures(), [object.to_owned()]);
+    // a Microsoft account sends it as it was composed
+    let microsoft = composed.clone().for_cloud(&Cloud::Microsoft).unwrap();
+    assert_eq!(microsoft.html(), composed.html());
+}
+
+#[test]
+fn a_view_that_knows_no_account_reads_an_own_servers_file_on_that_server() {
+    use crate::chat::{shared_files, shared_files_any, unshown_parts, unshown_parts_any};
+    use crate::{DriveSite, UploadedFile};
+
+    let base = "https://chat.example:8443/sp/personal/lab_a/";
+    let site = DriveSite::from_web_url_in(&cloud(), base).unwrap();
+    let upload = serde_json::json!({"id":"ABC1","name":"demo.txt","size":3,
+        "webUrl":format!("{base}Documents/demo.txt"),"parentReference":{"driveId":"drive1"},
+        "sharepointIds":{"listItemUniqueId":"00000000-0000-4000-8000-000000000001"}});
+    let file = UploadedFile::from_upload(&site, &serde_json::to_vec(&upload).unwrap()).unwrap();
+    let files = serde_json::json!([file.entry()]);
+    // Microsoft's reading leaves it unread; the view's reads it on the server its links name
+    assert!(shared_files(Some(&files)).files.is_empty());
+    let read = shared_files_any(Some(&files));
+    assert_eq!(read.unread, None);
+    assert_eq!(
+        read.files[0].open_link(),
+        Some("https://chat.example:8443/sp/personal/lab_a/Documents/demo.txt")
+    );
+    let properties = serde_json::Map::from_iter([("files".to_owned(), files)]);
+    assert_eq!(unshown_parts(&properties).len(), 1);
+    assert!(unshown_parts_any(&properties).is_empty());
+    // an entry that is nobody's file stays unread
+    let odd = serde_json::json!([{"@type": crate::chat::FILE_TYPE, "fileName": "x.txt",
+        "fileInfo": {"shareUrl": "http://chat.example:8443/sp/x.txt"}}]);
+    assert!(shared_files_any(Some(&odd)).unread.is_some());
+}
+
+#[test]
 fn own_files_accept_only_the_selected_origin_and_file_prefix() {
     use crate::chat::{is_file_link_in, shared_files_in};
     use crate::{DriveSite, DriveWrite, FileDownload, FileThumbnails, UploadedFile};

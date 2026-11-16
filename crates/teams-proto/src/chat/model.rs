@@ -1039,6 +1039,22 @@ pub fn unshown_parts(properties: &Map<String, Value>) -> Vec<Unshown> {
     unshown_parts_in(&crate::Cloud::Microsoft, properties)
 }
 
+/// [`unshown_parts`] for a view that knows no account: file entries read as [`super::files::shared_files_any`] reads
+/// them.
+#[must_use]
+pub fn unshown_parts_any(properties: &Map<String, Value>) -> Vec<Unshown> {
+    let mut parts = unshown_parts_in(&crate::Cloud::Microsoft, properties);
+    if let Some(at) = parts.iter().position(|part| matches!(part, Unshown::Files(_))) {
+        match super::files::shared_files_any(properties.get("files")).unread {
+            Some(raw) => parts[at] = Unshown::Files(raw),
+            None => {
+                parts.remove(at);
+            }
+        }
+    }
+    parts
+}
+
 /// Unread file entries and cards, with file links checked against the account's service boundary.
 #[must_use]
 pub fn unshown_parts_in(cloud: &crate::Cloud, properties: &Map<String, Value>) -> Vec<Unshown> {

@@ -175,6 +175,46 @@ pub fn shared_files_in(cloud: &crate::Cloud, value: Option<&Value>) -> SharedFil
     }
 }
 
+/// Reads `properties.files` for a view that knows no account: an entry is read on Microsoft's services
+/// ([`shared_files`]), else on the own server its links name ([`shared_files_in`] of that server). A file itself is
+/// read only through its account's engine, which takes only its own cloud's links, so an entry on another server is
+/// drawn and never fetched.
+#[must_use]
+pub fn shared_files_any(value: Option<&Value>) -> SharedFiles {
+    let microsoft = shared_files(value);
+    let Some(Value::Array(unread)) = microsoft.unread else {
+        return microsoft;
+    };
+    let mut files = microsoft.files;
+    let mut left = Vec::new();
+    for entry in unread {
+        let read = entry
+            .as_object()
+            .and_then(|entry| Some((entry, own_cloud_of(entry)?)))
+            .and_then(|(entry, cloud)| read_entry(&cloud, entry));
+        match read {
+            Some(file) => files.push(file),
+            None => left.push(entry),
+        }
+    }
+    SharedFiles {
+        files,
+        unread: (!left.is_empty()).then_some(Value::Array(left)),
+    }
+}
+
+/// The own server an entry's links name: the origin of its sharing link, else of its own address.
+fn own_cloud_of(entry: &Map<String, Value>) -> Option<crate::Cloud> {
+    let info = entry.get("fileInfo").and_then(Value::as_object);
+    let link = info
+        .and_then(|info| info.get("shareUrl"))
+        .or_else(|| entry.get("objectUrl"))
+        .or_else(|| info.and_then(|info| info.get("fileUrl")))?
+        .as_str()?;
+    let url = Url::parse(link.trim()).ok()?;
+    crate::Cloud::own(&url.origin().ascii_serialization()).ok()
+}
+
 /// One entry, when it is a file's in the shape the module docs give.
 fn read_entry(cloud: &crate::Cloud, entry: &Map<String, Value>) -> Option<SharedFile> {
     fn text(value: Option<&Value>) -> Option<&str> {

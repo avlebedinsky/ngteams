@@ -162,7 +162,9 @@ impl MessageText {
         })
     }
 
-    /// Checks the composed text and staged files against the sending account's cloud.
+    /// Checks the composed text and staged files against the sending account's cloud. A picture the composer put in
+    /// Microsoft's form ([`crate::sent_picture`]: the composer knows no account) goes on the cloud's own media
+    /// service, the same object: an own server's upload named it there.
     ///
     /// # Errors
     /// Returns [`ComposeError::FileCloud`] for an off-cloud file, or a text validation error.
@@ -170,7 +172,11 @@ impl MessageText {
         if self.files.iter().any(|file| file.site_in(cloud).is_none()) {
             return Err(ComposeError::FileCloud);
         }
-        Self::new_in(cloud, self.text, self.mentioned).map(|text| text.with_files(self.files))
+        let mut text = self.text;
+        if !cloud.is_microsoft() {
+            pictures_on(cloud, &mut text.nodes);
+        }
+        Self::new_in(cloud, text, self.mentioned).map(|text| text.with_files(self.files))
     }
 
     /// Plain text as one paragraph, no mention.
@@ -644,6 +650,36 @@ fn within_depth(nodes: &[Node], depth: usize) -> Result<(), ComposeError> {
         }
     }
     Ok(())
+}
+
+/// Each picture in `nodes` that is in Microsoft's sent form moved to `cloud`'s media service (see
+/// [`MessageText::for_cloud`]); any other picture stays as it is, for the render to check.
+fn pictures_on(cloud: &crate::Cloud, nodes: &mut [Node]) {
+    for node in nodes {
+        match node {
+            Node::Image(image) => {
+                let moved = crate::MessagePicture::of_in(&crate::Cloud::Microsoft, &image.src)
+                    .filter(|picture| picture.view() == "imgo")
+                    .zip(image.size)
+                    .and_then(|(picture, size)| crate::sent_picture_in(cloud, picture.object(), size));
+                if let Some(moved) = moved {
+                    image.src = moved.src;
+                }
+            }
+            Node::Paragraph(children)
+            | Node::Link { children, .. }
+            | Node::Span { children, .. }
+            | Node::Heading { children, .. }
+            | Node::Indented { children, .. } => pictures_on(cloud, children),
+            Node::Quote(quote) => pictures_on(cloud, &mut quote.body),
+            Node::List(list) => {
+                for item in &mut list.items {
+                    pictures_on(cloud, item);
+                }
+            }
+            Node::Text { .. } | Node::Break | Node::Mention { .. } | Node::Code(_) | Node::Rule => {}
+        }
+    }
 }
 
 /// An `http`, `https` or `mailto` URL.
