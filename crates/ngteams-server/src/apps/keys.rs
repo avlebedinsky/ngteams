@@ -6,7 +6,9 @@
 //! published [`PRE_PUBLISH`] before it signs (a shorter rotation period: one period before). The next key is made one
 //! rotation period after the newest, so each key signs for one period (the first, which signs at once, also for the
 //! pre-publish time of the next). The signer is the newest unretired key published that long, else the oldest
-//! unretired one; when a new key takes over, the keys before it are retired. A retired key is still published until nothing it signed can be used, then deleted.
+//! unretired one; when a new key takes over, the keys before it are retired. Each key is made at least a second after
+//! the one before it, so the order of the keys is the order they were made in. A retired key is still published
+//! until nothing it signed can be used, then deleted.
 //!
 //! The published set is read from the database on each request, so a key another node just made is published by
 //! every node at once; a node signs with its own view, reloaded at housekeeping.
@@ -319,23 +321,33 @@ async fn store_after(db: &Db, key: &Stored, newest: Option<&str>) -> Result<bool
                 .set(server_meta::value.eq(server_meta::value))
                 .execute(conn)
                 .await?;
-            let current: Option<String> = bot_signing_keys::table
+            let current: Option<(String, i64)> = bot_signing_keys::table
                 .filter(bot_signing_keys::retired_at.is_null())
                 .order((bot_signing_keys::created_at.desc(), bot_signing_keys::kid.desc()))
-                .select(bot_signing_keys::kid)
+                .select((bot_signing_keys::kid, bot_signing_keys::created_at))
                 .first(conn)
                 .await
                 .optional()?;
-            if current.as_deref() != newest {
+            if current.as_ref().map(|(kid, _)| kid.as_str()) != newest {
                 return Ok(false);
             }
+            let created_at = made_after(key.created_at, current.map(|(_, created_at)| created_at));
             diesel::insert_into(bot_signing_keys::table)
-                .values(key)
+                .values(Stored {
+                    created_at,
+                    ..key.clone()
+                })
                 .execute(conn)
                 .await?;
             Ok(true)
         })
         .await)
+}
+
+/// When a key made at `at` is stored after a key made at `newest`: at least a second later, as the times are whole
+/// seconds and a tie would leave the order of the keys, and so the signer, to their random `kid`s.
+fn made_after(at: i64, newest: Option<i64>) -> i64 {
+    newest.map_or(at, |newest| at.max(newest.saturating_add(1)))
 }
 
 /// A fresh RSA-2048 key with a random `kid`.
@@ -426,6 +438,15 @@ mod tests {
         let keys = [after, next, first];
         assert_eq!(signing(&keys, 121 * hour - 1, lead).unwrap().kid, "next");
         assert_eq!(signing(&keys, 121 * hour, lead).unwrap().kid, "after");
+    }
+
+    #[test]
+    fn a_key_is_stored_at_least_a_second_after_the_newest() {
+        assert_eq!(made_after(100, None), 100);
+        assert_eq!(made_after(100, Some(99)), 100);
+        assert_eq!(made_after(100, Some(100)), 101);
+        assert_eq!(made_after(100, Some(102)), 103);
+        assert_eq!(made_after(100, Some(i64::MAX)), i64::MAX);
     }
 
     #[test]

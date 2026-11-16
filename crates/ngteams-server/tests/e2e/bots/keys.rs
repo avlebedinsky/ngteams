@@ -238,6 +238,31 @@ async fn two_nodes_share_the_bot_keys_and_a_rotation_on_one_is_published_by_both
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn keys_made_within_one_second_keep_the_order_they_were_made_in_and_the_first_still_signs() {
+    for backend in backends() {
+        let registry = Registry::open(backend).await;
+        let server = &registry.server;
+        let first = kids(server).await;
+        assert_eq!(first.len(), 1, "{first:?}");
+        let mut made = Vec::new();
+        for _ in 0..4 {
+            made.push(server.app.bot_keys.rotate().await.unwrap());
+        }
+        made.reverse();
+        made.extend(first.iter().cloned());
+        assert_eq!(kids(server).await, made);
+        server.app.bot_keys.reload().await.unwrap();
+        let token = server
+            .app
+            .bot_keys
+            .activity_token("28:bot", "https://example.test/")
+            .unwrap();
+        assert_eq!(jsonwebtoken::decode_header(&token).unwrap().kid, first.first().cloned());
+        registry.server.stop().await;
+    }
+}
+
 diesel::table! {
     bot_signing_keys (kid) {
         kid -> Text,
