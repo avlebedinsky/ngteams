@@ -132,6 +132,11 @@ name = "qa_app_card_window"
 harness = false
 
 [[test]]
+# QA of task 407: a new chat not made yet and its draft stay after a chat switch, in the UI sandbox
+name = "qa_new_chat_kept_window"
+harness = false
+
+[[test]]
 name = "deferred_devices_window"
 harness = false
 
