@@ -27,16 +27,39 @@ use crate::icons::{Glyph, icon_button, selected_by};
 
 /// The least width of the text beside the tools on one line, px; a box that cannot give it is stacked.
 pub(super) const MIN_TEXT: f32 = 160.0;
-/// The border and the padding left and right of a box on one line, px.
-const LINE_CHROME: f32 = 2.0 + 12.0 + 8.0;
-/// The border and the padding left and right of a stacked box, px.
-const STACKED_CHROME: f32 = 2.0 + 12.0 + 12.0;
-/// A tool button and the gap after it, px.
-const SLOT: f32 = TOOL + 4.0;
-/// The compact language caret and the gap after it, px.
-const CARET_SLOT: f32 = 24.0;
-/// The divider and Send at the end of the row, with their gaps, px.
-const END: f32 = 4.0 + 1.0 + 8.0 + 4.0 + TOOL;
+
+/// The box's spacing at the window's rem size, px. Its gaps, its padding and the language caret are rem-sized, so they
+/// follow the font size the user set; the tool buttons are [`TOOL`] px at every size.
+#[derive(Clone, Copy, Debug)]
+struct Space {
+    /// The gap between the tools (`gap_1`).
+    gap: f32,
+    /// The border and the padding left and right of a box on one line (`pl_3`, `pr_2`).
+    line_chrome: f32,
+    /// The border and the padding left and right of a stacked box (`px_3`).
+    stacked_chrome: f32,
+    /// A tool button and the gap after it.
+    slot: f32,
+    /// The compact language caret (`size_5`) and the gap after it.
+    caret_slot: f32,
+    /// The divider (`mx_1`) and Send at the end of the row, with their gaps.
+    end: f32,
+}
+
+impl Space {
+    fn at(rem: Pixels) -> Self {
+        let rem = f32::from(rem);
+        let gap = 0.25 * rem;
+        Self {
+            gap,
+            line_chrome: 2.0 + 0.75 * rem + 0.5 * rem,
+            stacked_chrome: 2.0 + 2.0 * 0.75 * rem,
+            slot: TOOL + gap,
+            caret_slot: 1.25 * rem + gap,
+            end: gap + 1.0 + 2.0 * gap + gap + TOOL,
+        }
+    }
+}
 
 /// A tool of the box, Send apart, in the order the box shows them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,8 +83,12 @@ impl Tool {
         )
     }
 
-    fn slot(self) -> f32 {
-        if self == Self::Language { CARET_SLOT } else { SLOT }
+    fn slot(self, space: Space) -> f32 {
+        if self == Self::Language {
+            space.caret_slot
+        } else {
+            space.slot
+        }
     }
 
     /// The tool's selector: its button's, and with `-row` its row's in the menu.
@@ -114,9 +141,10 @@ pub(crate) struct Fit {
     pub(crate) more: Vec<Tool>,
 }
 
-/// Where `tools` go in a box last drawn `width` wide (`None`: not drawn yet, so as a wide box).
+/// Where `tools` go in a box last drawn `width` wide (`None`: not drawn yet, so as a wide box) in a window whose rem size
+/// is `rem`.
 #[must_use]
-pub(crate) fn fit(width: Option<Pixels>, tools: &[Tool]) -> Fit {
+pub(crate) fn fit(width: Option<Pixels>, rem: Pixels, tools: &[Tool]) -> Fit {
     let all = || Fit {
         stacked: false,
         row: tools.to_vec(),
@@ -125,17 +153,19 @@ pub(crate) fn fit(width: Option<Pixels>, tools: &[Tool]) -> Fit {
     let Some(width) = width.map(f32::from).filter(|width| *width < NARROW_BOX) else {
         return all();
     };
-    let tools_width: f32 = tools.iter().map(|tool| tool.slot()).sum();
-    if width - LINE_CHROME - tools_width - END - 4.0 >= MIN_TEXT {
+    let space = Space::at(rem);
+    let tools_width: f32 = tools.iter().map(|tool| tool.slot(space)).sum();
+    if width - space.line_chrome - tools_width - space.end - space.gap >= MIN_TEXT {
         return all();
     }
-    let room = width - STACKED_CHROME - END - SLOT;
+    // the row keeps a slot for More options
+    let room = width - space.stacked_chrome - space.end - space.slot;
     let mut used = 0.0;
     let row: Vec<Tool> = tools
         .iter()
         .copied()
         .take_while(|tool| {
-            used += tool.slot();
+            used += tool.slot(space);
             tool.of_teams() && used <= room
         })
         .collect();
@@ -147,8 +177,15 @@ pub(crate) fn fit(width: Option<Pixels>, tools: &[Tool]) -> Fit {
     }
 }
 
-/// What a menu row shows of its tool at the time the menu opens.
-#[derive(Clone)]
+/// "More options" while it is open: its menu and the rows it was built of.
+pub(super) struct More {
+    pub(super) menu: Entity<PopupMenu>,
+    rows: Vec<Row>,
+    _dismissed: gpui::Subscription,
+}
+
+/// What a menu row shows of its tool: the menu is built again when one of its rows changes.
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Row {
     tool: Tool,
     label: SharedString,
@@ -164,7 +201,7 @@ impl Compose {
             tools.extend([Tool::Attach, Tool::Loop, Tool::Apps]);
         }
         tools.extend([Tool::Correct, Tool::Translate, Tool::Language]);
-        fit(self.box_at.get().map(|bounds| bounds.size.width), &tools)
+        fit(self.box_at.get().map(|bounds| bounds.size.width), self.rem, &tools)
     }
 
     /// Whether the box was last drawn stacked: the text on top, its tools on a row under it.
@@ -222,17 +259,33 @@ impl Compose {
         }
     }
 
-    /// Opens "More options" (its button, tests, the tour): the keyboard goes to its first row.
+    /// Opens "More options" (its button, tests, the tour). The keyboard goes into the menu with no row selected: Down
+    /// selects its first row, Up its last row that can be taken, and after that each key skips the rows that are off.
     pub fn open_more(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let more = self.fit().more;
-        if more.is_empty() || self.more.is_some() {
+        if self.more.is_some() {
             return;
         }
-        let rows: Vec<Row> = more.iter().map(|tool| self.row(*tool, cx)).collect();
+        let rows = self.more_rows(cx);
+        if rows.is_empty() {
+            return;
+        }
+        self.more = Some(self.more_menu(rows, window, cx));
+        cx.notify();
+    }
+
+    /// The rows "More options" shows now, one for each tool in it.
+    fn more_rows(&self, cx: &App) -> Vec<Row> {
+        self.fit().more.iter().map(|tool| self.row(*tool, cx)).collect()
+    }
+
+    /// "More options" of `rows`, the keyboard in it.
+    fn more_menu(&self, rows: Vec<Row>, window: &mut Window, cx: &mut Context<Self>) -> More {
         let compose = cx.entity().downgrade();
         let text = self.editor.read(cx).focus.clone();
+        let built = rows.clone();
         let menu = PopupMenu::build(window, cx, move |menu, window, _| {
-            rows.iter()
+            built
+                .iter()
                 .fold(menu.min_w(px(240.0)).action_context(text.clone()), |menu, row| {
                     let compose = compose.clone();
                     let tool = row.tool;
@@ -246,7 +299,33 @@ impl Compose {
             cx.notify();
         });
         menu.focus_handle(cx).focus(window, cx);
-        self.more = Some((menu, dismissed));
+        More {
+            menu,
+            rows,
+            _dismissed: dismissed,
+        }
+    }
+
+    /// As the box draws: when a row of the open "More options" no longer shows its tool's state, the menu is built
+    /// again after this frame.
+    pub(super) fn more_follows_tools(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.more.as_ref().is_some_and(|more| more.rows != self.more_rows(cx)) {
+            cx.defer_in(window, Self::refresh_more);
+        }
+    }
+
+    /// Builds the open "More options" again when a tool's state changed (a job started or stopped, the draft or the
+    /// language changed), so that each row says what its click does now. A box that no longer has a menu closes it.
+    fn refresh_more(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(more) = &self.more else { return };
+        let rows = self.more_rows(cx);
+        if rows == more.rows {
+            return;
+        }
+        if rows.is_empty() {
+            return self.close_more(window, cx);
+        }
+        self.more = Some(self.more_menu(rows, window, cx));
         cx.notify();
     }
 
@@ -269,7 +348,7 @@ impl Compose {
     /// open by this button.
     pub(super) fn more_button(&self, more: &[Tool], cx: &mut Context<Self>) -> AnyElement {
         let open = self.more.is_some();
-        let menu = self.more.as_ref().map(|(menu, _)| menu.clone());
+        let menu = self.more.as_ref().map(|more| more.menu.clone());
         let compose = cx.entity().downgrade();
         let button = icon_button("compose-more", Glyph::MORE, "More options").with_size(Size::Size(px(TOOL)));
         let popover = Popover::new("compose-more-popover")
@@ -361,6 +440,11 @@ fn menu_row(row: &Row, text: &FocusHandle, window: &Window) -> PopupMenuItem {
 mod tests {
     use super::*;
 
+    /// The app's rem size at its default font size.
+    fn rem() -> Pixels {
+        px(f32::from(crate::theme::FONT_SIZE))
+    }
+
     const CHAT: [Tool; 8] = [
         Tool::Format,
         Tool::Emoji,
@@ -382,7 +466,7 @@ mod tests {
     #[test]
     fn a_box_not_drawn_yet_or_wide_keeps_every_tool_on_one_line() {
         for width in [None, Some(px(NARROW_BOX)), Some(px(1200.0))] {
-            let fit = fit(width, &CHAT);
+            let fit = fit(width, rem(), &CHAT);
             assert!(!fit.stacked);
             assert_eq!(fit.row, CHAT);
             assert!(fit.more.is_empty());
@@ -392,7 +476,7 @@ mod tests {
     #[test]
     fn a_box_in_a_call_s_chat_pane_stacks_with_teams_tools_on_its_row() {
         // the Chat pane is 360 px, its box 328 px
-        let fit = fit(Some(px(328.0)), &CHAT);
+        let fit = fit(Some(px(328.0)), rem(), &CHAT);
         assert!(fit.stacked);
         assert_eq!(
             fit.row,
@@ -404,14 +488,14 @@ mod tests {
     #[test]
     fn a_thread_s_box_with_room_for_its_text_stays_on_one_line() {
         // the thread's pane is 440 px, its box 408 px
-        let fit = fit(Some(px(408.0)), &CHANNEL);
+        let fit = fit(Some(px(408.0)), rem(), &CHANNEL);
         assert!(!fit.stacked);
         assert_eq!(fit.row, CHANNEL);
     }
 
     #[test]
     fn a_very_narrow_box_moves_the_last_teams_tools_into_the_menu_too() {
-        let fit = fit(Some(px(200.0)), &CHAT);
+        let fit = fit(Some(px(200.0)), rem(), &CHAT);
         assert!(fit.stacked);
         assert_eq!(fit.row, [Tool::Format, Tool::Emoji, Tool::Attach]);
         assert_eq!(fit.more.first(), Some(&Tool::Loop));
@@ -420,8 +504,19 @@ mod tests {
 
     #[test]
     fn a_box_with_no_room_for_one_tool_keeps_more_options_and_send() {
-        let fit = fit(Some(px(60.0)), &CHAT);
+        let fit = fit(Some(px(60.0)), rem(), &CHAT);
         assert!(fit.row.is_empty());
         assert_eq!(fit.more, CHAT);
+    }
+
+    #[test]
+    fn the_spacing_follows_the_font_size_so_a_larger_one_moves_more_into_the_menu() {
+        // at 24 px the box's gaps and padding are wider: the five Teams tools no longer fit beside More and Send
+        let at_default = fit(Some(px(264.0)), rem(), &CHAT);
+        assert_eq!(at_default.row.len(), 5);
+        let at_largest = fit(Some(px(264.0)), px(24.0), &CHAT);
+        assert!(at_largest.stacked);
+        assert_eq!(at_largest.row, [Tool::Format, Tool::Emoji, Tool::Attach, Tool::Loop]);
+        assert_eq!(at_largest.more.first(), Some(&Tool::Apps));
     }
 }

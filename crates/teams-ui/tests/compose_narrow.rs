@@ -114,6 +114,7 @@ fn a_narrow_box_keeps_its_text_field_usable_and_its_tools_in_more() {
         "the tools that do not fit go into More options"
     );
     assert!(shown(cx, "compose-send"), "Send stays in the box");
+    assert!(compose.read_with(cx, |compose, _| compose.is_stacked()));
     let hidden: Vec<_> = TOOLS.iter().filter(|tool| cx.debug_bounds(tool).is_none()).collect();
     assert!(!hidden.is_empty(), "some tools go into the menu");
     // the box stays inside its pane
@@ -124,10 +125,11 @@ fn a_narrow_box_keeps_its_text_field_usable_and_its_tools_in_more() {
 #[test]
 fn a_wide_box_keeps_all_its_tools_and_no_more_button() {
     let rig = Rig::start();
-    let (_compose, cx) = chat(&rig, 900.0);
+    let (compose, cx) = chat(&rig, 900.0);
     for tool in TOOLS {
         assert!(shown(cx, tool), "{tool} is in a wide box");
     }
+    assert!(!compose.read_with(cx, |compose, _| compose.is_stacked()));
     assert!(!shown(cx, "compose-more"));
     assert!(shown(cx, "compose-send"));
 }
@@ -207,12 +209,41 @@ fn a_channel_box_moves_only_the_tools_it_has() {
     });
     draw(cx);
     assert!(width(cx, "rich-editor") >= USABLE);
-    if shown(cx, "compose-more") {
-        click(cx, "compose-more");
-        for tool in ["compose-attach", "compose-loop", "compose-apps"] {
-            assert!(cx.debug_bounds(row(tool)).is_none(), "{tool} is not in a channel's box");
-        }
+    // its text cannot keep a usable width beside its tools: it stacks, and its own tools are in More options
+    assert!(compose.read_with(cx, |compose, _| compose.is_stacked()));
+    assert!(shown(cx, "compose-more"), "a narrow channel box has More options");
+    click(cx, "compose-more");
+    assert!(shown(cx, "compose-more-menu"));
+    for tool in ["compose-correct", "compose-translate", "compose-language"] {
+        assert!(shown(cx, row(tool)), "{tool} is in the menu of a channel's box");
     }
+    for tool in ["compose-attach", "compose-loop", "compose-apps"] {
+        assert!(!shown(cx, row(tool)), "{tool} is not in a channel's box");
+        assert!(!shown(cx, tool), "{tool} is not in a channel's box");
+    }
+}
+
+#[test]
+fn an_open_menu_follows_the_state_of_its_tools() {
+    let rig = Rig::start();
+    let (compose, cx) = chat(&rig, PANE);
+    type_in(&compose, cx, "A made-up draft");
+    click(cx, "compose-more");
+    // the draft goes while the menu is open: Correct and Translate have nothing to work on now. Down selects the first
+    // row, and the next Down skips the rows that are off and selects the language row
+    cx.update(|_, cx| {
+        compose.update(cx, |compose, cx| {
+            compose.editor().update(cx, teams_ui::compose::Editor::clear);
+        });
+    });
+    draw(cx);
+    assert!(compose.read_with(cx, |compose, _| compose.more_open()));
+    cx.simulate_keystrokes("down down enter");
+    draw(cx);
+    assert!(
+        shown(cx, "compose-language-menu"),
+        "the rows show the state of their tools now"
+    );
 }
 
 #[test]

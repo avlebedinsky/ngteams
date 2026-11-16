@@ -676,8 +676,10 @@ pub struct Compose {
     emoji_at: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// Where the box was last drawn: a narrow one compacts its toolbar.
     box_at: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The window's rem size as the box was last drawn: its gaps and padding follow it ([`fit`]).
+    rem: Pixels,
     /// "More options" while it is open ([`fit`]).
-    more: Option<(Entity<gpui_component::menu::PopupMenu>, Subscription)>,
+    more: Option<fit::More>,
     /// Whether the picker was open as the emoji button was pressed: its click then closes it.
     emoji_on_press: bool,
     _editor_events: Subscription,
@@ -791,6 +793,7 @@ impl Compose {
             emoji: None,
             emoji_at: Rc::default(),
             box_at: Rc::default(),
+            rem: px(f32::from(theme::FONT_SIZE)),
             more: None,
             emoji_on_press: false,
             _editor_events: editor_events,
@@ -2166,6 +2169,8 @@ impl Render for Compose {
         self.correction_follows_draft(cx);
         self.draft_translation_follows_draft(cx);
         self.prepare_language_menu(window, cx);
+        self.rem = window.rem_size();
+        self.more_follows_tools(window, cx);
         let focused = self.focused(window, cx);
         let keyed = div()
             .key_context(CONTEXT)
