@@ -3542,8 +3542,11 @@ fn a_group_call_offers_teams_controls_raise_and_react_and_shows_who_is_muted_or_
         assert!(drawn(stage, row), "{row}");
     }
     // b's hand, the first up, is numbered as Teams numbers them
-    assert!(drawn(stage, "call-roster-hand-1"));
-    assert!(!drawn(stage, "call-roster-hand-2"), "the account's hand is down again");
+    assert!(drawn(stage, "call-roster-0-hand-1"));
+    assert!(
+        (0..=9).all(|rank| !drawn(stage, &format!("call-roster-self-hand-{rank}"))),
+        "the account's hand is down again"
+    );
     // a live reaction floats up from the stage
     rig.send(Event::CallReaction {
         call: call(1),

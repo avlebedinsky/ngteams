@@ -14,8 +14,9 @@
 //! - **The stage** ([`gallery`]): before anyone is in the call, the callee's avatar (a 1:1 call's other one's picture)
 //!   with the call's state, as Teams shows it while it rings; once the call's roster told who is in it, a tile per
 //!   participant (its video when a line shows it, else its person's picture, or their initials, centred and sized to
-//!   the tile: [`faces`]; its name with its microphone muted and its hand raised; a border in the brand colour
-//!   while it speaks, Teams' gold while its hand is up) in the gallery, as many to a page as Max gallery size and the
+//!   the tile: [`faces`]; its name with its microphone muted; a raised hand at its top left with its place in the line
+//!   of hands, the same number as the People pane; a border in Teams' gold while its hand is up, else in the brand
+//!   colour while it speaks) in the gallery, as many to a page as Max gallery size and the
 //!   stage allow, or the one who speaks (or the one pinned) large over a strip of the others; more than fit go on
 //!   further pages, turned with the `<` `>` under the gallery or at the strip's end ([`pages`]); each tile's More
 //!   options pins it for the account alone. The account's own tile (its own picture while its camera is off) is the

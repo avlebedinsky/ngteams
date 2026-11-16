@@ -453,9 +453,9 @@ fn section_heading(text: String, action: Option<AnyElement>, palette: Palette) -
         .children(action)
 }
 
-/// The signs on a row's right: a raised hand with its place in the line (Teams' "1 ✋" chip), the speaker while they
-/// speak, the microphone (muted or not).
-fn signs(signs: Signs, palette: Palette) -> gpui::Div {
+/// The signs on the right of the row `row`: a raised hand with its place in the line (Teams' "1 ✋" chip, named
+/// `{row}-hand-{place}`), the speaker while they speak, the microphone (muted or not).
+fn signs(row: &str, signs: Signs, palette: Palette) -> gpui::Div {
     let Signs {
         speaking, muted, hand, ..
     } = signs;
@@ -465,8 +465,9 @@ fn signs(signs: Signs, palette: Palette) -> gpui::Div {
         .items_center()
         .gap_2()
         .children(hand.map(|rank| {
+            let chip = format!("{row}-hand-{rank}");
             div()
-                .debug_selector(move || format!("call-roster-hand-{rank}"))
+                .debug_selector(move || chip)
                 .h(px(22.0))
                 .px_1p5()
                 .flex()
@@ -507,8 +508,9 @@ fn roster_row(
     palette: Palette,
 ) -> AnyElement {
     let selector = selector.into();
+    let shown_signs = signs(&selector, shown, palette);
     div()
-        .debug_selector(move || selector.clone())
+        .debug_selector(move || selector)
         .h(px(48.0))
         .px_4()
         .flex()
@@ -516,7 +518,7 @@ fn roster_row(
         .gap_3()
         .child(hand_ring(avatar, shown.hand.is_some(), palette))
         .child(name_and_role(name, shown.organizer, palette))
-        .child(signs(shown, palette))
+        .child(shown_signs)
         .into_any_element()
 }
 
@@ -606,6 +608,6 @@ fn self_row(
         .gap_3()
         .child(hand_ring(mark, shown.hand.is_some(), palette))
         .child(name_and_role(name, shown.organizer, palette))
-        .child(signs(shown, palette))
+        .child(signs("call-roster-self", shown, palette))
         .into_any_element()
 }

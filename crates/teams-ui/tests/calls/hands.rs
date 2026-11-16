@@ -35,9 +35,10 @@ fn own_hand(rig: &Rig, raised: bool) {
     rig.cx.run_until_parked();
 }
 
-/// The places of the hands shown on `tile`, from 1 to 9.
+/// The places of the hands shown on `tile` (a stage tile or a People row), from 1 to 9; 0 is a hand shown without
+/// its place.
 fn shown_on(stage: &mut gpui::VisualTestContext, tile: &str) -> Vec<usize> {
-    (1..=9)
+    (0..=9)
         .filter(|rank| drawn(stage, &format!("{tile}-hand-{rank}")))
         .collect()
 }
@@ -58,14 +59,11 @@ fn a_tile_shows_its_raised_hand_with_its_place_in_the_line_of_hands() {
         [3],
         "the account's own hand, the last up"
     );
-    // the People pane numbers them the same
+    // the People pane numbers each person the same
     click(stage, "call-roster");
-    for rank in 1..=3 {
-        assert!(
-            drawn(stage, &format!("call-roster-hand-{rank}")),
-            "People's hand {rank}"
-        );
-    }
+    assert_eq!(shown_on(stage, "call-roster-1"), [1], "c's row");
+    assert_eq!(shown_on(stage, "call-roster-0"), [2], "b's row");
+    assert_eq!(shown_on(stage, "call-roster-self"), [3], "the account's row");
 }
 
 #[test]
