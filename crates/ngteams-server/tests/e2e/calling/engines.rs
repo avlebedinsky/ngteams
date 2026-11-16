@@ -325,10 +325,21 @@ impl Engine {
 
 /// The level of `tone` in the last `stretch` of the recording at `path`, leaving out its last 200 ms.
 pub(super) fn heard(path: &Path, tone: Tone, stretch: Duration) -> f32 {
+    let end = recorded(path).saturating_sub(in_samples(Duration::from_millis(200)));
+    heard_before(path, tone, stretch, end)
+}
+
+/// The samples of the recording at `path` that a read gets now. The writer updates the header each second, so this
+/// count is at most 1 s behind the recording.
+pub(super) fn recorded(path: &Path) -> usize {
+    wav::read(path).unwrap().len()
+}
+
+/// The level of `tone` in the `stretch` of the recording at `path` that ends at sample `end`.
+pub(super) fn heard_before(path: &Path, tone: Tone, stretch: Duration, end: usize) -> f32 {
     let samples = wav::read(path).unwrap();
-    let at = |span: Duration| usize::try_from(span.as_millis()).unwrap() * 48;
-    let end = samples.len().saturating_sub(at(Duration::from_millis(200)));
-    let start = end.saturating_sub(at(stretch));
+    let end = end.min(samples.len());
+    let start = end.saturating_sub(in_samples(stretch));
     assert!(
         end - start >= 24_000,
         "{} holds {} samples",
@@ -336,6 +347,11 @@ pub(super) fn heard(path: &Path, tone: Tone, stretch: Duration) -> f32 {
         samples.len()
     );
     level_at(&samples[start..end], tone.hz)
+}
+
+/// `span` in samples at 48 kHz.
+fn in_samples(span: Duration) -> usize {
+    usize::try_from(span.as_millis()).unwrap() * 48
 }
 
 pub(super) async fn wait_until(what: &str, done: impl Fn() -> bool) {

@@ -13,7 +13,7 @@ use teams_media::tone::Tone;
 use teams_proto::Mri;
 use teams_store::OutboxState;
 
-use super::engines::{A_TONE, B_TONE, Engine, TALK, WAIT, heard, relayed};
+use super::engines::{A_TONE, B_TONE, Engine, TALK, WAIT, heard_before, recorded, relayed};
 use crate::support::{Backend, TestServer, backends, redis_url};
 use crate::trouter::{Account, ORIGIN};
 
@@ -30,6 +30,12 @@ pub(super) const SILENT: Tone = Tone {
 const HEARD: f32 = 0.15;
 /// Below this, a tone isn't in a recording.
 const ABSENT: f32 = 0.05;
+/// The stretch of a recording a level is read over: long enough that a gap of a second or so under load leaves a
+/// heard tone above [`HEARD`].
+const LISTEN: Duration = Duration::from_secs(4);
+/// How long the parties talk before what they heard is marked: [`LISTEN`], the up to 1 s a mark lags, and 1 s for the
+/// media to come.
+const TALKING: Duration = LISTEN.saturating_add(Duration::from_secs(2));
 
 /// The media node's configuration on loopback: its sockets on free ports, its candidate the loopback address.
 fn on_loopback(config: &mut ngteams_server::config::Config) {
@@ -162,9 +168,15 @@ pub(super) async fn group_chat(first: &Engine, others: &[&Engine], quiet: &[Stri
     chat
 }
 
-/// The tone `tone`'s level in the last stretch of `engine`'s recording.
-fn level(engine: &Engine, tone: Tone) -> f32 {
-    heard(&engine.recording, tone, TALK)
+/// The end of `engine`'s recording now. Take it while the call runs: the media stops before the recording stops, when
+/// the call ends or when the parties leave one at a time.
+fn mark(engine: &Engine) -> usize {
+    recorded(&engine.recording)
+}
+
+/// The tone `tone`'s level in the stretch of `engine`'s recording up to `mark`.
+fn level(engine: &Engine, mark: usize, tone: Tone) -> f32 {
+    heard_before(&engine.recording, tone, LISTEN, mark)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -179,10 +191,10 @@ async fn one_client_hears_its_own_silence_and_gets_the_control_planes_ack() {
         let id = mixed.open_call().await;
         mixed.connected(&id, 1).await;
         tokio::time::sleep(TALK + Duration::from_millis(500)).await;
+        let talked = mark(&a);
         a.call(CallAction::HangUp { call }).await;
         a.ended(call).await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        let own = level(&a, A_TONE);
+        let own = level(&a, talked, A_TONE);
         eprintln!("a heard its own tone at {own:.3}");
         assert!(own < ABSENT, "a heard itself at {own:.3}");
         a.shut_down().await;
@@ -214,10 +226,10 @@ pub(super) async fn hang_up_all(engines: &mut [&mut Engine], calls: &[CallId]) {
     tokio::time::sleep(Duration::from_millis(300)).await;
 }
 
-/// `engine` heard each of `heard` and not `not`.
-fn hears(engine: &Engine, heard: &[Tone], not: Tone) {
-    let levels: Vec<f32> = heard.iter().map(|tone| level(engine, *tone)).collect();
-    let own = level(engine, not);
+/// `engine` heard each of `heard` and not `not`, in the stretch up to `mark`.
+fn hears(engine: &Engine, mark: usize, heard: &[Tone], not: Tone) {
+    let levels: Vec<f32> = heard.iter().map(|tone| level(engine, mark, *tone)).collect();
+    let own = level(engine, mark, not);
     eprintln!("{} heard {levels:?}, its own {own:.3}", engine.mri);
     assert!(levels.iter().all(|level| *level > HEARD), "{}: {levels:?}", engine.mri);
     assert!(own < ABSENT, "{} heard itself at {own:.3}", engine.mri);
@@ -233,11 +245,12 @@ async fn three_clients_hear_each_others_tones_mixed() {
         let chat = group_chat(&a, &[&b, &c], &[]).await;
         let calls = connect_all(&chat, &mut [&mut a, &mut b, &mut c]).await;
         mixed.connected(&mixed.open_call().await, 3).await;
-        tokio::time::sleep(2 * TALK).await;
+        tokio::time::sleep(TALKING).await;
+        let talked = [mark(&a), mark(&b), mark(&c)];
         hang_up_all(&mut [&mut a, &mut b, &mut c], &calls).await;
-        hears(&a, &[B_TONE, C_TONE], A_TONE);
-        hears(&b, &[A_TONE, C_TONE], B_TONE);
-        hears(&c, &[A_TONE, B_TONE], C_TONE);
+        hears(&a, talked[0], &[B_TONE, C_TONE], A_TONE);
+        hears(&b, talked[1], &[A_TONE, C_TONE], B_TONE);
+        hears(&c, talked[2], &[A_TONE, B_TONE], C_TONE);
         for engine in [a, b, c] {
             engine.shut_down().await;
         }
@@ -334,10 +347,11 @@ async fn a_late_joiner_hears_the_call_and_is_heard() {
         c.status(joined, &CallStatus::Connected).await;
         calls.push(joined);
         mixed.connected(&mixed.open_call().await, 3).await;
-        tokio::time::sleep(2 * TALK).await;
+        tokio::time::sleep(TALKING).await;
+        let talked = [mark(&a), mark(&c)];
         hang_up_all(&mut [&mut a, &mut b, &mut c], &calls).await;
-        hears(&c, &[A_TONE, B_TONE], C_TONE);
-        hears(&a, &[B_TONE, C_TONE], A_TONE);
+        hears(&c, talked[1], &[A_TONE, B_TONE], C_TONE);
+        hears(&a, talked[0], &[B_TONE, C_TONE], A_TONE);
         for engine in [a, b, c] {
             engine.shut_down().await;
         }
@@ -363,11 +377,12 @@ async fn a_callee_that_leaves_is_no_longer_heard_and_the_call_goes_on() {
         a.view(calls[0], |view| view.participants.iter().all(|party| party.mri != gone))
             .await;
         mixed.connected(&id, 2).await;
-        tokio::time::sleep(2 * TALK).await;
+        tokio::time::sleep(TALKING).await;
         assert_eq!(mixed.open_call().await, id, "the call goes on");
+        let talked = mark(&a);
         hang_up_all(&mut [&mut a, &mut b], &calls[..2]).await;
-        hears(&a, &[B_TONE], A_TONE);
-        let left = level(&a, C_TONE);
+        hears(&a, talked, &[B_TONE], A_TONE);
+        let left = level(&a, talked, C_TONE);
         assert!(left < ABSENT, "a still heard c at {left:.3}");
         for engine in [a, b, c] {
             engine.shut_down().await;
@@ -413,13 +428,14 @@ async fn signaling_and_media_on_different_nodes() {
     let chat = group_chat(&a, &[&b], &[quiet]).await;
     let calls = connect_all(&chat, &mut [&mut a, &mut b]).await;
     mixed.connected(&mixed.open_call().await, 2).await;
-    tokio::time::sleep(2 * TALK).await;
+    tokio::time::sleep(TALKING).await;
+    let talked = [mark(&a), mark(&b)];
     // the media node goes while the call runs: the API node, which has no node of its own, sees it in the registry
     mixed.node.take().unwrap().stop().await;
     ended_by_the_service(&a.ended(calls[0]).await, 503);
     ended_by_the_service(&b.ended(calls[1]).await, 503);
-    hears(&a, &[B_TONE], A_TONE);
-    hears(&b, &[A_TONE], B_TONE);
+    hears(&a, talked[0], &[B_TONE], A_TONE);
+    hears(&b, talked[1], &[A_TONE], B_TONE);
     for engine in [a, b] {
         engine.shut_down().await;
     }
