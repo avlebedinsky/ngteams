@@ -734,6 +734,22 @@ pub(crate) fn presence(origin: &str, call: &Call, evt: u64) -> Value {
     json!({"evt": evt, "cp": crate::trouter::gzip_base64(&content.to_string())})
 }
 
+/// What a host's mute is told at its request's callback: each party it muted, by MRI, at its new mute version.
+pub(crate) fn mute_outcome(call: &Call, muted: &[Seat], operation: &Value) -> Value {
+    let parties: Map<String, Value> = muted
+        .iter()
+        .map(|seat| call.party(*seat))
+        .map(|party| {
+            let result = json!([{
+                "result": "success", "participantId": party.participant["participantId"], "reason": "success",
+                "serverMuteVersion": party.mute_version,
+            }]);
+            (party.mri(), result)
+        })
+        .collect();
+    json!({"muteUnmuteResponseAsync": parties, "operationId": operation, "result": "success"})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -821,20 +837,4 @@ mod tests {
         assert_eq!(seed(&unreadable), None);
         assert_eq!(seed(&json!({})), None);
     }
-}
-
-/// What a host's mute is told at its request's callback: each party it muted, by MRI, at its new mute version.
-pub(crate) fn mute_outcome(call: &Call, muted: &[Seat], operation: &Value) -> Value {
-    let parties: Map<String, Value> = muted
-        .iter()
-        .map(|seat| call.party(*seat))
-        .map(|party| {
-            let result = json!([{
-                "result": "success", "participantId": party.participant["participantId"], "reason": "success",
-                "serverMuteVersion": party.mute_version,
-            }]);
-            (party.mri(), result)
-        })
-        .collect();
-    json!({"muteUnmuteResponseAsync": parties, "operationId": operation, "result": "success"})
 }

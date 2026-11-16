@@ -366,6 +366,22 @@ pub(super) async fn enter_at_conversation(
 /// at once don't post it twice. One not posted is logged.
 async fn post_meeting(app: &App, call: &Call) {
     let key = Key::Id(&call.id);
+    if claim_post(app, key).await {
+        announce(app, key, call).await;
+    }
+}
+
+/// Posts the channel's meeting and keeps its post with its call. One not posted is logged.
+async fn announce(app: &App, key: Key<'_>, call: &Call) {
+    // `None`: its organizer isn't in its channel (any more)
+    match posted(app, call).await.transpose() {
+        Some(Ok(post)) => keep_post(app, key, post).await,
+        failed => tracing::warn!(?failed, "a channel meeting wasn't posted to its channel"),
+    }
+}
+
+/// Whether this entry is the one that posts the channel's meeting: none claimed its post before.
+async fn claim_post(app: &App, key: Key<'_>) -> bool {
     let claimed = step_any(app, key, |call, _, _| {
         let meeting = call.meeting.as_mut().ok_or(Refusal::Gone)?;
         if meeting.post.is_some() {
@@ -375,35 +391,33 @@ async fn post_meeting(app: &App, call: &Call) {
         Ok(true)
     })
     .await;
-    if !matches!(claimed, Ok(true)) {
-        return;
-    }
-    let posted = async {
-        let organizer = call
-            .meeting
-            .as_ref()
-            .map(|meeting| meeting.organizer.as_str())
-            .unwrap_or_default();
-        let user = users::by_id(&app.db, organizer).await?.ok_or(DbError::Conflict)?;
-        let channel = call.chat.as_deref().unwrap_or_default();
-        let conversation = wire::conversation_url(&app.config.origin(), &call.conversation, None);
-        call_events::meeting_started(app, channel, (&user.id, &user.display_name), (&call.id, &conversation)).await
-    };
-    match posted.await {
-        Ok(Some(post)) => {
-            let kept = step_any(app, key, |call, _, _| {
-                if let Some(meeting) = call.meeting.as_mut() {
-                    meeting.post = Some(post.to_string());
-                }
-                Ok(())
-            })
-            .await;
-            if let Err(Failure::Database(error)) = kept {
-                tracing::warn!(%error, "a channel meeting's post wasn't kept with its call");
-            }
+    matches!(claimed, Ok(true))
+}
+
+/// The channel's post of its meeting `call`, as its organizer's: its id, when it was posted.
+async fn posted(app: &App, call: &Call) -> Result<Option<i64>, DbError> {
+    let organizer = call
+        .meeting
+        .as_ref()
+        .map(|meeting| meeting.organizer.as_str())
+        .unwrap_or_default();
+    let user = users::by_id(&app.db, organizer).await?.ok_or(DbError::Conflict)?;
+    let channel = call.chat.as_deref().unwrap_or_default();
+    let conversation = wire::conversation_url(&app.config.origin(), &call.conversation, None);
+    call_events::meeting_started(app, channel, (&user.id, &user.display_name), (&call.id, &conversation)).await
+}
+
+/// Keeps the channel meeting's post `post` with its call.
+async fn keep_post(app: &App, key: Key<'_>, post: i64) {
+    let kept = step_any(app, key, |call, _, _| {
+        if let Some(meeting) = call.meeting.as_mut() {
+            meeting.post = Some(post.to_string());
         }
-        Ok(None) => tracing::warn!("a channel meeting's organizer isn't in its channel: nothing was posted"),
-        Err(error) => tracing::warn!(%error, "a channel meeting wasn't posted to its channel"),
+        Ok(())
+    })
+    .await;
+    if let Err(Failure::Database(error)) = kept {
+        tracing::warn!(%error, "a channel meeting's post wasn't kept with its call");
     }
 }
 

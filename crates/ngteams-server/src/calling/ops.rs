@@ -87,10 +87,10 @@ fn asked<'a>(caller: &Caller, body: &'a Value) -> Result<Asked<'a>, Failure> {
         .pointer("/conversationRequest/properties/enableGroupCallMeetupGeneration")
         .and_then(Value::as_bool)
         == Some(true);
-    let invites = body
+    let with_media = body
         .get("callInvitation")
         .is_some_and(|invitation| !invitation.is_null());
-    if posts_meetup && !invites {
+    if posts_meetup && !with_media {
         let channel = body
             .pointer("/groupChat/threadId")
             .and_then(Value::as_str)
