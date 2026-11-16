@@ -4,10 +4,12 @@
 //!   asks and what the bot answered ([`crate::bot_card`]). A card whose `refresh` names the account runs it by itself
 //!   when it is first drawn; any card with a `refresh` offers "Refresh card" in its message's "More options". Where the
 //!   bot put its card in a card's place, that card's `refresh` is the one offered and run. When the message's cards
-//!   change (an edit), its bot state starts again ([`CardBot::renewed`]).
+//!   change (an edit), its bot state starts again ([`CardBot::renewed`]), and a card that names the account refreshes
+//!   by itself again.
 //! - **Suggested actions**: when the newest message of a 1:1 chat is a bot's and suggests actions, they stand as
 //!   buttons over the compose box, as Teams shows them; a click posts the user's answer (an `imBack`) or asks the bot.
-//!   They go once anyone writes again.
+//!   They ask in a place of their own ([`SUGGESTED`]), not as a card: while their ask goes they wait and the cards
+//!   don't, and what the bot answered shows under them. They go once anyone writes again.
 //!
 //! In read-only mode a card's inputs are drawn but take nothing, its buttons open the message in Teams on the web, and
 //! no refresh or suggested action is offered.
@@ -19,14 +21,14 @@ use gpui::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div, px, rgb,
 };
-use gpui_component::Sizable as _;
 use gpui_component::button::{Button, ButtonRounded};
+use gpui_component::{Disableable as _, Sizable as _};
 use teams_proto::chat::card::{ActionKind, Card};
 
 use super::{Body, ChatView, MessageItem, Place, writes_to};
-use crate::bot_card::{CardBot, Target};
-use crate::card_view::{BotHook, CardState};
-use crate::icons::Glyph;
+use crate::bot_card::{CardBot, SUGGESTED, Target};
+use crate::card_view::{BotHook, CardState, bot_line};
+use crate::icons::{Glyph, Spinning as _};
 use crate::theme::Palette;
 
 /// "Refresh card" in a message's "More options".
@@ -239,6 +241,12 @@ impl ChatView {
             return None;
         }
         let bot = self.card_bot(item, cx)?;
+        let shown = bot.read(cx).shown();
+        let busy = shown.busy.get(&SUGGESTED).cloned();
+        let line = shown.lines.get(&SUGGESTED).map(|line| {
+            let in_teams = teams_proto::workflow::MessageRun::link_to(&self.conversation, &item.id, None);
+            bot_line(palette, "suggested-answer".to_owned(), line, Some(&in_teams))
+        });
         let buttons = cards.0.suggested.iter().enumerate().filter_map(|(at, action)| {
             let ActionKind::Submit(sent) = &action.kind else {
                 return None;
@@ -246,6 +254,7 @@ impl ChatView {
             let (bot, sent, key) = (bot.clone(), sent.clone(), format!("suggested-{at}"));
             let id = SharedString::from(key.clone());
             let selector = key.clone();
+            let spinning = busy.as_deref() == Some(key.as_str());
             Some(
                 div().debug_selector(move || selector).child(
                     Button::new(ElementId::Name(id))
@@ -253,25 +262,35 @@ impl ChatView {
                         .outline()
                         .rounded(ButtonRounded::Large)
                         .small()
+                        .spinning(spinning)
+                        .disabled(busy.is_some())
                         .on_click(move |_, _, cx| {
-                            bot.update(cx, |bot, cx| bot.press(0, &key, &sent, &[], cx));
+                            bot.update(cx, |bot, cx| bot.press(SUGGESTED, &key, &sent, &[], cx));
                         }),
                 ),
             )
         });
+        let bar = div()
+            .id("suggested-actions")
+            .debug_selector(|| "suggested-actions".to_owned())
+            .w_full()
+            .flex()
+            .flex_wrap()
+            .justify_end()
+            .gap_2()
+            .text_color(rgb(palette.foreground))
+            .children(buttons);
         Some(
             div()
-                .id("suggested-actions")
-                .debug_selector(|| "suggested-actions".to_owned())
                 .w_full()
                 .px_4()
                 .pb_2()
                 .flex()
-                .flex_wrap()
-                .justify_end()
-                .gap_2()
-                .text_color(rgb(palette.foreground))
-                .children(buttons)
+                .flex_col()
+                .items_end()
+                .gap_1()
+                .child(bar)
+                .children(line)
                 .into_any_element(),
         )
     }

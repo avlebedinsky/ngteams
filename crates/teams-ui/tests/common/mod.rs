@@ -256,9 +256,12 @@ pub struct FakeCore {
     pub read_only: Mutex<bool>,
     /// The optional services the account's cloud serves, as `Core::capabilities` answers them: all when `None`.
     pub capabilities: Mutex<Option<teams_core::Capabilities>>,
-    /// Every bot ask, in order; each answered from `bot_answers`, else `Done`.
+    /// Every bot ask, in order; each answered from `bot_answers`, else `Done`; with `hold_bot_answers` set, each
+    /// waits in `held_bot_answers` until the test answers it.
     pub bot_asks: Mutex<Vec<teams_core::bots::BotAsk>>,
     pub bot_answers: Mutex<VecDeque<Result<teams_proto::InvokeAnswer, EngineError>>>,
+    pub hold_bot_answers: Mutex<bool>,
+    pub held_bot_answers: Mutex<Vec<Answer<teams_proto::InvokeAnswer>>>,
     /// The scheduling tests' calendar service; its defaults match Core's empty, unsaved calendar.
     pub calendar: Mutex<calendar::CalendarFake>,
     /// The meetings their chats' threads name, by chat; any other chat names none.
@@ -471,6 +474,11 @@ impl FakeCore {
 impl Core for FakeCore {
     fn bot_invoke(&self, ask: teams_core::bots::BotAsk) -> Reply<teams_proto::InvokeAnswer> {
         locked(&self.bot_asks).push(ask);
+        if *locked(&self.hold_bot_answers) {
+            let (answer, reply) = Reply::later();
+            locked(&self.held_bot_answers).push(answer);
+            return reply;
+        }
         Reply::ready(
             locked(&self.bot_answers)
                 .pop_front()

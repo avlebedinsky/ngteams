@@ -635,15 +635,7 @@ fn an_edit_of_the_message_drops_the_bots_card_and_the_answers() {
         "body": [{"type": "Input.Text", "id": "said"}],
         "actions": [{"type": "Action.Execute", "title": "Reopen", "verb": "reopen"}]
     });
-    {
-        let mut stored = card_message(ID, &edited);
-        stored.version = 2;
-        let mut messages = rig.core.messages.lock().unwrap();
-        messages.get_mut(AB).unwrap()[0] = stored;
-    }
-    rig.send(Event::ConversationChanged {
-        conversation: AB.to_owned(),
-    });
+    edit(&rig, card_message(ID, &edited), 2);
     draw(cx);
     // the edited card shows, its input empty again
     assert!(bounds(cx, &input("said")).is_some());
@@ -654,6 +646,157 @@ fn an_edit_of_the_message_drops_the_bots_card_and_the_answers() {
     };
     assert_eq!(sent.verb.as_deref(), Some("reopen"));
     assert_eq!(sent.data, json!({}), "the answer typed in the old card is gone");
+}
+
+/// The bot edits its message: `stored` (version `version`) takes the place of the chat's first message.
+fn edit(rig: &Rig, mut stored: Message, version: i64) {
+    stored.version = version;
+    rig.core.messages.lock().unwrap().get_mut(AB).unwrap()[0] = stored;
+    rig.send(Event::ConversationChanged {
+        conversation: AB.to_owned(),
+    });
+}
+
+/// A card with an input `said` and an `Action.Execute` of `verb`.
+fn asking(verb: &str) -> Value {
+    json!({
+        "type": "AdaptiveCard",
+        "body": [{"type": "Input.Text", "id": "said"}],
+        "actions": [{"type": "Action.Execute", "title": "Go", "verb": verb}]
+    })
+}
+
+/// The answer the bot holds back first, given now.
+fn answer_held(rig: &Rig, answer: InvokeAnswer) {
+    let held = rig.core.held_bot_answers.lock().unwrap().remove(0);
+    held.send(Ok(answer));
+}
+
+/// The bot answered no card: an edit still drops the answer typed and the bot's line.
+#[test]
+fn an_edit_drops_the_typed_answers_and_the_line() {
+    let rig = bots_rig(vec![card_message(ID, &asking("approve"))]);
+    rig.core
+        .bot_answers
+        .lock()
+        .unwrap()
+        .push_back(Ok(InvokeAnswer::Message("Noted".to_owned())));
+    let (_view, cx) = tall_window(&rig);
+    click(cx, &input("said"));
+    cx.simulate_input("typed");
+    click(cx, &format!("card-{ID}-c0a0"));
+    assert!(bounds(cx, &format!("card-{ID}-c0answer")).is_some(), "the bot's line");
+    edit(&rig, card_message(ID, &asking("reopen")), 2);
+    draw(cx);
+    assert!(bounds(cx, &format!("card-{ID}-c0answer")).is_none(), "the line went");
+    click(cx, &format!("card-{ID}-c0a0"));
+    let asks = rig.core.bot_asks.lock().unwrap().clone();
+    let Some(InvokeKind::Execute(sent)) = asks.last().map(|ask| &ask.kind) else {
+        panic!("an execute: {asks:?}");
+    };
+    assert_eq!(sent.verb.as_deref(), Some("reopen"));
+    assert_eq!(sent.data, json!({}), "the answer typed in the old card is gone");
+}
+
+/// A card that names the account refreshes by itself again for each new version of the message's cards.
+#[test]
+fn an_edited_card_refreshes_by_itself_again() {
+    let rig = bots_rig(vec![card_message(ID, &refreshing("first"))]);
+    let (_view, cx) = tall_window(&rig);
+    draw(cx);
+    assert_eq!(verbs(&rig), ["first"]);
+    edit(&rig, card_message(ID, &refreshing("second")), 2);
+    draw(cx);
+    draw(cx);
+    assert_eq!(verbs(&rig), ["first", "second"], "once for the edited card");
+}
+
+/// While card 0's ask goes, its button waits; the input and the button of card 1 don't.
+#[test]
+fn an_ask_holds_back_only_its_own_card() {
+    let rig = bots_rig(vec![cards_message(ID, &[asking("one"), asking("two")])]);
+    *rig.core.hold_bot_answers.lock().unwrap() = true;
+    let (_view, cx) = tall_window(&rig);
+    click(cx, &format!("card-{ID}-c0a0"));
+    click(cx, &format!("card-{ID}-c0a0"));
+    assert_eq!(verbs(&rig), ["one"], "card 0 waits for its ask");
+    click(cx, &format!("card-{ID}-c1-in-said"));
+    cx.simulate_input("typed");
+    click(cx, &format!("card-{ID}-c1a0"));
+    let asks = rig.core.bot_asks.lock().unwrap().clone();
+    assert_eq!(verbs(&rig), ["one", "two"]);
+    assert!(
+        matches!(&asks[1].kind, InvokeKind::Execute(sent) if sent.data == json!({"said": "typed"})),
+        "{asks:?}"
+    );
+}
+
+/// An answer to an ask of the cards before an edit shows nowhere: the edited card stays.
+#[test]
+fn a_late_answer_to_an_ask_before_an_edit_shows_nowhere() {
+    let rig = bots_rig(vec![card_message(ID, &refresh_card(&[]))]);
+    *rig.core.hold_bot_answers.lock().unwrap() = true;
+    let (view, cx) = tall_window(&rig);
+    view.update(cx, |view, cx| view.toggle_options(ID, cx));
+    click(cx, "action-refresh-card");
+    assert_eq!(verbs(&rig), ["status"]);
+    edit(&rig, card_message(ID, &asking("reopen")), 2);
+    draw(cx);
+    answer_held(
+        &rig,
+        InvokeAnswer::Card(json!({"type": "AdaptiveCard", "body": [{"type": "TextBlock", "text": "Old"}]})),
+    );
+    draw(cx);
+    assert!(bounds(cx, &input("said")).is_some(), "the edited card stays");
+    assert!(bounds(cx, &format!("card-{ID}-c0answer")).is_none());
+}
+
+/// A suggested action asks in a place of its own: card 0 doesn't wait for it, and its line shows under the actions.
+#[test]
+fn a_suggested_action_waits_alone_and_answers_under_the_actions() {
+    let rig = bots_rig(vec![bot_message(
+        ID,
+        &json!({
+            "type": "message/card",
+            "attachments": [{"contentType": "application/vnd.microsoft.card.adaptive", "content": asking("card")}],
+            "suggestedActions": {"actions": [
+                {"type": "messageBack", "title": "Blue", "text": "blue", "value": {"c": "blue"}}
+            ]}
+        }),
+    )]);
+    *rig.core.hold_bot_answers.lock().unwrap() = true;
+    let (_view, cx) = tall_window(&rig);
+    click(cx, "suggested-0");
+    click(cx, "suggested-0");
+    assert_eq!(
+        rig.core.bot_asks.lock().unwrap().len(),
+        1,
+        "the action waits for its ask"
+    );
+    click(cx, &format!("card-{ID}-c0a0"));
+    assert_eq!(verbs(&rig), ["card"], "the card doesn't wait");
+    answer_held(&rig, InvokeAnswer::Message("Blue it is".to_owned()));
+    draw(cx);
+    assert!(bounds(cx, "suggested-answer").is_some());
+    assert!(bounds(cx, &format!("card-{ID}-c0answer")).is_none());
+}
+
+/// A send that fails its checks on card 0 keeps its marks when a button of card 1 sends.
+#[test]
+fn the_error_marks_of_one_card_stay_when_another_card_sends() {
+    let required = json!({
+        "type": "AdaptiveCard",
+        "body": [{"type": "Input.Text", "id": "name", "isRequired": true, "errorMessage": "Enter your name"}],
+        "actions": [{"type": "Action.Submit", "title": "Send"}]
+    });
+    let rig = bots_rig(vec![cards_message(ID, &[required, asking("two")])]);
+    let (_view, cx) = tall_window(&rig);
+    click(cx, &format!("card-{ID}-c0a0"));
+    let error = format!("{}-error", input("name"));
+    assert!(bounds(cx, &error).is_some());
+    click(cx, &format!("card-{ID}-c1a0"));
+    assert_eq!(verbs(&rig), ["two"]);
+    assert!(bounds(cx, &error).is_some(), "card 0's mark stays");
 }
 
 #[test]

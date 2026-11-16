@@ -89,7 +89,8 @@ input shows its `errorMessage`. A typed time that can't be read as one fails too
 `suggestedActions.actions` (the Bot Framework's shape: `imBack`, `messageBack`, `postBack` buttons), carried in the
 `<Swift>` activity of its `RichText/Media_Card` message beside its `attachments`. In a 1:1 chat the newest message's
 are buttons over the compose box; `imBack` posts its `value` as the user's message, the others ask the bot as a
-card's button does. They go once anyone writes again.
+card's button does, but in a place of their own: no card waits for them, and the bot's line shows under them. They go
+once anyone writes again.
 
 **Just-in-time install** (seen, Approvals, 2026-11-16): an app not yet in the chat answers a `submitAction` with a
 dialog card (`task` `continue`) that asks to add it, its `Action.Submit` `data` the submitted data plus
@@ -133,8 +134,8 @@ flag (`NGTEAMS_BOTS=1`), only a build run with it asks a bot (`teams_ui::bot_car
 - the answer shows on the card: a card in the pressed card's place (its answers start again), a message, the bot's
   error or "the app didn't respond" under it, a sign-in request or a dialog as a line that opens the message in Teams
   on the web (sign-in cards and the apps' dialogs come later);
-- a card's `refresh` runs by itself (`trigger` `automatic`) once while the chat is open when its `userIds` name the
-  account (its MRI or its object id), and by hand from the message's "More options" → "Refresh card" (`manual`);
+- a card's `refresh` runs by itself (`trigger` `automatic`) once for each version of the message's cards while the
+  chat is open when its `userIds` name the account (its MRI or its object id), and by hand from the message's "More options" → "Refresh card" (`manual`);
 - a `task/fetch` button opens the message in Teams on the web until the apps' dialogs are built; `signin` opens its
   page in the browser;
 - the bot's app id is the bot's own id until the engine knows each bot's app.

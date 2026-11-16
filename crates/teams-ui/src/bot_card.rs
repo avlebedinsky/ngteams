@@ -13,11 +13,14 @@
 //!   on the web until the app's dialogs are built.
 //! - **The answer**: a card takes the pressed card's place; a message, an error or a sign-in request shows as a line
 //!   under the card; a bot that wasn't reached is said there too, and nothing is sent again.
-//! - **Refresh**: a card's `refresh` runs by itself, once while the view lives, for a user it names
-//!   ([`CardBot::refreshes_for`]); anyone may run it by hand ("Refresh card"). It is the `refresh` of the card shown:
-//!   the bot's card when it put one in the place.
+//! - **Refresh**: a card's `refresh` runs by itself, once for each version of its cards while the view lives, for a
+//!   user it names ([`CardBot::refreshes_for`]); anyone may run it by hand ("Refresh card"). It is the `refresh` of
+//!   the card shown: the bot's card when it put one in the place.
 //! - **An edit**: when the message's cards change, its state starts again ([`CardBot::renewed`]): answers, the bot's
-//!   cards and lines go, and an answer to an ask of the old cards is not shown.
+//!   cards and lines go, an answer to an ask of the old cards is not shown, and a card that names the user refreshes
+//!   by itself again.
+//! - **Suggested actions** ask in a slot of their own ([`SUGGESTED`]): they wait for their ask alone, and their line
+//!   shows under them.
 //!
 //! The view asks the engine; it builds no request ([`crate::bridge::Core`]).
 use std::collections::{HashMap, HashSet};
@@ -48,6 +51,9 @@ pub const REQUIRED: &str = "This is required.";
 pub const NOT_VALID: &str = "Enter a valid value.";
 /// What a button that opens a dialog says in its tooltip.
 pub const DIALOG_TIP: &str = "Opens in Teams on the web, where this app's dialog runs";
+/// The place of a message's suggested actions among its cards: after all of them, so that their ask and its answer
+/// do not touch a card.
+pub const SUGGESTED: usize = usize::MAX;
 
 /// The bot a card's buttons reach, and where.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -146,14 +152,11 @@ impl CardBot {
         }
     }
 
-    /// The same message's state started again, for its changed cards: only which cards refreshed by themselves stays,
-    /// so that a card does that once while the view lives.
+    /// The same message's state started again, for its changed cards: nothing of the old cards stays, so a card that
+    /// names the user refreshes by itself again.
     #[must_use]
     pub fn renewed(&self) -> Self {
-        Self {
-            refreshed: self.refreshed.clone(),
-            ..Self::new(Arc::clone(&self.core), self.message.clone(), self.target.clone())
-        }
+        Self::new(Arc::clone(&self.core), self.message.clone(), self.target.clone())
     }
 
     #[must_use]
@@ -177,12 +180,6 @@ impl CardBot {
             busy: self.busy.clone(),
             reaches: self.target.is_some(),
         }
-    }
-
-    /// Whether an ask of card `at` is on its way.
-    #[must_use]
-    pub fn busy(&self, at: usize) -> bool {
-        self.busy.contains_key(&at)
     }
 
     /// The controls of card `at`'s inputs, made for those that have none yet.
@@ -302,7 +299,7 @@ impl CardBot {
     }
 
     /// The answers of `inputs` (card `at`'s), by input id, each a string as the card sends it; `None` (each failing one
-    /// marked) when one doesn't pass its checks.
+    /// marked) when one doesn't pass its checks. The marks of the other cards stay.
     pub fn answers(&mut self, at: usize, inputs: &[Input], cx: &Context<Self>) -> Option<Map<String, Value>> {
         let mut answers = Map::new();
         let mut failed = HashSet::new();
@@ -327,8 +324,11 @@ impl CardBot {
                 answers.insert(input.id.clone(), Value::String(answer));
             }
         }
-        self.invalid = failed;
-        self.invalid.is_empty().then_some(answers)
+        let prefix = format!("{at}/");
+        self.invalid.retain(|key| !key.starts_with(&prefix));
+        let passed = failed.is_empty();
+        self.invalid.extend(failed);
+        passed.then_some(answers)
     }
 
     /// An input's answer as its control holds it (as the card starts it, before its control is made); `None` when

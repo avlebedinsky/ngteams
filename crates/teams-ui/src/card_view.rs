@@ -476,7 +476,18 @@ fn card_surface(draw: &Draw<'_>, at: usize, shown: &Card, cx: &mut App) -> AnyEl
 /// What a card's bot answered, under it: its message, its error, or a sign-in or dialog it asks for, which go on in
 /// Teams on the web.
 fn answer_line(draw: &Draw<'_>, path: &str, line: &Line) -> AnyElement {
-    let palette = draw.palette;
+    bot_line(
+        draw.palette,
+        draw.selector(&format!("{path}answer")),
+        line,
+        draw.in_teams,
+    )
+}
+
+/// What a bot answered (`line`), drawn under the card or the buttons that asked, as `selector`; a sign-in or a dialog
+/// line opens `in_teams`, the message in Teams on the web.
+#[must_use]
+pub fn bot_line(palette: Palette, selector: String, line: &Line, in_teams: Option<&str>) -> AnyElement {
     let (glyph, text, colour) = match line {
         Line::Note(text) => (Glyph::INFO, text.clone(), palette.muted_foreground),
         Line::Error(text) => (Glyph::CIRCLE_ALERT, text.clone(), theme::DANGER),
@@ -487,13 +498,13 @@ fn answer_line(draw: &Draw<'_>, path: &str, line: &Line) -> AnyElement {
             palette.foreground,
         ),
     };
-    let selector = draw.selector(&format!("{path}answer"));
     let opens = matches!(line, Line::SignIn | Line::Dialog)
-        .then(|| draw.in_teams.map(str::to_owned))
+        .then(|| in_teams.map(str::to_owned))
         .flatten();
+    let id = SharedString::from(selector.clone());
     div()
         .debug_selector(move || selector)
-        .id(SharedString::from(draw.selector(&format!("{path}answer"))))
+        .id(id)
         .flex()
         .items_start()
         .gap_1p5()
