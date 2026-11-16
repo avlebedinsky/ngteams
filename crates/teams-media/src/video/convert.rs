@@ -4,6 +4,8 @@
 //! frame turned into the premultiplied BGRA a window draws ([`i420_to_bgra`]). Colours as the camera's pictures and
 //! H.264's are written: BT.601, limited range.
 
+use libwebrtc::native::yuv_helper;
+
 use crate::devices::{PixelFormat, VideoFrame};
 
 /// The largest picture the call sends: a bigger camera frame is scaled down by a whole factor until it fits.
@@ -155,31 +157,40 @@ fn from_rgb(r: u8, g: u8, b: u8) -> Yuv {
     }
 }
 
-/// An I420 `frame` (each plane's stride its width, as [`to_i420`] and the decoder make it) as premultiplied BGRA,
-/// rows `width * 4` bytes apart, opaque; `None` for another format or a frame whose data is too short.
+/// An I420 `frame` (even sides, each plane's stride its width, as [`to_i420`] and the decoder make it) as premultiplied
+/// BGRA, rows `width * 4` bytes apart, opaque; `None` for another format, an empty or odd-sided frame, or one whose data
+/// is too short. libyuv converts it: in the unoptimized debug and coverage builds, a Rust loop over the pixels of a
+/// 720p frame takes about 70 ms, and the far end then shows a share at few frames a second.
 #[must_use]
 pub fn i420_to_bgra(frame: &VideoFrame) -> Option<Vec<u8>> {
-    if frame.format != PixelFormat::I420 || !holds(frame) {
+    let (width, height) = (frame.width, frame.height);
+    if frame.format != PixelFormat::I420
+        || width == 0
+        || height == 0
+        || !width.is_multiple_of(2)
+        || !height.is_multiple_of(2)
+        || !holds(frame)
+    {
         return None;
     }
-    let (width, height, stride) = (to_usize(frame.width), to_usize(frame.height), to_usize(frame.stride));
-    let luma_size = stride * height;
-    let mut out = vec![0_u8; width * height * 4];
-    for (row, line) in out.chunks_exact_mut(width * 4).enumerate() {
-        let (pixels, _) = line.as_chunks_mut::<4>();
-        for (column, bgra) in pixels.iter_mut().enumerate() {
-            let chroma = (row / 2) * (stride / 2) + column / 2;
-            let luma = frame.data[row * stride + column];
-            let cb = frame.data.get(luma_size + chroma).copied().unwrap_or(128);
-            let cr = frame
-                .data
-                .get(luma_size + luma_size / 4 + chroma)
-                .copied()
-                .unwrap_or(128);
-            let (red, green, blue) = to_rgb(luma, cb, cr);
-            *bgra = [blue, green, red, 255];
-        }
-    }
+    let luma_size = to_usize(frame.stride) * to_usize(height);
+    let (luma, chroma) = frame.data.split_at(luma_size);
+    let (cb, cr) = chroma.split_at(luma_size / 4);
+    let row = width.checked_mul(4)?;
+    let mut out = vec![0_u8; to_usize(row) * to_usize(height)];
+    // libyuv's ARGB is B, G, R, A in memory, from BT.601 limited range as `to_rgb`
+    yuv_helper::i420_to_argb(
+        luma,
+        frame.stride,
+        cb,
+        frame.stride / 2,
+        cr,
+        frame.stride / 2,
+        &mut out,
+        row,
+        i32::try_from(width).ok()?,
+        i32::try_from(height).ok()?,
+    );
     Some(out)
 }
 
@@ -248,6 +259,22 @@ mod tests {
             "{r} {g} {b}"
         );
         assert_eq!(a, 255);
+    }
+
+    #[test]
+    fn an_odd_sided_or_empty_i420_frame_is_refused() {
+        let i420 = |width: u32, height: u32| VideoFrame {
+            width,
+            height,
+            format: PixelFormat::I420,
+            stride: width,
+            data: vec![128; to_usize(width * height * 2)],
+        };
+        assert!(i420_to_bgra(&i420(3, 2)).is_none());
+        assert!(i420_to_bgra(&i420(2, 3)).is_none());
+        assert!(i420_to_bgra(&i420(0, 2)).is_none());
+        assert!(i420_to_bgra(&i420(2, 0)).is_none());
+        assert_eq!(i420_to_bgra(&i420(2, 2)).map(|bgra| bgra.len()), Some(16));
     }
 
     #[test]
