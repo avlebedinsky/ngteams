@@ -1160,7 +1160,12 @@ fn draft_row(draft: &ChatRow, palette: Palette) -> AnyElement {
                 .rounded_r_sm()
                 .bg(theme::gradient(palette.brand, palette.accent, 180.0)),
         )
-        .child(crate::chat_list::group_face(draft, palette, crate::chat_list::AVATAR))
+        .child(crate::chat_list::chat_avatar(
+            draft,
+            palette,
+            gpui_component::Size::Size(px(crate::chat_list::AVATAR)),
+            "avatar",
+        ))
         .child(
             div()
                 .flex_1()

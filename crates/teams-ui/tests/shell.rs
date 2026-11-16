@@ -584,6 +584,35 @@ fn a_chat_clicked_opens_and_is_kept_as_the_selected_chat() {
     assert!(bounds(cx, "chat-header").is_some());
 }
 
+/// Opens group chat `chat` at the start, and checks that its header splits its two members as its row does.
+fn header_avatar_is_the_row_s(chat: &str) {
+    let rig = seeded();
+    let settings = Settings {
+        selected_chat: Some(chat.to_owned()),
+        ..Settings::default()
+    };
+    let (shell, cx) = shell_window(&rig, settings, Arc::new(ViewTrace::off()));
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).main().clone()),
+        Main::Chat(chat.to_owned())
+    );
+    assert!(bounds(cx, "avatar-split").is_some(), "the row splits its two members");
+    assert!(
+        bounds(cx, "chat-header-avatar-split").is_some(),
+        "the header splits its two members as its row does"
+    );
+}
+
+#[test]
+fn a_group_chat_with_a_topic_shows_its_row_s_avatar_in_its_header() {
+    header_avatar_is_the_row_s(TRIO);
+}
+
+#[test]
+fn a_group_chat_without_a_topic_shows_its_row_s_avatar_in_its_header() {
+    header_avatar_is_the_row_s(UNNAMED);
+}
+
 #[test]
 fn the_selected_chat_is_opened_again_at_the_start() {
     let rig = seeded();

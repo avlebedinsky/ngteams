@@ -445,7 +445,9 @@ impl NewChat {
     /// The new group chat's header in place of To: (see the module docs).
     fn draft_header(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let row = self.draft_row();
-        let face = row.as_ref().map(|row| chat_list::group_face(row, palette, 32.0));
+        let face = row
+            .as_ref()
+            .map(|row| chat_list::chat_avatar(row, palette, Size::Size(px(32.0)), "new-chat-avatar"));
         let title: Vec<&str> = self
             .people
             .iter()
@@ -963,7 +965,7 @@ impl NewChat {
                 detail.clone(),
             ),
             Suggested::Chat(row) => (
-                chat_list::group_face(row, palette, FACE),
+                chat_list::chat_avatar(row, palette, Size::Size(px(FACE)), "new-chat-suggestion-avatar"),
                 row.name.clone(),
                 SharedString::default(),
             ),

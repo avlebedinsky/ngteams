@@ -149,6 +149,8 @@ pub const LIST_MIN: f32 = 220.0;
 pub const LIST_MAX: f32 = 560.0;
 /// An account's avatar on the rail, px.
 const ACCOUNT_AVATAR: f32 = 36.0;
+/// The test selectors' start of a chat header's avatar ([`crate::chat_list::chat_avatar`]).
+const HEADER_AVATAR: &str = "chat-header-avatar";
 /// How often a channel shown is read again for a meeting that runs in it (its header's Join): nothing the native
 /// client hears tells it.
 pub const CHANNEL_MEETUP_REFRESH: std::time::Duration = std::time::Duration::from_secs(30);
@@ -3256,7 +3258,7 @@ impl Shell {
     ) -> AnyElement {
         let row = self.list.read(cx).row(id);
         let name = row.map_or_else(|| SharedString::from("Chat"), |row| row.name.clone());
-        let face = row.map(|row| people::avatar(row.named.then_some(&row.name), row.picture.as_ref(), Size::Small));
+        let face = row.map(|row| crate::chat_list::chat_avatar(row, palette, Size::Small, HEADER_AVATAR));
         let chat = self.chat.clone().filter(|chat| chat.read(cx).conversation() == id);
         let presence = self.header_presence(cx).map(|availability| {
             presence::labelled(&availability, palette).debug_selector(|| "chat-header-presence".to_owned())
@@ -3274,7 +3276,7 @@ impl Shell {
         // presence, the call on the right
         let header = self
             .partner_header(id, &name, palette, cx)
-            .unwrap_or_else(|| pane_header(face, name, palette))
+            .unwrap_or_else(|| pane_header_led(face, name, palette))
             .children(tabs)
             .children(presence)
             .child(div().flex_1())

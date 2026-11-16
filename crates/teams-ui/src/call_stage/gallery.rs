@@ -100,6 +100,17 @@ impl CallStage {
             .into_any_element()
     }
 
+    /// Who the call up is with as the ringing screen draws them ([`CallStage::big_face`]).
+    fn active_face(&self, active: &ActiveCall, title: &SharedString, palette: Palette, cx: &App) -> AnyElement {
+        self.big_face(
+            (active.kind, active.chat.as_deref()),
+            (title, Some(active.id)),
+            "call-calling",
+            palette,
+            cx,
+        )
+    }
+
     /// The stage while nobody's tile shows: who the call is with and its state (on hold, or held by the far end), the
     /// rings spreading from them while it rings or waits.
     fn nobody_shown(
@@ -114,7 +125,7 @@ impl CallStage {
             // Teams' held call: who it is with, "On hold" and how long, no rings
             let lasted = calls::duration_text(since.elapsed().as_secs());
             calling(
-                (title, self.partner_picture(Some(active.id))),
+                (title, self.active_face(active, title, palette, cx)),
                 &format!("On hold {lasted}"),
                 palette,
                 Vec::new(),
@@ -125,7 +136,7 @@ impl CallStage {
                 .debug_selector(|| "call-held-by-far-end".to_owned())
                 .size_full()
                 .child(calling(
-                    (title, self.partner_picture(Some(active.id))),
+                    (title, self.active_face(active, title, palette, cx)),
                     "On hold",
                     palette,
                     Vec::new(),
@@ -138,7 +149,12 @@ impl CallStage {
                 calls::status_text(active)
             };
             let rings = crate::motion::ripple("call-calling", palette.accent, BIG_AVATAR_PX, cx);
-            calling((title, self.partner_picture(Some(active.id))), &state, palette, rings)
+            calling(
+                (title, self.active_face(active, title, palette, cx)),
+                &state,
+                palette,
+                rings,
+            )
         }
     }
 

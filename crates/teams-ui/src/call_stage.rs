@@ -90,6 +90,7 @@ use teams_proto::Mri;
 use crate::bridge::Core;
 use crate::call_view::{self, CallPeople, Control, Look, control};
 use crate::calls::{self, ActiveCall, Ask, CallKind, Calls, DeviceCheck, EndReason, Ended, Verdict};
+use crate::chat_list::{ChatRow, RowKind};
 use crate::effects::{EffectsPicker, PickerPlace};
 use crate::icons::{Glyph, icon_button, selected_by};
 use crate::notify::SOMEONE;
@@ -129,8 +130,9 @@ const BIG_AVATAR_PX: f32 = 80.0;
 /// How long a call's end stays shown when the user does nothing.
 pub const AUTO_CLOSE: Duration = Duration::from_secs(8);
 
-/// What names a group chat's call in its window: the main window's chat list's row for it, when the list is there.
-pub type ChatNamer = Rc<dyn Fn(&str, &App) -> Option<SharedString>>;
+/// What names a group chat's call in its window and draws its avatar: the main window's chat list's row for it, when
+/// the list is there.
+pub type ChatNamer = Rc<dyn Fn(&str, &App) -> Option<ChatRow>>;
 
 /// What the call window asks of the app.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -444,6 +446,38 @@ impl CallStage {
             });
         })
         .detach();
+    }
+
+    /// The list's name of group chat `chat`, when its row is named by people's names or a topic: an unnamed one leaves
+    /// the call its participants' names.
+    fn chat_name(&self, chat: &str, cx: &App) -> Option<SharedString> {
+        let row = self.namer.as_ref().and_then(|namer| namer(chat, cx))?;
+        row.named.then_some(row.name)
+    }
+
+    /// Who a call in `chat` (`kind`) is with as the ringing and ended screens draw them: a group chat as its row draws
+    /// it, else the one person's picture (`call`'s), else the initials of `title`. A call that rang in shows its caller.
+    /// Its test selector is `<place>-<kind>`: `call-calling-split`, `call-end-picture`.
+    fn big_face(
+        &self,
+        (kind, chat): (CallKind, Option<&str>),
+        (title, call): (&SharedString, Option<CallId>),
+        place: &'static str,
+        palette: Palette,
+        cx: &App,
+    ) -> AnyElement {
+        let group = chat
+            .filter(|_| kind != CallKind::Incoming)
+            .and_then(|chat| self.namer.as_ref().and_then(|namer| namer(chat, cx)))
+            .filter(|row| row.kind == RowKind::Group);
+        if let Some(row) = group {
+            return crate::chat_list::chat_avatar(&row, palette, BIG_AVATAR, place);
+        }
+        let picture = self.partner_picture(call);
+        let shown = if picture.is_some() { "picture" } else { "initials" };
+        people::avatar(Some(title), picture, BIG_AVATAR)
+            .debug_selector(move || format!("{place}-{shown}"))
+            .into_any_element()
     }
 
     /// The picture of the one person the call is with (`call`'s, else the call's read last), when it is with one
@@ -761,12 +795,7 @@ impl CallStage {
                 SharedString::from(names.join(", "))
             }
         };
-        call_view::call_title(active, |chat| {
-            self.namer
-                .as_ref()
-                .and_then(|namer| namer(chat, cx))
-                .unwrap_or_else(joined)
-        })
+        call_view::call_title(active, |chat| self.chat_name(chat, cx).unwrap_or_else(joined))
     }
 
     /// Sets the window's title to `title`, when it changed.
@@ -966,7 +995,10 @@ impl CallStage {
         match (ended, ended.and_then(|ended| ended.check)) {
             (Some(ended), Some(check)) => self.results_card(ended, check, palette, cx),
             (Some(ended), None) => self.end_view(ended, title, palette, cx),
-            (None, _) => calling((title, self.partner_picture(None)), "Call ended", palette, Vec::new()),
+            (None, _) => {
+                let face = self.big_face((CallKind::Chat, None), (title, None), "call-calling", palette, cx);
+                calling((title, face), "Call ended", palette, Vec::new())
+            }
         }
     }
 
@@ -1009,6 +1041,13 @@ impl CallStage {
                 .outline()
                 .on_click(cx.listener(|_, _, _, cx| cx.emit(CallStageEvent::Close))),
         );
+        let face = self.big_face(
+            (ended.kind, ended.chat.as_deref()),
+            (title, None),
+            "call-end",
+            palette,
+            cx,
+        );
         div()
             .debug_selector(|| "call-end".to_owned())
             .size_full()
@@ -1019,7 +1058,7 @@ impl CallStage {
             .gap_2()
             .p_4()
             .bg(rgb(palette.background))
-            .child(ended_avatar(title, self.partner_picture(None), palette))
+            .child(ended_avatar(face, palette))
             .child(
                 div()
                     .mt_2()
@@ -1055,10 +1094,9 @@ impl CallStage {
         if let Some(with) = &self.with {
             return with.clone();
         }
-        let chat_name = |chat: &str| self.namer.as_ref().and_then(|namer| namer(chat, cx));
         match (ended.kind, &ended.chat) {
             (CallKind::Incoming, None) => ended.caller_name.clone().map(SharedString::from),
-            (_, Some(chat)) => chat_name(chat),
+            (_, Some(chat)) => self.chat_name(chat, cx),
             _ => None,
         }
         .or_else(|| {
@@ -1251,10 +1289,10 @@ fn device_item(kind: DeviceKind, choice: DeviceChoice, model: &Entity<SettingsMo
     })
 }
 
-/// The screen while the call rings (or once it ended): its avatar (the picture of the one it is with, when it has one),
-/// who it is with and its state, centred.
+/// The screen while the call rings (or once it ended): its avatar (`face`: [`CallStage::big_face`]), who it is with
+/// and its state, centred.
 fn calling(
-    (title, picture): (&SharedString, Option<&people::Picture>),
+    (title, face): (&SharedString, AnyElement),
     state: &str,
     palette: Palette,
     rings: Vec<AnyElement>,
@@ -1268,17 +1306,7 @@ fn calling(
         .justify_center()
         .gap_3()
         // `rings` spreading from who is called, while it rings or waits
-        .child(
-            div()
-                .relative()
-                .children(rings)
-                .child(
-                    people::avatar(Some(title), picture, BIG_AVATAR).debug_selector(move || {
-                        let shown = if picture.is_some() { "picture" } else { "initials" };
-                        format!("call-calling-{shown}")
-                    }),
-                ),
-        )
+        .child(div().relative().children(rings).child(face))
         .child(
             div()
                 .text_xl()
@@ -1293,33 +1321,24 @@ fn calling(
         .into_any_element()
 }
 
-/// The avatar of who an ended call was with (their picture, when it was with one person who has one), a red hung-up
-/// mark on it.
-fn ended_avatar(title: &SharedString, picture: Option<&people::Picture>, palette: Palette) -> gpui::Div {
-    div()
-        .relative()
-        .child(
-            people::avatar(Some(title), picture, BIG_AVATAR).debug_selector(move || {
-                let shown = if picture.is_some() { "picture" } else { "initials" };
-                format!("call-end-{shown}")
-            }),
-        )
-        .child(
-            div()
-                .absolute()
-                .bottom_0()
-                .right_0()
-                .size(px(32.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .border_2()
-                .border_color(rgb(palette.background))
-                .bg(rgb(theme::DANGER))
-                .text_color(rgb(0x00ff_ffff))
-                .child(Glyph::PHONE_OFF.icon().size(px(16.0))),
-        )
+/// The avatar of who an ended call was with (`face`: [`CallStage::big_face`]), a red hung-up mark on it.
+fn ended_avatar(face: AnyElement, palette: Palette) -> gpui::Div {
+    div().relative().child(face).child(
+        div()
+            .absolute()
+            .bottom_0()
+            .right_0()
+            .size(px(32.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .border_2()
+            .border_color(rgb(palette.background))
+            .bg(rgb(theme::DANGER))
+            .text_color(rgb(0x00ff_ffff))
+            .child(Glyph::PHONE_OFF.icon().size(px(16.0))),
+    )
 }
 
 /// Call back (Teams' green) or Rejoin, with its key.

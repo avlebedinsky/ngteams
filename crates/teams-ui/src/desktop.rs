@@ -284,8 +284,8 @@ impl Desktop {
         this
     }
 
-    /// The call windows of the app's windows' app id `app_id`, a group chat's call named as the main window's list
-    /// names it, and what they ask followed.
+    /// The call windows of the app's windows' app id `app_id`, a group chat's call named and drawn as the main
+    /// window's list names and draws it, and what they ask followed.
     fn make_call_windows(app_id: &str, cx: &mut Context<Self>) -> (Entity<CallWindows>, Subscription) {
         // read from the windows themselves, never the desktop: a call window can draw while the desktop is updated
         let namer: AccountNamer = Rc::new(|key: &str, chat: &str, cx: &App| {
@@ -304,9 +304,7 @@ impl Desktop {
                     .iter()
                     .find(|shell| shell.read(cx).account() == key)?
                     .clone();
-                let list = shell.read(cx).list().read(cx);
-                // a row named by people's names or a topic: an unnamed one leaves the call its participants' names
-                list.row(chat).filter(|row| row.named).map(|row| row.name.clone())
+                shell.read(cx).list().read(cx).row(chat).cloned()
             })
         });
         let windows = cx.new(|cx| {

@@ -34,7 +34,8 @@
 //!   other members' first names as Teams joins them ("Evgenia and Sean"). Someone without a name is never shown by
 //!   MRI: "Unknown user", a bot "Bot" (the test call's echo service "Test call").
 //! - **Avatars** ([`AVATAR`] across): a 1:1 chat's other member's picture, else the initials of a name, else nothing;
-//!   a group chat's two of its other members, half each, as Teams splits it; a meeting chat Teams' calendar.
+//!   a group chat's two of its other members, half each, as Teams splits it; a meeting chat Teams' calendar. Every
+//!   place that draws a chat draws it by the same rule ([`chat_avatar`]): its header, search, New message, its call.
 //! - **Presence** (M2 Task 17): a 1:1 chat's avatar carries its other member's presence badge
 //!   ([`crate::presence_badge`], nothing while it isn't known), never a bot's (it has none to read).
 //!   After each load the engine is asked about the other members of the top [`LIST_WATCHED`] 1:1 chats, the lowest
@@ -1137,19 +1138,19 @@ impl ChatList {
             .into_any_element()
     }
 
-    /// The row's avatar ([`avatar`]), with its person's presence badge at its corner (a 1:1 chat's other member, the
+    /// The row's avatar ([`chat_avatar`]), with its person's presence badge at its corner (a 1:1 chat's other member, the
     /// account's own on its notes) when it is known, ringed in the row's `background`.
     fn avatar(&self, row: &ChatRow, background: u32, palette: Palette, cx: &App) -> AnyElement {
         let badge = self
             .presence_of(row, cx)
             .and_then(|availability| presence_badge::badge(&availability, AVATAR_BADGE, palette));
         let Some(badge) = badge else {
-            return avatar(row, palette);
+            return chat_avatar(row, palette, Size::Size(px(AVATAR)), "avatar");
         };
         div()
             .relative()
             .flex_none()
-            .child(avatar(row, palette))
+            .child(chat_avatar(row, palette, Size::Size(px(AVATAR)), "avatar"))
             .child(
                 badge
                     .border_color(rgb(background))
@@ -1169,50 +1170,42 @@ impl ChatList {
     }
 }
 
-/// A group chat's face `size` across, where a picker lists it (New message's To:): its two members split as the list
-/// draws them, else the initials of its name.
+/// A chat's avatar `size` across, by the one rule every place that draws a chat follows (its row, its header, search,
+/// New message, its call's window), as Teams draws it: a meeting's calendar, a channel's team, the Workflows app, a
+/// bot's head, a group's two members split, else the picture, else the initials of its name (not of an MRI), else a
+/// blank one. Its test selector is `<place>-<kind>` (`avatar-split` in the list, `chat-header-avatar-split`).
 #[must_use]
-pub fn group_face(row: &ChatRow, palette: Palette, size: f32) -> AnyElement {
-    match row.faces.as_slice() {
-        [left, right, ..] => split_avatar(left, right, theme::palette_is_dark(palette), size).into_any_element(),
-        _ => div()
-            .flex_none()
-            .child(people::avatar(
-                row.named.then_some(&row.name),
-                row.picture.as_ref(),
-                Size::Size(px(size)),
-            ))
-            .into_any_element(),
-    }
-}
-
-/// A row's avatar, [`AVATAR`] across: a meeting's calendar, a group's two members split, else the picture, else the
-/// initials of its name (not of an MRI), else a blank one.
-fn avatar(row: &ChatRow, palette: Palette) -> AnyElement {
+pub fn chat_avatar(row: &ChatRow, palette: Palette, size: Size, place: &'static str) -> AnyElement {
+    let across = side(size);
     match (row.kind, row.faces.as_slice()) {
         (RowKind::Meeting, _) => mark_avatar(
             Glyph::CALENDAR,
-            theme::brand_gradient(palette, 135.0),
-            palette.on_brand,
-            "avatar-meeting",
+            (theme::brand_gradient(palette, 135.0), palette.on_brand),
+            across,
+            (place, "meeting"),
         ),
-        (RowKind::Channel, _) => team_avatar(row.team.as_deref().unwrap_or_default(), palette),
+        (RowKind::Channel, _) => team_avatar(
+            row.team.as_deref().unwrap_or_default(),
+            palette,
+            across,
+            (place, "team"),
+        ),
         // the Workflows bot's chat: the app's icon on its tile, as Teams draws an app's
         (RowKind::OneToOne, _) if is_workflows_chat(&row.id) => div()
-            .debug_selector(|| "avatar-workflows".to_owned())
+            .debug_selector(move || format!("{place}-workflows"))
             .flex_none()
-            .child(crate::workflows_app::bot_avatar(AVATAR, palette))
+            .child(crate::workflows_app::bot_avatar(across, palette))
             .into_any_element(),
         // a 1:1 chat whose other member has no presence: a bot or a service
         (RowKind::OneToOne, _) if row.partner.is_none() && row.picture.is_none() => mark_avatar(
             Glyph::BOT,
-            rgb(palette.hover).into(),
-            palette.muted_foreground,
-            "avatar-bot",
+            (rgb(palette.hover).into(), palette.muted_foreground),
+            across,
+            (place, "bot"),
         ),
-        (RowKind::Group, [left, right, ..]) => {
-            split_avatar(left, right, theme::palette_is_dark(palette), AVATAR).into_any_element()
-        }
+        (RowKind::Group, [left, right, ..]) => split_avatar(left, right, theme::palette_is_dark(palette), across)
+            .debug_selector(move || format!("{place}-split"))
+            .into_any_element(),
         _ => {
             let name = row.named.then(|| match row.kind {
                 // the initials of the account's own name, not of "(You)"
@@ -1220,14 +1213,22 @@ fn avatar(row: &ChatRow, palette: Palette) -> AnyElement {
                 _ => row.name.clone(),
             });
             div()
+                .debug_selector(move || format!("{place}-face"))
                 .flex_none()
-                .child(people::avatar(
-                    name.as_ref(),
-                    row.picture.as_ref(),
-                    Size::Size(px(AVATAR)),
-                ))
+                .child(people::avatar(name.as_ref(), row.picture.as_ref(), size))
                 .into_any_element()
         }
+    }
+}
+
+/// The side of a kit avatar of `size`, px.
+fn side(size: Size) -> f32 {
+    match size {
+        Size::XSmall => 16.0,
+        Size::Small => 24.0,
+        Size::Medium => 48.0,
+        Size::Large => 80.0,
+        Size::Size(pixels) => f32::from(pixels),
     }
 }
 
@@ -1238,35 +1239,41 @@ fn is_workflows_chat(chat: &str) -> bool {
         .is_some_and(|(_, bot)| bot == crate::workflows_app::WORKFLOWS_BOT)
 }
 
-/// An avatar of one mark on a colour, its test selector `selector`: Teams' calendar on the brand colour for a
-/// meeting's chat, a bot's head on a quiet one for a bot.
-fn mark_avatar(mark: Glyph, background: gpui::Background, foreground: u32, selector: &'static str) -> AnyElement {
+/// An avatar of one mark on a colour (`colours`: its background, the mark's), `side` across, its test selector
+/// `<place>-<kind>`: Teams' calendar on the brand colour for a meeting's chat, a bot's head on a quiet one for a bot.
+fn mark_avatar(
+    mark: Glyph,
+    colours: (gpui::Background, u32),
+    side: f32,
+    (place, kind): (&'static str, &'static str),
+) -> AnyElement {
+    let (background, foreground) = colours;
     div()
-        .debug_selector(move || selector.to_owned())
-        .size(px(AVATAR))
+        .debug_selector(move || format!("{place}-{kind}"))
+        .size(px(side))
         .flex_none()
         .rounded_full()
         .bg(background)
         .flex()
         .items_center()
         .justify_center()
-        .child(mark.icon().size(px(AVATAR * 0.5)).text_color(rgb(foreground)))
+        .child(mark.icon().size(px(side * 0.5)).text_color(rgb(foreground)))
         .into_any_element()
 }
 
-/// A channel's avatar: its team's initial on the brand colour, on a rounded square as Teams draws a team (and as the
-/// Teams list marks one).
-fn team_avatar(team: &str, palette: Palette) -> AnyElement {
+/// A channel's avatar `side` across: its team's initial on the brand colour, on a rounded square as Teams draws a team
+/// (and as the Teams list marks one).
+fn team_avatar(team: &str, palette: Palette, side: f32, (place, kind): (&'static str, &'static str)) -> AnyElement {
     let initial: String = people::team_initials(team).chars().take(1).collect();
     div()
-        .debug_selector(|| "avatar-team".to_owned())
-        .size(px(AVATAR))
+        .debug_selector(move || format!("{place}-{kind}"))
+        .size(px(side))
         .flex_none()
         .rounded_lg()
         .bg(theme::brand_gradient(palette, 135.0))
         .text_color(rgb(palette.on_brand))
         .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_size(px(AVATAR * 0.4))
+        .text_size(px(side * 0.4))
         .flex()
         .items_center()
         .justify_center()
@@ -1280,7 +1287,6 @@ const SPLIT_GAP: f32 = 1.0;
 /// A group chat's avatar as Teams splits it: two members, half each, in a `dark` theme's colours or a light one's.
 fn split_avatar(left: &HalfFace, right: &HalfFace, dark: bool, size: f32) -> Div {
     div()
-        .debug_selector(|| "avatar-split".to_owned())
         .size(px(size))
         .flex_none()
         .flex()

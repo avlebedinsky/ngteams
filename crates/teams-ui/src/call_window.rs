@@ -24,8 +24,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    App, AppContext as _, Bounds, Context, Entity, EventEmitter, Global, SharedString, Subscription, TitlebarOptions,
-    WeakEntity, WindowBounds, WindowHandle, WindowId, WindowOptions, px, size,
+    App, AppContext as _, Bounds, Context, Entity, EventEmitter, Global, Subscription, TitlebarOptions, WeakEntity,
+    WindowBounds, WindowHandle, WindowId, WindowOptions, px, size,
 };
 use teams_core::{CallId, CallStatus};
 
@@ -41,8 +41,9 @@ const DEFAULT_SIZE: (f32, f32) = (1000.0, 680.0);
 /// The smallest it gets.
 const MIN_SIZE: (f32, f32) = (560.0, 400.0);
 
-/// What names a group chat for an account: its key (its MRI), the chat, the app.
-pub type AccountNamer = Rc<dyn Fn(&str, &str, &App) -> Option<SharedString>>;
+/// What names a group chat for an account and draws its avatar: its key (its MRI), the chat, the app; the main
+/// window's chat list's row of it.
+pub type AccountNamer = Rc<dyn Fn(&str, &str, &App) -> Option<crate::chat_list::ChatRow>>;
 
 /// What the call windows ask of the app.
 #[derive(Clone, Debug, PartialEq, Eq)]

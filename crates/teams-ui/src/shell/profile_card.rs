@@ -334,7 +334,7 @@ impl Shell {
             .or_else(|| crate::chat_list::one_to_one_partner(id, self.core.me()))?;
         let of = CardOf::new(mri, row.named.then(|| row.name.clone())).with_picture(row.picture.clone());
         let asks = &self.models.cards;
-        let face = people::avatar(row.named.then_some(&row.name), row.picture.as_ref(), Size::Small);
+        let face = crate::chat_list::chat_avatar(row, palette, Size::Small, super::HEADER_AVATAR);
         let lead = crate::profile_card::anchor("profile-card-from-header-avatar", of.clone(), Click::Full, asks, face);
         let title = crate::profile_card::anchor(
             "profile-card-from-header-name",

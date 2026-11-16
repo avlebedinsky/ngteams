@@ -984,7 +984,7 @@ impl ChatPeople {
             Picked::Person(person) => {
                 people::avatar(Some(&person.name), person.picture.as_ref(), Size::Small).into_any_element()
             }
-            Picked::Chat(row) => chat_list::group_face(row, palette, 22.0),
+            Picked::Chat(row) => chat_list::chat_avatar(row, palette, Size::Size(px(22.0)), "chat-people-avatar"),
         };
         let remove = div()
             .id(SharedString::from(format!("chat-people-chip-remove-{at}")))
@@ -1023,7 +1023,10 @@ impl ChatPeople {
                     .into_any_element(),
                 person.detail.clone(),
             ),
-            Picked::Chat(row) => (chat_list::group_face(row, palette, FACE), SharedString::default()),
+            Picked::Chat(row) => (
+                chat_list::chat_avatar(row, palette, Size::Size(px(FACE)), "chat-people-avatar"),
+                SharedString::default(),
+            ),
         };
         div()
             .id(SharedString::from(format!("chat-people-suggestion-{at}")))

@@ -43,7 +43,7 @@ use teams_proto::{FoundFile, FoundMessage, FoundPerson, SearchKind};
 use teams_store::{Message, OutboxState};
 
 use crate::bridge::Core;
-use crate::chat_list::{ChatList, RowKind};
+use crate::chat_list::{ChatList, ChatRow, RowKind};
 use crate::chat_translate::{Lookup, Previews};
 use crate::clock::{self, HourCycle};
 use crate::icons::Glyph;
@@ -167,8 +167,8 @@ pub enum Suggestion {
     Chat {
         id: String,
         name: SharedString,
-        picture: Option<Picture>,
-        named: bool,
+        /// The list's row of it, whose avatar the suggestion shows ([`crate::chat_list::chat_avatar`]).
+        row: Option<Box<ChatRow>>,
     },
     Channel {
         id: String,
@@ -998,10 +998,8 @@ fn one_to_one_of(list: &Entity<ChatList>, mri: &str, cx: &App) -> Option<String>
 }
 
 fn chat_suggestion(list: &ChatList, id: String, name: SharedString) -> Suggestion {
-    let row = list.row(&id);
     Suggestion::Chat {
-        picture: row.and_then(|row| row.picture.clone()),
-        named: row.is_none_or(|row| row.named),
+        row: list.row(&id).cloned().map(Box::new),
         id,
         name,
     }
@@ -1330,10 +1328,11 @@ fn glyph_face(glyph: Glyph, palette: Palette) -> gpui::Div {
 /// A suggestion's look: its face and its lines.
 fn suggestion_content(suggestion: &Suggestion, query: &str, palette: Palette) -> Vec<AnyElement> {
     match suggestion {
-        Suggestion::Chat {
-            name, picture, named, ..
-        } => vec![
-            people::avatar(named.then_some(name), picture.as_ref(), Size::Small).into_any_element(),
+        Suggestion::Chat { name, row, .. } => vec![
+            row.as_deref().map_or_else(
+                || people::avatar(Some(name), None, Size::Small).into_any_element(),
+                |row| crate::chat_list::chat_avatar(row, palette, Size::Small, "search-avatar"),
+            ),
             two_lines(name.clone(), SharedString::default(), palette).into_any_element(),
         ],
         Suggestion::Channel { name, team, .. } => vec![
