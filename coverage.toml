@@ -102,7 +102,7 @@ sha256 = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70"
 reason = "module declarations and documentation only; no executable bodies"
 
 [unmapped_sources."crates/teams-core/src/lib.rs"]
-sha256 = "bdf5733cf64171e3a666b8d3ccea3ad644d979fec6ff22687b1e2fc60bf5d574"
+sha256 = "382652335d53ec00bdeb6ac5b4f2424fa079db283c033a4c5e3e1ed57b39aea8"
 reason = "module declarations, re-exports and documentation only; no executable bodies"
 
 [unmapped_sources."crates/teams-media/src/lib.rs"]
@@ -142,7 +142,7 @@ context = { "crates/proto-lab/src/action_targets.rs" = "624e25a8a896080702107574
 [unmapped_sources."crates/teams-proto/src/http/attachment_tests.rs"]
 sha256 = "fc4f64d121310a964744b565cd4d0efbd7874f3b5438692d6759a076cfd66c94"
 reason = "unit-test module included only under cfg(test); omitted by cargo-llvm-cov default tests.rs/_tests.rs filename filter; executable parent remains measured"
-context = { "crates/teams-proto/src/http.rs" = "c6f5346d202491601d0a77c71f2429271ae1386a26c656fd98ddc8ff7d203334" }
+context = { "crates/teams-proto/src/http.rs" = "d500f9d3d135fb13d3418f323d755ff7e94e607b65c8ac04c1a7095152ac03d4" }
 
 [unmapped_sources."crates/teams-core/src/attachments_tests.rs"]
 sha256 = "9dd845ed73f53a7a32137d505c45018d56bf8529060c3cfdee1ebe7059968e96"
@@ -643,7 +643,7 @@ context = { "crates/teams-ui/src/meeting_alert.rs" = "be5825947b396fe792bc9f0fe9
 [unmapped_sources."crates/teams-proto/src/http/cloud_tests.rs"]
 sha256 = "885613503f07f6fabe77ddea168bf3c4e7814f66caef61a3b0b9e338b6c74b40"
 reason = "unit-test module included only under cfg(test); omitted by cargo-llvm-cov default tests.rs/_tests.rs filename filter; executable parent remains measured"
-context = { "crates/teams-proto/src/http.rs" = "c6f5346d202491601d0a77c71f2429271ae1386a26c656fd98ddc8ff7d203334" }
+context = { "crates/teams-proto/src/http.rs" = "d500f9d3d135fb13d3418f323d755ff7e94e607b65c8ac04c1a7095152ac03d4" }
 
 [unmapped_sources."crates/teams-sdp/src/lib.rs"]
 sha256 = "2dfe9b286b9ebca1a0c6c3ee22c751f4886f6f8bd7d397bc684c79a5eba33862"
