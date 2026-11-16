@@ -1144,8 +1144,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         }
     }
 
-    /// One write sent, on the heap: an attempt's every kind of write awaits one, and in a debug build each of them
-    /// held by value made the attempt's poll frame a deep part of the engine's stack.
+    /// One write sent, on the heap: an attempt's every kind of write awaits one.
     fn deliver<R: Request + Send>(&self, request: R) -> Pin<Box<impl Future<Output = Tried>>> {
         Box::pin(self.delivered(request))
     }

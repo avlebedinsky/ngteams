@@ -2,7 +2,7 @@
 //! engine's own thread, which a debug build once overflowed. The engine runs with half of a thread's default stack,
 //! so the write keeps twice the depth it needs.
 
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use ngteams_server::admin::{self, Actor, NewAccount};
 use ngteams_server::app::{self, App};
@@ -34,7 +34,7 @@ fn an_engines_first_write_refreshes_its_token_and_goes_out_over_tls() {
         first_write();
         return;
     }
-    let status = Command::new(std::env::current_exe().unwrap())
+    let output = Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
             "first_write::an_engines_first_write_refreshes_its_token_and_goes_out_over_tls",
@@ -42,9 +42,17 @@ fn an_engines_first_write_refreshes_its_token_and_goes_out_over_tls() {
         ])
         .env(CHILD, "1")
         .env("RUST_MIN_STACK", HALF_STACK)
-        .status()
+        .stdin(Stdio::null())
+        .output()
         .unwrap();
-    assert!(status.success(), "the engine's process ended with {status}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "the engine's process ended with {}\n--- stdout\n{stdout}\n--- stderr\n{stderr}",
+        output.status
+    );
+    assert!(stdout.contains("1 passed"), "the child ran no test\n{stdout}\n{stderr}");
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]

@@ -2170,8 +2170,7 @@ where
         }
     }
 
-    /// The engine's run, on the heap. In a debug build every poll frame holds its child future by value, so a run
-    /// handed down the runtime's calls by value took a quarter of the thread's stack before the run began.
+    /// The engine's run, on the heap, as [`on_heap`] says.
     fn running(
         parts: Parts<C, T>,
         events: mpsc::UnboundedSender<Event>,
