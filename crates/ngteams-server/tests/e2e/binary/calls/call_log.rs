@@ -365,7 +365,6 @@ async fn qa_every_way_a_1_1_call_ends_reaches_both_call_logs_and_the_missed_ones
 const AT_ONCE: Duration = Duration::from_secs(5);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "QA 288 Q1: a client whose feed is empty shows its first missed call only after the app's 30 s catch-up"]
 async fn qa_the_first_missed_call_shows_at_once_in_a_client_that_runs_as_the_app() {
     let Some(rig) = Rig::start(crate::support::Backend::Sqlite, "qa-first-missed", 5, Turn::Coturn).await else {
         return;

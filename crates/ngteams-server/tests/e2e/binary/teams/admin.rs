@@ -220,7 +220,9 @@ async fn someone_removed_loses_the_team_and_a_team_and_a_private_channel_keep_an
             assert_ne!(b.post(conversation, "Still here?").await.state, OutboxState::Sent);
             assert!(b.engine().sync_conversation(conversation.as_str()).await.is_err());
         }
-        assert!(reads.conversations().await.unwrap().conversations.is_empty());
+        assert!(crate::support::only_own_streams(
+            &reads.conversations().await.unwrap().conversations
+        ));
         assert!(b.engine().team_channels(group.as_str()).await.unwrap().is_empty());
         // its client, started again, reads no team
         rig.seats[1].restart();

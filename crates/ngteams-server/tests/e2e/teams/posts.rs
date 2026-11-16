@@ -121,9 +121,18 @@ async fn a_teams_general_channel_is_in_the_conversation_list_and_its_other_chann
 
         let reads = ChatReads::new(&*bert.client);
         let list = reads.conversations().await.unwrap();
-        let ids: Vec<&str> = list.conversations.iter().map(|entry| entry.id.as_str()).collect();
+        let ids: Vec<&str> = list
+            .conversations
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .filter(|id| !crate::support::own_stream(id))
+            .collect();
         assert_eq!(ids, [team.as_str()]);
-        let general = &list.conversations[0];
+        let general = list
+            .conversations
+            .iter()
+            .find(|entry| entry.id == team.as_str())
+            .unwrap();
         assert_eq!(general.thread_properties["threadType"], "space");
         assert_eq!(general.thread_properties["groupId"], group.as_str());
         assert_eq!(general.thread_properties["spaceThreadTopic"], "Rocket");

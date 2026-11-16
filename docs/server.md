@@ -844,7 +844,7 @@ hold (`docs/protocol/chat.md`, "The call log"), and the client's catch-up and pu
   party but the caller whose entry is `missed`: a cancelled ring, one that ran out, a group call that ended while it
   rang, someone with no calling endpoint. A decline is none. The client reads it as "Missed call from <caller>".
 - Both are written after the call's end is delivered, one transaction per stream, and told on each account's push
-  channel, so its clients on any node have them at once; a client that didn't list the stream yet catches it up.
+  channel, so its clients on any node have them at once (each client listed both streams on its first sync).
 
 ### The TURN relay (coturn)
 
@@ -1043,15 +1043,17 @@ under an id no request can name. A request's `48:…` id always resolves to the 
 guards every chat also keeps one account's stream from another. A stream is no thread: its thread and member reads
 answer 404, as does any other `48:` id (`48:generic`: 400).
 
+- **The server-written streams** (`48:notifications`, `48:mentions`, `48:calllogs`) are made at the account's first
+  conversation list (when it has none yet) and are in the list from then on, empty too: a client takes a pushed item
+  only into a conversation it has, and it can't add a stream by its thread read.
 - **Notes** (`48:notes`): `POST …/48:notes/messages` writes a note, and its edit, delete and message pages work as
   a chat's. They answer 404 until the first note is written, and are in no conversation list, as with Teams. A
   note is pushed to the account's own endpoints.
-- **The call log** (`48:calllogs`) is written by the server only, one entry per call ([above](#the-call-log));
-  it is listed once it holds one, and takes its account's `consumptionhorizon` (also before that).
+- **The call log** (`48:calllogs`) is written by the server only, one entry per call ([above](#the-call-log)),
+  and takes its account's `consumptionhorizon`.
 - **The activity feed** (`48:notifications`) and **the mentions stream** (`48:mentions`) are written by the server
-  only (a post there is refused, 403). They are in the conversation list once they hold an item, with their
-  `consumptionhorizon` and `consumptionHorizonBookmark`. The account marks an item read or unread (`PUT
-  …/messages/<item>/properties?name=isread`), removes it (`DELETE …/messages/<item>?behavior=softDelete`), moves
+  only (a post there is refused, 403). The list shows their `consumptionhorizon` and `consumptionHorizonBookmark`.
+  The account marks an item read or unread (`PUT …/messages/<item>/properties?name=isread`), removes it (`DELETE …/messages/<item>?behavior=softDelete`), moves
   the feed's own horizon and marks all read (the two properties). Each change moves the item's or the stream's
   version, so the account's other clients sync it.
 

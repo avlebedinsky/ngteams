@@ -41,7 +41,8 @@ async fn a_team_shows_for_the_people_on_it_and_an_outsider_is_refused_everywhere
         assert!(c.listed().await.is_empty());
         assert!(c.stored_teams(|_| true).await.is_empty());
         assert!(c.engine().conversation(team.clone()).await.unwrap().is_none());
-        assert!(c.engine().conversations(50).await.unwrap().is_empty());
+        let stored = c.engine().conversations(50).await.unwrap();
+        assert!(stored.iter().all(|entry| crate::support::own_stream(&entry.id)));
         assert!(c.engine().team_channels(group.as_str()).await.unwrap().is_empty());
         {
             let team: &str = &team;
@@ -77,7 +78,9 @@ async fn a_team_shows_for_the_people_on_it_and_an_outsider_is_refused_everywhere
                 assert_eq!(c.client.write(send).await.unwrap().status(), 403, "{thread}");
                 assert!(c.engine().sync_conversation(thread).await.is_err(), "{thread}");
             }
-            assert!(reads.conversations().await.unwrap().conversations.is_empty());
+            assert!(crate::support::only_own_streams(
+                &reads.conversations().await.unwrap().conversations
+            ));
         }
 
         // nothing of it changed, and its people still read it

@@ -19,6 +19,10 @@ pub(super) const CALL_LOG: &str = "48:calllogs";
 
 const NAMES: [&str; 4] = [NOTES, FEED, MENTIONS, CALL_LOG];
 
+/// The streams the server writes, which an account has from its first conversation list on: a client stores a
+/// pushed item only in a conversation it listed, as it can't read a stream as a thread to add it.
+const SERVER_WRITTEN: [&str; 3] = [FEED, MENTIONS, CALL_LOG];
+
 /// The stream a stored thread id is, when it is one.
 pub(super) fn name_of(stored: &str) -> Option<&'static str> {
     NAMES
@@ -91,6 +95,30 @@ pub(super) async fn ensure(db: &Db, name: &str, user: &str) -> Result<(), DbErro
         .transaction::<_, DbError, _>(async |conn| {
             let version: i64 = advance!(conn, at);
             ensure_in!(conn, &id, user, version);
+            Ok(())
+        })
+        .await)
+}
+
+/// Makes `user`'s server-written streams that it has none of yet.
+pub(super) async fn ensure_listed(db: &Db, user: &str) -> Result<(), DbError> {
+    let ids = SERVER_WRITTEN.map(|name| stored_id(name, user));
+    let made: i64 = with_conn!(db, |conn| chats::table
+        .filter(chats::id.eq_any(&ids))
+        .count()
+        .get_result(conn)
+        .await?);
+    if usize::try_from(made).is_ok_and(|made| made == ids.len()) {
+        return Ok(());
+    }
+    let at = super::wire::now();
+    with_conn!(db, |conn| conn
+        .transaction::<_, DbError, _>(async |conn| {
+            // a version each: the list's page cursor is a version, so a page could end between two that share one
+            for id in &ids {
+                let version: i64 = advance!(conn, at);
+                ensure_in!(conn, id, user, version);
+            }
             Ok(())
         })
         .await)

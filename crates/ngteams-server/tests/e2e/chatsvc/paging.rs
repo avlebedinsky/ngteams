@@ -4,7 +4,16 @@ use teams_proto::chat::ChatReads;
 use teams_proto::{CreateChat, Mri};
 
 use super::client;
-use crate::support::{TestServer, backends};
+use crate::support::{TestServer, backends, own_stream};
+
+/// The ids of the chats among listed conversations: the account's own streams left out.
+fn chat_ids(listed: &[teams_proto::chat::Conversation]) -> Vec<String> {
+    listed
+        .iter()
+        .map(|entry| entry.id.clone())
+        .filter(|id| !own_stream(id))
+        .collect()
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn oversized_reaction_summaries_do_not_block_conversation_paging() {
@@ -23,8 +32,9 @@ async fn oversized_reaction_summaries_do_not_block_conversation_paging() {
             200
         );
         let normal = reads.conversations().await.unwrap();
+        let chat = normal.conversations.iter().find(|entry| entry.id == pair.chat).unwrap();
         assert_eq!(
-            normal.conversations[0].last_message_raw.as_ref().unwrap()["annotationsSummary"]["emotions"]["like"],
+            chat.last_message_raw.as_ref().unwrap()["annotationsSummary"]["emotions"]["like"],
             1
         );
         for index in 0..72 {
@@ -37,13 +47,23 @@ async fn oversized_reaction_summaries_do_not_block_conversation_paging() {
         }
         let c = pair.server.add_user("c@own.test", "Cora").await;
         let later = group_with_preview(&pair, &c, "After the oversized preview", "still reachable").await;
-        let first = reads
+        let mut page = reads
             .conversations_from("https://own.example.test/api/chatsvc/own/v1/users/ME/conversations?pageSize=1")
             .await
             .unwrap();
-        assert_eq!(first.conversations.len(), 1);
-        assert_eq!(first.conversations[0].id, pair.chat);
-        let preview = first.conversations[0].last_message_raw.as_ref().unwrap();
+        let sync = page.sync_state().unwrap().to_owned();
+        let mut listed = Vec::new();
+        loop {
+            assert_eq!(page.conversations.len(), 1);
+            assert_eq!(page.sync_state(), Some(sync.as_str()));
+            let next = page.forward_link().map(str::to_owned);
+            listed.extend(page.conversations.into_iter().filter(|entry| !own_stream(&entry.id)));
+            let Some(next) = next else { break };
+            page = reads.conversations_from(&next).await.unwrap();
+        }
+        let ids: Vec<&str> = listed.iter().map(|entry| entry.id.as_str()).collect();
+        assert_eq!(ids, [pair.chat.as_str(), later.0.as_str()]);
+        let preview = listed[0].last_message_raw.as_ref().unwrap();
         assert_eq!(preview["id"], message);
         assert!(
             preview["content"]
@@ -52,19 +72,7 @@ async fn oversized_reaction_summaries_do_not_block_conversation_paging() {
                 .contains("the preview text survives")
         );
         assert!(preview.get("annotationsSummary").is_none());
-        let next = reads.conversations_from(first.forward_link().unwrap()).await.unwrap();
-        assert_eq!(next.conversations.len(), 1);
-        assert_eq!(next.conversations[0].id, later.0);
-        assert_eq!(next.sync_state(), first.sync_state());
-        assert!(next.forward_link().is_none());
-        assert!(
-            reads
-                .conversations_from(next.sync_state().unwrap())
-                .await
-                .unwrap()
-                .conversations
-                .is_empty()
-        );
+        assert!(reads.conversations_from(&sync).await.unwrap().conversations.is_empty());
         pair.stop().await;
     }
 }
@@ -88,7 +96,7 @@ async fn large_conversation_previews_page_within_the_native_budget_and_sync_ever
         let mut seen = Vec::new();
         loop {
             assert_eq!(page.sync_state(), Some(sync.as_str()));
-            seen.extend(page.conversations.iter().map(|entry| entry.id.clone()));
+            seen.extend(chat_ids(&page.conversations));
             let Some(next) = page.forward_link() else { break };
             page = reads.conversations_from(next).await.unwrap();
         }
@@ -103,7 +111,9 @@ async fn large_conversation_previews_page_within_the_native_budget_and_sync_ever
         assert_eq!(next.conversations.len(), 1);
         assert_eq!(next.conversations[0].id, later.0);
         assert!(pair.b.sync().await.unwrap().failed.is_empty());
-        assert_eq!(pair.b.conversations(200).await.unwrap().len(), chats.len() + 2);
+        let stored = pair.b.conversations(200).await.unwrap();
+        let stored = stored.iter().filter(|entry| !own_stream(&entry.id));
+        assert_eq!(stored.count(), chats.len() + 2);
         chats.push(later);
         for (chat, message) in chats {
             let stored = pair.b.message(&chat, &message).await.unwrap().unwrap();
@@ -171,11 +181,11 @@ async fn conversation_pages_keep_their_snapshot_and_survive_another_node_startin
         let sync = page.sync_state().unwrap().to_owned();
         assert_eq!(page.conversations.len(), 1);
         assert_eq!(client.write(create()).await.unwrap().status(), 201);
-        let mut seen = vec![page.conversations[0].id.clone()];
+        let mut seen = chat_ids(&page.conversations);
         while let Some(next) = page.forward_link() {
             page = reads.conversations_from(next).await.unwrap();
             assert_eq!(page.sync_state(), Some(sync.as_str()));
-            seen.extend(page.conversations.iter().map(|entry| entry.id.clone()));
+            seen.extend(chat_ids(&page.conversations));
         }
         assert_eq!(seen.len(), 3);
         assert_eq!(seen.iter().collect::<std::collections::HashSet<_>>().len(), 3);
@@ -190,12 +200,7 @@ async fn conversation_pages_keep_their_snapshot_and_survive_another_node_startin
         .await;
         let reader = super::client(&node, "b@own.test", &b).await;
         assert_eq!(
-            ChatReads::new(&reader)
-                .conversations()
-                .await
-                .unwrap()
-                .conversations
-                .len(),
+            chat_ids(&ChatReads::new(&reader).conversations().await.unwrap().conversations).len(),
             4
         );
         node.stop().await;

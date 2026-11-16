@@ -71,6 +71,7 @@ pub(super) async fn conversations(
     {
         return Err(Error::Denied);
     }
+    streams::ensure_listed(&app.db, &caller.id).await?;
     let current = repo::watermark(&app.db).await?;
     let since = number(&query, "syncState", 0)?;
     let until = number(&query, "until", current)?;

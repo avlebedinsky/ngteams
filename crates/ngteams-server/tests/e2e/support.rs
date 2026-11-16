@@ -46,6 +46,16 @@ pub enum Backend {
     Postgres,
 }
 
+/// Whether `id` is one of the streams the server writes, which an account lists from its first list on.
+pub fn own_stream(id: &str) -> bool {
+    matches!(id, "48:notifications" | "48:mentions" | "48:calllogs")
+}
+
+/// Whether a conversation list holds nothing but the account's own streams.
+pub fn only_own_streams(listed: &[teams_proto::chat::Conversation]) -> bool {
+    listed.iter().all(|entry| own_stream(&entry.id))
+}
+
 /// SQLite always; Postgres too when its URL is set.
 pub fn backends() -> Vec<Backend> {
     let mut backends = vec![Backend::Sqlite];

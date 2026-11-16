@@ -54,7 +54,7 @@ async fn reads_none_of_them(other: &mut User, owner: &User, ids: &[&str]) {
     }
 }
 
-/// Its own notes are none yet, a made-up name of the owner's stream is nothing, and no list has a stream.
+/// Its own notes are none yet, a made-up name of the owner's stream is nothing, and no list has notes.
 async fn reads_none_by_name(other: &User, names: &[String]) {
     let client = other.client();
     let reads = ChatReads::new(&client);
@@ -66,7 +66,12 @@ async fn reads_none_by_name(other: &User, names: &[String]) {
         assert_eq!(thread.unwrap_err().status(), Some(404), "{}: {name}", other.upn);
     }
     let listed = reads.conversations().await.unwrap();
-    assert!(listed.conversations.iter().all(|entry| !entry.id.starts_with("48:")));
+    assert!(
+        listed
+            .conversations
+            .iter()
+            .all(|entry| !entry.id.starts_with("48:") || crate::support::own_stream(&entry.id))
+    );
 }
 
 /// A note's id reads and deletes nothing from another account, under its own notes' name or a made-up one.

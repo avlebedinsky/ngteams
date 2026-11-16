@@ -5,7 +5,7 @@ use teams_proto::{Mri, NewChannelKind, TeamRole, TeamWrite};
 use teams_store::OutboxState;
 
 use super::{Seat, new_channel, refusal, server};
-use crate::support::backends;
+use crate::support::{backends, only_own_streams};
 
 /// An archived team takes no channel and nobody new.
 async fn archived_refuses(ada: &Seat, cora: &Seat, team: &str, group: &str) {
@@ -116,7 +116,7 @@ async fn an_owner_edits_archives_restores_and_deletes_a_team() {
         for thread in [&team, &channel] {
             assert_eq!(reads.thread(thread).await.unwrap_err().status(), Some(404));
         }
-        assert!(reads.conversations().await.unwrap().conversations.is_empty());
+        assert!(only_own_streams(&reads.conversations().await.unwrap().conversations));
         for seat in [ada, bert, cora] {
             seat.stop();
         }

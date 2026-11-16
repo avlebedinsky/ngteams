@@ -158,9 +158,7 @@ async fn a_mention_in_a_1_1_chat_is_in_the_mentioned_accounts_feed_and_mentions_
         assert!(feed(&pair.a).await.items.is_empty(), "the sender gets no item");
         let sender = client(&pair.server, "a@own.test", &pair.a_id).await;
         let sender_reads = ChatReads::new(&sender);
-        assert_eq!(sender_reads.messages(FEED, 200).await.unwrap_err().status(), Some(404));
-        let listed = sender_reads.conversations().await.unwrap();
-        assert!(listed.conversations.iter().all(|entry| !entry.id.starts_with("48:")));
+        assert!(sender_reads.messages(FEED, 200).await.unwrap().messages.is_empty());
         pair.stop().await;
     }
 }
@@ -220,13 +218,13 @@ async fn a_mention_reaches_nobody_outside_the_chat_and_names_no_other_chats_ever
         .await;
         assert!(feed(c).await.items.is_empty(), "c is not in a's and b's chat");
         let outsider = client(&trio.pair.server, "c@own.test", &trio.c_id).await;
-        assert_eq!(
+        assert!(
             ChatReads::new(&outsider)
                 .messages(FEED, 200)
                 .await
-                .unwrap_err()
-                .status(),
-            Some(404)
+                .unwrap()
+                .messages
+                .is_empty()
         );
 
         send(

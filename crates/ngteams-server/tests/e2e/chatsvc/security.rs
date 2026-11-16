@@ -106,14 +106,11 @@ async fn malformed_rosters_and_cursors_never_create_or_expose_a_chat() {
             status
         );
     }
-    assert!(
-        teams_proto::chat::ChatReads::new(&client(&server, "a@own.test", &a).await)
-            .conversations()
-            .await
-            .unwrap()
-            .conversations
-            .is_empty()
-    );
+    let ada = client(&server, "a@own.test", &a).await;
+    let reads = teams_proto::chat::ChatReads::new(&ada);
+    assert!(crate::support::only_own_streams(
+        &reads.conversations().await.unwrap().conversations
+    ));
     server.stop().await;
 }
 
