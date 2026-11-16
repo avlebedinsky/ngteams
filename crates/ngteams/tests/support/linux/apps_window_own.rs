@@ -99,7 +99,7 @@ pub fn child() -> SandboxResult {
     let sandbox_dir = PathBuf::from(std::env::var_os(ui_sandbox::SANDBOX_ENV).ok_or("no sandbox dir")?);
     let dir = PathBuf::from(env(DIR_ENV)?);
     let paths = PersonalPaths::new(dir.join("config"), dir.join("data"));
-    let setup = Setup::new(paths)?.with_own_servers(true);
+    let setup = Setup::new(paths)?;
     let server = accounts_file::OwnServer::parse(&env(ORIGIN_ENV)?, &env(CA_ENV)?)?;
     let store = MemorySecretStore::new();
     let runtime = ngteams::accounts::runtime()?;

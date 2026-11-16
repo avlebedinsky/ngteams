@@ -1339,7 +1339,7 @@ fn own_child() -> SandboxResult {
     ngteams::read_only::window_allowed_here()?;
     let dir = PathBuf::from(env(DIR_ENV)?);
     let paths = PersonalPaths::new(dir.join("config"), dir.join("data"));
-    let setup = Setup::new(paths)?.with_own_servers(true);
+    let setup = Setup::new(paths)?;
     let server = accounts_file::OwnServer::parse(&env(ORIGIN_ENV)?, &env(CA_ENV)?)?;
     let store = MemorySecretStore::new();
     let runtime = ngteams::accounts::runtime()?;
