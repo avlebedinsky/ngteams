@@ -222,6 +222,7 @@ async fn own_engine_sends_and_views_a_picture_and_reads_a_file_link() {
     let message = a.message(AB_CHAT, row.message_id.unwrap()).await.unwrap().unwrap();
     assert!(message.content.contains("https://chat.example:8443/ams/v1/objects/"));
     assert_eq!(*a.message_picture(&src).await.unwrap().unwrap(), picture);
+    composed_picture_moves_to_own(&a, &object).await;
     assert!(a.message_picture(src.replace(":8443", "")).await.unwrap().is_none());
     assert!(
         a.message_picture("https://us-api.asm.skype.com/v1/objects/x/views/imgo")
@@ -293,28 +294,61 @@ async fn own_file(mock: &ChatServiceMock, a: &EngineHandle, cloud: &Cloud) {
     assert!(a.file_size("https://outside.example/sp/demo.mp4").await.is_err());
 }
 
+/// The compose box writes a pasted picture in Microsoft's form (it knows no account): an own server's account sends it
+/// on its own server's media service, the same object, and never names Microsoft's.
+async fn composed_picture_moves_to_own(a: &EngineHandle, object: &str) {
+    use teams_proto::chat::{Node, RichText};
+    let image = teams_proto::sent_picture_in(&Cloud::Microsoft, object, (32, 24)).unwrap();
+    let text = MessageText::new_in(
+        &Cloud::Microsoft,
+        RichText {
+            nodes: vec![Node::Image(image)],
+            truncated: false,
+        },
+        [],
+    )
+    .unwrap();
+    let row = a
+        .write(Action::Send {
+            conversation: AB_CHAT.into(),
+            text,
+        })
+        .await
+        .unwrap();
+    assert_eq!(row.state, OutboxState::Sent);
+    let message = a.message(AB_CHAT, row.message_id.unwrap()).await.unwrap().unwrap();
+    assert!(
+        message
+            .content
+            .contains(&format!("https://chat.example:8443/ams/v1/objects/{object}/views/imgo")),
+        "{}",
+        message.content
+    );
+    assert!(!message.content.contains("asm.skype.com"), "{}", message.content);
+}
+
+/// A picture on another own server's media service is refused.
 async fn refuse_foreign_picture(a: &EngineHandle) {
     use teams_proto::chat::{Node, RichText};
-    for cloud in [Cloud::Microsoft, Cloud::own("https://other.example").unwrap()] {
-        let image = teams_proto::sent_picture_in(&cloud, "synthetic-picture", (32, 24)).unwrap();
-        let text = MessageText::new_in(
-            &cloud,
-            RichText {
-                nodes: vec![Node::Image(image)],
-                truncated: false,
-            },
-            [],
-        )
-        .unwrap();
-        assert!(
-            a.write(Action::Send {
-                conversation: AB_CHAT.into(),
-                text
-            })
-            .await
-            .is_err()
-        );
-    }
+    let cloud = Cloud::own("https://other.example").unwrap();
+    let image = teams_proto::sent_picture_in(&cloud, "synthetic-picture", (32, 24)).unwrap();
+    let text = MessageText::new_in(
+        &cloud,
+        RichText {
+            nodes: vec![Node::Image(image)],
+            truncated: false,
+        },
+        [],
+    )
+    .unwrap();
+    assert!(
+        a.write(Action::Send {
+            conversation: AB_CHAT.into(),
+            text
+        })
+        .await
+        .is_err()
+    );
 }
 
 async fn own_upload(mock: &ChatServiceMock, a: &EngineHandle, dir: &std::path::Path) {
