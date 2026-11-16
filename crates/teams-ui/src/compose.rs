@@ -766,7 +766,8 @@ impl Compose {
         editor.update(cx, |editor, _| editor.set_takes_pictures(note.is_none()));
         let correction = correction::Correction::new(cx);
         Self {
-            send_focus: cx.focus_handle(),
+            // a tracked handle is a stop of the keyboard only by its own flag, not by the div's
+            send_focus: cx.focus_handle().tab_stop(true),
             core: parts.core,
             settings: parts.settings,
             trace: parts.trace,
@@ -1738,11 +1739,14 @@ impl Compose {
                 .border_color(rgb(palette.brand))
                 .text_xs()
                 .child(div().font_weight(gpui::FontWeight::BOLD).child(title))
+                // a short quote, as Teams' box shows it: two lines at most, cut with "…"
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .overflow_hidden()
+                        .line_clamp(2)
+                        .text_ellipsis()
                         .text_color(rgb(palette.muted_foreground))
                         .child(detail),
                 )
@@ -1798,7 +1802,11 @@ impl Compose {
             .tab_stop(true)
             .focus(move |button| button.border_2().border_color(rgb(palette.on_brand)))
             .tooltip(move |window, cx| Tooltip::new(tip).build(window, cx))
-            .on_click(cx.listener(|this, _, window, cx| this.send(window, cx)))
+            // as in Teams, the text keeps the keyboard for the next message
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.send(window, cx);
+                this.focus(window, cx);
+            }))
             .child(Glyph::SEND.icon().size(px(15.0)));
         crate::motion::toggle(button, "compose-send-ready", true, cx, |button, t| {
             button.opacity(t.clamp(0.0, 1.0)).mt(px(6.0 * (1.0 - t)))

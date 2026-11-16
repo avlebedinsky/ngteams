@@ -2,7 +2,8 @@
 //! and numbered lists | highlight, font colour, font size | quote, link, code | More (paragraph styles, indent,
 //! outdent, a horizontal line, a table, clear formatting, undo, redo), and Discard on the right. Each button acts on
 //! the editor it was made for and gives it the focus back; a button whose format is on where the cursor is shows
-//! selected.
+//! selected. As Teams' bar does, a bar too narrow for all its tools keeps the first that fit and puts the others at the
+//! top of its More options, each row doing what its button does; More options and Discard always stay on the bar.
 //!
 //! The colours are Teams' own, from its web client: the font colours its palette names (Red, Tuscan orange,
 //! Sunglow, Pear, Eucalyptus, Faded jade, Fun blue, Tyrian purple) and the highlights (Cranberry, Pumpkin, Marigold,
@@ -14,7 +15,7 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, Bounds, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
+    AnyElement, App, AppContext as _, Bounds, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
     KeyDownEvent, ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
     Subscription, Window, anchored, deferred, div, px, rgb,
 };
@@ -73,6 +74,185 @@ pub enum Menu {
     More,
 }
 
+/// A tool of the bar that goes into its More options when the bar is too narrow, in the bar's order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tool {
+    Bold,
+    Italic,
+    Underline,
+    Strikethrough,
+    Bullets,
+    Numbers,
+    Highlight,
+    FontColour,
+    FontSize,
+    Quote,
+    Link,
+    Code,
+}
+
+/// The bar's tools, in order; More options and Discard follow them.
+const TOOLS: [Tool; 12] = [
+    Tool::Bold,
+    Tool::Italic,
+    Tool::Underline,
+    Tool::Strikethrough,
+    Tool::Bullets,
+    Tool::Numbers,
+    Tool::Highlight,
+    Tool::FontColour,
+    Tool::FontSize,
+    Tool::Quote,
+    Tool::Link,
+    Tool::Code,
+];
+
+/// The gap between the bar's controls, px.
+const GAP: f32 = 2.0;
+
+impl Tool {
+    /// Its button's selector; its row in More options has `-row` after it.
+    fn id(self) -> &'static str {
+        match self {
+            Self::Bold => "format-bold",
+            Self::Italic => "format-italic",
+            Self::Underline => "format-underline",
+            Self::Strikethrough => "format-strikethrough",
+            Self::Bullets => "format-bullets",
+            Self::Numbers => "format-numbers",
+            Self::Highlight => "format-highlight",
+            Self::FontColour => "format-colour",
+            Self::FontSize => "format-size",
+            Self::Quote => "format-quote",
+            Self::Link => "format-link",
+            Self::Code => "format-code",
+        }
+    }
+
+    fn row_id(self) -> &'static str {
+        match self {
+            Self::Bold => "format-bold-row",
+            Self::Italic => "format-italic-row",
+            Self::Underline => "format-underline-row",
+            Self::Strikethrough => "format-strikethrough-row",
+            Self::Bullets => "format-bullets-row",
+            Self::Numbers => "format-numbers-row",
+            Self::Highlight => "format-highlight-row",
+            Self::FontColour => "format-colour-row",
+            Self::FontSize => "format-size-row",
+            Self::Quote => "format-quote-row",
+            Self::Link => "format-link-row",
+            Self::Code => "format-code-row",
+        }
+    }
+
+    fn glyph(self) -> Glyph {
+        match self {
+            Self::Bold => Glyph::BOLD,
+            Self::Italic => Glyph::ITALIC,
+            Self::Underline => Glyph::UNDERLINE,
+            Self::Strikethrough => Glyph::STRIKETHROUGH,
+            Self::Bullets => Glyph::LIST,
+            Self::Numbers => Glyph::LIST_ORDERED,
+            Self::Highlight => Glyph::HIGHLIGHTER,
+            Self::FontColour => Glyph::FONT_COLOUR,
+            Self::FontSize => Glyph::FONT_SIZE,
+            Self::Quote => Glyph::QUOTE,
+            Self::Link => Glyph::LINK,
+            Self::Code => Glyph::CODE,
+        }
+    }
+
+    /// Its name in its row of More options.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Bold => "Bold",
+            Self::Italic => "Italic",
+            Self::Underline => "Underline",
+            Self::Strikethrough => "Strikethrough",
+            Self::Bullets => "Bulleted list",
+            Self::Numbers => "Numbered list",
+            Self::Highlight => "Highlight",
+            Self::FontColour => "Font colour",
+            Self::FontSize => "Font size",
+            Self::Quote => "Quote",
+            Self::Link => "Insert link",
+            Self::Code => "Code",
+        }
+    }
+
+    /// Its button's tooltip: its name, and its key when it has one.
+    fn tip(self) -> &'static str {
+        match self {
+            Self::Code => concat!("Code (", ctrl!(), "+Shift+B block)"),
+            other => other.label(),
+        }
+    }
+
+    /// The action of its key, which its tooltip names.
+    fn action(self) -> Option<&'static dyn gpui::Action> {
+        match self {
+            Self::Bold => Some(&Bold),
+            Self::Italic => Some(&Italic),
+            Self::Underline => Some(&Underline),
+            Self::Strikethrough => Some(&Strikethrough),
+            Self::Bullets => Some(&BulletList),
+            Self::Numbers => Some(&NumberedList),
+            Self::Quote => Some(&Quote),
+            _ => None,
+        }
+    }
+
+    /// The menu it opens, if it opens one.
+    fn menu(self) -> Option<Menu> {
+        match self {
+            Self::Highlight => Some(Menu::Highlight),
+            Self::FontColour => Some(Menu::FontColour),
+            Self::FontSize => Some(Menu::FontSize),
+            Self::Link => Some(Menu::Link),
+            _ => None,
+        }
+    }
+
+    /// Its group on the bar: a divider stands between two groups.
+    fn group(self) -> u8 {
+        match self {
+            Self::Bold | Self::Italic | Self::Underline | Self::Strikethrough => 0,
+            Self::Bullets | Self::Numbers => 1,
+            Self::Highlight | Self::FontColour | Self::FontSize => 2,
+            Self::Quote | Self::Link | Self::Code => 3,
+        }
+    }
+
+    /// Whether a divider stands before the tool at `index` of [`TOOLS`].
+    fn after_divider(index: usize) -> bool {
+        index > 0 && TOOLS[index - 1].group() != TOOLS[index].group()
+    }
+}
+
+/// How many of [`TOOLS`] a bar last drawn `width` wide (`None`: not drawn yet, so all) keeps, at the rem size `rem`,
+/// with or without Discard; the others go into its More options.
+fn kept(width: Option<Pixels>, rem: Pixels, discard: bool) -> usize {
+    let Some(width) = width.map(f32::from) else {
+        return TOOLS.len();
+    };
+    let divider = 1.0 + 0.5 * f32::from(rem);
+    // More options, the space that pushes Discard to the right, and Discard
+    let mut used = BUTTON + GAP + if discard { GAP + BUTTON } else { 0.0 };
+    let mut kept = 0;
+    for index in 0..TOOLS.len() {
+        if Tool::after_divider(index) {
+            used += divider + GAP;
+        }
+        used += BUTTON + GAP;
+        if used > width {
+            break;
+        }
+        kept = index + 1;
+    }
+    kept
+}
+
 /// What the bar tells its owner.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FormatBarEvent {
@@ -96,6 +276,10 @@ pub struct FormatBar {
     link: Option<LinkForm>,
     /// Whether Discard is offered.
     discard: bool,
+    /// Where the bar was last drawn: its width decides which tools it keeps.
+    drawn_at: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// How many of [`TOOLS`] the bar kept as it was last drawn; the others are in its More options.
+    kept: usize,
     _editor: Subscription,
 }
 
@@ -111,6 +295,8 @@ impl FormatBar {
             anchors: Default::default(),
             link: None,
             discard: true,
+            drawn_at: Rc::default(),
+            kept: TOOLS.len(),
             _editor: observing,
         }
     }
@@ -120,6 +306,12 @@ impl FormatBar {
     pub fn without_discard(mut self) -> Self {
         self.discard = false;
         self
+    }
+
+    /// The selectors of the tools that the bar put into its More options as it was last drawn (tests, the tour).
+    #[must_use]
+    pub fn in_more_options(&self) -> Vec<&'static str> {
+        TOOLS.iter().skip(self.kept).map(|tool| tool.id()).collect()
     }
 
     /// The menu open, if one is.
@@ -207,45 +399,111 @@ impl FormatBar {
 
     // --- drawing ---
 
-    /// A format's button: its tooltip names its key; selected while the format is on.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "one toolbar button: its id, glyph, tip, key, state and press"
-    )]
-    fn format_button(
-        id: &'static str,
-        glyph: Glyph,
-        tip: &'static str,
-        action: &dyn gpui::Action,
-        on: bool,
-        cx: &mut Context<Self>,
-        press: impl Fn(&mut Editor, &mut Context<Editor>) + 'static,
-    ) -> AnyElement {
-        let button = icon_button_with_key(id, glyph, tip, action)
-            .with_size(Size::Size(px(BUTTON)))
-            .selected(on)
-            .on_click(cx.listener(move |this, _, window, cx| this.act(window, cx, &press)));
-        selected_by(id, button).into_any_element()
+    /// Whether `tool` shows lit: its format is on where the cursor is, or its menu is open.
+    fn on(&self, tool: Tool, cx: &App) -> bool {
+        if let Some(menu) = tool.menu() {
+            return self.open == Some(menu);
+        }
+        let editor = self.editor.read(cx);
+        let kind = editor.block_kind();
+        match tool {
+            Tool::Bold => editor.has_mark(Marks::BOLD),
+            Tool::Italic => editor.has_mark(Marks::ITALIC),
+            Tool::Underline => editor.has_mark(Marks::UNDERLINE),
+            Tool::Strikethrough => editor.has_mark(Marks::STRIKE),
+            Tool::Bullets => kind == Kind::Bullet,
+            Tool::Numbers => kind == Kind::Numbered,
+            Tool::Quote => kind == Kind::Quote,
+            Tool::Code => kind == Kind::Code || editor.has_mark(Marks::CODE),
+            Tool::Highlight | Tool::FontColour | Tool::FontSize | Tool::Link => false,
+        }
     }
 
-    /// A menu's button, the menu opening under it.
-    fn menu_button(
-        &self,
-        id: &'static str,
-        glyph: Glyph,
-        tip: &'static str,
-        menu: Menu,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let anchor = Rc::clone(&self.anchors[menu as usize]);
-        let button = icon_button(id, glyph, tip)
+    /// Does what `tool`'s button does: opens its menu, or acts on the editor.
+    fn press(&mut self, tool: Tool, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(menu) = tool.menu() {
+            return self.toggle(menu, window, cx);
+        }
+        self.act(window, cx, |editor, cx| match tool {
+            Tool::Bold => editor.toggle_mark(Marks::BOLD, cx),
+            Tool::Italic => editor.toggle_mark(Marks::ITALIC, cx),
+            Tool::Underline => editor.toggle_mark(Marks::UNDERLINE, cx),
+            Tool::Strikethrough => editor.toggle_mark(Marks::STRIKE, cx),
+            Tool::Bullets => editor.toggle_kind(Kind::Bullet, cx),
+            Tool::Numbers => editor.toggle_kind(Kind::Numbered, cx),
+            Tool::Quote => editor.toggle_kind(Kind::Quote, cx),
+            Tool::Code => editor.code(cx),
+            Tool::Highlight | Tool::FontColour | Tool::FontSize | Tool::Link => {}
+        });
+    }
+
+    /// `tool`'s button on the bar: its tooltip names its key, it is selected while it is on, and a menu opens under it.
+    fn tool_button(&self, tool: Tool, cx: &mut Context<Self>) -> AnyElement {
+        let button = match tool.action() {
+            Some(action) => icon_button_with_key(tool.id(), tool.glyph(), tool.tip(), action),
+            None => icon_button(tool.id(), tool.glyph(), tool.tip()),
+        }
+        .with_size(Size::Size(px(BUTTON)))
+        .selected(self.on(tool, cx))
+        .on_click(cx.listener(move |this, _, window, cx| this.press(tool, window, cx)));
+        let button = selected_by(tool.id(), button);
+        match tool.menu() {
+            Some(menu) => button
+                .relative()
+                .child(measured(&self.anchors[menu as usize]))
+                .into_any_element(),
+            None => button.into_any_element(),
+        }
+    }
+
+    /// More options' button; its menu opens under it, as do the menus of the tools in it.
+    fn more_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let button = icon_button("format-more", Glyph::MORE, "More options")
             .with_size(Size::Size(px(BUTTON)))
-            .selected(self.open == Some(menu))
-            .on_click(cx.listener(move |this, _, window, cx| this.toggle(menu, window, cx)));
-        selected_by(id, button)
+            .selected(self.open == Some(Menu::More))
+            .on_click(cx.listener(|this, _, window, cx| this.toggle(Menu::More, window, cx)));
+        selected_by("format-more", button)
             .relative()
-            .child(measured(&anchor))
+            .child(measured(&self.anchors[Menu::More as usize]))
             .into_any_element()
+    }
+
+    /// The tools the bar keeps, with a divider between two groups.
+    fn kept_tools(&self, palette: Palette, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mut row = Vec::new();
+        for (index, tool) in TOOLS.iter().enumerate().take(self.kept) {
+            if Tool::after_divider(index) {
+                row.push(Self::divider(palette));
+            }
+            row.push(self.tool_button(*tool, cx));
+        }
+        row
+    }
+
+    /// The tools in More options, each a row that does what its button does, a check on the rows that are on.
+    fn overflow_rows(&self, palette: Palette, cx: &mut Context<Self>) -> Vec<gpui::Stateful<gpui::Div>> {
+        TOOLS
+            .iter()
+            .skip(self.kept)
+            .map(|tool| {
+                let tool = *tool;
+                Self::row_face(
+                    tool.row_id(),
+                    Some(tool.glyph()),
+                    tool.label(),
+                    self.on(tool, cx),
+                    palette,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| this.press(tool, window, cx)))
+            })
+            .collect()
+    }
+
+    /// Where the menu of `menu` opens: under its button, or under More options while its tool is in that menu.
+    fn anchor_of(&self, menu: Menu) -> Option<Bounds<Pixels>> {
+        let in_more = TOOLS.iter().skip(self.kept).any(|tool| tool.menu() == Some(menu));
+        let anchor = if in_more { Menu::More } else { menu };
+        self.anchors[anchor as usize].get()
     }
 
     fn divider(palette: Palette) -> AnyElement {
@@ -256,100 +514,6 @@ impl FormatBar {
             .mx_1()
             .bg(rgb(palette.border))
             .into_any_element()
-    }
-
-    fn marks(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let editor = self.editor.read(cx);
-        let on = |mark| editor.has_mark(mark);
-        let (bold, italic, underline, strike) = (
-            on(Marks::BOLD),
-            on(Marks::ITALIC),
-            on(Marks::UNDERLINE),
-            on(Marks::STRIKE),
-        );
-        vec![
-            Self::format_button("format-bold", Glyph::BOLD, "Bold", &Bold, bold, cx, |e, cx| {
-                e.toggle_mark(Marks::BOLD, cx);
-            }),
-            Self::format_button(
-                "format-italic",
-                Glyph::ITALIC,
-                "Italic",
-                &Italic,
-                italic,
-                cx,
-                |e, cx| {
-                    e.toggle_mark(Marks::ITALIC, cx);
-                },
-            ),
-            Self::format_button(
-                "format-underline",
-                Glyph::UNDERLINE,
-                "Underline",
-                &Underline,
-                underline,
-                cx,
-                |e, cx| {
-                    e.toggle_mark(Marks::UNDERLINE, cx);
-                },
-            ),
-            Self::format_button(
-                "format-strikethrough",
-                Glyph::STRIKETHROUGH,
-                "Strikethrough",
-                &Strikethrough,
-                strike,
-                cx,
-                |e, cx| e.toggle_mark(Marks::STRIKE, cx),
-            ),
-        ]
-    }
-
-    fn lists(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let kind = self.editor.read(cx).block_kind();
-        vec![
-            Self::format_button(
-                "format-bullets",
-                Glyph::LIST,
-                "Bulleted list",
-                &BulletList,
-                kind == Kind::Bullet,
-                cx,
-                |e, cx| e.toggle_kind(Kind::Bullet, cx),
-            ),
-            Self::format_button(
-                "format-numbers",
-                Glyph::LIST_ORDERED,
-                "Numbered list",
-                &NumberedList,
-                kind == Kind::Numbered,
-                cx,
-                |e, cx| e.toggle_kind(Kind::Numbered, cx),
-            ),
-        ]
-    }
-
-    fn inserts(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let editor = self.editor.read(cx);
-        let quote = editor.block_kind() == Kind::Quote;
-        let code = editor.block_kind() == Kind::Code || editor.has_mark(Marks::CODE);
-        vec![
-            Self::format_button("format-quote", Glyph::QUOTE, "Quote", &Quote, quote, cx, |e, cx| {
-                e.toggle_kind(Kind::Quote, cx);
-            }),
-            self.menu_button("format-link", Glyph::LINK, "Insert link", Menu::Link, cx),
-            {
-                let button = icon_button(
-                    "format-code",
-                    Glyph::CODE,
-                    concat!("Code (", ctrl!(), "+Shift+B block)"),
-                )
-                .with_size(Size::Size(px(BUTTON)))
-                .selected(code)
-                .on_click(cx.listener(|this, _, window, cx| this.act(window, cx, super::Editor::code)));
-                selected_by("format-code", button).into_any_element()
-            },
-        ]
     }
 
     /// A swatch of `colour` named `name`, choosing it; `None` is the swatch that takes the colour off.
@@ -453,7 +617,7 @@ impl FormatBar {
             .into_any_element()
     }
 
-    /// A row of a menu: an icon, a label, a check when chosen; disabled with `disabled` (its tooltip saying why).
+    /// A row of a menu that acts on the editor: an icon, a label, a check when chosen.
     #[expect(
         clippy::too_many_arguments,
         reason = "one menu row: its id, glyph, label, state and choice"
@@ -467,6 +631,18 @@ impl FormatBar {
         cx: &mut Context<Self>,
         choose: impl Fn(&mut Editor, &mut Context<Editor>) + 'static,
     ) -> gpui::Stateful<gpui::Div> {
+        Self::row_face(id, glyph, label, chosen, palette)
+            .on_click(cx.listener(move |this, _, window, cx| this.act(window, cx, &choose)))
+    }
+
+    /// A menu row's face: an icon, a label and a check when chosen.
+    fn row_face(
+        id: &'static str,
+        glyph: Option<Glyph>,
+        label: &'static str,
+        chosen: bool,
+        palette: Palette,
+    ) -> gpui::Stateful<gpui::Div> {
         div()
             .id(id)
             .debug_selector(move || id.to_owned())
@@ -479,7 +655,6 @@ impl FormatBar {
             .cursor_pointer()
             .text_sm()
             .hover(move |row| row.bg(rgb(palette.hover)))
-            .on_click(cx.listener(move |this, _, window, cx| this.act(window, cx, &choose)))
             .child(
                 div()
                     .w(px(16.0))
@@ -547,10 +722,14 @@ impl FormatBar {
             .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new(NO_TABLES).build(window, cx))
             .child(div().w(px(16.0)).child(Glyph::TABLE.icon().size(px(14.0))))
             .child("Insert table");
+        let overflow = self.overflow_rows(palette, cx);
+        let overflow_separator = (!overflow.is_empty()).then(separator);
         div()
             .w(px(220.0))
             .flex()
             .flex_col()
+            .children(overflow)
+            .children(overflow_separator)
             .children(self.kind_rows(palette, cx))
             .child(separator())
             .child(Self::menu_row(
@@ -695,7 +874,7 @@ impl FormatBar {
     /// The open menu, under its button.
     fn popover(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.open?;
-        let at = self.anchors[menu as usize].get()?;
+        let at = self.anchor_of(menu)?;
         let content = match menu {
             Menu::Highlight => self.colour_menu(true, palette, cx),
             Menu::FontColour => self.colour_menu(false, palette, cx),
@@ -756,8 +935,13 @@ pub fn link_address(typed: &str) -> Option<String> {
 }
 
 impl Render for FormatBar {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::current(cx);
+        self.kept = kept(
+            self.drawn_at.get().map(|bounds| bounds.size.width),
+            window.rem_size(),
+            self.discard,
+        );
         let discard = self.discard.then(|| {
             let button = icon_button("format-discard", Glyph::TRASH, "Discard")
                 .with_size(Size::Size(px(BUTTON)))
@@ -767,22 +951,16 @@ impl Render for FormatBar {
         let read_only = self.editor.read(cx).read_only;
         div()
             .debug_selector(|| "format-bar".to_owned())
+            .relative()
             .w_full()
             .flex()
             .items_center()
-            .gap(px(2.0))
-            .children(self.marks(cx))
-            .child(Self::divider(palette))
-            .children(self.lists(cx))
-            .child(Self::divider(palette))
-            .child(self.menu_button("format-highlight", Glyph::HIGHLIGHTER, "Highlight", Menu::Highlight, cx))
-            .child(self.menu_button("format-colour", Glyph::FONT_COLOUR, "Font colour", Menu::FontColour, cx))
-            .child(self.menu_button("format-size", Glyph::FONT_SIZE, "Font size", Menu::FontSize, cx))
-            .child(Self::divider(palette))
-            .children(self.inserts(cx))
-            .child(self.menu_button("format-more", Glyph::MORE, "More options", Menu::More, cx))
+            .gap(px(GAP))
+            .children(self.kept_tools(palette, cx))
+            .child(self.more_button(cx))
             .child(div().flex_1())
             .children(discard)
+            .child(measured(&self.drawn_at))
             .children(self.popover(palette, cx))
             .when(read_only, |bar| bar.opacity(0.5))
     }
@@ -800,6 +978,30 @@ pub fn unavailable(id: &'static str, glyph: Glyph, tip: &'static str) -> AnyElem
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rem() -> Pixels {
+        px(f32::from(theme::FONT_SIZE))
+    }
+
+    #[test]
+    fn a_bar_not_drawn_yet_or_wide_keeps_every_tool() {
+        assert_eq!(kept(None, rem(), true), TOOLS.len());
+        assert_eq!(kept(Some(px(800.0)), rem(), true), TOOLS.len());
+    }
+
+    #[test]
+    fn a_bar_in_a_call_s_chat_pane_keeps_the_first_tools_that_fit() {
+        // the expanded box in the 360 px Chat pane gives its bar 302 px
+        assert_eq!(kept(Some(px(302.0)), rem(), true), 7);
+        assert_eq!(TOOLS[6], Tool::Highlight);
+        // without Discard, one more fits
+        assert_eq!(kept(Some(px(302.0)), rem(), false), 8);
+    }
+
+    #[test]
+    fn a_bar_with_no_room_keeps_no_tool() {
+        assert_eq!(kept(Some(px(40.0)), rem(), true), 0);
+    }
 
     #[test]
     fn a_link_s_address_gets_a_scheme_the_renderer_opens() {

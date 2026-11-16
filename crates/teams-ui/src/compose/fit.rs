@@ -389,7 +389,11 @@ impl Compose {
     /// button, so the menu its row opens shows by it.
     fn hidden_language_anchor(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu: Entity<menu::LanguageMenu> = self.language_menu()?;
-        let face = Button::new("compose-language").ghost().with_size(Size::XSmall);
+        // the language row is the way to it: the anchor is no stop of the keyboard
+        let face = Button::new("compose-language")
+            .ghost()
+            .with_size(Size::XSmall)
+            .tab_stop(false);
         Some(
             div()
                 .absolute()
@@ -410,10 +414,12 @@ impl Compose {
     }
 }
 
-/// A tool's row in the menu: its icon, its name and its key as bound where the `text` is, `compose-<tool>-row` for
-/// tests.
+/// A tool's row in the menu: its icon, its name, its key as bound where the `text` is, and a check while the tool is
+/// lit (`compose-<tool>-row`, `compose-<tool>-check` for tests). The check is the row's own: the kit draws a row's icon
+/// in place of its check.
 fn menu_row(row: &Row, text: &FocusHandle, window: &Window) -> PopupMenuItem {
     let selector = format!("{}-row", row.tool.selector());
+    let check = row.checked.then(|| format!("{}-check", row.tool.selector()));
     let label = row.label.clone();
     let key = row
         .tool
@@ -421,6 +427,11 @@ fn menu_row(row: &Row, text: &FocusHandle, window: &Window) -> PopupMenuItem {
         .and_then(|action| Kbd::binding_for_action_in(action, text, window));
     PopupMenuItem::element(move |_, _| {
         let selector = selector.clone();
+        let check = check.clone().map(|check| {
+            div()
+                .debug_selector(move || check.clone())
+                .child(Glyph::CHECK.icon().size(px(14.0)))
+        });
         div()
             .debug_selector(move || selector.clone())
             .flex_1()
@@ -429,11 +440,17 @@ fn menu_row(row: &Row, text: &FocusHandle, window: &Window) -> PopupMenuItem {
             .justify_between()
             .gap_3()
             .child(label.clone())
-            .children(key.clone())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .children(key.clone())
+                    .child(div().flex_none().w(px(14.0)).children(check)),
+            )
     })
     .icon(row.tool.glyph().icon())
     .disabled(row.disabled)
-    .checked(row.checked)
 }
 
 #[cfg(test)]

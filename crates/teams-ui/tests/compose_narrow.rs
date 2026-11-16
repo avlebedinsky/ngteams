@@ -275,3 +275,177 @@ fn in_a_very_narrow_box_every_tool_is_in_the_menu_and_keeps_its_action_and_key()
     assert!(compose.read_with(cx, |compose, _| compose.emoji_picker().is_some()));
     assert!(compose.read_with(cx, |compose, _| !compose.more_open()));
 }
+
+fn right(cx: &mut VisualTestContext, selector: &'static str) -> f32 {
+    f32::from(
+        cx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is not shown"))
+            .right(),
+    )
+}
+
+#[test]
+fn the_format_bar_fits_a_narrow_box_and_its_other_tools_are_in_its_more_options() {
+    let rig = Rig::start();
+    let (compose, cx) = chat(&rig, PANE);
+    type_in(&compose, cx, "A made-up draft");
+    cx.simulate_keystrokes("ctrl-shift-x");
+    draw(cx);
+    assert!(compose.read_with(cx, |compose, _| compose.is_expanded()));
+    let inside = right(cx, "compose-box");
+    for tool in ["format-bold", "format-highlight", "format-more", "format-discard"] {
+        let at = right(cx, tool);
+        assert!(at <= inside, "{tool} ends at {at} px, past the box at {inside} px");
+    }
+    assert!(
+        !shown(cx, "format-code"),
+        "Code does not fit the bar: it is in its More options"
+    );
+
+    // the tools that do not fit are rows of the bar's More options, and each row does what its button does
+    click(cx, "format-more");
+    for tool in [
+        "format-colour",
+        "format-size",
+        "format-quote",
+        "format-link",
+        "format-code",
+    ] {
+        assert!(shown(cx, row(tool)), "{tool} is a row of the bar's More options");
+    }
+    for tool in ["format-bold", "format-highlight"] {
+        assert!(!shown(cx, row(tool)), "{tool} is on the bar: it has no row");
+    }
+    cx.simulate_keystrokes("end");
+    click(cx, "format-code-row");
+    let code = compose.read_with(cx, |compose, cx| {
+        compose.editor().read(cx).has_mark(teams_proto::chat::Marks::CODE)
+            || compose.editor().read(cx).block_kind() == teams_ui::editor::doc::Kind::Code
+    });
+    assert!(code, "the Code row turns code on");
+    // a row of a tool with a menu opens that menu by the bar's More options, inside the window
+    click(cx, "format-more");
+    click(cx, "format-link-row");
+    assert!(shown(cx, "format-link-insert"), "the Link row opens the link dialog");
+    let menu = cx.debug_bounds("format-menu").unwrap();
+    assert!(f32::from(menu.right()) <= PANE, "{menu:?}");
+}
+
+#[test]
+fn a_wide_format_bar_keeps_every_tool() {
+    let rig = Rig::start();
+    let (compose, cx) = chat(&rig, 900.0);
+    type_in(&compose, cx, "A made-up draft");
+    cx.simulate_keystrokes("ctrl-shift-x");
+    draw(cx);
+    for tool in [
+        "format-bold",
+        "format-highlight",
+        "format-link",
+        "format-code",
+        "format-more",
+        "format-discard",
+    ] {
+        assert!(shown(cx, tool), "{tool} is on a wide bar");
+    }
+    click(cx, "format-more");
+    assert!(!shown(cx, "format-code-row"));
+}
+
+#[test]
+fn a_lit_tool_s_row_in_more_options_shows_a_check() {
+    let rig = Rig::start();
+    let (compose, cx) = chat(&rig, 150.0);
+    cx.simulate_keystrokes("ctrl-shift-x");
+    draw(cx);
+    assert!(compose.read_with(cx, |compose, _| compose.is_expanded()));
+    click(cx, "compose-more");
+    assert!(shown(cx, "compose-format-row"));
+    assert!(
+        shown(cx, "compose-format-check"),
+        "Format is lit: its row shows a check"
+    );
+    assert!(
+        !shown(cx, "compose-emoji-check"),
+        "Emoji is not lit: its row shows no check"
+    );
+}
+
+#[test]
+fn tab_from_the_text_reaches_no_hidden_stop() {
+    let rig = Rig::start();
+    let (compose, cx) = chat(&rig, PANE);
+    type_in(&compose, cx, "A made-up draft");
+    // the stops after the text: Format, Emoji, Attach, More options, then Send; the language is in More options, so
+    // Enter on no stop opens the language menu
+    for stops in 5..=6 {
+        for _ in 0..stops {
+            cx.update(gpui::Window::focus_next);
+            draw(cx);
+        }
+        cx.simulate_keystrokes("enter");
+        draw(cx);
+        assert!(
+            !shown(cx, "compose-language-menu"),
+            "stop {stops} is a hidden one: it opened the language menu"
+        );
+        cx.simulate_keystrokes("escape");
+        cx.update(|window, cx| compose.update(cx, |compose, cx| compose.focus(window, cx)));
+        draw(cx);
+    }
+    // the fifth stop is Send: Enter on it sends (a focused control clicks as the key goes up)
+    for _ in 0..5 {
+        cx.update(gpui::Window::focus_next);
+        draw(cx);
+    }
+    cx.simulate_keystrokes("enter");
+    cx.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse("enter").unwrap(),
+    });
+    draw(cx);
+    assert!(
+        compose.read_with(cx, |compose, cx| compose.value(cx).is_empty()),
+        "Enter on the fifth stop sends"
+    );
+}
+
+#[test]
+fn a_click_on_send_keeps_the_keyboard_in_the_text() {
+    for width in [PANE, 900.0] {
+        let rig = Rig::start();
+        let (compose, cx) = chat(&rig, width);
+        type_in(&compose, cx, "A made-up message");
+        click(cx, "compose-send");
+        assert!(
+            compose.read_with(cx, |compose, cx| compose.value(cx).is_empty()),
+            "the message went"
+        );
+        assert!(
+            cx.update(|window, cx| compose.read(cx).focused(window, cx)),
+            "a {width} px box keeps the keyboard in its text after a click on Send"
+        );
+    }
+}
+
+#[test]
+fn a_reply_to_a_long_message_shows_a_short_quote() {
+    let rig = Rig::start();
+    let (compose, cx) = chat(&rig, PANE);
+    let quoted = teams_ui::compose::Quoted {
+        message_id: "1700000000000".into(),
+        sender: "8:orgid:00000000-0000-4000-8000-00000000000b".into(),
+        sender_name: "Lab Bee".into(),
+        time: "1700000000000".into(),
+        preview: "A made-up long message that goes on and on. "
+            .repeat(6)
+            .trim()
+            .to_owned(),
+        shown: None,
+    };
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.reply_to(quoted, window, cx)));
+    draw(cx);
+    let quote = cx.debug_bounds("compose-mode").expect("the reply's quote shows");
+    // two lines of small text at most
+    assert!(f32::from(quote.size.height) <= 40.0, "the quote is {quote:?}");
+    assert!(f32::from(cx.debug_bounds("compose-box").unwrap().size.width) <= PANE);
+}
