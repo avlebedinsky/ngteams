@@ -127,6 +127,22 @@ impl Compose {
         &self.attachments
     }
 
+    /// Takes `file` from another box of the same chat ([`Compose::hand_draft_to`]), unless the box has that file: an
+    /// upload still on its way starts again here.
+    pub(super) fn take_attachment(&mut self, mut file: Attachment, cx: &mut Context<Self>) {
+        if self.attachments.iter().any(|held| held.path == file.path) {
+            return;
+        }
+        self.next_attachment += 1;
+        file.id = self.next_attachment;
+        let uploading = file.state == AttachmentState::Uploading;
+        self.attachments.push(file);
+        if uploading {
+            self.upload_attachment(self.next_attachment, cx);
+        }
+        cx.notify();
+    }
+
     fn upload_attachment(&mut self, id: u64, cx: &mut Context<Self>) {
         let Some(file) = self.attachments.iter_mut().find(|file| file.id == id) else {
             return;

@@ -209,9 +209,12 @@ impl Shell {
         }
     }
 
-    /// The draft typed to `chat` in New message goes to the box of that chat: the box of its view while that view is
-    /// shown or holds a draft, else its kept draft. The text comes after a draft that box holds, so no draft is lost.
-    /// With no draft there, `compose` becomes the kept draft of the chat, and the chat opens with it.
+    /// The draft typed to `chat` in New message and the draft of that chat become one draft in one box. The box of
+    /// the chat is the box of its view while that view is shown or holds a draft, else its kept draft. The full draft
+    /// (text, pictures, files, reply) moves with [`Compose::hand_draft_to`], and the draft of the chat comes first, so
+    /// no draft is lost. The box of the chat stays, but New message's box stays when a file send from it is on its
+    /// way (that send gives its files back to it if it fails) and the box of the chat is not shown and sends no files.
+    /// With no draft in the chat, `compose` becomes the kept draft of the chat, and the chat opens with it.
     fn hand_found_draft(&mut self, chat: String, compose: &Entity<Compose>, cx: &mut App) {
         let shown = self.main == Main::Chat(chat.clone());
         let own = self
@@ -227,11 +230,16 @@ impl Shell {
                     .filter(|kept| kept.read(cx).has_draft(cx))
                     .cloned()
             });
-        match own {
-            Some(own) if own != *compose => compose.update(cx, |compose, cx| compose.hand_text_to(&own, cx)),
-            _ => {
-                self.drafts.insert(chat, compose.clone());
-            }
+        let Some(own) = own.filter(|own| own != compose) else {
+            self.drafts.insert(chat, compose.clone());
+            return;
+        };
+        if !shown && compose.read(cx).is_sending_files() && !own.read(cx).is_sending_files() {
+            // the view of the chat, if it holds `own`, is made again with `compose` when the chat opens
+            own.update(cx, |own, cx| own.hand_draft_to(compose, true, cx));
+            self.drafts.insert(chat, compose.clone());
+        } else {
+            compose.update(cx, |compose, cx| compose.hand_draft_to(&own, false, cx));
         }
     }
 

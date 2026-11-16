@@ -848,6 +848,57 @@ impl Compose {
         cx.notify();
     }
 
+    /// The full draft of the box moves to `other`, a box of the same chat (New message's box for the chat that it
+    /// found, and the own box of that chat): the text, the pictures, the files, and the reply or edit. With `first`,
+    /// the draft goes before the draft that `other` holds, else after it. `other` sends again a picture or a file that
+    /// was still on its way. `other` keeps its own reply or edit; it takes the reply or edit of this box only when it
+    /// has none. A file send on its way stays with this box, so the caller keeps the box that has one
+    /// ([`Compose::is_sending_files`]).
+    pub fn hand_draft_to(&mut self, other: &Entity<Self>, first: bool, cx: &mut Context<Self>) {
+        let own = self.editor.read(cx);
+        // an empty box hands no blocks
+        let doc = if own.is_empty() {
+            Doc { blocks: Vec::new() }
+        } else {
+            own.doc().clone()
+        };
+        let pictures: Vec<_> = doc
+            .blocks
+            .iter()
+            .filter_map(|block| match block.kind {
+                Kind::Picture(id) => Some((id, own.picture(id)?.clone())),
+                _ => None,
+            })
+            .collect();
+        let files = std::mem::take(&mut self.attachments);
+        let mode = std::mem::replace(&mut self.mode, Mode::New);
+        self.editor.update(cx, |editor, cx| editor.set_doc(Doc::default(), cx));
+        other.update(cx, |other, cx| {
+            let sending = other
+                .editor
+                .update(cx, |editor, cx| editor.take_doc(doc, pictures, first, cx));
+            for id in sending {
+                other.send_picture(id, cx);
+            }
+            for file in files {
+                other.take_attachment(file, cx);
+            }
+            if other.mode == Mode::New {
+                other.mode = mode;
+            }
+            other.fit_pictures(cx);
+            cx.notify();
+        });
+        self.fit_pictures(cx);
+        cx.notify();
+    }
+
+    /// Whether a send with files from this box is on its way: its answer comes back to this box.
+    #[must_use]
+    pub fn is_sending_files(&self) -> bool {
+        self.sending_files > 0
+    }
+
     /// A chat keeps its editor alive while a local draft or upload remains, including across chat navigation.
     pub(crate) fn has_draft(&self, cx: &App) -> bool {
         !self.editor.read(cx).is_empty()

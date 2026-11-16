@@ -681,3 +681,120 @@ fn the_read_only_mode_offers_no_new_message() {
     draw(cx);
     assert_ne!(main(&shell, cx), Main::NewChat);
 }
+
+/// The box of the chat shown.
+fn chat_box(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<teams_ui::compose::Compose> {
+    let chat = cx.update(|_, cx| shell.read(cx).chat().cloned()).unwrap();
+    cx.update(|_, cx| chat.read(cx).compose().clone())
+}
+
+/// A file with synthetic text in a new temporary folder: the folder, and the path of the file.
+fn temp_file(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join(name);
+    std::fs::write(&file, b"synthetic").unwrap();
+    (dir, file)
+}
+
+#[test]
+fn a_found_chat_s_draft_with_a_file_and_a_reply_keeps_them_after_the_draft_that_chat_had() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig);
+    open(&shell, cx, AB);
+    type_in_chat(&shell, cx, "foo");
+    open(&shell, cx, TALK);
+    draft_to_found_ab(&shell, cx, "bar");
+    let view = new_chat(&shell, cx);
+    let found = cx.update(|_, cx| view.read(cx).compose(cx));
+    let (_dir, file) = temp_file("plan.txt");
+    cx.update(|window, cx| found.update(cx, |compose, cx| compose.attach_files(&[file], window, cx)));
+    let replied = message(AB, "1", LAB_B, "RichText/Html", "<p>hi a</p>", NOON);
+    let quoted = teams_ui::compose::Quoted::of(&replied, "Lab Bee").unwrap();
+    cx.update(|window, cx| found.update(cx, |compose, cx| compose.reply_to(quoted, window, cx)));
+    draw(cx);
+    open(&shell, cx, AC);
+    open(&shell, cx, AB);
+    let own = chat_box(&shell, cx);
+    let typed = chat_typed(&shell, cx);
+    let (foo, bar) = (typed.find("foo"), typed.find("bar"));
+    assert!(
+        foo.is_some() && bar.is_some() && foo < bar,
+        "the earlier draft, then the new: {typed:?}"
+    );
+    assert_eq!(
+        cx.update(|_, cx| own
+            .read(cx)
+            .attachments()
+            .iter()
+            .map(|file| file.name.clone())
+            .collect::<Vec<_>>()),
+        ["plan.txt"]
+    );
+    assert!(cx.update(|_, cx| matches!(own.read(cx).mode(), teams_ui::compose::Mode::Reply(_))));
+}
+
+#[test]
+fn a_picture_pasted_in_a_found_chat_s_draft_moves_to_the_draft_that_chat_had_and_goes_with_it() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig);
+    open(&shell, cx, AB);
+    type_in_chat(&shell, cx, "foo");
+    open(&shell, cx, TALK);
+    draft_to_found_ab(&shell, cx, "bar");
+    let pasted = gpui::ClipboardEntry::Image(gpui::Image::from_bytes(gpui::ImageFormat::Png, png(30, 30)));
+    cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem { entries: vec![pasted] }));
+    cx.simulate_keystrokes("ctrl-v");
+    draw(cx);
+    open(&shell, cx, AC);
+    open(&shell, cx, AB);
+    let own = chat_box(&shell, cx);
+    let editor = cx.update(|_, cx| own.read(cx).editor().clone());
+    assert_eq!(cx.update(|_, cx| editor.read(cx).shown_pictures().len()), 1);
+    own.update_in(cx, |compose, window, cx| compose.focus(window, cx));
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    let actions = rig.core.actions.lock().unwrap().clone();
+    let [Action::Send { conversation, text }] = actions.as_slice() else {
+        panic!("one message sent, nothing held back: {actions:?}");
+    };
+    assert_eq!(conversation, AB);
+    assert_eq!(text.pictures().len(), 1);
+}
+
+#[test]
+fn a_file_send_from_a_found_chat_that_fails_gives_its_draft_back_to_that_chat_with_its_own_draft() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig);
+    open(&shell, cx, AB);
+    type_in_chat(&shell, cx, "foo");
+    open(&shell, cx, TALK);
+    draft_to_found_ab(&shell, cx, "bar");
+    let view = new_chat(&shell, cx);
+    let found = cx.update(|_, cx| view.read(cx).compose(cx));
+    let (_dir, file) = temp_file("plan.txt");
+    cx.update(|window, cx| found.update(cx, |compose, cx| compose.attach_files(&[file], window, cx)));
+    draw(cx);
+    rig.core
+        .write_errors
+        .lock()
+        .unwrap()
+        .push_back(teams_core::EngineError::Stopped);
+    found.update_in(cx, |compose, window, cx| compose.focus(window, cx));
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    assert_eq!(main(&shell, cx), Main::Chat(AB.to_owned()));
+    let own = chat_box(&shell, cx);
+    assert_eq!(own, found, "the box whose send was on its way is the chat's box");
+    let typed = chat_typed(&shell, cx);
+    assert!(typed.contains("foo"), "the earlier draft stays: {typed:?}");
+    assert!(typed.contains("bar"), "the refused draft comes back: {typed:?}");
+    assert_eq!(
+        cx.update(|_, cx| own
+            .read(cx)
+            .attachments()
+            .iter()
+            .map(|file| file.name.clone())
+            .collect::<Vec<_>>()),
+        ["plan.txt"]
+    );
+}
