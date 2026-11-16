@@ -246,7 +246,7 @@ impl Call {
     }
 
     /// Ends the call: everyone in it gets `end`, every ring still going ends, every leg and the room go.
-    fn end_group(&mut self, at: At<'_>, end: &Value, out: &mut Out) {
+    pub(super) fn end_group(&mut self, at: At<'_>, end: &Value, out: &mut Out) {
         let rung = wire::end(487, "Call cancelled as the call ended.", None);
         for seat in 0..self.parties.len() {
             let party = self.party_mut(Seat(seat));

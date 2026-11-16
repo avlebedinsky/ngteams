@@ -220,4 +220,20 @@ impl Call {
         out.call_back(at.origin, callback, wire::mute_outcome(self, &muted, &operation));
         Ok(())
     }
+
+    /// The party at `seat` ends the call at its conversation (`DELETE`): a meeting's organizer ends it for everyone in
+    /// it, whom it names as who ended it; anyone else leaves it.
+    pub(crate) fn end_meeting(&mut self, seat: Seat, body: &Value, at: At<'_>, out: &mut Out) {
+        let organizes = self.role_of(self.party(seat)) == Some("organizer");
+        if !organizes || self.in_call(seat).is_err() {
+            self.leave(seat, body, at, out);
+            return;
+        }
+        let sender = self.party(seat).participant.clone();
+        let end = wire::end(0, ENDED_FOR_ALL, Some(&sender));
+        self.end_group(at, &end, out);
+    }
 }
+
+/// What everyone in a meeting its organizer ended is told.
+const ENDED_FOR_ALL: &str = "ConversationEndForAllInitiated";

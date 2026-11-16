@@ -383,3 +383,37 @@ async fn the_organizer_mutes_everyone_else_who_see_it_and_may_unmute_themselves(
         shut_down(vec![ada, bert, cora], mixed).await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_organizer_ends_the_meeting_for_everyone_in_it_and_its_chat_tells_the_end() {
+    for backend in backends() {
+        let mixed = Mixed::start(backend).await;
+        let mut ada = Person::new(&mixed, "Ada", A_TONE).await;
+        let mut bert = Person::new(&mixed, "Bert", B_TONE).await;
+        let mut cora = Person::new(&mixed, "Cora", C_TONE).await;
+        let event = schedule(&ada, &[&bert, &cora]).await;
+        let join = join_of(&event);
+        let a_call = joined(&mut ada, &join).await;
+        let b_call = joined(&mut bert, &join).await;
+        let c_call = joined(&mut cora, &join).await;
+        let id = mixed.open_call().await;
+        mixed.connected(&id, 3).await;
+        ada.engine.call(CallAction::EndMeeting { call: a_call }).await;
+        for (person, call) in [(&mut bert, b_call), (&mut cora, c_call)] {
+            let end = person.engine.ended(call).await;
+            assert!(matches!(end, End::Remote(_)), "{end:?}");
+        }
+        ada.engine.ended(a_call).await;
+        let calls = ngteams_server::calling::open_calls(&mixed.server().app.db)
+            .await
+            .unwrap();
+        assert!(calls.is_empty(), "{calls:?}");
+        let chat = event.meeting_chat.clone().unwrap();
+        let events = call_events(&mixed, &bert, &chat).await;
+        assert!(
+            events[0].contains("callEnded") && events[0].contains("count=\"3\""),
+            "{events:?}"
+        );
+        shut_down(vec![ada, bert, cora], mixed).await;
+    }
+}

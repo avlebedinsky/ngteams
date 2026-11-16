@@ -245,7 +245,8 @@ pub(super) async fn subscribe(
     Ok(Json(wire::conversation(&origin, &app.config.region, &call)).into_response())
 }
 
-/// `DELETE conv/<id>`: the call ended at its conversation, as a leave ends a 1:1 call.
+/// `DELETE conv/<id>`: the call ended at its conversation: a meeting's organizer ends it for everyone; anyone else's
+/// is a leave.
 pub(super) async fn end_for_all(
     State(app): State<Arc<App>>,
     caller: Caller,
@@ -256,7 +257,7 @@ pub(super) async fn end_for_all(
     let body = json(&body)?;
     let key = Key::Conversation(param(&path, "conversation"));
     step(&app, key, &caller, |call, seat, at, out| {
-        call.leave(seat, &body, at, out);
+        call.end_meeting(seat, &body, at, out);
         Ok(())
     })
     .await?;
