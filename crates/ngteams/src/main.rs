@@ -735,7 +735,7 @@ fn ready_accounts(setup: &Setup) -> Result<(Vec<PersonalAccount>, Vec<PersonalAc
     let (mut ready, mut unready) = (Vec::new(), Vec::new());
     for account in setup.signed_in_accounts().map_err(|error| error.to_string())? {
         if accounts::ready(setup, &account)? {
-            ask_unserved_again(setup, &account);
+            ask_own_again(setup, &account);
             ready.push(account);
         } else {
             eprintln!("teams: {} must sign in again", account.upn);
@@ -745,19 +745,24 @@ fn ready_accounts(setup: &Setup) -> Result<(Vec<PersonalAccount>, Vec<PersonalAc
     Ok((ready, unready))
 }
 
-/// An own server's account whose saved region names no chat service: its server's authz is asked again before the
-/// start says so, since the server may serve chats by now. One that can't be asked starts on the region it has.
-fn ask_unserved_again(setup: &Setup, account: &PersonalAccount) {
-    if accounts::unserved(setup, account).is_none() {
+/// An own server's account: its server's authz is asked again before it starts, so that its region names the
+/// services the server has now (a server updated, or an option turned on or off, since the sign-in), and the client
+/// shows only those. One that can't be asked starts on the region it has; when that names no chat service, the start
+/// says why.
+fn ask_own_again(setup: &Setup, account: &PersonalAccount) {
+    if account.server_host().is_none() {
         return;
     }
+    let unserved = accounts::unserved(setup, account).is_some();
     match accounts::region_again(setup, account) {
         Ok(()) => log::info!("an own server's region was asked again at the start"),
         Err(error) => {
-            eprintln!(
-                "teams: {}: its server's region wasn't asked again: {error}",
-                account.upn
-            );
+            if unserved {
+                eprintln!(
+                    "teams: {}: its server's region wasn't asked again: {error}",
+                    account.upn
+                );
+            }
             log::warn!("an own server's region wasn't asked again at the start");
         }
     }

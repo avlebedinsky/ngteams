@@ -1036,9 +1036,14 @@ fn click_of(draw: &Draw<'_>, key: &str, action: &Action, set: &[String]) -> OnCl
     }
 }
 
-/// `inner`, doing what `action` does on a click anywhere on it (a pointing hand over it); as it is without one.
+/// `inner`, doing what `action` does on a click anywhere on it (a pointing hand over it); as it is without one, and
+/// without a Submit while the card sends nothing to its bot.
 fn selectable(draw: &Draw<'_>, key: &str, action: Option<&Action>, inner: gpui::Div) -> AnyElement {
-    let Some(action) = action.filter(|action| !matches!(action.kind, ActionKind::ShowCard(_))) else {
+    let Some(action) = action.filter(|action| match action.kind {
+        ActionKind::ShowCard(_) => false,
+        ActionKind::Submit => draw.submits,
+        _ => true,
+    }) else {
         return inner.into_any_element();
     };
     let click = click_of(draw, key, action, &[]);

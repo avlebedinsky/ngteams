@@ -1,7 +1,7 @@
 //! What an account's cloud serves of the services the views offer beside chats, teams, calls and people.
 //!
 //! Microsoft's cloud serves them all. An own server serves each only when its authz names the service's GTM
-//! (`docs/server.md`, "Prefix table"): the views hide what it doesn't serve rather than offer something that fails.
+//! (`docs/server.md`, "Optional services"): the views hide what it doesn't serve rather than offer something that fails.
 
 use teams_proto::Cloud;
 

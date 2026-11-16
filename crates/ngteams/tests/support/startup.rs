@@ -473,6 +473,7 @@ const STARTUP_CASES: &[&str] = &[
     "unserved-own-then-ready",
     "ready-then-unserved-own",
     "unserved-own-served-now",
+    "served-own",
     "forget-missing",
     "forget-pending",
     "forget-stored",
@@ -604,6 +605,8 @@ fn child() {
         "unserved-own" | "unserved-own-served-now" => {
             signed_own_as(&setup, READY_OWN_UPN);
         }
+        // signed in before, on a server that serves chats, but whose authz can't be reached now
+        "served-own" => served_own(&setup),
         "unserved-own-then-ready" | "ready-then-unserved-own" => unserved_beside_ready(&setup, &case),
         "empty" | "prompt-window-error" | "own-prompt-success" | "own-prompt-error" | "own-prompt-unserved" => {}
         other => panic!("unknown synthetic case {other}"),
@@ -692,6 +695,18 @@ fn check_outcome(case: &str, outcome: &Result<Outcome, String>) {
     }
 }
 
+/// The own server's account [`READY_OWN_UPN`] as a sign-in left it on a server that serves chats.
+fn served_own(setup: &Setup) {
+    let account = signed_own_as(setup, READY_OWN_UPN);
+    std::fs::write(
+        setup.paths.region_file(&account).unwrap(),
+        format!(
+            r#"{{"_synthetic":true,"region":"own","partition":null,"regionGtms":{{"chatServiceAfd":"{OWN_SERVER}/api/chatsvc/own"}}}}"#
+        ),
+    )
+    .unwrap();
+}
+
 /// The unserved own server's account and a Microsoft 365 account that starts, in the order `case` names: added
 /// before it, the own one doesn't hold it back; added after it, the app runs on the Microsoft 365 one.
 fn unserved_beside_ready(setup: &Setup, case: &str) {
@@ -754,7 +769,7 @@ fn seen_own(case: &str, seen: &[String]) {
     }
 }
 
-/// What a case's run did with an own server's account whose saved region names no chat service.
+/// What a case's run did with an own server's account that signed in before: its server's authz asked again.
 fn seen_unserved(case: &str, seen: &[String]) {
     match case {
         // the server's authz was asked again and named no chat service still (or wasn't reached): the engine was
@@ -764,14 +779,15 @@ fn seen_unserved(case: &str, seen: &[String]) {
             assert!(seen.contains(&format!("start:{READY_OWN_UPN}")), "{seen:?}");
             assert!(!seen.iter().any(|call| call.starts_with("sign-in-own:")), "{seen:?}");
         }
-        // the server serves chats by now: asked again once, the account opens, and no password is asked
-        "unserved-own-served-now" => {
+        // the server serves chats by now; or served them already, asked again for the services it has now, and
+        // can't be asked (the account starts on the region it has): asked once, the account opens, no password
+        "unserved-own-served-now" | "served-own" => {
             assert_eq!(asked_again(seen), 1, "{seen:?}");
             assert!(seen.contains(&format!("start:{READY_OWN_UPN}")), "{seen:?}");
             assert!(seen.iter().any(|call| call.starts_with("ctl-bound:")), "{seen:?}");
             assert!(!seen.iter().any(|call| call.starts_with("sign-in-own:")), "{seen:?}");
         }
-        // an account whose region names a chat service is never asked again
+        // a Microsoft 365 account is never asked again
         "ready" | "many" => assert_eq!(asked_again(seen), 0, "{seen:?}"),
         // left out, and the account beside it runs the app: no sign-in screen stands in its way
         "unserved-own-then-ready" | "ready-then-unserved-own" => {

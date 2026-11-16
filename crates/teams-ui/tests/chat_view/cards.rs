@@ -154,6 +154,31 @@ fn a_cards_buttons_open_links_toggle_and_show_cards_and_send_to_teams_on_the_web
 
 /// An input takes no place in the elements' paths: the text after it is still the first element.
 #[test]
+fn a_cloud_without_bot_invokes_draws_no_part_of_a_card_that_sends_to_the_bot() {
+    let card = json!({
+        "type": "AdaptiveCard",
+        "body": [
+            {"type": "Container", "selectAction": {"type": "Action.Submit"},
+             "items": [{"type": "TextBlock", "text": "Pick me"}]}
+        ],
+        "actions": [{"type": "Action.Submit", "title": "Approve"}]
+    });
+    for apps in [true, false] {
+        let rig = rig_with(vec![card_message(ID, &card)]);
+        *rig.core.capabilities.lock().unwrap() = Some(teams_core::Capabilities {
+            apps,
+            ..teams_core::Capabilities::ALL
+        });
+        let (written_trace, _) = trace();
+        let (_view, cx) = chat_window(&rig, written_trace);
+        // the container is drawn either way; a click on it sends to the bot only where the cloud serves bots
+        assert!(bounds(cx, &format!("card-{ID}-c0b0.")).is_some());
+        assert_eq!(bounds(cx, &format!("card-{ID}-c0b0.s")).is_some(), apps, "apps {apps}");
+        assert_eq!(bounds(cx, &format!("card-{ID}-c0a0")).is_some(), apps, "apps {apps}");
+    }
+}
+
+#[test]
 fn a_card_with_an_input_says_it_has_content_it_cant_show() {
     let card = json!({
         "type": "AdaptiveCard",
