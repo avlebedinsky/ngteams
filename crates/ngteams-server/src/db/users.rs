@@ -4,7 +4,8 @@
 //! naming what it authored (`crate::admin::repo::delete`).
 //!
 //! A row is a person's (`kind` [`PERSON`]) or an app's ([`APP`]): an app's bot is a principal in chats that never
-//! signs in. Every read of people goes through [`person`], so no listing, lookup or sign-in finds an app.
+//! signs in. Every listing, search, lookup by UPN and sign-in of people goes through [`person`], so none finds an app.
+//! [`by_id`] reads any row: an app's row is disabled and has no password or refresh token, so it never signs in.
 
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;

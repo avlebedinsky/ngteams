@@ -208,13 +208,21 @@ async fn update(
 }
 
 /// `POST /api/admin/v1/apps/{id}/secret`: a new secret for its bot, shown once; the old one stops working.
-async fn rotate(State(app): State<Arc<App>>, Admin(admin): Admin, Path(id): Path<String>) -> Result<Response, ApiError> {
+async fn rotate(
+    State(app): State<Arc<App>>,
+    Admin(admin): Admin,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
     let secret = super::rotate_secret(&app.db, Actor::account(&admin), &id).await?;
     Ok(answer(StatusCode::OK, &json!({ "secret": secret })))
 }
 
 /// `DELETE /api/admin/v1/apps/{id}`.
-async fn remove(State(app): State<Arc<App>>, Admin(admin): Admin, Path(id): Path<String>) -> Result<Response, ApiError> {
+async fn remove(
+    State(app): State<Arc<App>>,
+    Admin(admin): Admin,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
     super::delete(Registry::of(&app), Actor::account(&admin), &id).await?;
     Ok((StatusCode::NO_CONTENT, [(CACHE_CONTROL, "no-store")]).into_response())
 }

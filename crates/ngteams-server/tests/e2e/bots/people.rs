@@ -18,10 +18,15 @@ const WORKFLOWS_BOT: &str = "358f0194-6b0e-4dd3-af35-c24fe8a9ec87";
 #[tokio::test(flavor = "multi_thread")]
 async fn no_people_read_finds_a_bot() {
     for backend in backends() {
-        let registry = Registry::open_with(backend, |config| config.public_origin = url::Url::parse(ORIGIN).unwrap()).await;
+        let registry = Registry::open_with(backend, |config| {
+            config.public_origin = url::Url::parse(ORIGIN).unwrap()
+        })
+        .await;
         let server = &registry.server;
         let ada = server.add_user("ada@own.test", "Ada Echo").await;
-        let echo = registry.register("Echo (synthetic)", "https://bot.example.test/api/messages").await;
+        let echo = registry
+            .register("Echo (synthetic)", "https://bot.example.test/api/messages")
+            .await;
         let bot = echo["id"].as_str().unwrap().to_owned();
 
         // the admin's list and every account change
@@ -32,7 +37,10 @@ async fn no_people_read_finds_a_bot() {
         assert_eq!(listed.len(), 2, "{listed:?}");
         assert!(!listed.contains(&bot.as_str()) && !listed.contains(&WORKFLOWS_BOT));
         let page = admin.users(&token, "echo", None, 50).await.unwrap();
-        assert_eq!(page.users.iter().map(|user| user.id.as_str()).collect::<Vec<_>>(), [ada.as_str()]);
+        assert_eq!(
+            page.users.iter().map(|user| user.id.as_str()).collect::<Vec<_>>(),
+            [ada.as_str()]
+        );
         for id in [bot.as_str(), WORKFLOWS_BOT] {
             let user = format!("/api/admin/v1/users/{id}");
             let password = json!({"password": PASSWORD});
@@ -50,7 +58,9 @@ async fn no_people_read_finds_a_bot() {
 
         // a sign-in by the bot's row
         for upn in [format!("app:{bot}"), "workflows@apps.invalid".to_owned()] {
-            let (status, answer) = server.password_grant(&upn, PASSWORD, &teams_auth::token::Scope::spaces()).await;
+            let (status, answer) = server
+                .password_grant(&upn, PASSWORD, &teams_auth::token::Scope::spaces())
+                .await;
             assert_eq!(status, 400, "{answer}");
         }
 
@@ -65,14 +75,22 @@ async fn no_people_read_finds_a_bot() {
         .unwrap();
         let answer = client.post_read(lookup.clone()).await.unwrap();
         let profiles = lookup.read_answer(answer.body()).unwrap();
-        assert_eq!(profiles.iter().map(|profile| profile.mri.as_str()).collect::<Vec<_>>(), [format!("8:orgid:{ada}")]);
+        assert_eq!(
+            profiles.iter().map(|profile| profile.mri.as_str()).collect::<Vec<_>>(),
+            [format!("8:orgid:{ada}")]
+        );
         let found = ngteams_server::people::repo::people_by_address(&server.app.db, &[format!("app:{bot}")])
             .await
             .unwrap();
         assert!(found.is_empty());
         let directory = ngteams_server::db::users::list(&server.app.db).await.unwrap();
         assert!(directory.iter().all(|user| user.id != bot && user.id != WORKFLOWS_BOT));
-        assert!(ngteams_server::db::users::by_upn(&server.app.db, &format!("app:{bot}")).await.unwrap().is_none());
+        assert!(
+            ngteams_server::db::users::by_upn(&server.app.db, &format!("app:{bot}"))
+                .await
+                .unwrap()
+                .is_none()
+        );
         registry.server.stop().await;
     }
 }

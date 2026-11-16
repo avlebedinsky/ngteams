@@ -148,7 +148,7 @@ takes a double underscore: `NGTEAMS_SERVER_TLS__CERT`, `NGTEAMS_SERVER_TOKENS__A
 | `mixer.media_timeout`, `mixer.connect_timeout` | `20`, `30` | seconds a party's media may stay down, or take to come up after its answer, before it is taken out of the call |
 | `mixer.reconcile`, `mixer.drain_timeout` | `30`, `300` | seconds between the node's looks at its rooms' calls; seconds a stopping node serves its rooms before it ends them |
 | `apps.enabled` | `true` | whether the server serves apps and bots ([below](#apps-and-bots)): the registry, a bot's credentials and the keys it checks with |
-| `bots.scope` | `https://api.botframework.com` | the resource a bot asks its token for (`<scope>/.default`) and that token's audience; never one of `audiences` |
+| `bots.scope` | `https://api.botframework.com` | the resource a bot asks its token for (`<scope>/.default`) and that token's audience; never an audience a person's token is for (`audiences`, the public origin, Workflows') |
 | `bots.issuer`, `bots.service_url` | `<public_origin>/bot`, `<public_origin>/bot/` | the issuer of the tokens activities to bots carry; the `serviceUrl` activities name |
 | `bots.token_lifetime`, `bots.activity_token_lifetime` | `3600`, `3600` | seconds a bot's own token and an activity's token are valid |
 | `bots.key_rotation` | `2592000` | seconds a bot signing key signs before a new one replaces it (30 days) |
@@ -502,7 +502,7 @@ Admins only, with the same bearer token and refusals as the [account routes](#ad
 
 | Request | Does | Answers |
 |---|---|---|
-| `POST /api/admin/v1/apps` | registers a bot from the form: `name` (1–30 characters), optional `description`, `endpoint` (an absolute `https` URL without credentials; `http` with `bots.allow_http_endpoints`), `auth_mode` (`signed`, the default, or `unsigned` with `bots.allow_unsigned`). The app and its bot share a new id | 201 app with `secret` |
+| `POST /api/admin/v1/apps` | registers a bot from the form: `name` (1–30 characters), optional `description`, optional `endpoint` (an absolute `https` URL without credentials; `http` with `bots.allow_http_endpoints`; without one the bot has none until a `PATCH` sets it), `auth_mode` (`signed`, the default, or `unsigned` with `bots.allow_unsigned`). The app and its bot share a new id | 201 app with `secret` |
 | `POST /api/admin/v1/apps/package` | registers the app a Teams app package holds (`Content-Type: application/zip`, at most 5 MiB): `manifest.json` (a GUID `id`, `version`, `name.short` up to 30 characters, `description`, `developer.name`, `accentColor` `#RRGGBB`, at most one bot with a GUID `botId` and scopes of `personal`, `team`, `groupChat`) and its two icons (PNG, color 192×192, outline 32×32, kept in the file store as `apps/<id>/color.png` and `outline.png`). The bot has no endpoint until a `PATCH` sets it | 201 app, with `secret` when it has a bot |
 | `PUT /api/admin/v1/apps/{id}/package` | a new package of the same app and bot: version, names, manifest, icons. The bot keeps its endpoint, mode and secret | 200 app |
 | `GET /api/admin/v1/apps` | every app, by name | 200 `{"apps": [app]}` |
@@ -541,11 +541,11 @@ A bot gets the server's token with MSAL's client-credentials request, unchanged:
   server's EdDSA JWT with `aud` `bots.scope`, `appid`, `azp` and `sub` the bot's id, `tid`, `idtyp: "app"`; it has no
   `oid`, so it never passes for a person's token, and no person's token is ever issued for `bots.scope`.
 - Refusals take Entra's shape and codes: `invalid_client` `AADSTS7000215` (401) for a wrong secret or an unknown bot
-  alike, `7000216` without a secret; `unauthorized_client` `7000112` (400) for a disabled app; `invalid_scope`
-  `70011`; `unsupported_grant_type` `70003` for any other grant; `invalid_request` `90002` for another tenant. Wrong
-  secrets count per bot as password attempts do (`login.max_failures` in `login.window`, across nodes with Redis);
-  after that the bot gets 429 `temporarily_unavailable` with `Retry-After`, its right secret too, until the window
-  ends.
+  alike, `7000216` without a secret; `unauthorized_client` `7000112` (400) for a disabled app or an `unsigned` bot;
+  `invalid_scope` `70011`; `unsupported_grant_type` `70003` for any other grant; `invalid_request` `90002` for another
+  tenant. Wrong secrets count per bot as password attempts do (`login.max_failures` in `login.window`, across nodes
+  with Redis); after that a wrong secret gets 429 `temporarily_unavailable` with `Retry-After` until the window ends.
+  The right secret is never held off (a bot's id is public), and it clears the count.
 
 ### The keys a bot checks activities with
 
@@ -563,8 +563,10 @@ EdDSA keys can't be used: no SDK accepts them), published where the SDKs look:
 Each key carries `endorsements: ["msteams"]` (botbuilder takes no key without its channel's endorsement). The keys
 are rows of `bot_signing_keys`, so every node signs with and publishes the same ones; the JWKS is read from the
 database on each request, so a key one node makes is published by all at once. A new key replaces the signer every
-`bots.key_rotation`; a retired key stays published until no token it signed can still be used (its lifetime, the
-SDKs' five minutes of skew and three housekeeping rounds), then goes.
+`bots.key_rotation`, but only after it was published for 25 hours (or one `bots.key_rotation`, if that is shorter):
+an SDK keeps the JWKS for a day and fetches it again for an unknown `kid` at most once an hour. The key it replaces
+is then retired, and stays published until no token it signed can still be used (its lifetime, the SDKs' five
+minutes of skew and three housekeeping rounds), then goes.
 
 With `apps.enabled = false` none of these routes is served.
 

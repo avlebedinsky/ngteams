@@ -187,7 +187,11 @@ pub fn package(manifest: &Value, color: &[u8], outline: &[u8], extra: &[(&str, &
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let options = zip::write::SimpleFileOptions::default();
     let manifest = serde_json::to_vec_pretty(manifest).unwrap();
-    let files = [("manifest.json", manifest.as_slice()), ("color.png", color), ("outline.png", outline)];
+    let files = [
+        ("manifest.json", manifest.as_slice()),
+        ("color.png", color),
+        ("outline.png", outline),
+    ];
     for (name, bytes) in files.iter().chain(extra) {
         zip.start_file(*name, options).unwrap();
         zip.write_all(bytes).unwrap();

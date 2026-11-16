@@ -91,6 +91,8 @@ pub struct Credentials {
     pub secret_hash: String,
     /// Whether its app is enabled.
     pub enabled: bool,
+    /// Whether it authenticates (`signed`); an `unsigned` bot takes no token.
+    pub signed: bool,
 }
 
 #[derive(Insertable)]
@@ -129,28 +131,41 @@ macro_rules! record {
 }
 
 /// The app `$id` with its bot and users, or [`AppError::NoSuchApp`].
-macro_rules! load {
+macro_rules! app_row {
     ($conn:ident, $id:expr) => {{
-        let app: AppRow = apps::table
+        let app: Option<AppRow> = apps::table
             .find($id)
             .select(AppRow::as_select())
             .first($conn)
             .await
-            .optional()?
-            .ok_or(AppError::NoSuchApp)?;
+            .optional()?;
+        app
+    }};
+}
+
+macro_rules! filled {
+    ($conn:ident, $app:expr) => {{
+        let app: AppRow = $app;
         let bot: Option<BotRow> = bots::table
-            .filter(bots::app_id.eq($id))
+            .filter(bots::app_id.eq(&app.id))
             .select(BotRow::as_select())
             .first($conn)
             .await
             .optional()?;
         let users: Vec<String> = app_users::table
-            .filter(app_users::app_id.eq($id))
+            .filter(app_users::app_id.eq(&app.id))
             .order(app_users::user_id.asc())
             .select(app_users::user_id)
             .load($conn)
             .await?;
         Record { app, bot, users }
+    }};
+}
+
+macro_rules! load {
+    ($conn:ident, $id:expr) => {{
+        let app = app_row!($conn, $id).ok_or(AppError::NoSuchApp)?;
+        filled!($conn, app)
     }};
 }
 
@@ -308,7 +323,11 @@ fn apply(record: &mut Record, changes: &Changes) -> Result<Map<String, Value>, A
     }
     if changes.endpoint.is_some() || changes.auth_mode.is_some() {
         let bot = record.bot.as_mut().ok_or(AppError::NoBot)?;
-        if let Some(endpoint) = changes.endpoint.as_ref().filter(|endpoint| bot.endpoint.as_ref() != Some(*endpoint)) {
+        if let Some(endpoint) = changes
+            .endpoint
+            .as_ref()
+            .filter(|endpoint| bot.endpoint.as_ref() != Some(*endpoint))
+        {
             detail.insert("endpoint".to_owned(), json!(endpoint));
             bot.endpoint = Some(endpoint.clone());
         }
@@ -374,7 +393,10 @@ pub async fn update(db: &Db, actor: Actor<'_>, id: &str, changes: &Changes) -> R
                     .execute(conn)
                     .await?;
             }
-            record!(conn, &Entry::new(actor, "app.update", &record.app, &Value::Object(detail)));
+            record!(
+                conn,
+                &Entry::new(actor, "app.update", &record.app, &Value::Object(detail))
+            );
             Ok((record, true))
         })
         .await)?;
@@ -433,16 +455,12 @@ pub async fn delete(db: &Db, actor: Actor<'_>, id: &str) -> Result<Record, AppEr
 /// # Errors
 /// A database failure.
 pub async fn get(db: &Db, id: &str) -> Result<Option<Record>, DbError> {
-    match loaded(db, id).await {
-        Ok(record) => Ok(Some(record)),
-        Err(AppError::NoSuchApp) => Ok(None),
-        Err(AppError::Db(error)) => Err(error),
-        Err(error) => Err(DbError::Pool(error.to_string())),
-    }
-}
-
-async fn loaded(db: &Db, id: &str) -> Result<Record, AppError> {
-    with_conn!(db, |conn| Ok(load!(conn, id)))
+    with_conn!(db, |conn| {
+        let Some(app) = app_row!(conn, id) else {
+            return Ok(None);
+        };
+        Ok(Some(filled!(conn, app)))
+    })
 }
 
 /// Every app, by name.
@@ -483,14 +501,18 @@ pub async fn list(db: &Db) -> Result<Vec<Record>, DbError> {
 /// # Errors
 /// A database failure.
 pub async fn credentials(db: &Db, bot: &str) -> Result<Option<Credentials>, DbError> {
-    let found: Option<(String, bool)> = with_conn!(db, |conn| bots::table
+    let found: Option<(String, bool, String)> = with_conn!(db, |conn| bots::table
         .inner_join(apps::table)
         .filter(bots::id.eq(bot))
-        .select((bots::secret_hash, apps::enabled))
+        .select((bots::secret_hash, apps::enabled, bots::auth_mode))
         .first(conn)
         .await
         .optional()?);
-    Ok(found.map(|(secret_hash, enabled)| Credentials { secret_hash, enabled }))
+    Ok(found.map(|(secret_hash, enabled, mode)| Credentials {
+        secret_hash,
+        enabled,
+        signed: mode == super::AuthMode::Signed.as_str(),
+    }))
 }
 
 #[cfg(test)]
@@ -510,7 +532,10 @@ mod tests {
             updated_at: 0,
         };
         let shown = format!("{bot:?}");
-        assert!(shown.contains("bot") && !shown.contains("digest-of-the-secret"), "{shown}");
+        assert!(
+            shown.contains("bot") && !shown.contains("digest-of-the-secret"),
+            "{shown}"
+        );
         let record = Record {
             app: AppRow {
                 id: "app".to_owned(),

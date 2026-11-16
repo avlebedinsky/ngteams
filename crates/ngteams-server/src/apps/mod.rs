@@ -116,14 +116,16 @@ impl BotsConfig {
         Duration::from_secs(self.key_rotation)
     }
 
-    /// Whether the values are usable: lifetimes above zero, an absolute `https` scope (`http` on loopback) that
-    /// names no resource a person's token is for, and absolute issuer and service URLs.
+    /// Whether the values are usable: lifetimes above zero, an absolute `https` or `http` scope that names no
+    /// resource a person's token is for ([`Config::person_audiences`]), and absolute issuer and service URLs.
     #[must_use]
     pub fn usable(&self, person_audiences: &[String]) -> bool {
         let scope = Url::parse(&self.scope).ok();
         let scope_ok = scope.is_some_and(|scope| matches!(scope.scheme(), "https" | "http") && scope.has_host())
             && !self.scope.ends_with('/')
-            && !person_audiences.iter().any(|audience| audience.trim_end_matches('/') == self.scope);
+            && !person_audiences
+                .iter()
+                .any(|audience| audience.trim_end_matches('/').eq_ignore_ascii_case(&self.scope));
         let issuer_ok = self.issuer.as_deref().is_none_or(|issuer| Url::parse(issuer).is_ok());
         let service_ok = self.service_url.as_ref().is_none_or(Url::has_host);
         scope_ok
@@ -498,7 +500,10 @@ mod tests {
 
     #[test]
     fn the_bot_scope_names_no_persons_audience_and_lifetimes_are_above_zero() {
-        let people = vec!["https://api.spaces.skype.com".to_owned(), "https://presence.teams.microsoft.com/".to_owned()];
+        let people = vec![
+            "https://api.spaces.skype.com".to_owned(),
+            "https://presence.teams.microsoft.com/".to_owned(),
+        ];
         assert!(BotsConfig::default().usable(&people));
         for scope in [
             "https://api.spaces.skype.com",
@@ -523,6 +528,24 @@ mod tests {
             ..BotsConfig::default()
         };
         assert!(!issuer.usable(&people));
+    }
+
+    #[test]
+    fn a_config_whose_bot_scope_is_the_origin_or_a_workflows_audience_is_refused() {
+        let mut config = Config::default();
+        assert!(config.check().is_ok());
+        for scope in [
+            config.origin(),
+            config.origin().to_uppercase(),
+            crate::workflows::audiences(&config)[0].clone(),
+        ] {
+            config.bots.scope = scope;
+            assert!(
+                matches!(config.check(), Err(crate::config::ConfigError::Bots)),
+                "{}",
+                config.bots.scope
+            );
+        }
     }
 
     #[test]

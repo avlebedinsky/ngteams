@@ -91,7 +91,11 @@ struct Bot {
 async fn bot(registry: &Registry, name: &str) -> Bot {
     let added = registry.register(name, "https://bot.example.test/api/messages").await;
     let tenant = registry.server.app.issuer.tenant().to_owned();
-    let metadata = get(&registry.server, &format!("/{tenant}/v2.0/.well-known/openid-configuration")).await;
+    let metadata = get(
+        &registry.server,
+        &format!("/{tenant}/v2.0/.well-known/openid-configuration"),
+    )
+    .await;
     Bot {
         id: added["id"].as_str().unwrap().to_owned(),
         secret: added["secret"].as_str().unwrap().to_owned(),
@@ -107,14 +111,30 @@ async fn a_bot_gets_a_token_in_msals_exact_form_through_the_metadata_msal_reads(
         let tenant = server.app.issuer.tenant().to_owned();
         let origin = server.origin.clone();
         let metadata = get(server, &format!("/{tenant}/v2.0/.well-known/openid-configuration")).await;
-        assert_eq!(metadata["token_endpoint"], format!("{origin}/{tenant}/oauth2/v2.0/token"));
+        assert_eq!(
+            metadata["token_endpoint"],
+            format!("{origin}/{tenant}/oauth2/v2.0/token")
+        );
         assert_eq!(metadata["issuer"], format!("{origin}/{tenant}/v2.0"));
         assert_eq!(metadata["jwks_uri"], format!("{origin}/{tenant}/discovery/v2.0/keys"));
-        assert!(metadata["authorization_endpoint"].as_str().unwrap().starts_with(&origin));
-        assert_eq!(metadata["token_endpoint_auth_methods_supported"], json!(["client_secret_post", "client_secret_basic"]));
+        assert!(
+            metadata["authorization_endpoint"]
+                .as_str()
+                .unwrap()
+                .starts_with(&origin)
+        );
+        assert_eq!(
+            metadata["token_endpoint_auth_methods_supported"],
+            json!(["client_secret_post", "client_secret_basic"])
+        );
         let echo = bot(&registry, "Echo (synthetic)").await;
 
-        let (status, _, answer) = post(&echo.token_endpoint, &msal_node_form(&echo.id, &echo.secret, BOT_SCOPE), None).await;
+        let (status, _, answer) = post(
+            &echo.token_endpoint,
+            &msal_node_form(&echo.id, &echo.secret, BOT_SCOPE),
+            None,
+        )
+        .await;
         assert_eq!(status, 200, "{answer}");
         assert_eq!(answer["token_type"], "Bearer");
         let lifetime = answer["expires_in"].as_u64().unwrap();
@@ -177,24 +197,45 @@ async fn a_grant_for_another_scope_tenant_or_kind_is_refused_as_entra_refuses_it
     let server = &registry.server;
     let echo = bot(&registry, "Echo (synthetic)").await;
     let form = |scope: &str| msal_node_form(&echo.id, &echo.secret, scope);
-    for scope in ["https://api.spaces.skype.com/.default", "https://ic3.teams.office.com/.default", "openid"] {
+    for scope in [
+        "https://api.spaces.skype.com/.default",
+        "https://ic3.teams.office.com/.default",
+        "openid",
+    ] {
         let (status, _, answer) = post(&echo.token_endpoint, &form(scope), None).await;
-        assert_eq!((status, aadsts(&answer)), (400, ("invalid_scope".to_owned(), 70_011)), "{scope}");
+        assert_eq!(
+            (status, aadsts(&answer)),
+            (400, ("invalid_scope".to_owned(), 70_011)),
+            "{scope}"
+        );
     }
     let elsewhere = format!("{}/contoso.example/oauth2/v2.0/token", server.origin);
     let (status, _, answer) = post(&elsewhere, &form(BOT_SCOPE), None).await;
     assert_eq!((status, aadsts(&answer)), (400, ("invalid_request".to_owned(), 90_002)));
-    let (status, _) = call(server, Method::GET, "/contoso.example/v2.0/.well-known/openid-configuration", None, None).await;
+    let (status, _) = call(
+        server,
+        Method::GET,
+        "/contoso.example/v2.0/.well-known/openid-configuration",
+        None,
+        None,
+    )
+    .await;
     assert_eq!(status, 400);
 
     let mut password = form(BOT_SCOPE);
     password[2].1 = "password".to_owned();
     let (status, _, answer) = post(&echo.token_endpoint, &password, None).await;
-    assert_eq!((status, aadsts(&answer)), (400, ("unsupported_grant_type".to_owned(), 70_003)));
+    assert_eq!(
+        (status, aadsts(&answer)),
+        (400, ("unsupported_grant_type".to_owned(), 70_003))
+    );
     let mut no_grant = form(BOT_SCOPE);
     no_grant.retain(|(name, _)| *name != "grant_type");
     let (status, _, answer) = post(&echo.token_endpoint, &no_grant, None).await;
-    assert_eq!((status, aadsts(&answer)), (400, ("invalid_request".to_owned(), 900_144)));
+    assert_eq!(
+        (status, aadsts(&answer)),
+        (400, ("invalid_request".to_owned(), 900_144))
+    );
     let mut bare = form(BOT_SCOPE);
     bare.retain(|(name, _)| *name != "client_secret");
     let (status, _, answer) = post(&echo.token_endpoint, &bare, None).await;
@@ -204,7 +245,13 @@ async fn a_grant_for_another_scope_tenant_or_kind_is_refused_as_entra_refuses_it
     let (status, _, answer) = post(&server.token_endpoint(), &form(BOT_SCOPE), None).await;
     assert_eq!((status, aadsts(&answer).0.as_str()), (400, "invalid_scope"));
     registry.server.add_user("bob@own.test", "Bob").await;
-    registry.server.session("bob@own.test").await.skypetoken().await.unwrap();
+    registry
+        .server
+        .session("bob@own.test")
+        .await
+        .skypetoken()
+        .await
+        .unwrap();
     registry.server.stop().await;
 }
 
@@ -216,19 +263,40 @@ async fn a_wrong_secret_is_refused_and_too_many_hold_the_bot_off() {
     let wrong = msal_node_form(&echo.id, "not-the-secret-0000000000000000000000000", BOT_SCOPE);
     for _ in 0..3 {
         let (status, _, answer) = post(&echo.token_endpoint, &wrong, None).await;
-        assert_eq!((status, aadsts(&answer)), (401, ("invalid_client".to_owned(), 7_000_215)), "{answer}");
+        assert_eq!(
+            (status, aadsts(&answer)),
+            (401, ("invalid_client".to_owned(), 7_000_215)),
+            "{answer}"
+        );
     }
     // an unknown bot is told the same
     let stranger = msal_node_form(&uuid::Uuid::new_v4().to_string(), &echo.secret, BOT_SCOPE);
     let (status, _, answer) = post(&echo.token_endpoint, &stranger, None).await;
-    assert_eq!((status, aadsts(&answer)), (401, ("invalid_client".to_owned(), 7_000_215)));
-    // held off, the right secret too, until the window ends; other bots aren't
-    let right = msal_node_form(&echo.id, &echo.secret, BOT_SCOPE);
-    let (status, retry, answer) = post(&echo.token_endpoint, &right, None).await;
-    assert_eq!((status, answer["error"].as_str()), (429, Some("temporarily_unavailable")), "{answer}");
+    assert_eq!(
+        (status, aadsts(&answer)),
+        (401, ("invalid_client".to_owned(), 7_000_215))
+    );
+    // more wrong secrets are held off until the window ends; other bots aren't
+    let (status, retry, answer) = post(&echo.token_endpoint, &wrong, None).await;
+    assert_eq!(
+        (status, answer["error"].as_str()),
+        (429, Some("temporarily_unavailable")),
+        "{answer}"
+    );
     assert!(retry.unwrap().parse::<u64>().unwrap() >= 1);
-    let (status, _, answer) = post(&other.token_endpoint, &msal_node_form(&other.id, &other.secret, BOT_SCOPE), None).await;
+    let (status, _, answer) = post(
+        &other.token_endpoint,
+        &msal_node_form(&other.id, &other.secret, BOT_SCOPE),
+        None,
+    )
+    .await;
     assert_eq!(status, 200, "{answer}");
+    // the bot's id is public: the bot with its secret still gets its token, and that clears the count
+    let right = msal_node_form(&echo.id, &echo.secret, BOT_SCOPE);
+    let (status, _, answer) = post(&echo.token_endpoint, &right, None).await;
+    assert_eq!(status, 200, "{answer}");
+    let (status, _, answer) = post(&echo.token_endpoint, &wrong, None).await;
+    assert_eq!(status, 401, "{answer}");
     registry.server.stop().await;
 }
 
@@ -252,8 +320,10 @@ async fn the_hold_is_shared_by_every_node_through_redis() {
         let wrong = msal_node_form(&echo.id, "not-the-secret-0000000000000000000000000", BOT_SCOPE);
         post(&echo.token_endpoint, &wrong, None).await;
         post(&on_second, &wrong, None).await;
-        let (status, _, answer) = post(&on_second, &msal_node_form(&echo.id, &echo.secret, BOT_SCOPE), None).await;
+        let (status, _, answer) = post(&on_second, &wrong, None).await;
         assert_eq!(status, 429, "{answer}");
+        let (status, _, answer) = post(&on_second, &msal_node_form(&echo.id, &echo.secret, BOT_SCOPE), None).await;
+        assert_eq!(status, 200, "{answer}");
         second.stop().await;
         registry.server.stop().await;
     }
@@ -267,15 +337,23 @@ async fn a_disabled_rotated_or_deleted_bot_gets_no_token_with_what_it_had() {
         let path = app_path(&echo.id);
         let form = msal_node_form(&echo.id, &echo.secret, BOT_SCOPE);
 
-        let (status, _) = registry.call(Method::PATCH, &path, Some(json!({"enabled": false}))).await;
+        let (status, _) = registry
+            .call(Method::PATCH, &path, Some(json!({"enabled": false})))
+            .await;
         assert_eq!(status, 200);
         let (status, _, answer) = post(&echo.token_endpoint, &form, None).await;
-        assert_eq!((status, aadsts(&answer)), (400, ("unauthorized_client".to_owned(), 7_000_112)), "{answer}");
+        assert_eq!(
+            (status, aadsts(&answer)),
+            (400, ("unauthorized_client".to_owned(), 7_000_112)),
+            "{answer}"
+        );
         // a wrong secret of a disabled bot is still only a wrong secret
         let wrong = msal_node_form(&echo.id, "not-the-secret-0000000000000000000000000", BOT_SCOPE);
         let (status, _, _) = post(&echo.token_endpoint, &wrong, None).await;
         assert_eq!(status, 401);
-        let (status, _) = registry.call(Method::PATCH, &path, Some(json!({"enabled": true}))).await;
+        let (status, _) = registry
+            .call(Method::PATCH, &path, Some(json!({"enabled": true})))
+            .await;
         assert_eq!(status, 200);
         let (status, _, answer) = post(&echo.token_endpoint, &form, None).await;
         assert_eq!(status, 200, "{answer}");
@@ -293,6 +371,27 @@ async fn a_disabled_rotated_or_deleted_bot_gets_no_token_with_what_it_had() {
         assert_eq!((status, aadsts(&answer).0.as_str()), (401, "invalid_client"));
         registry.server.stop().await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unsigned_bot_takes_no_token() {
+    let registry = Registry::open_with(Backend::Sqlite, |config| config.bots.allow_unsigned = true).await;
+    let echo = bot(&registry, "Echo (synthetic)").await;
+    let form = msal_node_form(&echo.id, &echo.secret, BOT_SCOPE);
+    let (status, _, answer) = post(&echo.token_endpoint, &form, None).await;
+    assert_eq!(status, 200, "{answer}");
+    let path = app_path(&echo.id);
+    let (status, _) = registry
+        .call(Method::PATCH, &path, Some(json!({"auth_mode": "unsigned"})))
+        .await;
+    assert_eq!(status, 200);
+    let (status, _, answer) = post(&echo.token_endpoint, &form, None).await;
+    assert_eq!(
+        (status, aadsts(&answer)),
+        (400, ("unauthorized_client".to_owned(), 7_000_112)),
+        "{answer}"
+    );
+    registry.server.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

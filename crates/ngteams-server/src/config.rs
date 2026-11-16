@@ -474,7 +474,7 @@ impl Config {
         if !self.mixer.usable() {
             return Err(ConfigError::Mixer);
         }
-        if !self.bots.usable(&self.audiences) {
+        if !self.bots.usable(&self.person_audiences()) {
             return Err(ConfigError::Bots);
         }
         Ok(())
@@ -484,6 +484,16 @@ impl Config {
     #[must_use]
     pub fn redis_timeout(&self) -> Duration {
         Duration::from_millis(self.redis_timeout_ms)
+    }
+
+    /// Every audience a person's token may be issued for: the configured services, the server's own origin (the
+    /// file service's), and Workflows' while it serves them.
+    #[must_use]
+    pub fn person_audiences(&self) -> Vec<String> {
+        let mut audiences = self.audiences.clone();
+        audiences.push(self.origin());
+        audiences.extend(crate::workflows::audiences(self));
+        audiences
     }
 
     /// The public origin without its trailing slash, the form bases are built on.

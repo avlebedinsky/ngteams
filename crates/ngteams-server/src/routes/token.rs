@@ -171,10 +171,7 @@ pub async fn token(
     let field = |name: &str| form.get(name).map(String::as_str).filter(|value| !value.is_empty());
     let client_id = field("client_id").ok_or_else(Refusal::missing)?;
     let scope = field("scope").ok_or_else(Refusal::missing)?;
-    // the file service's audience is the server's own origin, as a SharePoint site's is its origin
-    let resource = requested(scope, &app.config.audiences)
-        .or_else(|| requested(scope, &[app.config.origin()]))
-        .or_else(|| requested(scope, &crate::workflows::audiences(&app.config)))
+    let resource = requested(scope, &app.config.person_audiences())
         .filter(|wanted| !crate::workflows::withheld(&app.config, &wanted.audience))
         .ok_or_else(Refusal::scope)?;
     let (user, refresh) = match field("grant_type") {

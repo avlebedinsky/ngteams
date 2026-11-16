@@ -26,7 +26,13 @@ async fn get(server: &TestServer, url: &str) -> Value {
 
 /// What a bot SDK does with an activity's token, given the metadata URL it was configured with: its claims, or why
 /// it refuses it.
-async fn sdk_verifies(server: &TestServer, metadata: &str, token: &str, bot: &str, service_url: &str) -> Result<Value, String> {
+async fn sdk_verifies(
+    server: &TestServer,
+    metadata: &str,
+    token: &str,
+    bot: &str,
+    service_url: &str,
+) -> Result<Value, String> {
     let metadata = get(server, metadata).await;
     let keys = get(server, metadata["jwks_uri"].as_str().unwrap()).await;
     let header = jsonwebtoken::decode_header(token).map_err(|error| error.to_string())?;
@@ -70,7 +76,9 @@ async fn an_activity_token_verifies_against_the_published_keys_as_the_sdks_check
         let server = &registry.server;
         let origin = server.origin.clone();
         let tenant = server.app.issuer.tenant().to_owned();
-        let added = registry.register("Echo (synthetic)", "https://bot.example.test/api/messages").await;
+        let added = registry
+            .register("Echo (synthetic)", "https://bot.example.test/api/messages")
+            .await;
         let bot = added["id"].as_str().unwrap();
         let service_url = ngteams_server::apps::service_url(&server.app.config);
         assert_eq!(service_url, format!("{origin}/bot/"));
@@ -79,7 +87,12 @@ async fn an_activity_token_verifies_against_the_published_keys_as_the_sdks_check
         let metadata = get(server, "/bot/v1/.well-known/openidconfiguration").await;
         assert_eq!(metadata["issuer"], format!("{origin}/bot"));
         assert_eq!(metadata["jwks_uri"], format!("{origin}/bot/v1/.well-known/keys"));
-        assert!(metadata["id_token_signing_alg_values_supported"].as_array().unwrap().contains(&"RS256".into()));
+        assert!(
+            metadata["id_token_signing_alg_values_supported"]
+                .as_array()
+                .unwrap()
+                .contains(&"RS256".into())
+        );
         let published = get(server, "/bot/v1/.well-known/keys").await;
         for key in published["keys"].as_array().unwrap() {
             assert_eq!(key["kty"], "RSA");
@@ -96,9 +109,15 @@ async fn an_activity_token_verifies_against_the_published_keys_as_the_sdks_check
         let token = server.app.bot_keys.activity_token(bot, &service_url).unwrap();
         let header = jsonwebtoken::decode_header(&token).unwrap();
         assert_eq!(header.typ.as_deref(), Some("JWT"));
-        let claims = sdk_verifies(server, "/bot/v1/.well-known/openidconfiguration", &token, bot, &service_url)
-            .await
-            .unwrap();
+        let claims = sdk_verifies(
+            server,
+            "/bot/v1/.well-known/openidconfiguration",
+            &token,
+            bot,
+            &service_url,
+        )
+        .await
+        .unwrap();
         // exactly these: an SDK takes a token with `ver`, `appid` or `azp` for an emulator's or a skill's
         let names: BTreeSet<&str> = claims.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(names, BTreeSet::from(["aud", "exp", "iat", "iss", "nbf", "serviceurl"]));
@@ -107,11 +126,21 @@ async fn an_activity_token_verifies_against_the_published_keys_as_the_sdks_check
         assert!((300..=3600).contains(&lifetime), "{claims}");
 
         // another bot, another service URL or a token signed by anyone else is refused
-        let other = registry.register("Other (synthetic)", "https://other.example.test/api/messages").await;
+        let other = registry
+            .register("Other (synthetic)", "https://other.example.test/api/messages")
+            .await;
         let other = other["id"].as_str().unwrap();
         let metadata = "/bot/v1/.well-known/openidconfiguration";
-        assert!(sdk_verifies(server, metadata, &token, other, &service_url).await.is_err());
-        assert!(sdk_verifies(server, metadata, &token, bot, "https://elsewhere.example.test/").await.is_err());
+        assert!(
+            sdk_verifies(server, metadata, &token, other, &service_url)
+                .await
+                .is_err()
+        );
+        assert!(
+            sdk_verifies(server, metadata, &token, bot, "https://elsewhere.example.test/")
+                .await
+                .is_err()
+        );
         let foreign = {
             let rsa = aws_lc_rs::rsa::KeyPair::generate(aws_lc_rs::rsa::KeySize::Rsa2048).unwrap();
             let pkcs8 = aws_lc_rs::encoding::AsDer::<aws_lc_rs::encoding::Pkcs8V1Der>::as_der(&rsa).unwrap();
@@ -121,10 +150,18 @@ async fn an_activity_token_verifies_against_the_published_keys_as_the_sdks_check
             let key = jsonwebtoken::EncodingKey::from_rsa_pem(pem.as_bytes()).unwrap();
             jsonwebtoken::encode(&header, &claims, &key).unwrap()
         };
-        assert!(sdk_verifies(server, metadata, &foreign, bot, &service_url).await.is_err());
+        assert!(
+            sdk_verifies(server, metadata, &foreign, bot, &service_url)
+                .await
+                .is_err()
+        );
         // an EdDSA token of the server's own (a person's access token) is no activity token
         let person = registry.token().await;
-        assert!(sdk_verifies(server, metadata, &person, bot, &service_url).await.is_err());
+        assert!(
+            sdk_verifies(server, metadata, &person, bot, &service_url)
+                .await
+                .is_err()
+        );
         registry.server.stop().await;
     }
 }
@@ -132,8 +169,15 @@ async fn an_activity_token_verifies_against_the_published_keys_as_the_sdks_check
 fn pem_of(der: &[u8]) -> String {
     use base64::Engine as _;
     let body = base64::engine::general_purpose::STANDARD.encode(der);
-    let lines: Vec<&str> = body.as_bytes().chunks(64).map(|line| std::str::from_utf8(line).unwrap()).collect();
-    format!("-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n", lines.join("\n"))
+    let lines: Vec<&str> = body
+        .as_bytes()
+        .chunks(64)
+        .map(|line| std::str::from_utf8(line).unwrap())
+        .collect();
+    format!(
+        "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
+        lines.join("\n")
+    )
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -146,7 +190,9 @@ async fn two_nodes_share_the_bot_keys_and_a_rotation_on_one_is_published_by_both
             config.public_origin.clone_from(&first.app.config.public_origin);
         })
         .await;
-        let added = registry.register("Echo (synthetic)", "https://bot.example.test/api/messages").await;
+        let added = registry
+            .register("Echo (synthetic)", "https://bot.example.test/api/messages")
+            .await;
         let bot = added["id"].as_str().unwrap();
         let service_url = ngteams_server::apps::service_url(&first.app.config);
         let metadata = "/bot/v1/.well-known/openidconfiguration";
@@ -157,54 +203,117 @@ async fn two_nodes_share_the_bot_keys_and_a_rotation_on_one_is_published_by_both
             jsonwebtoken::decode_header(&before).unwrap().kid,
             jsonwebtoken::decode_header(&from_second).unwrap().kid
         );
-        sdk_verifies(&second, metadata, &before, bot, &service_url).await.unwrap();
+        sdk_verifies(&second, metadata, &before, bot, &service_url)
+            .await
+            .unwrap();
 
-        // the first node rotates: its new key is published by the second at once, and the earlier token still holds
+        // the first node publishes a new key: the second publishes it at once, and neither signs with it yet, as a
+        // bot may still hold the keys it fetched before
         let kid = first.app.bot_keys.rotate().await.unwrap();
-        let after = first.app.bot_keys.activity_token(bot, &service_url).unwrap();
-        assert_eq!(jsonwebtoken::decode_header(&after).unwrap().kid.as_deref(), Some(kid.as_str()));
-        sdk_verifies(&second, metadata, &after, bot, &service_url).await.unwrap();
-        sdk_verifies(&second, metadata, &before, bot, &service_url).await.unwrap();
+        let published = get(&second, "/bot/v1/.well-known/keys").await;
+        assert!(
+            published["keys"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|key| key["kid"] == kid.as_str()),
+            "{published}"
+        );
+        for node in [first, &second] {
+            node.app.bot_keys.reload().await.unwrap();
+            let after = node.app.bot_keys.activity_token(bot, &service_url).unwrap();
+            assert_eq!(
+                jsonwebtoken::decode_header(&after).unwrap().kid,
+                jsonwebtoken::decode_header(&before).unwrap().kid
+            );
+            sdk_verifies(node, metadata, &after, bot, &service_url).await.unwrap();
+        }
         sdk_verifies(first, metadata, &before, bot, &service_url).await.unwrap();
-        // the second signs with the new key once it reloads
-        second.app.bot_keys.reload().await.unwrap();
-        let reloaded = second.app.bot_keys.activity_token(bot, &service_url).unwrap();
-        assert_eq!(jsonwebtoken::decode_header(&reloaded).unwrap().kid.as_deref(), Some(kid.as_str()));
         second.stop().await;
         registry.server.stop().await;
     }
 }
 
+diesel::table! {
+    bot_signing_keys (kid) {
+        kid -> Text,
+        retired_at -> Nullable<BigInt>,
+    }
+}
+
+/// Marks the bot signing key `kid` retired at `at`.
+async fn retire(server: &TestServer, kid: &str, at: i64) -> Result<usize, ngteams_server::db::DbError> {
+    use diesel::{ExpressionMethods as _, QueryDsl as _};
+    use diesel_async::RunQueryDsl as _;
+    let query =
+        diesel::update(bot_signing_keys::table.find(kid.to_owned())).set(bot_signing_keys::retired_at.eq(Some(at)));
+    let db = &server.app.db;
+    ngteams_server::with_conn!(db, |conn| Ok(query.execute(conn).await?))
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn housekeeping_rotates_a_due_bot_key_and_drops_one_nothing_it_signed_can_still_use() {
+async fn housekeeping_publishes_the_next_bot_key_before_it_signs_and_drops_one_nothing_it_signed_can_still_use() {
     let registry = Registry::open_with(crate::support::Backend::Sqlite, |config| {
         config.bots.key_rotation = 1;
         config.bots.activity_token_lifetime = 1;
     })
     .await;
     let server = &registry.server;
-    let added = registry.register("Echo (synthetic)", "https://bot.example.test/api/messages").await;
+    let added = registry
+        .register("Echo (synthetic)", "https://bot.example.test/api/messages")
+        .await;
     let bot = added["id"].as_str().unwrap();
     let service_url = ngteams_server::apps::service_url(&server.app.config);
     let kid = |token: &str| jsonwebtoken::decode_header(token).unwrap().kid.unwrap();
+    let signing = || kid(&server.app.bot_keys.activity_token(bot, &service_url).unwrap());
     let published = |server: &TestServer| {
         let server = server.origin.clone();
         async move {
-            let keys: Value = reqwest::get(format!("{server}/bot/v1/.well-known/keys")).await.unwrap().json().await.unwrap();
-            keys["keys"].as_array().unwrap().iter().map(|key| key["kid"].as_str().unwrap().to_owned()).collect::<Vec<_>>()
+            let keys: Value = reqwest::get(format!("{server}/bot/v1/.well-known/keys"))
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            keys["keys"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|key| key["kid"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
         }
     };
-    let first = server.app.bot_keys.activity_token(bot, &service_url).unwrap();
+    let first = signing();
     let shown = format!("{:?}", server.app.bot_keys);
-    assert!(shown.contains(&kid(&first)) && !shown.contains("PRIVATE"), "{shown}");
+    assert!(shown.contains(&first) && !shown.contains("PRIVATE"), "{shown}");
+
+    // due: the next key is published, and the first still signs
     tokio::time::sleep(Duration::from_millis(1100)).await;
     ngteams_server::app::tidy(&server.app).await;
-    let second = server.app.bot_keys.activity_token(bot, &service_url).unwrap();
-    assert_ne!(kid(&first), kid(&second));
+    assert_eq!(signing(), first);
     let keys = published(server).await;
-    assert!(keys.contains(&kid(&first)) && keys.contains(&kid(&second)), "{keys:?}");
-    // the first key goes once its tokens and the nodes' reload allowance are past
-    let keep = ngteams_server::apps::keys::retention(&server.app.config);
-    assert!(keep >= Duration::from_secs(1) && keep < Duration::from_hours(4));
+    assert_eq!(keys.len(), 2, "{keys:?}");
+    let next = keys.iter().find(|key| **key != first).unwrap().clone();
+
+    // published long enough, it signs; the first is retired but still published
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    ngteams_server::app::tidy(&server.app).await;
+    assert_eq!(signing(), next);
+    let keys = published(server).await;
+    assert!(keys.contains(&first) && keys.contains(&next), "{keys:?}");
+
+    // a key retired longer ago than its tokens and the nodes' reload allowance goes; one retired since stays
+    let keep = i64::try_from(ngteams_server::apps::keys::retention(&server.app.config).as_secs()).unwrap();
+    assert!(keep < 4 * 3600);
+    let recent = server.app.bot_keys.rotate().await.unwrap();
+    let at = ngteams_server::db::now();
+    assert_eq!(retire(server, &first, at - keep - 60).await.unwrap(), 1);
+    assert_eq!(retire(server, &recent, at - keep + 60).await.unwrap(), 1);
+    ngteams_server::app::tidy(&server.app).await;
+    let keys = published(server).await;
+    assert!(
+        !keys.contains(&first) && keys.contains(&recent) && keys.contains(&next),
+        "{keys:?}"
+    );
     registry.server.stop().await;
 }

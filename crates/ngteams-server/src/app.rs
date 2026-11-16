@@ -26,7 +26,7 @@ use crate::workflows::Limiter;
 type Started = (Arc<dyn Fanout>, Arc<dyn Journal>, Throttle, Throttle, Limiter);
 
 /// The largest request body the auth endpoints take.
-const AUTH_BODY_LIMIT: usize = 64 * 1024;
+pub(crate) const AUTH_BODY_LIMIT: usize = 64 * 1024;
 /// How long a request may take.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// How often a node rotates keys when due and drops expired refresh tokens.
@@ -77,12 +77,13 @@ pub enum StartError {
     Previews(String),
 }
 
-/// How long a retired key is kept: as long as the longest-lived thing it signed, an access token or a file link,
-/// may still have to verify.
+/// How long a retired key is kept: as long as the longest-lived thing it signed, an access token, a bot's token or a
+/// file link, may still have to verify.
 fn key_retention(config: &Config) -> Duration {
     let longest = config
         .tokens
         .access()
+        .max(config.bots.token_lifetime())
         .max(Duration::from_secs(config.media.link_lifetime));
     // Allow two missed maintenance ticks before other nodes reload their signer.
     longest + 3 * MAINTENANCE + Duration::from_secs(crate::auth::tokens::LEEWAY)
@@ -275,5 +276,7 @@ mod tests {
         assert_eq!(key_retention(&config), Duration::from_hours(1) + allowance);
         config.media.link_lifetime = 86_400;
         assert_eq!(key_retention(&config), Duration::from_hours(24) + allowance);
+        config.bots.token_lifetime = 2 * 86_400;
+        assert_eq!(key_retention(&config), Duration::from_hours(48) + allowance);
     }
 }

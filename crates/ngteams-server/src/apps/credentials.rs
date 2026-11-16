@@ -8,14 +8,15 @@
 //!   `/adfs/discovery/keys`.
 //!
 //! A refused grant takes Entra's JSON shape and code, so an SDK logs what Entra would have said. Failed secrets are
-//! counted per bot by the sign-in [`crate::throttle::Throttle`], across nodes when the server has Redis; a held-off bot
-//! gets 429 with `Retry-After`. A wrong secret and an unknown bot are told the same.
+//! counted per bot by the sign-in [`crate::throttle::Throttle`], across nodes when the server has Redis; a wrong secret
+//! while the bot is held off gets 429 with `Retry-After`, and the right one is never held off (a bot's id is public).
+//! A wrong secret and an unknown bot are told the same.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Path, State};
+use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, RETRY_AFTER};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -37,11 +38,14 @@ const BOT_FRAMEWORK_TENANT: &str = "botframework.com";
 const AUTH_METHODS: [&str; 2] = ["client_secret_post", "client_secret_basic"];
 
 pub(super) fn router() -> Router<Arc<App>> {
-    Router::new()
+    let tokens = Router::new()
         .route("/{tenant}/oauth2/v2.0/token", post(tenant_token))
+        .route("/adfs/oauth2/token", post(adfs_token))
+        .layer(DefaultBodyLimit::max(crate::app::AUTH_BODY_LIMIT));
+    Router::new()
+        .merge(tokens)
         .route("/{tenant}/v2.0/.well-known/openid-configuration", get(tenant_metadata))
         .route("/{tenant}/discovery/v2.0/keys", get(tenant_keys))
-        .route("/adfs/oauth2/token", post(adfs_token))
         .route("/adfs/.well-known/openid-configuration", get(adfs_metadata))
         .route("/adfs/discovery/keys", get(keys))
         .route("/bot/v1/.well-known/openidconfiguration", get(bot_metadata))
@@ -129,6 +133,15 @@ impl Refusal {
             "unauthorized_client",
             7_000_112,
             "The application is disabled.",
+        )
+    }
+
+    const fn unsigned() -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "unauthorized_client",
+            7_000_112,
+            "The application is registered without authentication and takes no token.",
         )
     }
 
@@ -349,23 +362,32 @@ async fn grant(app: &App, headers: &HeaderMap, form: &BTreeMap<String, String>) 
     let (client_id, secret) = client(headers, form)?;
     let client_id = client_id.trim().to_lowercase();
     let wanted = format!("{}/.default", app.config.bots.scope);
-    if form.get("scope").is_none_or(|scope| scope.split_whitespace().ne([wanted.as_str()])) {
+    if form
+        .get("scope")
+        .is_none_or(|scope| scope.split_whitespace().ne([wanted.as_str()]))
+    {
         return Err(Refusal::scope());
     }
     let secret = secret.ok_or_else(Refusal::no_secret)?;
     let attempts = format!("bot:{client_id}");
-    if let Some(wait) = app.throttle.reserve(&attempts).await {
-        return Err(Refusal::held(wait));
-    }
     let registered = super::repo::credentials(&app.db, &client_id).await?;
     let given = super::digest(&secret);
     let proven = registered.as_ref().is_some_and(|bot| {
         aws_lc_rs::constant_time::verify_slices_are_equal(bot.secret_hash.as_bytes(), given.as_bytes()).is_ok()
     });
-    let bot = registered.filter(|_| proven).ok_or_else(Refusal::credentials)?;
+    // the bot's id is public, so a hold must not lock out the bot that has its secret
+    let Some(bot) = registered.filter(|_| proven) else {
+        return Err(match app.throttle.reserve(&attempts).await {
+            Some(wait) => Refusal::held(wait),
+            None => Refusal::credentials(),
+        });
+    };
     app.throttle.succeeded(&attempts).await;
     if !bot.enabled {
         return Err(Refusal::disabled());
+    }
+    if !bot.signed {
+        return Err(Refusal::unsigned());
     }
     issue(app, &client_id)
 }

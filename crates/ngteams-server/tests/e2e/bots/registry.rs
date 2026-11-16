@@ -54,7 +54,12 @@ async fn an_admin_registers_a_bot_from_the_form_and_sees_its_secret_once() {
         assert_eq!(read["bot"], added["bot"]);
         let (status, listed) = registry.call(Method::GET, APPS, None).await;
         assert_eq!(status, 200, "{listed}");
-        let ids: Vec<&str> = listed["apps"].as_array().unwrap().iter().map(|app| app["id"].as_str().unwrap()).collect();
+        let ids: Vec<&str> = listed["apps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|app| app["id"].as_str().unwrap())
+            .collect();
         assert_eq!(ids, [id]);
         assert!(!listed.to_string().contains(secret));
         let audit = audit_actions(&registry).await;
@@ -62,7 +67,13 @@ async fn an_admin_registers_a_bot_from_the_form_and_sees_its_secret_once() {
         assert_eq!(audit[0].1, "Echo (synthetic)");
         assert!(!format!("{audit:?}").contains(secret));
         if backend == Backend::Sqlite {
-            let file = registry.server.app.config.database_url.trim_start_matches("sqlite://").to_owned();
+            let file = registry
+                .server
+                .app
+                .config
+                .database_url
+                .trim_start_matches("sqlite://")
+                .to_owned();
             let mut stored = std::fs::read(&file).unwrap();
             stored.extend(std::fs::read(format!("{file}-wal")).unwrap_or_default());
             let found = stored.windows(secret.len()).any(|window| window == secret.as_bytes());
@@ -81,13 +92,37 @@ async fn the_form_refuses_what_a_bot_cant_be_and_only_an_admin_may_use_it() {
     };
     let cases = [
         (json!({"name": " ", "endpoint": ECHO_ENDPOINT}), 400, "InvalidName"),
-        (json!({"name": "x".repeat(300), "endpoint": ECHO_ENDPOINT}), 400, "InvalidName"),
-        (json!({"name": "Echo", "endpoint": "http://echo.example.test/api"}), 400, "InvalidEndpoint"),
-        (json!({"name": "Echo", "endpoint": "ftp://echo.example.test/api"}), 400, "InvalidEndpoint"),
-        (json!({"name": "Echo", "endpoint": "https://user:pw@echo.example.test/"}), 400, "InvalidEndpoint"),
+        (
+            json!({"name": "x".repeat(300), "endpoint": ECHO_ENDPOINT}),
+            400,
+            "InvalidName",
+        ),
+        (
+            json!({"name": "Echo", "endpoint": "http://echo.example.test/api"}),
+            400,
+            "InvalidEndpoint",
+        ),
+        (
+            json!({"name": "Echo", "endpoint": "ftp://echo.example.test/api"}),
+            400,
+            "InvalidEndpoint",
+        ),
+        (
+            json!({"name": "Echo", "endpoint": "https://user:pw@echo.example.test/"}),
+            400,
+            "InvalidEndpoint",
+        ),
         (json!({"name": "Echo", "endpoint": "not a url"}), 400, "InvalidEndpoint"),
-        (json!({"name": "Echo", "endpoint": ECHO_ENDPOINT, "auth_mode": "unsigned"}), 400, "UnsignedNotAllowed"),
-        (json!({"name": "Echo", "endpoint": ECHO_ENDPOINT, "auth_mode": "magic"}), 400, "InvalidRequest"),
+        (
+            json!({"name": "Echo", "endpoint": ECHO_ENDPOINT, "auth_mode": "unsigned"}),
+            400,
+            "UnsignedNotAllowed",
+        ),
+        (
+            json!({"name": "Echo", "endpoint": ECHO_ENDPOINT, "auth_mode": "magic"}),
+            400,
+            "InvalidRequest",
+        ),
     ];
     for (body, status, code) in cases {
         let (got, answer) = refused(body.clone()).await;
@@ -105,7 +140,14 @@ async fn the_form_refuses_what_a_bot_cant_be_and_only_an_admin_may_use_it() {
     registry.server.add_user("bob@own.test", "Bob").await;
     let bob = registry.server.session("bob@own.test").await;
     let token = bob.access_token(teams_auth::token::SPACES_RESOURCE).await.unwrap();
-    let (status, answer) = call(&registry.server, Method::POST, APPS, Some(token.token.expose()), Some(body)).await;
+    let (status, answer) = call(
+        &registry.server,
+        Method::POST,
+        APPS,
+        Some(token.token.expose()),
+        Some(body),
+    )
+    .await;
     assert_eq!((status, error_code(&answer)), (403, "NotAdmin"));
     let (status, _) = call(&registry.server, Method::GET, APPS, Some(token.token.expose()), None).await;
     assert_eq!(status, 403);
@@ -154,7 +196,13 @@ async fn a_package_registers_its_app_and_bot_and_a_new_version_replaces_it() {
         let storage = registry.server.app.storage.as_ref();
         let color = storage.get(&format!("apps/{app_id}/color.png")).await.unwrap().unwrap();
         assert_eq!(color.as_ref(), png(192, 192).as_slice());
-        assert!(storage.get(&format!("apps/{app_id}/outline.png")).await.unwrap().is_some());
+        assert!(
+            storage
+                .get(&format!("apps/{app_id}/outline.png"))
+                .await
+                .unwrap()
+                .is_some()
+        );
 
         // its endpoint is set afterwards
         let endpoint = json!({"endpoint": "https://polls.example.test/api/messages"});
@@ -171,7 +219,11 @@ async fn a_package_registers_its_app_and_bot_and_a_new_version_replaces_it() {
         let mut newer = manifest(&app_id, &bot_id, "1.1.0");
         newer["name"]["short"] = "Polls 2 (synthetic)".into();
         let (status, replaced) = registry
-            .upload(&replace, Method::PUT, package(&newer, &png(192, 192), &png(32, 32), &[]))
+            .upload(
+                &replace,
+                Method::PUT,
+                package(&newer, &png(192, 192), &png(32, 32), &[]),
+            )
             .await;
         assert_eq!(status, 200, "{replaced}");
         assert_eq!(replaced["version"], "1.1.0");
@@ -190,7 +242,11 @@ async fn a_package_registers_its_app_and_bot_and_a_new_version_replaces_it() {
         let (status, answer) = registry.upload(&upload, Method::POST, thief).await;
         assert_eq!((status, error_code(&answer)), (409, "BotExists"), "{answer}");
 
-        let actions: Vec<String> = audit_actions(&registry).await.into_iter().map(|entry| entry.0).collect();
+        let actions: Vec<String> = audit_actions(&registry)
+            .await
+            .into_iter()
+            .map(|entry| entry.0)
+            .collect();
         assert_eq!(actions[..3], ["app.package", "app.update", "app.add"]);
         registry.server.stop().await;
     }
@@ -211,32 +267,59 @@ async fn a_package_that_teams_would_refuse_is_refused() {
         ("not a zip", bytes::Bytes::from_static(b"PK not really")),
         ("no manifest", {
             let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-            zip.start_file("color.png", zip::write::SimpleFileOptions::default()).unwrap();
+            zip.start_file("color.png", zip::write::SimpleFileOptions::default())
+                .unwrap();
             std::io::Write::write_all(&mut zip, &png(192, 192)).unwrap();
             bytes::Bytes::from(zip.finish().unwrap().into_inner())
         }),
         ("manifest not json", {
             let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-            zip.start_file("manifest.json", zip::write::SimpleFileOptions::default()).unwrap();
+            zip.start_file("manifest.json", zip::write::SimpleFileOptions::default())
+                .unwrap();
             std::io::Write::write_all(&mut zip, b"{ nope").unwrap();
             bytes::Bytes::from(zip.finish().unwrap().into_inner())
         }),
         ("id not a GUID", with(|m| m["id"] = "polls".into())),
-        ("bot id not a GUID", with(|m| m["bots"][0]["botId"] = "polls-bot".into())),
+        (
+            "bot id not a GUID",
+            with(|m| m["bots"][0]["botId"] = "polls-bot".into()),
+        ),
         ("no short name", with(|m| m["name"]["short"] = "".into())),
-        ("two bots", with(|m| {
-            let bot = m["bots"][0].clone();
-            m["bots"].as_array_mut().unwrap().push(bot);
-        })),
-        ("unknown bot scope", with(|m| m["bots"][0]["scopes"] = json!(["everywhere"]))),
-        ("icon file missing", with(|m| m["icons"]["color"] = "missing.png".into())),
-        ("color icon of the wrong size", package(&good, &png(64, 64), &png(32, 32), &[])),
-        ("outline icon of the wrong size", package(&good, &png(192, 192), &png(48, 48), &[])),
-        ("icon that isn't a picture", package(&good, b"GIF? no", &png(32, 32), &[])),
+        (
+            "two bots",
+            with(|m| {
+                let bot = m["bots"][0].clone();
+                m["bots"].as_array_mut().unwrap().push(bot);
+            }),
+        ),
+        (
+            "unknown bot scope",
+            with(|m| m["bots"][0]["scopes"] = json!(["everywhere"])),
+        ),
+        (
+            "icon file missing",
+            with(|m| m["icons"]["color"] = "missing.png".into()),
+        ),
+        (
+            "color icon of the wrong size",
+            package(&good, &png(64, 64), &png(32, 32), &[]),
+        ),
+        (
+            "outline icon of the wrong size",
+            package(&good, &png(192, 192), &png(48, 48), &[]),
+        ),
+        (
+            "icon that isn't a picture",
+            package(&good, b"GIF? no", &png(32, 32), &[]),
+        ),
     ];
     for (case, bytes) in cases {
         let (status, answer) = registry.upload(&upload, Method::POST, bytes).await;
-        assert_eq!((status, error_code(&answer)), (400, "InvalidPackage"), "{case}: {answer}");
+        assert_eq!(
+            (status, error_code(&answer)),
+            (400, "InvalidPackage"),
+            "{case}: {answer}"
+        );
         assert!(!answer["error"]["message"].as_str().unwrap().is_empty());
     }
     // a package bigger than the limit (of bytes that don't compress)
@@ -268,7 +351,11 @@ async fn a_package_that_teams_would_refuse_is_refused() {
     tab_only.as_object_mut().unwrap().remove("bots");
     tab_only.as_object_mut().unwrap().remove("composeExtensions");
     let (status, added) = registry
-        .upload(&upload, Method::POST, package(&tab_only, &png(192, 192), &png(32, 32), &[]))
+        .upload(
+            &upload,
+            Method::POST,
+            package(&tab_only, &png(192, 192), &png(32, 32), &[]),
+        )
         .await;
     assert_eq!(status, 201, "{added}");
     assert_eq!(added["bot"], Value::Null);
@@ -298,10 +385,14 @@ async fn an_admin_names_who_may_use_an_app_and_deletes_it() {
                 .await;
             assert_eq!((status, error_code(&answer)), (400, "UnknownUser"), "{answer}");
         }
-        let (status, answer) = registry.call(Method::PATCH, &path, Some(json!({"colour": "red"}))).await;
+        let (status, answer) = registry
+            .call(Method::PATCH, &path, Some(json!({"colour": "red"})))
+            .await;
         assert_eq!(status, 400, "{answer}");
 
-        let (status, off) = registry.call(Method::PATCH, &path, Some(json!({"enabled": false}))).await;
+        let (status, off) = registry
+            .call(Method::PATCH, &path, Some(json!({"enabled": false})))
+            .await;
         assert_eq!(status, 200, "{off}");
         assert_eq!(off["enabled"], false);
 
@@ -324,7 +415,10 @@ async fn an_admin_names_who_may_use_an_app_and_deletes_it() {
 
         let audit = audit_actions(&registry).await;
         let actions: Vec<&str> = audit.iter().map(|entry| entry.0.as_str()).collect();
-        assert_eq!(actions[..5], ["app.delete", "app.secret", "app.update", "app.update", "app.add"]);
+        assert_eq!(
+            actions[..5],
+            ["app.delete", "app.secret", "app.update", "app.update", "app.add"]
+        );
         assert!(!format!("{audit:?}").contains(secret));
         assert_eq!(audit[2].2, json!({"enabled": false}));
         registry.server.stop().await;
@@ -352,7 +446,11 @@ async fn a_deleted_bots_id_can_come_back_with_a_new_package() {
     let person = registry.server.add_user("carol@own.test", "Carol").await;
     for taken in [person.as_str(), "358f0194-6b0e-4dd3-af35-c24fe8a9ec87"] {
         let (status, answer) = registry
-            .upload(&upload, Method::POST, good_package(&uuid::Uuid::new_v4().to_string(), taken, "1.0.0"))
+            .upload(
+                &upload,
+                Method::POST,
+                good_package(&uuid::Uuid::new_v4().to_string(), taken, "1.0.0"),
+            )
             .await;
         assert_eq!((status, error_code(&answer)), (409, "BotExists"), "{answer}");
     }
@@ -374,11 +472,30 @@ async fn apps_turned_off_serve_no_registry() {
 async fn the_operator_manages_apps_on_the_command_line() {
     let registry = Registry::open(Backend::Sqlite).await;
     let server = &registry.server;
-    let added = cli(server, &["app", "add", "--name", "Ops bot (synthetic)", "--endpoint", ECHO_ENDPOINT], "")
-        .await
-        .unwrap();
+    let added = cli(
+        server,
+        &[
+            "app",
+            "add",
+            "--name",
+            "Ops bot (synthetic)",
+            "--endpoint",
+            ECHO_ENDPOINT,
+        ],
+        "",
+    )
+    .await
+    .unwrap();
     let mut lines = added.lines();
-    let id = lines.next().unwrap().strip_prefix("added ").unwrap().split(' ').next().unwrap().to_owned();
+    let id = lines
+        .next()
+        .unwrap()
+        .strip_prefix("added ")
+        .unwrap()
+        .split(' ')
+        .next()
+        .unwrap()
+        .to_owned();
     let secret = lines.next().unwrap().strip_prefix("secret ").unwrap().to_owned();
     assert!(secret.len() >= 40, "{added}");
 
@@ -386,13 +503,21 @@ async fn the_operator_manages_apps_on_the_command_line() {
     let file = dir.path().join("polls.zip");
     let (app_id, bot_id) = (uuid::Uuid::new_v4().to_string(), uuid::Uuid::new_v4().to_string());
     std::fs::write(&file, good_package(&app_id, &bot_id, "1.0.0")).unwrap();
-    let uploaded = cli(server, &["app", "add", "--package", file.to_str().unwrap()], "").await.unwrap();
+    let uploaded = cli(server, &["app", "add", "--package", file.to_str().unwrap()], "")
+        .await
+        .unwrap();
     assert!(uploaded.starts_with(&format!("added {app_id} ")), "{uploaded}");
     assert!(uploaded.contains("\nsecret "), "{uploaded}");
 
     let listed = cli(server, &["app", "list"], "").await.unwrap();
-    assert!(listed.contains(&format!("{id}\tenabled\tOps bot (synthetic)\t28:{id}")), "{listed}");
-    assert!(listed.contains(&format!("{app_id}\tenabled\tPolls (synthetic)\t28:{bot_id}")), "{listed}");
+    assert!(
+        listed.contains(&format!("{id}\tenabled\tOps bot (synthetic)\t28:{id}")),
+        "{listed}"
+    );
+    assert!(
+        listed.contains(&format!("{app_id}\tenabled\tPolls (synthetic)\t28:{bot_id}")),
+        "{listed}"
+    );
     assert!(!listed.contains(&secret));
 
     cli(server, &["app", "disable", &id], "").await.unwrap();
@@ -422,12 +547,15 @@ async fn a_change_that_changes_nothing_is_not_audited_and_bot_settings_need_a_bo
     let added = registry.register("Echo (synthetic)", ECHO_ENDPOINT).await;
     let path = app_path(added["id"].as_str().unwrap());
     let before = audit_actions(&registry).await.len();
-    let same = json!({"enabled": true, "everyone": true, "users": [], "endpoint": ECHO_ENDPOINT, "auth_mode": "signed"});
+    let same =
+        json!({"enabled": true, "everyone": true, "users": [], "endpoint": ECHO_ENDPOINT, "auth_mode": "signed"});
     let (status, unchanged) = registry.call(Method::PATCH, &path, Some(same)).await;
     assert_eq!(status, 200, "{unchanged}");
     assert_eq!(unchanged["updated_at"], added["updated_at"]);
     assert_eq!(audit_actions(&registry).await.len(), before);
-    let (status, unsigned) = registry.call(Method::PATCH, &path, Some(json!({"auth_mode": "unsigned"}))).await;
+    let (status, unsigned) = registry
+        .call(Method::PATCH, &path, Some(json!({"auth_mode": "unsigned"})))
+        .await;
     assert_eq!(status, 200, "{unsigned}");
     assert_eq!(unsigned["bot"]["auth_mode"], "unsigned");
     assert_eq!(audit_actions(&registry).await[0].2, json!({"auth_mode": "unsigned"}));
@@ -439,7 +567,11 @@ async fn a_change_that_changes_nothing_is_not_audited_and_bot_settings_need_a_bo
     tab_only["name"].as_object_mut().unwrap().remove("full");
     let upload = format!("{APPS}/package");
     let (status, added) = registry
-        .upload(&upload, Method::POST, package(&tab_only, &png(192, 192), &png(32, 32), &[]))
+        .upload(
+            &upload,
+            Method::POST,
+            package(&tab_only, &png(192, 192), &png(32, 32), &[]),
+        )
         .await;
     assert_eq!(status, 201, "{added}");
     assert_eq!(added["full_name"], added["name"]);
@@ -466,7 +598,11 @@ async fn a_change_that_changes_nothing_is_not_audited_and_bot_settings_need_a_bo
     let mut padded = manifest(&uuid::Uuid::new_v4().to_string(), &bot, "1.0.0");
     padded["padding"] = "x".repeat(1024 * 1024 + 1).into();
     let (status, answer) = registry
-        .upload(&upload, Method::POST, package(&padded, &png(192, 192), &png(32, 32), &[]))
+        .upload(
+            &upload,
+            Method::POST,
+            package(&padded, &png(192, 192), &png(32, 32), &[]),
+        )
         .await;
     assert_eq!((status, error_code(&answer)), (400, "InvalidPackage"), "{answer}");
     registry.server.stop().await;

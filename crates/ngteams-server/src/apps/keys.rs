@@ -1,7 +1,11 @@
 //! The keys the server signs activities to bots with: RSA-2048, RS256, as every bot SDK takes a channel's token (the
 //! server's own `EdDSA` keys can't be used: no SDK accepts them). Kept in `bot_signing_keys`, so every node signs
-//! with and publishes the same keys; rotated as the account keys are (`crate::auth::keys`): the newest unretired
-//! key signs, a retired one is still published until nothing it signed can be used, then deleted.
+//! with and publishes the same keys.
+//!
+//! A bot SDK keeps the JWKS for a day and fetches it again for an unknown `kid` at most once an hour, so a new key is
+//! published [`PRE_PUBLISH`] before it signs (a shorter rotation period: one period before). The signer is the newest
+//! unretired key published that long, else the oldest unretired one; when a new key takes over, the keys before it
+//! are retired. A retired key is still published until nothing it signed can be used, then deleted.
 //!
 //! The published set is read from the database on each request, so a key another node just made is published by
 //! every node at once; a node signs with its own view, reloaded at housekeeping.
@@ -31,8 +35,10 @@ use crate::db::{Db, DbError, now, seconds, with_conn};
 pub const CHANNEL: &str = "msteams";
 /// The clock skew the SDKs allow when they check a token.
 const SDK_SKEW: Duration = Duration::from_secs(300);
-/// The `server_meta` row a rotation locks, so two nodes don't both leave a signer.
+/// The `server_meta` row a rotation locks, so two nodes don't both make the next key.
 const LOCK: &str = "bot_signing_key_lock";
+/// How long a key is published before it signs: longer than the day an SDK keeps the JWKS.
+pub const PRE_PUBLISH: Duration = Duration::from_hours(25);
 
 #[derive(Clone, Queryable, Selectable, Insertable)]
 #[diesel(table_name = bot_signing_keys)]
@@ -69,6 +75,8 @@ pub struct BotKeys {
     published: Mutex<HashMap<String, Value>>,
     issuer: String,
     rotation: Duration,
+    /// How long a key is published before it signs.
+    lead: Duration,
     lifetime: Duration,
     keep: Duration,
 }
@@ -101,6 +109,7 @@ impl BotKeys {
             published: Mutex::default(),
             issuer: super::issuer(config),
             rotation: config.bots.key_rotation(),
+            lead: PRE_PUBLISH.min(config.bots.key_rotation()),
             lifetime: config.bots.activity_token_lifetime(),
             keep: retention(config),
         };
@@ -108,37 +117,42 @@ impl BotKeys {
         Ok(keys)
     }
 
-    /// Makes a new key when the newest is older than the rotation period (or there is none), deletes the keys
-    /// retired longer ago than [`retention`], and reloads.
+    /// Makes the first key, or publishes the next one when the signer has signed for the rotation period less the
+    /// pre-publish time; retires the keys before the signer; deletes the keys retired longer ago than
+    /// [`retention`]; and reloads.
     ///
     /// # Errors
     /// A database failure, or a key that can't be made.
     pub async fn rotate_if_due(&self) -> Result<(), KeyError> {
         let at = now();
-        let fresh = all(&self.db)
-            .await?
-            .iter()
-            .find(|key| key.retired_at.is_none())
-            .is_some_and(|key| at - key.created_at < seconds(self.rotation));
-        if !fresh {
-            self.rotate().await?;
+        let keys = all(&self.db).await?;
+        let signer = signing(&keys, at, self.lead);
+        if let Some(signer) = signer {
+            retire_before(&self.db, signer.created_at, at).await?;
+        }
+        let newest = keys.iter().find(|key| key.retired_at.is_none());
+        let due = match (newest, signer) {
+            (Some(newest), Some(signer)) => {
+                newest.kid == signer.kid && at - signer.created_at >= seconds(self.rotation.saturating_sub(self.lead))
+            }
+            _ => true,
+        };
+        if due {
+            let key = new_key().await?;
+            store_after(&self.db, &key, newest.map(|newest| newest.kid.as_str())).await?;
         }
         delete_retired(&self.db, at - seconds(self.keep)).await?;
         self.reload().await
     }
 
-    /// Makes a new signing key now and retires the others (they stay published); its `kid`.
+    /// Publishes a new key now; it signs once it has been published for the pre-publish time. Its `kid`.
     ///
     /// # Errors
     /// A database failure, or a key that can't be made.
     pub async fn rotate(&self) -> Result<String, KeyError> {
-        let key = tokio::task::spawn_blocking(generate)
-            .await
-            .map_err(|_| KeyError::Generate)??;
-        let kid = key.kid.clone();
-        store(&self.db, &key).await?;
-        self.reload().await?;
-        Ok(kid)
+        let key = new_key().await?;
+        insert(&self.db, &key).await?;
+        Ok(key.kid)
     }
 
     /// Reads the signer again.
@@ -146,15 +160,13 @@ impl BotKeys {
     /// # Errors
     /// A database failure.
     pub async fn reload(&self) -> Result<(), KeyError> {
-        let signer = all(&self.db)
-            .await?
-            .into_iter()
-            .find(|key| key.retired_at.is_none())
+        let keys = all(&self.db).await?;
+        let signer = signing(&keys, now(), self.lead)
             .map(|key| -> Result<Arc<Signer>, KeyError> {
                 let key_pem = pem(&key.private_der);
                 Ok(Arc::new(Signer {
                     key: EncodingKey::from_rsa_pem(key_pem.as_bytes()).map_err(|_| KeyError::Sign)?,
-                    kid: key.kid,
+                    kid: key.kid.clone(),
                 }))
             })
             .transpose()?;
@@ -235,8 +247,44 @@ async fn delete_retired(db: &Db, before: i64) -> Result<usize, DbError> {
     .await?))
 }
 
-/// Stores the new signer and retires the others, under the lock every node takes.
-async fn store(db: &Db, key: &Stored) -> Result<(), DbError> {
+/// The key that signs at `at` among `keys` (newest first): the newest unretired key published for `lead`, else the
+/// oldest unretired one.
+fn signing(keys: &[Stored], at: i64, lead: Duration) -> Option<&Stored> {
+    let mut unretired = keys.iter().filter(|key| key.retired_at.is_none());
+    unretired
+        .clone()
+        .find(|key| at - key.created_at >= seconds(lead))
+        .or_else(|| unretired.next_back())
+}
+
+async fn new_key() -> Result<Stored, KeyError> {
+    tokio::task::spawn_blocking(generate)
+        .await
+        .map_err(|_| KeyError::Generate)?
+}
+
+async fn insert(db: &Db, key: &Stored) -> Result<usize, DbError> {
+    with_conn!(db, |conn| Ok(diesel::insert_into(bot_signing_keys::table)
+        .values(key)
+        .execute(conn)
+        .await?))
+}
+
+/// Retires the unretired keys made before `created_at`, at `at`.
+async fn retire_before(db: &Db, created_at: i64, at: i64) -> Result<usize, DbError> {
+    with_conn!(db, |conn| Ok(diesel::update(
+        bot_signing_keys::table
+            .filter(bot_signing_keys::retired_at.is_null())
+            .filter(bot_signing_keys::created_at.lt(created_at))
+    )
+    .set(bot_signing_keys::retired_at.eq(Some(at)))
+    .execute(conn)
+    .await?))
+}
+
+/// Stores the next key when the newest unretired key is still `newest`, under the lock every node takes, so two
+/// nodes don't both make one.
+async fn store_after(db: &Db, key: &Stored, newest: Option<&str>) -> Result<(), DbError> {
     with_conn!(db, |conn| conn
         .transaction::<_, DbError, _>(async |conn| {
             diesel::insert_into(server_meta::table)
@@ -248,18 +296,19 @@ async fn store(db: &Db, key: &Stored) -> Result<(), DbError> {
                 .set(server_meta::value.eq(server_meta::value))
                 .execute(conn)
                 .await?;
-            diesel::insert_into(bot_signing_keys::table)
-                .values(key)
-                .execute(conn)
-                .await?;
-            diesel::update(
-                bot_signing_keys::table
-                    .filter(bot_signing_keys::kid.ne(&key.kid))
-                    .filter(bot_signing_keys::retired_at.is_null()),
-            )
-            .set(bot_signing_keys::retired_at.eq(Some(key.created_at)))
-            .execute(conn)
-            .await?;
+            let current: Option<String> = bot_signing_keys::table
+                .filter(bot_signing_keys::retired_at.is_null())
+                .order((bot_signing_keys::created_at.desc(), bot_signing_keys::kid.desc()))
+                .select(bot_signing_keys::kid)
+                .first(conn)
+                .await
+                .optional()?;
+            if current.as_deref() == newest {
+                diesel::insert_into(bot_signing_keys::table)
+                    .values(key)
+                    .execute(conn)
+                    .await?;
+            }
             Ok(())
         })
         .await)

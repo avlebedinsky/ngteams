@@ -90,8 +90,14 @@ pub async fn run(config: &Config, command: AppCommand, output: &mut dyn Write) -
         AppCommand::List => {
             for record in super::repo::list(&db).await? {
                 let state = if record.app.enabled { "enabled" } else { "disabled" };
-                let bot = record.bot.as_ref().map_or_else(|| "-".to_owned(), |bot| format!("28:{}", bot.id));
-                line(output, &format!("{}\t{state}\t{}\t{bot}", record.app.id, record.app.name))?;
+                let bot = record
+                    .bot
+                    .as_ref()
+                    .map_or_else(|| "-".to_owned(), |bot| format!("28:{}", bot.id));
+                line(
+                    output,
+                    &format!("{}\t{state}\t{}\t{bot}", record.app.id, record.app.name),
+                )?;
             }
             Ok(())
         }
