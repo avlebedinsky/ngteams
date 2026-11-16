@@ -203,7 +203,7 @@ pub struct FakeCore {
     pub chat_apps: Mutex<Vec<teams_proto::StoreApp>>,
     /// The bots' apps, by the bot's bare id in lower case: `Core::bot_app` and `Core::known_bot_app` answer from it.
     pub bot_apps: Mutex<HashMap<String, teams_proto::StoreApp>>,
-    /// How many next `Core::bot_app` asks fail, as when the engine can't read.
+    /// How many next `Core::bot_app` asks fail: each is answered `None`, as the engine answers a read that failed.
     pub bot_app_failures: Mutex<usize>,
     /// The apps whose bot people can mention, by chat or team.
     pub mentionable_bots: Mutex<HashMap<String, Vec<teams_proto::StoreApp>>>,
@@ -710,7 +710,8 @@ impl Core for FakeCore {
         let mut failures = locked(&self.bot_app_failures);
         if *failures > 0 {
             *failures -= 1;
-            return Reply::ready(Err(EngineError::Stopped));
+            // the engine answers a failed read with no app, not with an error
+            return Reply::ready(Ok(None));
         }
         drop(failures);
         // not among `asked`: the chat list asks about its 1:1 chats' bots as it builds them
