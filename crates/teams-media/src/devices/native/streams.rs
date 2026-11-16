@@ -419,12 +419,21 @@ fn prime(pipeline: &gst::Pipeline, source: &AppSrc, sink: &gst::Element) -> Resu
     let Some(bus) = pipeline.bus().filter(|_| audio_sink) else {
         return Ok(());
     };
-    let opened = bus.timed_pop_filtered(OPEN_WAIT, &[gst::MessageType::Latency, gst::MessageType::Error]);
-    match opened.as_ref().map(|message| message.view()) {
-        Some(gst::MessageView::Error(failure)) => Err(error(failure.error())),
-        Some(_) => pipeline.recalculate_latency().map_err(error),
-        None => Ok(()),
+    // A sink with `async` off also posts a LATENCY message when it goes to PAUSED, before its device opens. Thus a
+    // LATENCY message only tells when to ask again: the device is open when the sink itself can give its latency.
+    let deadline = std::time::Instant::now() + Duration::from_nanos(OPEN_WAIT.nseconds());
+    while !sink.query(&mut gst::query::Latency::new()) {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let wait = gst::ClockTime::try_from(left).map_err(error)?;
+        let message = bus.timed_pop_filtered(wait, &[gst::MessageType::Latency, gst::MessageType::Error]);
+        match message.as_ref().map(|message| message.view()) {
+            Some(gst::MessageView::Error(failure)) => return Err(error(failure.error())),
+            Some(_) => (),
+            // Not open in time: `healthy` takes the latency when the sink reports it.
+            None => return Ok(()),
+        }
     }
+    pipeline.recalculate_latency().map_err(error)
 }
 
 fn push(source: &AppSrc, frame: &AudioFrame) -> Result<(), DeviceError> {
@@ -458,5 +467,24 @@ mod tests {
         );
         pipeline.post_message(gst::message::Eos::new()).unwrap();
         assert!(matches!(healthy(&pipeline), Err(DeviceError::Closed)));
+    }
+
+    /// ALSA's `null` device is an audio sink that needs no sound card. Its LATENCY message from the change to PAUSED
+    /// comes before its device opens, so it must not end the wait for the device.
+    #[test]
+    fn the_speaker_plays_with_the_latency_of_its_open_device() {
+        use gstreamer_app::gst_base::prelude::*;
+        gst::init().unwrap();
+        let Ok(sink) = gst::ElementFactory::make("alsasink").property("device", "null").build() else {
+            eprintln!("skipped: GStreamer has no alsasink here");
+            return;
+        };
+        let (_pipeline, _source) = playback(&sink).unwrap();
+        let mut query = gst::query::Latency::new();
+        assert!(sink.query(&mut query), "the device is not open");
+        let (_, device, _) = query.result();
+        assert!(device >= PLAYOUT_MARGIN, "the device gives only {device}");
+        let base = sink.dynamic_cast_ref::<gstreamer_app::gst_base::BaseSink>().unwrap();
+        assert_eq!(base.latency(), device);
     }
 }

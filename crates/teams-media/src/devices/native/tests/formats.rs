@@ -105,9 +105,10 @@ fn windows(samples: &[f32], rate: i32) -> Vec<(f32, f32)> {
     let hz = TONE.hz * SAMPLE_RATE as f32 / rate as f32;
     let fits: Vec<(f32, f32)> = samples.chunks_exact(size).map(|w| purity(w, hz)).collect();
     let audible = |(amplitude, _): &(f32, f32)| *amplitude > TONE.amplitude / 4.0;
-    let first = fits.iter().position(audible).unwrap();
-    let last = fits.iter().rposition(audible).unwrap();
-    fits[first + 1..last].to_vec()
+    let (Some(first), Some(last)) = (fits.iter().position(audible), fits.iter().rposition(audible)) else {
+        return Vec::new();
+    };
+    fits.get(first + 1..last).unwrap_or_default().to_vec()
 }
 
 fn assert_whole(fits: &[(f32, f32)], what: &str) {

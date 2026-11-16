@@ -20,6 +20,10 @@ const WINDOW: usize = 960;
 const DISTURBED_DB: f32 = 20.0;
 /// The windows at the start of the tone that are not judged: the sink can jump once there, while its device starts.
 const OPENING: usize = 20;
+/// The 10 ms frames of the tone that a test plays: 4 s.
+const FED: u32 = 400;
+/// The windows that a whole tone gives at the least: the fed windows less one at each edge and the opening.
+const WHOLE: usize = FED as usize * FRAME_SAMPLES / WINDOW - 2 - OPENING;
 
 struct Recording {
     _running: Running,
@@ -96,9 +100,10 @@ fn disturbed(samples: &[f32], skip: usize) -> (usize, usize) {
         .map(|window| purity(window, TONE.hz))
         .collect();
     let audible = |(amplitude, _): &(f32, f32)| *amplitude > TONE.amplitude / 4.0;
-    let first = fits.iter().position(audible).unwrap();
-    let last = fits.iter().rposition(audible).unwrap();
-    let stretch = &fits[first + 1 + skip..last];
+    let (Some(first), Some(last)) = (fits.iter().position(audible), fits.iter().rposition(audible)) else {
+        return (0, 0);
+    };
+    let stretch = fits.get(first + 1 + skip..last).unwrap_or_default();
     let bad = stretch.iter().filter(|(_, db)| *db < DISTURBED_DB).count();
     (stretch.len(), bad)
 }
@@ -109,7 +114,7 @@ fn play_and_record(late: Duration) -> (usize, usize) {
     let recording = Recording::start();
     thread::sleep(Duration::from_millis(300));
     let mut speaker = speaker(devices).unwrap();
-    feed(speaker.as_mut(), 400, late);
+    feed(speaker.as_mut(), FED, late);
     thread::sleep(Duration::from_millis(500));
     drop(speaker);
     let (windows, bad) = disturbed(&recording.finish(), OPENING);
@@ -117,9 +122,9 @@ fn play_and_record(late: Duration) -> (usize, usize) {
     (windows, bad)
 }
 
-/// 4 s fed: about 200 windows less the edges and the opening. Nothing after the opening may be cut out or disturbed.
+/// Nothing after the opening may be cut out or disturbed.
 fn assert_whole((windows, bad): (usize, usize)) {
-    assert!(windows >= 180, "only {windows} windows of the tone played");
+    assert!(windows >= WHOLE, "only {windows} windows of the tone played");
     assert_eq!(bad, 0, "{bad} of {windows} windows disturbed");
 }
 
@@ -143,4 +148,16 @@ fn the_fit_finds_a_clean_tone_and_a_cut_in_it() {
     assert_eq!(disturbed(&samples, 0), (8, 0));
     samples[WINDOW * 4 + 100..WINDOW * 4 + 160].fill(0.0);
     assert_eq!(disturbed(&samples, 0), (8, 1));
+    assert_eq!(disturbed(&samples, 9), (0, 0));
+    assert_eq!(disturbed(&vec![0.0; WINDOW * 10], 0), (0, 0));
+}
+
+#[test]
+fn a_whole_tone_of_the_fed_length_passes_where_ever_the_windows_fall() {
+    for offset in [0, WINDOW / 5, WINDOW / 2, WINDOW * 4 / 5] {
+        let mut tone = ToneGenerator::new(TONE);
+        let mut samples = vec![0.0; WINDOW * 210];
+        tone.fill(&mut samples[WINDOW * 5 + offset..][..FED as usize * FRAME_SAMPLES]);
+        assert_whole(disturbed(&samples, OPENING));
+    }
 }

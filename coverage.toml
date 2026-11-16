@@ -227,14 +227,14 @@ reason = "unit-test module included only by native.rs cfg(test); omitted by carg
 context = { "crates/teams-media/src/devices/native.rs" = "151b703df64f634e37c4e40a26156af122e321cef79789b28b58076bfd9f2694" }
 
 [unmapped_sources."crates/teams-media/src/devices/native/tests/formats.rs"]
-sha256 = "39bc015209bc98facb552f570bc8ee0e3340234e40e1d62df4cbe2f2e4b3c353"
+sha256 = "b658fcde5c87bf3d58695c8af57ad6f14eb556730e4cfd2b1d555f66c74a06f8"
 reason = "unit-test module (the device formats of the native speaker and microphone) included only by native/tests.rs; omitted by cargo-llvm-cov's test-file filter"
 context = { "crates/teams-media/src/devices/native/tests.rs" = "28d3b962ef75a2a0632de3d8bf99544d4fe14f28832e4c8aa46b6767b66a415d" }
 
 [unmapped_sources."crates/teams-media/src/devices/native/streams/playback_tests.rs"]
-sha256 = "03d146578e4ca8017b43e8ae02491b9626427f492d1f972d3423eb73f5794478"
+sha256 = "3851d227b41fe22f517e7bc5ad7503612f114848cfdece9b7b41a7f70a1a0086"
 reason = "unit-test module included only by native/streams.rs cfg(test); omitted by cargo-llvm-cov's test-file filter. Its playing tests are ignored: they need a Windows speaker and the win11 console"
-context = { "crates/teams-media/src/devices/native/streams.rs" = "f8d0146d34f6e825557c35e62f6e8bf21871f6c23a59751e330ca7ce8a137183" }
+context = { "crates/teams-media/src/devices/native/streams.rs" = "ad78e7bbd382f9ffdc64e9b403c2b9499470f5c583245ee393cbfb392af731ab" }
 
 [unmapped_sources."crates/teams-media/src/test_turn/windows.rs"]
 sha256 = "109eb478053a60252c242550ece0a118c0648e9c1c8d0c067d0a35bbcf345c33"
