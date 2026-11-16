@@ -27,6 +27,8 @@ pub fn instructions() -> String {
      punctuation, and its style: replace a word that is wrong, misused or unidiomatic with the word a native speaker \
      would use there, and reword a phrase only where it sounds unnatural. Make the fewest changes that make the \
      message correct and natural, and leave what is already fine exactly as it is.\n\
+     It is a chat message, and chat messages often leave out the final dot: where a line, a paragraph or the whole \
+     message ends with no final dot, never add one. Keep a final dot, ? or ! that the member typed.\n\
      Keep the message's language: never translate it, and where it mixes languages keep each part in its own. Keep \
      its meaning, its facts, its tone and how formal it is. Don't add greetings, explanations or anything else it \
      doesn't say, and don't shorten it.\n\

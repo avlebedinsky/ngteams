@@ -72,7 +72,7 @@ fn kept_whole(run: &Run) -> bool {
 
 /// Which of `runs` must come back exactly as they are: each one [`kept_whole`] alone, and every run of a link whose
 /// runs, formatted apart, show its address together.
-fn kept_whole_runs(runs: &[Run]) -> Vec<bool> {
+pub(super) fn kept_whole_runs(runs: &[Run]) -> Vec<bool> {
     let mut whole: Vec<bool> = runs.iter().map(kept_whole).collect();
     let mut start = 0;
     while start < runs.len() {

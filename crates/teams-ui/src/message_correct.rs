@@ -7,12 +7,14 @@
 //! - **The draft keeps its shape** ([`draft`]): only the words of its text blocks go to the tool, between numbered
 //!   markers; blocks of code, pictures, rules, mentions and inline code never do, and an answer that doesn't keep every
 //!   marker is not used.
+//! - **Chat style**: a line or a message that ends with no final dot gets none ([`final_dot`]).
 //! - **One run per request** ([`Correcting`]), on a thread of its own so the window never waits on the tool. Dropping it
 //!   stops it and ends the tool's process.
 //! - **Private**: no draft, message, correction or tool output is logged or traced.
 
 pub mod diff;
 pub mod draft;
+pub mod final_dot;
 pub mod prompt;
 
 use std::path::PathBuf;
@@ -164,12 +166,14 @@ fn ask(tool: &mut Tool, request: &Request, stop: &AtomicBool) -> Outcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Unusable;
 
-/// What `answer` proposes for `draft`, `None` when it proposes nothing: a proposal that changes no word is none.
+/// What `answer` proposes for `draft`, `None` when it proposes nothing: a proposal that changes no word, or only adds a
+/// final dot that the draft left out, is none.
 fn read(answer: &str, draft: &Encoded) -> Result<Option<Proposal>, Unusable> {
-    let corrected = match prompt::read(answer).ok_or(Unusable)? {
+    let mut corrected = match prompt::read(answer).ok_or(Unusable)? {
         Answer::Unchanged => return Ok(None),
         Answer::Corrected(text) => draft.decode(&text).ok_or(Unusable)?,
     };
+    final_dot::keep_missing(draft.doc(), &mut corrected);
     let preview = diff::preview(draft.doc(), &corrected);
     Ok((!preview.marks.is_empty()).then_some(Proposal { corrected, preview }))
 }

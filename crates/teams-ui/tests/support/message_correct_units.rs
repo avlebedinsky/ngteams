@@ -434,3 +434,106 @@ fn a_tool_that_can_t_start_says_so() {
     );
     assert!(Tools::default().pick(crate::local_ai::ToolChoice::Automatic).is_err());
 }
+
+/// What `answer` proposes for `doc`: the text as it would be, `None` when it proposes nothing.
+fn proposed(doc: &Doc, answer: &str) -> Option<String> {
+    read(&format!("<corrected>{answer}</corrected>"), &encode(doc))
+        .unwrap()
+        .map(|proposal| proposal.corrected.plain_text())
+}
+
+#[test]
+fn a_final_dot_the_writer_left_out_is_not_added() {
+    let sentence = Doc::new(vec![Block::paragraph("teh cat sat")]);
+    assert_eq!(
+        proposed(&sentence, "<x0>The cat sat.</x0>").as_deref(),
+        Some("The cat sat")
+    );
+    let lines = Doc::new(vec![Block::paragraph("teh cat\nok then")]);
+    assert_eq!(encode(&lines).text, "<x0>teh cat<x1/>ok then</x0>");
+    assert_eq!(
+        proposed(&lines, "<x0>The cat.<x1/>Ok then.</x0>").as_deref(),
+        Some("The cat\nOk then")
+    );
+    let paragraphs = Doc::new(vec![Block::paragraph("teh cat"), Block::paragraph("teh dog ")]);
+    assert_eq!(
+        proposed(&paragraphs, "<x0>the cat.</x0>\n<x1>the dog. </x1>").as_deref(),
+        Some("the cat\nthe dog ")
+    );
+}
+
+#[test]
+fn a_final_dot_is_not_added_after_or_inside_a_trailing_marker() {
+    let address = Doc::new(vec![paragraph(vec![
+        plain("see teh "),
+        link("https://example.test/a", "https://example.test/a"),
+    ])]);
+    assert_eq!(encode(&address).text, "<x0>see teh <x1/></x0>");
+    assert_eq!(
+        proposed(&address, "<x0>See the <x1/>.</x0>").as_deref(),
+        Some("See the https://example.test/a")
+    );
+    let named = Doc::new(vec![paragraph(vec![
+        plain("see teh "),
+        link("docs", "https://example.test/"),
+    ])]);
+    assert_eq!(encode(&named).text, "<x0>see teh <x1>docs</x1></x0>");
+    let Ok(Some(fixed)) = read(
+        "<corrected><x0>See the <x1>docs.</x1></x0></corrected>",
+        &encode(&named),
+    ) else {
+        panic!("no proposal");
+    };
+    assert_eq!(
+        fixed.corrected,
+        Doc::new(vec![paragraph(vec![
+            plain("See the "),
+            link("docs", "https://example.test/")
+        ])])
+    );
+    let mentioned = Doc::new(vec![paragraph(vec![plain("thanks "), mention("Bee")])]);
+    assert_eq!(
+        proposed(&mentioned, "<x0>Thanks <x1/>.</x0>").as_deref(),
+        Some("Thanks Bee")
+    );
+}
+
+#[test]
+fn an_answer_that_only_adds_a_final_dot_is_unchanged() {
+    let doc = Doc::new(vec![Block::paragraph("the cat sat\nok")]);
+    assert_eq!(proposed(&doc, "<x0>the cat sat.<x1/>ok.</x0>"), None);
+    let linked = Doc::new(vec![paragraph(vec![
+        plain("see "),
+        link("https://example.test/a", "https://example.test/a"),
+    ])]);
+    assert_eq!(proposed(&linked, "<x0>see <x1/>.</x0>"), None);
+}
+
+#[test]
+fn the_dots_the_writer_typed_and_the_other_corrections_stay() {
+    let typed = Doc::new(vec![Block::paragraph("teh cat sat.")]);
+    assert_eq!(
+        proposed(&typed, "<x0>The cat sat.</x0>").as_deref(),
+        Some("The cat sat.")
+    );
+    let asked = Doc::new(vec![Block::paragraph("is it ok?\nyes!")]);
+    assert_eq!(
+        proposed(&asked, "<x0>Is it ok?<x1/>Yes!</x0>").as_deref(),
+        Some("Is it ok?\nYes!")
+    );
+    let inside = Doc::new(vec![Block::paragraph("hi all thanks")]);
+    assert_eq!(
+        proposed(&inside, "<x0>Hi all. Thanks.</x0>").as_deref(),
+        Some("Hi all. Thanks")
+    );
+    let trailing = Doc::new(vec![Block::paragraph("wait")]);
+    assert_eq!(proposed(&trailing, "<x0>wait...</x0>").as_deref(), Some("wait..."));
+    let replaced = Doc::new(vec![Block::paragraph("is it ok?")]);
+    assert_eq!(proposed(&replaced, "<x0>It is ok.</x0>").as_deref(), Some("It is ok."));
+}
+
+#[test]
+fn the_instructions_say_a_missing_final_dot_stays_missing() {
+    let instructions = prompt::instructions();
+    assert!(instructions.contains("final dot"), "{instructions}");
+}
