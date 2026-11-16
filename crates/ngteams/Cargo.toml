@@ -137,6 +137,11 @@ name = "qa_new_chat_kept_window"
 harness = false
 
 [[test]]
+# QA of task 224: a bot's cards, inputs and buttons in the app's window over the mock, in the UI sandbox
+name = "qa_bot_cards_window"
+harness = false
+
+[[test]]
 name = "deferred_devices_window"
 harness = false
 
