@@ -171,6 +171,23 @@ source with Xcode's command line tools, the repository's Rust and GStreamer's of
 
 To add another account, press **+** under your avatar on the left.
 
+## Your own server
+
+ngteams can also sign in to a server you run yourself instead of Microsoft's. `ngteams-server` speaks the same
+language as Teams, so chats, channels, files, the calendar, meetings and calls work the same, and everything stays
+on your server. Your Microsoft 365 accounts and your own server's accounts sit side by side in one window.
+
+1. On a host with Docker and a domain name pointing at it, copy `packaging/server/.env.example` to
+   `packaging/server/.env`, fill it in, and run `docker compose up -d` in that folder. It starts the server with its
+   database, file storage, call relay and HTTPS.
+2. Get a setup code: `docker compose exec api-1 ngteams-server setup-code` prints one.
+3. In ngteams, press **+** (or start it for the first time), choose **Own server** and type your server's address.
+   The window sees that the server has no administrator yet and offers **Create the administrator account**: enter
+   the setup code, your name, user name and password.
+
+Add the other people in **Settings → Manage users**. Deployment, backups, TLS and scaling are in
+[docs/server.md](docs/server.md#operations).
+
 ## Keyboard shortcuts
 
 | Keys | Action |

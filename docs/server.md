@@ -156,6 +156,164 @@ takes a double underscore: `NGTEAMS_SERVER_TLS__CERT`, `NGTEAMS_SERVER_TOKENS__A
 | `bots.allow_http_endpoints` | `false` | whether a bot's endpoint may be plain `http` (development only) |
 | `[[rooms]]` | none | the meeting rooms the room finder lists, each `name`, `address` (its mailbox) and optionally `list` (its building), `capacity`, `floor`, `street`, `audio_device`, `video_device`, `display_device`, `wheelchair` |
 
+## Operations
+
+`packaging/server/` holds a deployment for one host with Docker Compose (Podman works through `docker-compose` on
+its socket): the image's `Dockerfile`, `compose.yaml`, `Caddyfile`, `server.toml` and `.env.example`.
+
+### The image
+
+The `Dockerfile` builds only `ngteams-server`, with the workspace's pinned toolchain, onto Debian slim. The context
+is the repository root:
+
+```sh
+docker build -f packaging/server/Dockerfile -t ngteams-server .
+```
+
+`--build-arg CARGO_BUILD_JOBS=4` limits the compile on a busy host. Podman keeps the health check only with
+`podman build --format docker`. The image runs as the user `ngteams` (uid 10001) in `/var/lib/ngteams-server`, its
+entrypoint is `ngteams-server` and its command `serve`. It listens on `0.0.0.0:8080` (`NGTEAMS_SERVER_LISTEN`), and
+its health check asks that port's `/health/ready`.
+
+### Deploying with Compose
+
+| Service | Runs |
+|---|---|
+| `caddy` | TLS on ports 80 and 443; balances `api-1` and `api-2` by their `/health/ready`, WebSockets included |
+| `api-1`, `api-2` | `serve --role api` |
+| `media` | `serve --role media`: its UDP socket on `MEDIA_UDP_PORT`, published; its internal API at `http://media:9090` on the Compose network |
+| `migrate` | `migrate`, once, before the nodes start |
+| `postgres` | Postgres 17, volume `postgres` |
+| `redis` | Redis 7, nothing kept on disk |
+| `rustfs` | RustFS, the S3 store, volume `rustfs`; `bucket` makes the bucket at each start |
+| `coturn` | the TURN relay, on the host's network |
+
+```sh
+cd packaging/server
+cp .env.example .env        # fill it in, then: chmod 600 .env
+docker compose build
+docker compose up -d
+docker compose ps
+curl -i https://teams.example.com/health/ready     # 204
+```
+
+`.env` holds the name (`NGTEAMS_DOMAIN`), an address of the host for the relay (`HOST_IP`) and the secrets: the
+database password, the S3 keys and the TURN secret. Write each secret as hex (`openssl rand -hex 32`): they go into
+URLs unescaped. Nothing else needs setting.
+
+The firewall lets in:
+
+| Port | For |
+|---|---|
+| TCP 80, TCP and UDP 443 | Caddy (80 for the certificate and the redirect) |
+| UDP `MEDIA_UDP_PORT` (50000) | the media node, from the relay |
+| TCP and UDP `TURN_PORT` (3478) | coturn, from clients |
+| UDP `TURN_MIN_PORT`–`TURN_MAX_PORT` (49160–49359) | coturn's relay ports: one per party in a call |
+
+coturn runs on the host's network: its relay ports and the addresses it sees must be the host's own. It sends a group
+call's media to the media node at `HOST_IP`, the only private address it may reach. On a host behind 1:1 NAT (a
+cloud instance's public address), set `TURN_EXTERNAL_IP=<public>/<private>`. The relay speaks plain TURN: a call's
+media is DTLS-SRTP inside it, and its credentials expire.
+
+Compose sets the connections, the TURN relay and the media node's keys in the environment. Other keys go in
+`server.toml` (read through `NGTEAMS_SERVER_CONFIG`) or as more `NGTEAMS_SERVER_*` variables, which win. After a
+change to `server.toml`, `docker compose restart api-1 api-2 media`; `docker compose up -d` recreates what a change to
+`.env` or `compose.yaml` touched.
+
+To upgrade, update the checkout, then `docker compose build` and `docker compose up -d`: `migrate` runs first and the
+nodes start after it.
+
+### TLS
+
+Caddy gets a certificate for `NGTEAMS_DOMAIN` from Let's Encrypt and renews it by itself. The name's DNS must point at
+the host and ports 80 and 443 must be open. The nodes speak plain HTTP inside the Compose network.
+
+A server without a public name uses Caddy's own certificate authority: `CADDY_GLOBAL_OPTIONS=local_certs` in `.env`.
+Each account then trusts that authority's root:
+
+```sh
+docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt ngteams-ca.crt
+```
+
+The sign-in window's "Certificate authority file" takes it, the account's `ca_file`
+([personal-build.md](personal-build.md#own-server-accounts)). The authority lives in the volume `caddy-data`: keep it,
+or every client needs the new root.
+
+Behind Caddy the nodes see its address as every client's, so the first-admin setup's attempts
+(`setup.max_attempts`) count for all clients together.
+
+### Backups
+
+- **Postgres** holds everything that lasts: accounts, chats and messages, teams, the calendar, calls, the signing
+  keys, apps, the audit. Dump it while it runs:
+
+  ```sh
+  docker compose exec -T postgres pg_dump -U ngteams -d ngteams --format=custom > ngteams.dump
+  ```
+
+  Restore it with the nodes stopped:
+
+  ```sh
+  docker compose stop api-1 api-2 media
+  docker compose exec -T postgres pg_restore -U ngteams -d ngteams --clean --if-exists --no-owner < ngteams.dump
+  docker compose up -d
+  ```
+
+  A database restored beside the deployment it came from, on the same Redis, needs its own `redis_namespace`
+  ([Configuration](#configuration)).
+- **The bucket** holds the pictures, files, thumbnails, profile pictures and app icons. Copy it with any S3 tool after
+  the database dump, so the dump names no blob the copy lacks. For example, with rclone on the Compose network:
+
+  ```sh
+  docker run --rm --network ngteams_default --env-file .env -v "$PWD/blobs:/backup" \
+    -e RCLONE_CONFIG_S3_TYPE=s3 -e RCLONE_CONFIG_S3_PROVIDER=Other \
+    -e RCLONE_CONFIG_S3_ENDPOINT=http://rustfs:9000 \
+    --entrypoint sh docker.io/rclone/rclone -c \
+    'RCLONE_CONFIG_S3_ACCESS_KEY_ID=$S3_ACCESS_KEY RCLONE_CONFIG_S3_SECRET_ACCESS_KEY=$S3_SECRET_KEY \
+     rclone copy s3:${S3_BUCKET:-ngteams} /backup'
+  ```
+
+  `copy` keeps what was deleted since, so an older dump still finds its blobs. To restore, copy the other way.
+- **Redis** needs no backup. It holds the fan-out, the 15-minute push journal, presence, the sign-in counters and the
+  media node registry. After it loses them, clients sync and report their presence again, and media nodes register at
+  their next heartbeat.
+- **`.env`** and the volume **`caddy-data`** (certificates, and with `local_certs` the authority clients trust).
+
+### Scaling
+
+Every API node serves every request ([Scaling](#scaling)). What all nodes share: the database, Redis (the same
+namespace), the bucket with its keys, `public_origin`, and the TURN relay's URLs and secret. The signing keys are in
+the database.
+
+- **An API node**: copy `api-2` in `compose.yaml` as `api-3` and add `api-3:8080` to the `Caddyfile`'s
+  `reverse_proxy`; then `docker compose up -d` and `docker compose exec caddy caddy reload --config
+  /etc/caddy/Caddyfile`.
+- **A media node** on the same host: copy `media` as `media-2` with another UDP port (published, and in its
+  `NGTEAMS_SERVER_MIXER__UDP_LISTEN`) and `NGTEAMS_SERVER_MIXER__INTERNAL_URL: http://media-2:9090`. A new call goes
+  to the live node with the fewest legs.
+- **Nodes on other hosts** run the same image with the same shared settings. A media node's `mixer.internal_url` must
+  be reachable from the API nodes on a private network, and its `mixer.public_addrs` from the relay. More relays take
+  the same secret, each listed in `calling.turn.urls`.
+
+### Accounts
+
+The command line runs in a node, which has the configuration. A password comes on standard input (`-T` keeps it
+apart from a terminal):
+
+```sh
+printf '%s\n' "$PASSWORD" | docker compose exec -T api-1 ngteams-server user add ada@example.com --name "Ada Lovelace"
+docker compose exec api-1 ngteams-server user list
+docker compose exec api-1 ngteams-server user disable bert@example.com
+```
+
+With the nodes down, `docker compose run --rm migrate user list` runs the same commands.
+
+The first admin: `user add --admin`, or from ngteams. A node that starts without an admin logs a setup code
+(`docker compose logs api-1 api-2 | grep 'setup code'`); `docker compose exec api-1 ngteams-server setup-code` makes a
+new one. In ngteams' sign-in window choose "Own server" and type the server's address: it offers to create the
+administrator with that code ([The first admin](#the-first-admin)). Admins then manage accounts in Settings, "Manage
+users".
+
 ## Sign-in and tokens
 
 - `POST /oauth2/v2.0/token` takes Entra's form: `grant_type=password` (`username`, `password`) for a sign-in,
@@ -1448,8 +1606,8 @@ the 1:1 chat and its history stay its two people's.
 
 ## The client
 
-`ngteams` signs in to this server from its account window ("Own server": address, user name, password), behind
-`NGTEAMS_OWN_SERVER=1`: [personal-build.md](personal-build.md#own-server-accounts). A deployment with a certificate
+`ngteams` signs in to this server from its account window ("Own server": address, user name, password):
+[personal-build.md](personal-build.md#own-server-accounts). A deployment with a certificate
 the system doesn't trust gives its certificate authority to each account as `ca_file` (the form's "Certificate
 authority file" field).
 
