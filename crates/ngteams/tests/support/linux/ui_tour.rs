@@ -189,7 +189,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 305 + 8] = [
+const STEPS: [Step; 5 + 305 + 8 + 5] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -2310,7 +2310,166 @@ const STEPS: [Step; 5 + 305 + 8] = [
     ("live-channel-renamed-dark", |shell, _, cx| {
         fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
     }),
+    // a group call rings while its chat is open, shot as the ring's first frame is drawn and the app is busy (the
+    // start of a ring holds the main thread): the banner over the panes is whole at once, never an empty band (QA
+    // 297's Q5)
+    ("group-call-chat", |shell, window, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
+        shell.update(cx, |shell, cx| {
+            shell.show_chats(window, cx);
+            shell.open_chat(ABC_CHAT.to_owned(), window, cx);
+        });
+        let models = shell.read(cx).models().clone();
+        models
+            .calls
+            .update(cx, |calls, _| *calls = teams_ui::Calls::shown(Some(Mri::new(ECHO))));
+        models.apply(
+            teams_core::Event::CallingRegistration(teams_core::RegistrationReport::Registered),
+            cx,
+        );
+    }),
+    ("group-call-ringing", |shell, window, cx| {
+        ring_group_call(shell, window, RINGING_GROUP_CALL, cx);
+    }),
+    ("group-call-ringing-dark", |shell, window, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
+        ring_group_call(shell, window, RINGING_GROUP_CALL + 1, cx);
+    }),
+    // the ring answered: made-up people without video whose names carry a quoted nickname, a guest's bracket and
+    // another script; each tile's initials are the first letters of the first and the last name only (QA 297's Q4)
+    ("initials-call", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
+        answer_initials_call(shell, cx);
+    }),
+    ("initials-call-dark", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
+    }),
 ];
+
+/// The steps whose shot shows a call that rings over the panes.
+const RINGING_SHOTS: [&str; 2] = ["group-call-ringing", "group-call-ringing-dark"];
+
+/// Fails when the band under the title bar, right of the rail, is one colour across: drawn but empty (QA 297's Q5).
+/// The banner's words and buttons, or the panes' headers, make it more than one.
+fn band_drawn(png: &Path) -> SandboxResult {
+    const TOP: u32 = 54;
+    const BOTTOM: u32 = 88;
+    const LEFT: u32 = 96;
+    let shot = image::open(png)?.to_rgb8();
+    let (width, height) = shot.dimensions();
+    if width <= LEFT * 2 || height <= BOTTOM {
+        return Err(format!("the shot is {width}×{height}").into());
+    }
+    let first = *shot.get_pixel(LEFT, TOP);
+    let apart = |pixel: &image::Rgb<u8>| {
+        pixel
+            .0
+            .iter()
+            .zip(first.0)
+            .map(|(a, b)| u32::from(a.abs_diff(b)))
+            .sum::<u32>()
+            > 48
+    };
+    let drawn = (TOP..BOTTOM).any(|y| (LEFT..width - LEFT).any(|x| apart(shot.get_pixel(x, y))));
+    if drawn {
+        Ok(())
+    } else {
+        Err(format!("an empty band of {first:?} under the title bar").into())
+    }
+}
+
+/// The made-up group call that rings in the `group-call-ringing` steps.
+const RINGING_GROUP_CALL: u64 = 3;
+
+/// The made-up group call `number` from a made-up caller rings in the a-b-c chat the `group-call-chat` step opened,
+/// told to a's models as the engine would tell it, the one before it ended. The step's shot is its first frame.
+fn ring_group_call(shell: &Entity<Shell>, window: &mut Window, number: u64, cx: &mut App) {
+    let models = shell.read(cx).models().clone();
+    let ringing = |number| teams_core::CallId::for_tests(number);
+    models.apply(
+        teams_core::Event::RingEnded {
+            call: ringing(number - 1),
+            end: teams_core::RemoteEnd::default(),
+        },
+        cx,
+    );
+    models.apply(
+        teams_core::Event::IncomingCall(teams_core::IncomingCall {
+            call: ringing(number),
+            caller: Mri::new(LAB_B),
+            caller_name: Some("Cora 'Cee' Nuñez".to_owned()),
+            group_chat: Some(ABC_CHAT.to_owned()),
+        }),
+        cx,
+    );
+    let name = if number == RINGING_GROUP_CALL {
+        RINGING_SHOTS[0]
+    } else {
+        RINGING_SHOTS[1]
+    };
+    shot_at_first_frame(window, name);
+}
+
+/// Says `shot <name>` once the frame the step changed is presented, then holds the main thread until the parent took
+/// it (at most [`WAIT`]): what a busy main thread shows of that frame, an animation's first.
+fn shot_at_first_frame(window: &Window, name: &'static str) {
+    let Some(dir) = std::env::var_os(ui_sandbox::SANDBOX_ENV) else {
+        return;
+    };
+    let next = PathBuf::from(dir).join(NEXT);
+    // the first callback runs before the changed frame is drawn, the second once it is presented
+    after_frames(window, 2, move |_, _| {
+        say(&format!("shot {name}"));
+        let start = std::time::Instant::now();
+        while !next.exists() && start.elapsed() < WAIT {
+            thread::sleep(Duration::from_millis(20));
+        }
+    });
+}
+
+/// The ringing group call answered and connected, told to a's models as the engine would tell it: made-up people
+/// without video, named as Teams makes initials of.
+fn answer_initials_call(shell: &Entity<Shell>, cx: &mut App) {
+    let models = shell.read(cx).models().clone();
+    let call = teams_core::CallId::for_tests(RINGING_GROUP_CALL + 1);
+    let participant = |mri: &str, name: &str| teams_core::CallParticipant {
+        mri: mri.to_owned(),
+        name: Some(name.to_owned()),
+        video_on: false,
+        line: None,
+        speaking: false,
+        muted: false,
+        hand_raised: false,
+        organizer: false,
+        joined: None,
+        sharing: false,
+    };
+    let events = [
+        teams_core::Event::Call {
+            call,
+            status: teams_core::CallStatus::Answering,
+        },
+        teams_core::Event::Call {
+            call,
+            status: teams_core::CallStatus::Connected,
+        },
+        teams_core::Event::CallParticipants {
+            call,
+            view: teams_core::CallView {
+                participants: vec![
+                    participant(LAB_B, "Cora 'Cee' Nuñez"),
+                    participant(LAB_C, "Ann Lee (Guest)"),
+                    participant(OUTSIDER, "Иван Петров"),
+                ],
+                speaking: false,
+                hearing: false,
+            },
+        },
+    ];
+    for event in events {
+        models.apply(event, cx);
+    }
+}
 
 /// The a–b–c chat with the compact card of the last of b's or c's messages drawn with a face open beside that face, as
 /// a rest of the pointer on it opens it.
@@ -3442,6 +3601,9 @@ fn tour(sandbox: &Sandbox) -> SandboxResult {
             sandbox.screenshot(&file, true)?
         };
         fs::copy(&png, shots_dir()?.join(&file))?;
+        if RINGING_SHOTS.contains(&name) {
+            band_drawn(&png).map_err(|error| running.fail(&format!("{name}: {error}")))?;
+        }
         fs::write(sandbox.dir().join(NEXT), "")?;
     }
     running

@@ -579,13 +579,8 @@ impl CallBar {
                 cx,
                 |this, cx| this.ask(Ask::Decline, cx),
             ));
-        // the strip comes in from above the panes as the call starts ringing
-        crate::motion::rise(
-            banner,
-            SharedString::from(format!("call-banner-{}", ringing.call.get())),
-            -12.0,
-            cx,
-        )
+        // drawn whole at once: faded in, it is an empty band over the panes while the ring's start holds the thread
+        banner.into_any_element()
     }
 
     /// The in-call strip: the call's mark, who it is with and its state, and its controls.
