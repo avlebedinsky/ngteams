@@ -32,7 +32,7 @@ use teams_proto::{Rating, StoreApp, TeamWrite};
 use crate::bridge::Core;
 use crate::icons::{Glyph, icon_button, selected_by};
 use crate::inline::decode_app_tile;
-use crate::teams_list::initials;
+use crate::people::team_initials;
 use crate::theme::{self, Palette};
 
 /// The longest side a tile's picture is decoded at: thrice the largest tile, for scaled screens.
@@ -882,7 +882,7 @@ pub(crate) fn app_picture(
             .text_color(rgb(0x00ff_ffff))
             .text_size(px((side * 0.36).max(9.0)))
             .font_weight(gpui::FontWeight::SEMIBOLD)
-            .child(initials(&store.app.name)),
+            .child(team_initials(&store.app.name)),
     }
 }
 
