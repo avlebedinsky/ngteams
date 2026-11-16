@@ -194,7 +194,7 @@ fn seed(sandbox: &Sandbox, server: &own::Own) -> SandboxResult {
 
 /// A colleague writing on the server as any client of it would, over its HTTP API: signed in with the password
 /// grant, the chat service's base from authz, then the chat service with an IC3 token (the engine isn't used here: see the report).
-struct Writer {
+pub(super) struct Writer {
     ca_file: std::path::PathBuf,
     /// An access token for the chat service (IC3).
     bearer: String,
@@ -202,7 +202,7 @@ struct Writer {
 }
 
 impl Writer {
-    fn signed_in(server: &own::Own, upn: &str) -> SandboxResult<Self> {
+    pub(super) fn signed_in(server: &own::Own, upn: &str) -> SandboxResult<Self> {
         let spaces = grant(server, upn, "https://api.spaces.skype.com")?;
         let authz = curl_json(
             server,
@@ -237,7 +237,7 @@ impl Writer {
     }
 
     /// A chat of the writer (`me`) and `others`: their 1:1 chat for one, else a group chat named `topic`.
-    fn chat(&self, me: &str, others: &[String], topic: Option<&str>) -> SandboxResult<String> {
+    pub(super) fn chat(&self, me: &str, others: &[String], topic: Option<&str>) -> SandboxResult<String> {
         let mut members = vec![serde_json::json!({"id": me, "role": "Admin"})];
         members.extend(others.iter().map(|mri| serde_json::json!({"id": mri, "role": "Admin"})));
         let one = others.len() == 1;
@@ -255,7 +255,7 @@ impl Writer {
             .to_owned())
     }
 
-    fn post(&self, chat: &str, text: &str) -> SandboxResult {
+    pub(super) fn post(&self, chat: &str, text: &str) -> SandboxResult {
         self.call(
             &format!("{}/v1/users/ME/conversations/{chat}/messages", self.chats),
             &serde_json::json!({"messagetype": "RichText/Html", "contenttype": "text", "content": format!("<p>{text}</p>")}),
@@ -510,7 +510,7 @@ fn ids(sandbox: &Sandbox) -> SandboxResult<Vec<(String, String)>> {
         .collect())
 }
 
-fn mri_of(people: &[(String, String)], upn: &str) -> SandboxResult<String> {
+pub(super) fn mri_of(people: &[(String, String)], upn: &str) -> SandboxResult<String> {
     people
         .iter()
         .find(|(held, _)| held == upn)

@@ -66,6 +66,8 @@ mod admin;
 mod admin_qa;
 #[path = "accounts_card_qa.rs"]
 mod card_qa;
+#[path = "accounts_hidden_qa.rs"]
+mod hidden_qa;
 #[path = "accounts_own.rs"]
 mod own;
 #[path = "../own_server.rs"]
@@ -220,7 +222,7 @@ const QA_PREFIX: &str = "qa_";
 type Scene = (&'static str, fn(&Sandbox) -> SandboxResult);
 
 /// The scenes, each the app started afresh (see the module docs).
-const SCENES: [Scene; 32] = [
+const SCENES: [Scene; 38] = [
     (
         "two_accounts_and_an_own_servers_account_added",
         two_accounts_in_one_window,
@@ -278,7 +280,30 @@ const SCENES: [Scene; 32] = [
     ("qa_own_card_at_1280_dark", |_| card_qa::card_at(1280, true)),
     ("qa_own_card_at_480", |_| card_qa::card_at(480, false)),
     ("qa_own_card_at_480_dark", |_| card_qa::card_at(480, true)),
+    ("qa_own_hidden_at_1280", |_| {
+        hidden_qa::hidden_at(hidden(1280, false, false))
+    }),
+    ("qa_own_hidden_at_1280_dark", |_| {
+        hidden_qa::hidden_at(hidden(1280, true, false))
+    }),
+    ("qa_own_hidden_at_480", |_| {
+        hidden_qa::hidden_at(hidden(480, false, false))
+    }),
+    ("qa_own_hidden_at_480_dark", |_| {
+        hidden_qa::hidden_at(hidden(480, true, false))
+    }),
+    ("qa_own_hidden_workflows_on_at_1280", |_| {
+        hidden_qa::hidden_at(hidden(1280, false, true))
+    }),
+    ("qa_own_hidden_workflows_on_at_1280_dark", |_| {
+        hidden_qa::hidden_at(hidden(1280, true, true))
+    }),
 ];
+
+/// The look of a [`hidden_qa`] scene.
+fn hidden(width: u32, dark: bool, workflows: bool) -> hidden_qa::Look {
+    hidden_qa::Look { width, dark, workflows }
+}
 
 /// The child's view trace, line by line as it comes.
 struct TraceReader {
@@ -1410,6 +1435,11 @@ enum Mode {
     Card,
     /// [`Mode::Card`] in Teams Dark.
     CardDark,
+    /// Own servers on, the parent's server's seeded account signed in beside a and b, its team, channel and meeting
+    /// made beforehand, the parent's steps answered (the hidden services QA scenes).
+    Hidden,
+    /// [`Mode::Hidden`] in Teams Dark.
+    HiddenDark,
 }
 
 impl Mode {
@@ -1429,6 +1459,8 @@ impl Mode {
             "admin-two" => Some(Self::AdminTwo),
             "card" => Some(Self::Card),
             "card-dark" => Some(Self::CardDark),
+            "hidden" => Some(Self::Hidden),
+            "hidden-dark" => Some(Self::HiddenDark),
             _ => None,
         }
     }
@@ -1444,6 +1476,8 @@ impl Mode {
             Self::AdminTwo => "admin-two",
             Self::Card => "card",
             Self::CardDark => "card-dark",
+            Self::Hidden => "hidden",
+            Self::HiddenDark => "hidden-dark",
             _ => "first",
         }
     }
@@ -1455,12 +1489,20 @@ impl Mode {
 
     /// Teams Dark, whatever the system says.
     fn dark(self) -> bool {
-        matches!(self, Self::Dark | Self::ShownDark | Self::AdminDark | Self::CardDark)
+        matches!(
+            self,
+            Self::Dark | Self::ShownDark | Self::AdminDark | Self::CardDark | Self::HiddenDark
+        )
     }
 
     /// The profile card QA scenes.
     fn card(self) -> bool {
         matches!(self, Self::Card | Self::CardDark)
+    }
+
+    /// The hidden services QA scenes.
+    fn hidden(self) -> bool {
+        matches!(self, Self::Hidden | Self::HiddenDark)
     }
 
     fn shown(self) -> bool {
@@ -1485,6 +1527,8 @@ impl Mode {
                 | Self::AdminTwo
                 | Self::Card
                 | Self::CardDark
+                | Self::Hidden
+                | Self::HiddenDark
         )
     }
 }
@@ -1592,6 +1636,9 @@ fn child_window(mode: Mode) -> SandboxResult {
         );
         match launched {
             Ok(launched) => {
+                if mode.hidden() {
+                    hidden_qa::answer(launched.window, cx);
+                }
                 tell_the_parent(mock, watched, origins, mode.card().then_some(launched.window), cx);
                 let _ = launched.window.update(cx, |_, window, _| {
                     after_frames(window, READY_FRAMES, |_, _| say("ready"));
@@ -1624,6 +1671,7 @@ fn own_started(
         (Mode::Restart, _) => Ok(vec![own::come_back(runner)?]),
         (Mode::AdminDark | Mode::AdminLight, Some(server)) => Ok(vec![admin::signed_in(runner, server)?]),
         (Mode::Card | Mode::CardDark, Some(server)) => card_qa::started(runner, server),
+        (Mode::Hidden | Mode::HiddenDark, Some(server)) => hidden_qa::started(runner, server),
         (Mode::AdminTwo, Some(server)) => {
             let running =
                 ngteams::accounts::add_own(&runner.setup, admin_qa::RUNNING, server, &Secret::new(own::PASSWORD))?;

@@ -9,6 +9,7 @@ mod directory;
 mod media;
 mod namespaces;
 mod push;
+mod search;
 mod setup;
 pub(crate) mod support;
 mod teams;

@@ -72,6 +72,13 @@ impl Own {
         ))
     }
 
+    /// The real binary with `tables` appended to its configuration; an error without the binary.
+    pub fn start_configured(tables: &str) -> SandboxResult<Self> {
+        let binary = own_server_binary::binary()?.ok_or("this scene needs the real ngteams-server binary")?;
+        say(&format!("own-server binary {}", binary.display()));
+        Ok(Self::Binary(BinaryServer::start_with(&binary, tables)?))
+    }
+
     pub fn origin(&self) -> &str {
         match self {
             Self::Binary(server) => &server.origin,
