@@ -480,7 +480,6 @@ impl CallStage {
             return self.caller_face(caller, chat.is_some(), (title, call), place);
         }
         let group = chat
-            .filter(|_| kind != CallKind::Incoming)
             .and_then(|chat| self.namer.as_ref().and_then(|namer| namer(chat, cx)))
             .filter(|row| row.kind == RowKind::Group);
         if let Some(row) = group {

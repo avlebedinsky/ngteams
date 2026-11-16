@@ -142,7 +142,23 @@ fn a_one_to_one_call_without_a_picture_rings_with_initials() {
 
 #[test]
 fn an_incoming_group_call_shows_its_caller_not_the_initials_of_its_title() {
+    incoming_group_call_shows_its_caller(true);
+}
+
+#[test]
+fn an_incoming_group_call_shows_its_caller_when_the_chat_s_members_are_not_read() {
+    // the chat's members are not stored: once read, the call's people do not hold the caller. The stage must still
+    // ask for the caller's picture (the caller of the call, or the first entry of the people read)
+    incoming_group_call_shows_its_caller(false);
+}
+
+/// b rings the account in the trio chat (its members stored when `members`): the stage shows b's picture on hold
+/// and once the call ended.
+fn incoming_group_call_shows_its_caller(members: bool) {
     let rig = calling();
+    if !members {
+        rig.core.members.lock().unwrap().remove(TRIO);
+    }
     profile(&rig, LAB_B, "Lab Bee", true);
     let (trace, _) = trace();
     let (shell, cx) = shell_window(&rig, None, std::sync::Arc::clone(&trace));
