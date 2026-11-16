@@ -106,6 +106,8 @@ reqwest.workspace = true
 # `tests/accounts_window.rs`); a Linux service, so Linux alone builds it
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 ngteams-server.workspace = true
+# a database of the run's own on the run's Postgres, for the two-node deployment (`tests/own_server_nodes_window.rs`)
+diesel-async.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
 # the updates' flow against a local fake release feed (`tests/support/update.rs`)
@@ -205,6 +207,10 @@ harness = false
 
 [[test]]
 name = "translate_draft_window"
+harness = false
+
+[[test]]
+name = "own_server_nodes_window"
 harness = false
 
 [build-dependencies]

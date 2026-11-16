@@ -1666,3 +1666,9 @@ chat and call part. It needs all four variables above; without coturn the calls 
 NGTEAMS_SERVER_PG_URL=… NGTEAMS_SERVER_REDIS_URL=… NGTEAMS_SERVER_S3_URL=… NGTS_TEST_COTURN=… \
 NGTS_TEST_COTURN_SECRET=… cargo test -p ngteams-server --test e2e -- binary::cluster --test-threads 4
 ```
+
+`cargo test -p ngteams --test own_server_nodes_window` runs the same deployment through the app's own windows, each
+`srv-*` app in a UI sandbox of its own, signed in from the first sign-in screen ("Own server", typed). The nodes share
+one `public_origin`, so a front on its port passes each TLS connection through to the node the app is pinned to, and
+to the other node once that one is down. It needs the same five variables and the server binary
+(`cargo build -p ngteams-server`); screenshots go to `target/ui-shots/own-server-nodes-*.png`.

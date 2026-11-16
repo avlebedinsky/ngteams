@@ -212,8 +212,9 @@ pub fn free_port() -> TestResult<u16> {
     Ok(TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port())
 }
 
-/// The server's certificate and key and the certificate authority's PEM in `dir`; the CA file's path.
-fn write_certificates(dir: &Path) -> TestResult<PathBuf> {
+/// The server's certificate and key (`cert.pem`, `key.pem`) and the certificate authority's PEM (`ca.pem`) in `dir`; the
+/// CA file's path.
+pub fn write_certificates(dir: &Path) -> TestResult<PathBuf> {
     let ca_key = KeyPair::generate()?;
     let mut ca = CertificateParams::new(Vec::new())?;
     ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);

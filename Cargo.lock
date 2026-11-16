@@ -7895,6 +7895,7 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "clap",
+ "diesel-async",
  "embed-resource",
  "gpui-pre",
  "gpui-pre-platform",
