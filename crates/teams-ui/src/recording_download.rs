@@ -257,35 +257,41 @@ pub fn start(core: Arc<dyn Core>, link: String, target: PathBuf, cx: &mut App) -
 }
 
 /// As [`start`], the file's streams opened by `open`, and `then` done once it is saved. A running download of the
-/// link is handed back only when it does the same (the same `then`, and for [`Then::Keep`] the same `target`); one
-/// that does another (an Open while a Download runs, or the reverse) runs on to its end beside the new one, which the
-/// card then shows.
+/// link (the one the card shows, or one that a later one took the place of) is handed back, and the card shows it
+/// again, only when it does the same (the same `then`, and for [`Then::Keep`] the same `target`, whose `.part` file it
+/// writes). One that does another (an Open while a Download runs, or the reverse) runs on to its end beside the new
+/// one, which the card then shows.
 pub fn start_with(open: Opener, link: String, target: PathBuf, then: Then, cx: &mut App) -> Entity<RecordingDownload> {
-    let running = download_of(&link, cx).filter(|download| download.read(cx).progress.running());
-    if let Some(running) = running.as_ref().filter(|download| {
-        let download = download.read(cx);
-        download.then == then && (then == Then::Open || download.target == target)
-    }) {
-        return running.clone();
-    }
+    let latest = download_of(&link, cx).filter(|download| download.read(cx).progress.running());
     let mut earlier = cx
         .try_global::<Downloads>()
         .map(|downloads| downloads.earlier.clone())
         .unwrap_or_default();
     earlier.retain(|download| download.read(cx).progress.running());
-    earlier.extend(running);
-    let download = cx.new(|cx| {
-        let mut download = RecordingDownload {
-            open,
-            link: link.clone(),
-            target,
-            then,
-            progress: Progress::Saved,
-            running: None,
-        };
-        download.start(cx);
-        download
-    });
+    let same = |download: &Entity<RecordingDownload>| {
+        let download = download.read(cx);
+        download.link == link && download.then == then && (then == Then::Open || download.target == target)
+    };
+    if let Some(latest) = latest.as_ref().filter(|download| same(download)) {
+        return latest.clone();
+    }
+    let download = if let Some(at) = earlier.iter().position(same) {
+        earlier.remove(at)
+    } else {
+        cx.new(|cx| {
+            let mut download = RecordingDownload {
+                open,
+                link: link.clone(),
+                target,
+                then,
+                progress: Progress::Saved,
+                running: None,
+            };
+            download.start(cx);
+            download
+        })
+    };
+    earlier.extend(latest);
     let downloads = cx.default_global::<Downloads>();
     downloads.earlier = earlier;
     downloads.latest.insert(link, download.clone());

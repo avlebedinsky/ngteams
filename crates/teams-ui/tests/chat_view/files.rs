@@ -366,6 +366,55 @@ fn an_open_of_an_own_servers_file_started_while_it_downloads_still_opens_it() {
     an_open_and_a_download_both_end(false);
 }
 
+/// Downloads the own server's document to a place, then (while that runs) opens it (`open_between`) or downloads it to
+/// another place, then downloads it to the first place again: the first download is handed back (one writer of its
+/// `.part` file), the card shows it again, and each place gets the whole file.
+fn a_download_again_to_where_one_still_runs_is_that_one(open_between: bool) {
+    let (rig, opened, cx) = own_file_chat(true);
+    *rig.core.hold_streams_from.lock().unwrap() = Some(0);
+    let chosen = tempfile::tempdir().unwrap();
+    let first = chosen.path().join("notes.pdf");
+    let other = chosen.path().join("other notes.pdf");
+    let download = |cx: &mut VisualTestContext, target: &std::path::Path| {
+        click(cx, &format!("file-more-{ID}-0"));
+        click(cx, &format!("file-menu-download-{ID}-0"));
+        let target = target.to_owned();
+        cx.simulate_new_path_selection(move |_| Some(target));
+        draw(cx);
+    };
+    download(cx, &first);
+    if open_between {
+        click(cx, &format!("file-name-{ID}-0"));
+    } else {
+        download(cx, &other);
+    }
+    download(cx, &first);
+    assert!(bounds(cx, &format!("file-download-{ID}-0 running")).is_some());
+    // two streams only: the third request started no second writer of the first place's `.part` file
+    answer_held(&rig, &[OWN_BYTES, OWN_BYTES]);
+    draw(cx);
+    assert_eq!(std::fs::read(&first).unwrap(), OWN_BYTES, "saved where chosen first");
+    assert!(!teams_ui::recording_download::part_path(&first).exists());
+    if open_between {
+        let path = opened_file(cx);
+        assert!(path.starts_with(opened.path()), "{}", path.display());
+        assert_eq!(std::fs::read(&path).unwrap(), OWN_BYTES);
+    } else {
+        assert_eq!(std::fs::read(&other).unwrap(), OWN_BYTES, "saved where chosen second");
+    }
+    assert!(bounds(cx, &format!("file-download-{ID}-0 saved")).is_some());
+}
+
+#[test]
+fn a_download_to_where_one_still_runs_behind_an_open_is_that_one() {
+    a_download_again_to_where_one_still_runs_is_that_one(true);
+}
+
+#[test]
+fn a_download_to_where_one_still_runs_behind_another_download_is_that_one() {
+    a_download_again_to_where_one_still_runs_is_that_one(false);
+}
+
 /// Another own server's sharing link of a document of the same name, in another folder of its drive.
 const OWN_SHARE_OTHER: &str = "https://chat.example:8443/sp/personal/lab_b/Documents/older/made-up%20notes.pdf";
 
