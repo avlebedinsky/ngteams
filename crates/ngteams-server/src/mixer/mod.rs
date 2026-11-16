@@ -22,6 +22,7 @@ mod node;
 mod registry;
 mod room;
 
+use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Once, mpsc};
@@ -76,7 +77,6 @@ pub enum MixerError {
 #[derive(Debug)]
 pub struct MediaNode {
     home: MediaHome,
-    udp: SocketAddr,
     alive: Arc<AtomicBool>,
     draining: Arc<AtomicBool>,
     commands: mpsc::Sender<Command>,
@@ -176,7 +176,6 @@ impl MediaNode {
         });
         let mut node = Self {
             home,
-            udp,
             alive: Arc::new(AtomicBool::new(true)),
             draining: Arc::new(AtomicBool::new(false)),
             commands,
@@ -195,19 +194,13 @@ impl MediaNode {
         Ok(node)
     }
 
-    /// Where the node's rooms are, as a call's row names it.
+    /// Where the node's rooms are, as a call's row names it. Only the e2e tests ask, to reach its internal API.
     #[must_use]
     pub fn home(&self) -> &MediaHome {
         &self.home
     }
 
-    /// The address of its UDP socket.
-    #[must_use]
-    pub fn udp_addr(&self) -> SocketAddr {
-        self.udp
-    }
-
-    /// The call `call`'s legs, while the node has its room.
+    /// The call `call`'s legs, while the node has its room. Only the e2e tests ask.
     pub async fn room(&self, call: &str) -> Option<Vec<LegView>> {
         let (reply, replied) = oneshot::channel();
         self.commands
@@ -252,18 +245,21 @@ impl MediaNode {
         }
     }
 
-    /// Now and then: each room whose call is over, missing or another node's goes.
+    /// Now and then: each room whose call is over, missing or another node's two looks in a row goes.
     fn reconciling(&self, app: Arc<App>) -> impl Future<Output = ()> + Send + 'static {
         let (commands, home) = (self.commands.clone(), self.home.clone());
         let every = Duration::from_secs(app.config.mixer.reconcile);
         async move {
             let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+            // a late tick mustn't bring the next look closer: two looks in a row drop a room
+            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut unwanted = BTreeSet::new();
             loop {
                 ticks.tick().await;
                 let Some(load) = Self::load(&commands).await else {
                     return;
                 };
-                drop_unwanted(&app, &commands, &home, load.rooms).await;
+                unwanted = drop_unwanted(&app, &commands, &home, load.rooms, &unwanted).await;
             }
         }
     }
@@ -310,18 +306,30 @@ impl MediaNode {
     }
 }
 
-/// Drops each of `rooms` whose call is over, missing or in another node's room.
-async fn drop_unwanted(app: &App, commands: &mpsc::Sender<Command>, home: &MediaHome, rooms: Vec<String>) {
+/// Drops each of `rooms` whose call is over, missing or in another node's room, and was so at the last look too
+/// (`before`): a new call's room is made before its row is stored. The rooms unwanted at this look.
+async fn drop_unwanted(
+    app: &App,
+    commands: &mpsc::Sender<Command>,
+    home: &MediaHome,
+    rooms: Vec<String>,
+    before: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let mut unwanted = BTreeSet::new();
     for call in rooms {
         match crate::calling::room_wanted(app, &call, home).await {
             Ok(true) => {}
-            Ok(false) => {
+            Ok(false) if before.contains(&call) => {
                 let (reply, _) = oneshot::channel();
                 let _ = commands.send(Command::DeleteRoom { call, reply });
+            }
+            Ok(false) => {
+                unwanted.insert(call);
             }
             Err(error) => tracing::warn!(%error, "a media room's call couldn't be read"),
         }
     }
+    unwanted
 }
 
 /// The parties whose legs lost their media are taken out of their calls.

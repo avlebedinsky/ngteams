@@ -823,11 +823,14 @@ answered the same; more than 20 in a minute are `429`.
 **Failure**: a call's row names its node (`{node, url, epoch}`), so any signaling node reaches its room; with Redis,
 every media node beats in the registry every `mixer.heartbeat` seconds. A call whose node is gone (no heartbeat for
 `mixer.dead_after`, another life after a restart, or this process's node stopped) ends for everyone (`503` at each
-party's `end`, the chat told); a running call is never moved to another node. A party whose leg stays down for
-`mixer.media_timeout`, or doesn't connect within `mixer.connect_timeout` of its answer, is taken out of the call
-(`408` at its `end`, the others get the roster). Every `mixer.reconcile` seconds the node drops a room whose call is
-over or gone. A stopping `--role media` node takes no new room and serves its rooms for `mixer.drain_timeout` at
-most; a stopping `--role all` node, its API already gone, stops its media node at once.
+party's `end`, the chat told); a running call is never moved to another node. A node's entry must stay missing from the
+registry for two `mixer.heartbeat`s before its calls end, so a Redis that lost its data ends no call. A party whose leg
+stays down for `mixer.media_timeout`, or doesn't connect within `mixer.connect_timeout` of its answer, is taken out of
+the call (`408` at its `end`, the others get the roster); a leg still there 5 s after its report is reported again.
+Every `mixer.reconcile` seconds the node looks at its rooms, and drops a room whose call is over or gone at two looks in
+a row (a new call's room is made before its row is stored). A stopping `--role media` node takes no new room and serves
+its rooms for `mixer.drain_timeout` at most; a stopping `--role all` node, its API already gone, stops its media node at
+once.
 
 - **The start**: the caller must be in the chat (`403`), and only the chat's members it names ring, once each; a
   chat that doesn't exist is `404`. The caller is in the call at once: its acceptance, with the node's answer to its

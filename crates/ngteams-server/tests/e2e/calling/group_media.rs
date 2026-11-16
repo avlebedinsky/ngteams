@@ -335,7 +335,7 @@ async fn signaling_and_media_on_different_nodes() {
     assert!(ngteams_server::mixer::install(&api.app, None).unwrap());
     let node = MediaNode::start(&media.app).await.unwrap();
     assert!(ngteams_server::mixer::install(&media.app, Some(&node)).unwrap());
-    let mixed = Mixed {
+    let mut mixed = Mixed {
         server: api,
         node: Some(node),
         turn,
@@ -348,7 +348,10 @@ async fn signaling_and_media_on_different_nodes() {
     let calls = connect_all(&chat, &mut [&mut a, &mut b]).await;
     mixed.connected(&mixed.open_call().await, 2).await;
     tokio::time::sleep(2 * TALK).await;
-    hang_up_all(&mut [&mut a, &mut b], &calls).await;
+    // the media node goes while the call runs: the API node, which has no node of its own, sees it in the registry
+    mixed.node.take().unwrap().stop().await;
+    ended_by_the_service(&a.ended(calls[0]).await, 503);
+    ended_by_the_service(&b.ended(calls[1]).await, 503);
     hears(&a, &[B_TONE], A_TONE);
     hears(&b, &[A_TONE], B_TONE);
     for engine in [a, b] {
@@ -356,6 +359,14 @@ async fn signaling_and_media_on_different_nodes() {
     }
     mixed.stop().await;
     media.stop().await;
+}
+
+/// The call ended as the service's, with `code`.
+fn ended_by_the_service(end: &End, code: i64) {
+    let End::Remote(remote) = end else {
+        panic!("not the service's end: {end:?}");
+    };
+    assert_eq!(remote.code, Some(code), "{end:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -369,8 +380,8 @@ async fn a_dead_media_node_ends_the_call_for_everyone() {
         let calls = connect_all(&chat, &mut [&mut a, &mut b]).await;
         mixed.connected(&mixed.open_call().await, 2).await;
         mixed.node.take().unwrap().stop().await;
-        assert!(matches!(a.ended(calls[0]).await, End::Remote(_)));
-        assert!(matches!(b.ended(calls[1]).await, End::Remote(_)));
+        ended_by_the_service(&a.ended(calls[0]).await, 503);
+        ended_by_the_service(&b.ended(calls[1]).await, 503);
         assert!(
             ngteams_server::calling::open_calls(&mixed.server.app.db)
                 .await
@@ -449,8 +460,7 @@ async fn a_leg_without_media_is_taken_out_of_the_roster() {
             .await;
         a.view(call, |view| view.participants.iter().all(|party| party.mri != joiner))
             .await;
-        let taken_out = b.ended().await;
-        eprintln!("b's call ended: {taken_out:?}");
+        ended_by_the_service(&b.ended().await, 408);
         a.call(CallAction::HangUp { call }).await;
         a.ended(call).await;
         a.shut_down().await;
@@ -585,8 +595,11 @@ async fn a_group_start_with_no_media_node_to_take_it_fails() {
     let (b, c) = (mixed.member("Bert").await, mixed.member("Cora").await);
     let chat = group_chat(&a, &[], &[b, c]).await;
     let call = a.call(CallAction::Call { chat }).await;
-    let end = a.ended(call).await;
-    eprintln!("the start ended: {end:?}");
+    assert_eq!(
+        a.ended(call).await,
+        End::Failed("start"),
+        "the start is refused: no node takes its room"
+    );
     assert!(
         ngteams_server::calling::open_calls(&mixed.server.app.db)
             .await
@@ -594,5 +607,113 @@ async fn a_group_start_with_no_media_node_to_take_it_fails() {
             .is_empty()
     );
     a.shut_down().await;
+    mixed.stop().await;
+}
+
+/// A token of the deployment's own keys for `audience`, made as the internal API's are.
+fn internal_token(server: &TestServer, audience: &str) -> String {
+    let app = &server.app;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let claims = serde_json::json!({
+        "aud": audience,
+        "iss": format!("{}/media", app.config.origin()),
+        "exp": now + 60,
+    });
+    app.issuer.keys().sign(&claims).unwrap()
+}
+
+/// The internal API's answer to `method` at `path` (under the rooms) on the node `home`, with `token` and `epoch`.
+async fn internal(
+    home: &ngteams_server::calling::MediaHome,
+    (method, path, body): (reqwest::Method, &str, Option<&serde_json::Value>),
+    token: Option<&str>,
+    epoch: u64,
+) -> reqwest::StatusCode {
+    let url = format!("{}/internal/mixer/v1/rooms/{path}", home.url);
+    let mut request = reqwest::Client::new()
+        .request(method, url)
+        .header("ngteams-media-epoch", epoch.to_string());
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    if let Some(body) = body {
+        request = request.json(body);
+    }
+    request.send().await.unwrap().status()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_internal_api_refuses_a_request_without_its_token_or_for_another_life() {
+    use reqwest::{Method, StatusCode};
+    let mixed = Mixed::start(Backend::Sqlite).await;
+    let home = mixed.node().home().clone();
+    let (own, other) = (
+        internal_token(&mixed.server, "ngteams-media"),
+        internal_token(&mixed.server, "ngteams-other"),
+    );
+    let sdp = serde_json::json!({"blob": "v=0\r\n", "contentType": "application/sdp-ngc-1.0"});
+    let (put, answer, offer) = (
+        serde_json::json!({"sources": ngteams_server::calling::Sources::default(), "offer": null}),
+        serde_json::json!({"answer": sdp}),
+        serde_json::json!({"offer": sdp}),
+    );
+    let routes = [
+        (Method::GET, "a-call", None),
+        (Method::DELETE, "a-call", None),
+        (Method::PUT, "a-call/legs/a-leg", Some(&put)),
+        (Method::DELETE, "a-call/legs/a-leg", None),
+        (Method::POST, "a-call/legs/a-leg/answer", Some(&answer)),
+        (Method::POST, "a-call/legs/a-leg/offer", Some(&offer)),
+    ];
+    for route in routes {
+        let what = format!("{} {}", route.0, route.1);
+        let unsigned = internal(&home, route.clone(), None, home.epoch).await;
+        assert_eq!(unsigned, StatusCode::UNAUTHORIZED, "{what} without a token");
+        let elsewhere = internal(&home, route.clone(), Some(&other), home.epoch).await;
+        assert_eq!(
+            elsewhere,
+            StatusCode::UNAUTHORIZED,
+            "{what} with another audience's token"
+        );
+        let old_life = internal(&home, route, Some(&own), home.epoch + 1).await;
+        assert_eq!(old_life, StatusCode::GONE, "{what} for another life");
+    }
+    let room = (Method::GET, "a-call", None);
+    let admitted = internal(&home, room, Some(&own), home.epoch).await;
+    assert_eq!(admitted, StatusCode::NOT_FOUND, "admitted: no such room");
+    mixed.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_room_without_a_call_goes_only_at_the_second_look() {
+    const EVERY: Duration = Duration::from_secs(2);
+    let mixed = Mixed::start_with(Backend::Sqlite, |config| config.mixer.reconcile = EVERY.as_secs()).await;
+    let home = mixed.node().home().clone();
+    let own = internal_token(&mixed.server, "ngteams-media");
+    // a new call's room, made before its row is stored, halfway to the node's first look
+    tokio::time::sleep(EVERY / 2).await;
+    let put = serde_json::json!({"sources": ngteams_server::calling::Sources::default(), "offer": null});
+    let made = internal(
+        &home,
+        (reqwest::Method::PUT, "no-row/legs/a-leg", Some(&put)),
+        Some(&own),
+        home.epoch,
+    )
+    .await;
+    assert!(made.is_success(), "{made}");
+    let since = tokio::time::Instant::now();
+    let deadline = since + WAIT;
+    while mixed.node().room("no-row").await.is_some() {
+        assert!(tokio::time::Instant::now() < deadline, "the room stayed");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let lived = since.elapsed();
+    assert!(
+        lived + Duration::from_millis(100) >= EVERY,
+        "dropped at its first look: {lived:?}"
+    );
     mixed.stop().await;
 }

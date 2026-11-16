@@ -1,8 +1,9 @@
 //! The media thread: the node's one UDP socket, every room's legs on it, and their ticks. No tokio inside: the
 //! internal API sends [`Command`]s and waits for the reply; a datagram goes to the leg whose `Rtc` accepts it. A leg
-//! whose media is lost is reported once ([`Lost`]), and the node's async side takes its party out of the call.
+//! whose media is lost is reported ([`Lost`]), and the node's async side takes its party out of the call; a leg still
+//! there [`REPORT_AGAIN`] later (that step failed) is reported again.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -21,6 +22,8 @@ use crate::calling::{Sdp, Sources};
 const DATAGRAM: usize = 2000;
 /// How often the node judges its legs' health.
 const HEALTH_EVERY: Duration = Duration::from_millis(500);
+/// How long after its report a lost leg still in its room is reported again.
+pub(crate) const REPORT_AGAIN: Duration = Duration::from_secs(5);
 
 /// Why the node didn't do what it was asked.
 #[derive(Debug, thiserror::Error)]
@@ -120,7 +123,8 @@ struct Node {
     settings: Settings,
     rooms: BTreeMap<String, Room>,
     lost: mpsc::UnboundedSender<Lost>,
-    reported: BTreeSet<Lost>,
+    /// The lost legs reported, and when.
+    reported: BTreeMap<Lost, Instant>,
     judged: Instant,
 }
 
@@ -140,7 +144,7 @@ pub(crate) fn run(
         settings,
         rooms: BTreeMap::new(),
         lost,
-        reported: BTreeSet::new(),
+        reported: BTreeMap::new(),
         judged: Instant::now(),
     };
     let mut buffer = vec![0_u8; DATAGRAM];
@@ -189,7 +193,7 @@ impl Node {
                 if let Some(room) = self.rooms.get_mut(&call) {
                     room.remove(&leg);
                 }
-                self.reported.retain(|lost| lost.call != call || lost.leg != leg);
+                self.reported.retain(|lost, _| lost.call != call || lost.leg != leg);
                 let _ = reply.send(Ok(()));
             }
             Command::DeleteRoom { call, reply } => {
@@ -247,7 +251,7 @@ impl Node {
                 room.remove(&leg);
             }
         }
-        self.reported.retain(|lost| lost.call != call);
+        self.reported.retain(|lost, _| lost.call != call);
     }
 
     /// Every leg's timeouts and output, every room's due ticks, and now and then the legs' health.
@@ -280,7 +284,8 @@ impl Node {
         }
     }
 
-    /// Reports each leg whose connection stayed down, or never came up after its exchange, too long.
+    /// Reports each leg whose connection stayed down, or never came up after its exchange, too long, unless it was
+    /// reported less than [`REPORT_AGAIN`] ago.
     fn judge(&mut self, now: Instant) {
         let (media_timeout, connect_timeout) = (self.settings.media_timeout, self.settings.connect_timeout);
         for (call, room) in &self.rooms {
@@ -297,9 +302,13 @@ impl Node {
                     call: call.clone(),
                     leg: id.clone(),
                 };
-                if (down || unconnected) && !self.reported.contains(&lost) {
+                let due = self
+                    .reported
+                    .get(&lost)
+                    .is_none_or(|at| now.duration_since(*at) >= REPORT_AGAIN);
+                if (down || unconnected) && due {
                     let _ = self.lost.send(lost.clone());
-                    self.reported.insert(lost);
+                    self.reported.insert(lost, now);
                 }
             }
         }
@@ -357,4 +366,67 @@ fn view(room: &Room) -> Vec<LegView> {
             control: leg.control_up(),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node() -> (Node, mpsc::UnboundedReceiver<Lost>) {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let destination = socket.local_addr().unwrap();
+        let (lost, losses) = mpsc::unbounded_channel();
+        let settings = Settings {
+            making: Making {
+                candidates: vec![destination],
+                ice_lite: true,
+            },
+            max_rooms: 4,
+            max_legs_per_room: 4,
+            media_timeout: Duration::from_secs(20),
+            connect_timeout: Duration::from_secs(30),
+        };
+        let node = Node {
+            socket,
+            destination,
+            settings,
+            rooms: BTreeMap::new(),
+            lost,
+            reported: BTreeMap::new(),
+            judged: Instant::now(),
+        };
+        (node, losses)
+    }
+
+    #[test]
+    fn a_lost_leg_still_in_its_room_is_reported_again_now_and_then() {
+        let now = Instant::now();
+        let (mut node, mut losses) = node();
+        node.put("call".into(), "leg".into(), Sources::default(), None, now)
+            .unwrap();
+        // the callee's answer was taken, and its leg never connected
+        node.leg("call", "leg").unwrap().health.exchanged = Some(now);
+        let lost = Lost {
+            call: "call".into(),
+            leg: "leg".into(),
+        };
+        let late = now + node.settings.connect_timeout;
+        node.judge(late);
+        assert_eq!(losses.try_recv().unwrap(), lost);
+        node.judge(late + HEALTH_EVERY);
+        assert!(losses.try_recv().is_err(), "reported once, not every look");
+        node.judge(late + REPORT_AGAIN);
+        assert_eq!(losses.try_recv().unwrap(), lost, "its step failed: reported again");
+        let (reply, _) = oneshot::channel();
+        node.command(
+            Command::DeleteLeg {
+                call: "call".into(),
+                leg: "leg".into(),
+                reply,
+            },
+            late,
+        );
+        node.judge(late + 3 * REPORT_AGAIN);
+        assert!(losses.try_recv().is_err(), "a leg that went isn't reported");
+    }
 }

@@ -241,15 +241,11 @@ impl Leg {
         Ok(ours(&written))
     }
 
-    /// The callee's answer to the mixer's offer.
+    /// The callee's answer to the mixer's offer. A leg whose exchange is done (every leg without the mixer's offer
+    /// waiting) takes an answer as a no-op: signaling sends a callee's answer again only as a retry.
     pub(crate) fn accept(&mut self, answer: &Sdp, now: Instant) -> Result<(), LegError> {
         if self.pending.is_none() {
-            // the same answer again, once taken
-            return if self.health.exchanged.is_some() {
-                Ok(())
-            } else {
-                Err(LegError::NoOffer)
-            };
+            return Ok(());
         }
         let read = self.dialect.read_answer(&standard(answer)?)?;
         let parsed = Str0mAnswer::from_sdp_string(&read.to_sdp_string())?;
@@ -539,12 +535,14 @@ mod tests {
     }
 
     #[test]
-    fn an_answer_without_an_offer_of_the_mixers_is_refused() {
+    fn a_leg_whose_exchange_is_done_takes_an_answer_as_a_no_op_and_a_bad_offer_is_refused() {
         let now = Instant::now();
         let (_, _, offer, _) = client();
-        let mut fresh = Leg::new(&making(), SOURCES, Some(&offer), now).unwrap();
-        fresh.health.exchanged = None;
-        assert!(matches!(fresh.accept(&offer, now), Err(LegError::NoOffer)));
+        let mut answered = Leg::new(&making(), SOURCES, Some(&offer), now).unwrap();
+        let exchanged = answered.health.exchanged;
+        let later = now + Duration::from_secs(1);
+        answered.accept(&offer, later).unwrap();
+        assert_eq!(answered.health.exchanged, exchanged, "nothing changed");
         let bad = Sdp {
             blob: "not sdp".into(),
             content_type: "application/sdp-ngc-1.0".into(),

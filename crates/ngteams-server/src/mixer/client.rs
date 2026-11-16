@@ -2,9 +2,10 @@
 //! (the registry's, else this process's own), and every request of a call goes to the node its row names, over the
 //! internal API.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Weak};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use reqwest::{Method, StatusCode};
@@ -18,6 +19,10 @@ use crate::calling::{MediaError, MediaHome, MediaNodes, Sdp, Sources};
 /// How long a request to a media node may take to connect, and in all.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// How many heartbeats a node's entry must stay missing before the node counts as gone.
+const MISSED_BEATS: u32 = 2;
+/// How long a node's missing entry is kept in mind after it was first missed.
+const FORGET_AFTER: Duration = Duration::from_secs(3600);
 
 /// This process's own media node, as its signaling side knows it.
 #[derive(Clone, Debug)]
@@ -27,6 +32,39 @@ pub(crate) struct Local {
     pub alive: Arc<AtomicBool>,
 }
 
+/// Since when each node life's registry entry has been missing. Only an entry missing for `grace` is evidence that
+/// the node is gone: a Redis that lost its data has every live node's entry back within a heartbeat.
+#[derive(Debug)]
+struct Missing {
+    grace: Duration,
+    since: Mutex<BTreeMap<(String, u64), Instant>>,
+}
+
+impl Missing {
+    fn new(grace: Duration) -> Self {
+        Self {
+            grace,
+            since: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn found(&self, home: &MediaHome) {
+        if let Ok(mut since) = self.since.lock() {
+            since.remove(&(home.node.clone(), home.epoch));
+        }
+    }
+
+    /// The entry of `home` is missing at `now`: whether it has been missing for the grace.
+    fn gone(&self, home: &MediaHome, now: Instant) -> bool {
+        let Ok(mut since) = self.since.lock() else {
+            return false;
+        };
+        since.retain(|_, first| now.duration_since(*first) < FORGET_AFTER);
+        let first = since.entry((home.node.clone(), home.epoch)).or_insert(now);
+        now.duration_since(*first) >= self.grace
+    }
+}
+
 /// The media nodes over the internal API.
 #[derive(Debug)]
 pub struct HttpNodes {
@@ -34,6 +72,7 @@ pub struct HttpNodes {
     http: reqwest::Client,
     registry: Option<Registry>,
     local: Option<Local>,
+    missing: Missing,
 }
 
 impl HttpNodes {
@@ -44,11 +83,13 @@ impl HttpNodes {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| error.to_string())?;
+        let heartbeat = Duration::from_secs(app.config.mixer.heartbeat);
         Ok(Self {
             app: Arc::downgrade(app),
             http,
             registry,
             local,
+            missing: Missing::new(heartbeat * MISSED_BEATS),
         })
     }
 
@@ -90,7 +131,11 @@ impl HttpNodes {
                     .bytes()
                     .await
                     .map_err(|error| MediaError::Failed(error.to_string()))?;
-                Ok(serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+                if bytes.is_empty() {
+                    return Ok(Value::Null);
+                }
+                serde_json::from_slice(&bytes)
+                    .map_err(|error| MediaError::Failed(format!("the media node's answer isn't JSON: {error}")))
             }
             StatusCode::GONE | StatusCode::NOT_FOUND => Err(MediaError::Gone),
             StatusCode::SERVICE_UNAVAILABLE => Err(MediaError::Unavailable),
@@ -111,7 +156,7 @@ fn room_path(call: &str) -> String {
 
 fn sdp_in(answer: &Value, field: &str) -> Result<Sdp, MediaError> {
     serde_json::from_value(answer.get(field).cloned().unwrap_or(Value::Null))
-        .map_err(|_| MediaError::Failed(format!("the media node's answer had no {field}")))
+        .map_err(|error| MediaError::Failed(format!("the media node's answer had no {field}: {error}")))
 }
 
 #[async_trait]
@@ -185,6 +230,48 @@ impl MediaNodes for HttpNodes {
             .entry(&home.node)
             .await
             .map_err(|error| MediaError::Failed(error.to_string()))?;
-        Ok(entry.is_some_and(|entry| entry.epoch == home.epoch))
+        match entry {
+            Some(entry) => {
+                self.missing.found(home);
+                Ok(entry.epoch == home.epoch)
+            }
+            None if self.missing.gone(home, Instant::now()) => Ok(false),
+            None => Err(MediaError::Failed(
+                "the media node's entry is missing, not yet for long".to_owned(),
+            )),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn home(epoch: u64) -> MediaHome {
+        MediaHome {
+            node: "node".into(),
+            url: "http://node".into(),
+            epoch,
+        }
+    }
+
+    #[test]
+    fn a_node_counts_as_gone_only_once_its_entry_stays_missing_for_the_grace() {
+        let missing = Missing::new(Duration::from_secs(2));
+        let now = Instant::now();
+        assert!(!missing.gone(&home(1), now), "a first miss is no evidence");
+        assert!(!missing.gone(&home(1), now + Duration::from_secs(1)));
+        assert!(missing.gone(&home(1), now + Duration::from_secs(2)));
+        assert!(
+            !missing.gone(&home(2), now + Duration::from_secs(2)),
+            "another life is missed on its own"
+        );
+        missing.found(&home(1));
+        assert!(
+            !missing.gone(&home(1), now + Duration::from_secs(3)),
+            "found again: the grace starts over"
+        );
+        let much_later = now + FORGET_AFTER + Duration::from_secs(3);
+        assert!(!missing.gone(&home(2), much_later), "an old miss is forgotten");
     }
 }
