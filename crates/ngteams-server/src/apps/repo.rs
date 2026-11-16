@@ -85,6 +85,10 @@ impl Record {
     }
 }
 
+fn by_name(rows: &mut [AppRow]) {
+    rows.sort_by_cached_key(|app| (app.name.to_lowercase(), app.id.clone()));
+}
+
 /// What a bot's client credentials are checked against.
 #[derive(Clone)]
 pub struct Credentials {
@@ -465,17 +469,14 @@ pub async fn get(db: &Db, id: &str) -> Result<Option<Record>, DbError> {
     })
 }
 
-/// Every app, by name.
+/// Every app, by name in any case, then by id. Sorted here, not by the database, so both backends order names alike
+/// whatever their collation.
 ///
 /// # Errors
 /// A database failure.
 pub async fn list(db: &Db) -> Result<Vec<Record>, DbError> {
-    let (rows, bots, users): (Vec<AppRow>, Vec<BotRow>, Vec<(String, String)>) = with_conn!(db, |conn| {
-        let rows = apps::table
-            .order((apps::name.asc(), apps::id.asc()))
-            .select(AppRow::as_select())
-            .load(conn)
-            .await?;
+    let (mut rows, bots, users): (Vec<AppRow>, Vec<BotRow>, Vec<(String, String)>) = with_conn!(db, |conn| {
+        let rows = apps::table.select(AppRow::as_select()).load(conn).await?;
         let bots = bots::table.select(BotRow::as_select()).load(conn).await?;
         let users = app_users::table
             .order(app_users::user_id.asc())
@@ -484,6 +485,7 @@ pub async fn list(db: &Db) -> Result<Vec<Record>, DbError> {
             .await?;
         (rows, bots, users)
     });
+    by_name(&mut rows);
     Ok(rows
         .into_iter()
         .map(|app| Record {
@@ -539,27 +541,46 @@ mod tests {
             "{shown}"
         );
         let record = Record {
-            app: AppRow {
-                id: "app".to_owned(),
-                version: "1".to_owned(),
-                name: "App".to_owned(),
-                full_name: "App".to_owned(),
-                short_description: String::new(),
-                full_description: String::new(),
-                developer: String::new(),
-                accent_color: "#000000".to_owned(),
-                manifest: "{}".to_owned(),
-                source: "form".to_owned(),
-                icons: false,
-                everyone: true,
-                enabled: true,
-                created_at: 0,
-                updated_at: 0,
-            },
+            app: app("app", "App"),
             bot: Some(bot),
             users: Vec::new(),
         };
         assert!(!format!("{record:?}").contains("digest-of-the-secret"));
         assert!(record.scopes().is_empty());
+    }
+
+    #[test]
+    fn apps_are_listed_by_name_in_any_case_then_by_id() {
+        let mut rows = vec![
+            app("5", "Zz last"),
+            app("4", "padded"),
+            app("3", "O'Brien"),
+            app("2", "echo"),
+            app("1", "Echo"),
+            app("0", "a"),
+        ];
+        by_name(&mut rows);
+        let order: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+        assert_eq!(order, ["0", "1", "2", "3", "4", "5"]);
+    }
+
+    fn app(id: &str, name: &str) -> AppRow {
+        AppRow {
+            id: id.to_owned(),
+            version: "1".to_owned(),
+            name: name.to_owned(),
+            full_name: name.to_owned(),
+            short_description: String::new(),
+            full_description: String::new(),
+            developer: String::new(),
+            accent_color: "#000000".to_owned(),
+            manifest: "{}".to_owned(),
+            source: "form".to_owned(),
+            icons: false,
+            everyone: true,
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+        }
     }
 }

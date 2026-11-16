@@ -505,7 +505,7 @@ Admins only, with the same bearer token and refusals as the [account routes](#ad
 | `POST /api/admin/v1/apps` | registers a bot from the form: `name` (1–30 characters), optional `description`, optional `endpoint` (an absolute `https` URL without credentials; `http` with `bots.allow_http_endpoints`; without one the bot has none until a `PATCH` sets it), `auth_mode` (`signed`, the default, or `unsigned` with `bots.allow_unsigned`). The app and its bot share a new id | 201 app with `secret` |
 | `POST /api/admin/v1/apps/package` | registers the app a Teams app package holds (`Content-Type: application/zip`, at most 5 MiB): `manifest.json` (a GUID `id`, `version`, `name.short` up to 30 characters, `description`, `developer.name`, `accentColor` `#RRGGBB`, at most one bot with a GUID `botId` and scopes of `personal`, `team`, `groupChat`) and its two icons (PNG, color 192×192, outline 32×32, kept in the file store as `apps/<id>/color.png` and `outline.png`). The bot has no endpoint until a `PATCH` sets it | 201 app, with `secret` when it has a bot |
 | `PUT /api/admin/v1/apps/{id}/package` | a new package of the same app and bot: version, names, manifest, icons. The bot keeps its endpoint, mode and secret | 200 app |
-| `GET /api/admin/v1/apps` | every app, by name | 200 `{"apps": [app]}` |
+| `GET /api/admin/v1/apps` | every app, by name in any case, then by id | 200 `{"apps": [app]}` |
 | `GET /api/admin/v1/apps/{id}` | one app | 200 app |
 | `PATCH /api/admin/v1/apps/{id}` | any of `enabled`, `everyone` (every account may use it) and `users` (the account ids that may when not), the bot's `endpoint` and `auth_mode` | 200 app |
 | `POST /api/admin/v1/apps/{id}/secret` | a new secret for its bot; the old one stops working at once | 200 `{"secret"}` |
@@ -526,7 +526,7 @@ audit entry holds it.
 
 The operator has the same on the command line: `app add --name <name> [--endpoint <url>] [--description <text>]
 [--unsigned]` or `app add --package <file.zip>` print `added <id> (<name>)` and `secret <secret>`; `app list` prints
-`<id>\t<enabled|disabled>\t<name>\t<28:bot or ->`; `app disable|enable|rotate-secret|remove <id>`.
+`<id>\t<enabled|disabled>\t<name>\t<28:bot or ->`, in the same order; `app disable|enable|rotate-secret|remove <id>`.
 
 ### A bot's credentials
 
