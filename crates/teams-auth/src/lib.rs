@@ -15,7 +15,8 @@
 //! - [`signin`]: the parent's side of the sign-in window (`teams-signin`): the request it is given, the redirect it
 //!   hands back, and the code redeemed only for the account the ID token names;
 //! - [`session`]: one signed-in account's tokens while a client runs: an access token per audience, refreshed before it
-//!   runs out, and the skypetoken renewed after its Entra token.
+//!   runs out, and the skypetoken renewed after its Entra token;
+//! - [`task`]: a request's network work on a task of its own, off its caller's stack.
 //!
 //! Filled in by M0 Tasks 2, 13 and 14 (`docs/plans/20261019-native-teams-m0-lab-and-spikes.md`), M1 Task 4 and M2
 //! Task 4 (the broker) and Task 24 (the sign-in window).
@@ -32,6 +33,7 @@ pub mod refresh;
 pub mod secrets;
 pub mod session;
 pub mod signin;
+pub mod task;
 pub mod token;
 
 mod wire;

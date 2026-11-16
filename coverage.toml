@@ -41,7 +41,7 @@ ngteams-server = { lines = 93, functions = 92, regions = 90 }
 # Individually inspected sources LLVM does not map. Any content change invalidates the review.
 # These entries never suppress coverage counts when LLVM supplies a mapping for the file.
 [unmapped_sources."crates/teams-auth/src/lib.rs"]
-sha256 = "d45bcb1d397960fc1911c82f03f4f14a13b7fff0e6c53d7c84ea042307229521"
+sha256 = "694db7114b006c69772cd024e8d6a87347ce1b3591d84c6ef89734e334cd5f12"
 reason = "module declarations and documentation only; no executable items"
 
 [unmapped_sources."crates/ngteams-server/src/lib.rs"]

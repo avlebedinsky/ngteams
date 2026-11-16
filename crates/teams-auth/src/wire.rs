@@ -37,10 +37,15 @@ pub(crate) async fn exchange(
         log::debug!(target: teams_log::wire::HTTP_TARGET, "{}", record.with_secrets(secrets));
     }
     let started = Instant::now();
-    let response = client.execute(request).await?;
-    let status = response.status();
-    let headers = response.headers().clone();
-    let body = response.bytes().await?.to_vec();
+    let client = client.clone();
+    let (status, headers, body) = crate::task::own_task(async move {
+        let response = client.execute(request).await?;
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = response.bytes().await?.to_vec();
+        Ok::<_, reqwest::Error>((status, headers, body))
+    })
+    .await?;
     if full {
         let pairs = header_pairs(&headers);
         let record = teams_log::wire::Response {

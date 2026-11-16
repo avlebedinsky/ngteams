@@ -1186,7 +1186,7 @@ impl<C: Credentials> HttpTransport<C> {
         if let Some(body) = body {
             request = request.body(body);
         }
-        let answered = match request.send().await {
+        let answered = match teams_auth::task::own_task(request.send()).await {
             Ok(answer) => {
                 let limit = if self.cloud.contains(url) && url.path().starts_with("/ams/") {
                     MAX_PICTURE_BODY
@@ -1399,13 +1399,12 @@ impl<C: Credentials> HttpTransport<C> {
         let full = log_request(&method, url, &map, None);
         let shown = format!("GET {}{}", url.host_str().unwrap_or_default(), url.path());
         let started = Instant::now();
-        let sent = self
+        let request = self
             .client
             .get(self.destination(url))
             .headers(map)
-            .timeout(STREAM_TIMEOUT)
-            .send()
-            .await;
+            .timeout(STREAM_TIMEOUT);
+        let sent = teams_auth::task::own_task(request.send()).await;
         let answer = match sent {
             Ok(answer) => answer,
             Err(error) => {
