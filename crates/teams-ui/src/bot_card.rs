@@ -582,7 +582,9 @@ fn passes(input: &Input, answer: Option<&str>) -> bool {
         InputKind::Date { min, max, .. } | InputKind::Time { min, max, .. } => {
             min.as_deref().is_none_or(|min| answer >= min) && max.as_deref().is_none_or(|max| answer <= max)
         }
-        InputKind::Toggle { .. } | InputKind::ChoiceSet { .. } => true,
+        // A required switch is filled only when it is on (as in Adaptive Cards); its `valueOff` is not an answer.
+        InputKind::Toggle { value_on, .. } => !input.required || answer == value_on,
+        InputKind::ChoiceSet { .. } => true,
     }
 }
 
@@ -619,7 +621,7 @@ mod tests {
     use serde_json::json;
     use teams_proto::chat::card::input;
 
-    use super::{merged, passes};
+    use super::{merged, passes, toggle_answer};
 
     #[test]
     fn answers_are_checked_as_the_card_says() {
@@ -637,6 +639,23 @@ mod tests {
         let date = input(&json!({"type": "Input.Date", "id": "d", "min": "2026-01-01"})).unwrap();
         assert!(!passes(&date, Some("2025-12-31")));
         assert!(passes(&date, Some("2026-01-02")));
+    }
+
+    #[test]
+    fn a_required_switch_passes_only_when_on() {
+        let required =
+            input(&json!({"type": "Input.Toggle", "id": "s", "title": "I agree", "isRequired": true})).unwrap();
+        assert!(passes(&required, Some(&toggle_answer(&required, true))));
+        assert!(!passes(&required, Some(&toggle_answer(&required, false))));
+        let custom = input(&json!({
+            "type": "Input.Toggle", "id": "c", "title": "Yes", "isRequired": true, "valueOn": "yes", "valueOff": "no"
+        }))
+        .unwrap();
+        assert!(passes(&custom, Some("yes")));
+        assert!(!passes(&custom, Some("no")));
+        let optional = input(&json!({"type": "Input.Toggle", "id": "o", "title": "News"})).unwrap();
+        assert!(passes(&optional, Some(&toggle_answer(&optional, false))));
+        assert!(passes(&optional, Some(&toggle_answer(&optional, true))));
     }
 
     #[test]
