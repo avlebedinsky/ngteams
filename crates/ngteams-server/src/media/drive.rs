@@ -73,13 +73,13 @@ pub(super) fn site(app: &App, owner: &str) -> String {
     format!("{}/sp/personal/{}/", app.config.origin(), site_user(owner))
 }
 
-/// The file's address in its owner's drive: what the message names it by and its sharing link.
-pub(super) fn web_url(app: &App, item: &repo::Item) -> Result<String, Error> {
-    let mut url = Url::parse(&site(app, &item.owner_id)).map_err(|_| Error::Missing)?;
+/// The address of the file `name` in `owner`'s drive: what the message names it by and its sharing link.
+pub(super) fn web_url(app: &App, owner: &str, name: &str) -> Result<String, Error> {
+    let mut url = Url::parse(&site(app, owner)).map_err(|_| Error::Missing)?;
     url.path_segments_mut()
         .map_err(|()| Error::Missing)?
         .pop_if_empty()
-        .extend(["Documents", FOLDER, item.name.as_str()]);
+        .extend(["Documents", FOLDER, name]);
     Ok(url.into())
 }
 
@@ -353,7 +353,7 @@ async fn refused(body: Body, why: Error) -> Error {
 
 /// A file as SharePoint and Graph describe a `driveItem`.
 pub(super) fn drive_item(app: &App, item: &repo::Item) -> Result<Value, Error> {
-    let url = web_url(app, item)?;
+    let url = web_url(app, &item.owner_id, &item.name)?;
     let at = chrono::DateTime::from_timestamp(item.created_at, 0)
         .unwrap_or(chrono::DateTime::UNIX_EPOCH)
         .format("%Y-%m-%dT%H:%M:%SZ")

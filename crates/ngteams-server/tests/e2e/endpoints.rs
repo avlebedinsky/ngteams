@@ -25,25 +25,31 @@ struct Row {
     status: Option<Status>,
 }
 
-/// The text in the parentheses after `marker` in `row`.
-fn named(row: &str, marker: &str) -> Option<String> {
-    let at = row.find(marker)? + marker.len();
-    let rest = &row[at..];
+/// The text in the parentheses that `note` starts with after `marker`.
+fn named(note: &str, marker: &str) -> Option<String> {
+    let rest = note.strip_prefix(marker)?;
     Some(rest[..rest.find(')')?].trim().to_owned())
 }
 
+/// The status the row's first `own server:` note starts with; `None` for a row without one, or whose note starts
+/// with anything else (a typo, a refusal or a to-do is no status).
 fn status(row: &str) -> Option<Status> {
+    const MARKER: &str = "own server:";
     let row = row.to_lowercase();
-    if let Some(capability) = named(&row, "own server: hidden (") {
+    let note = row[row.find(MARKER)? + MARKER.len()..].trim_start();
+    if let Some(capability) = named(note, "hidden (") {
         return Some(Status::Hidden(capability));
     }
-    if let Some(reason) = named(&row, "own server: not served (") {
+    if let Some(reason) = named(note, "not served (") {
         return Some(Status::NotServed(reason));
     }
-    if row.contains("own server: public host") {
+    if note.starts_with("public host") {
         return Some(Status::PublicHost);
     }
-    row.contains("own server:").then_some(Status::Served)
+    let served = note
+        .strip_prefix("served")
+        .is_some_and(|rest| !rest.starts_with(char::is_alphanumeric));
+    served.then_some(Status::Served)
 }
 
 /// The rows of the inventory's tables whose Native column names a native entry.
@@ -95,8 +101,8 @@ fn every_request_the_client_sends_is_served_hidden_public_or_a_named_gap() {
         .collect();
     assert!(
         unmarked.is_empty(),
-        "rows the client sends without an own-server status (`own server: served`, `own server: hidden (<capability>)`, \
-         `own server: public host`, `own server: not served (<why>)`):\n{}",
+        "rows the client sends whose note does not start with an own-server status (`own server: served`, \
+         `own server: hidden (<capability>)`, `own server: public host`, `own server: not served (<why>)`):\n{}",
         unmarked.join("\n")
     );
     let mut off = Config::default();
@@ -114,6 +120,38 @@ fn every_request_the_client_sends_is_served_hidden_public_or_a_named_gap() {
             }
             _ => {}
         }
+    }
+}
+
+#[test]
+fn only_a_note_that_starts_with_a_status_has_one() {
+    assert_eq!(status("| x | own server: served |"), Some(Status::Served));
+    assert_eq!(
+        status("| x | Own server: served: the caller's own stream |"),
+        Some(Status::Served)
+    );
+    assert_eq!(
+        status("| x | own server: served ([server.md](x)) |"),
+        Some(Status::Served)
+    );
+    assert_eq!(
+        status("| x | own server: hidden (apps) |"),
+        Some(Status::Hidden("apps".into()))
+    );
+    assert_eq!(
+        status("| x | own server: not served (no store) |"),
+        Some(Status::NotServed("no store".into()))
+    );
+    assert_eq!(status("| x | own server: public host |"), Some(Status::PublicHost));
+    for row in [
+        "| x | own server: hiden (apps) |",
+        "| x | own server: 400 (only emotions) |",
+        "| x | own server: TODO |",
+        "| x | own server: the caller's own stream |",
+        "| x | own server: serves it |",
+        "| x | served |",
+    ] {
+        assert_eq!(status(row), None, "{row}");
     }
 }
 

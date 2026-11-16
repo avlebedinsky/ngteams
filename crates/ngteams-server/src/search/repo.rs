@@ -4,7 +4,7 @@
 //! index; names are few and short, and matched here as the starts of their words.
 
 use diesel::prelude::*;
-use diesel::sql_types::{BigInt, Nullable, Text};
+use diesel::sql_types::{BigInt, Bool, Nullable, Text};
 use diesel_async::RunQueryDsl;
 
 use super::terms::Terms;
@@ -39,6 +39,9 @@ pub struct MessageHit {
     pub display_name: String,
     #[diesel(sql_type = Text)]
     pub upn: String,
+    /// Whether the reader left the thread: its people now are not theirs to see.
+    #[diesel(sql_type = Bool)]
+    pub gone: bool,
 }
 
 #[derive(Debug, QueryableByName)]
@@ -120,7 +123,8 @@ fn containing(terms: &Terms) -> String {
     format!("%{}%", terms.first().unwrap_or_default())
 }
 
-const MESSAGES: &str = "SELECT m.chat_id, m.id, m.root_id, s.text, u.id AS owner_id, u.display_name, u.upn \
+const MESSAGES: &str = "SELECT m.chat_id, m.id, m.root_id, s.text, u.id AS owner_id, u.display_name, u.upn, \
+     c.left_at IS NOT NULL AS gone \
      FROM message_search s \
      JOIN chat_messages m ON m.chat_id = s.chat_id AND m.id = s.message_id \
      JOIN chat_members c ON c.chat_id = s.chat_id AND c.user_id = $1 \

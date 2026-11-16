@@ -241,9 +241,17 @@ async fn find(app: &App, caller: &Caller<Substrate>, request: &Request, suggeste
         Kind::Team => teams(db, reader, terms, page).await?,
         Kind::Channel => channels(db, reader, terms, page).await?,
         Kind::TeamsChannel => {
-            let mut found = teams(db, reader, terms, page).await?;
-            found.extend(channels(db, reader, terms, page).await?);
+            // the teams, then the channels, from the first of each; the page is of the two together
+            let all = Page {
+                from: 0,
+                size: page.from.saturating_add(page.size),
+            };
+            let mut found = teams(db, reader, terms, all).await?;
+            found.extend(channels(db, reader, terms, all).await?);
             found
+                .into_iter()
+                .skip(usize::try_from(page.from).unwrap_or(0))
+                .collect()
         }
     };
     let size = usize::try_from(request.page.size).unwrap_or(0);
@@ -266,7 +274,12 @@ fn time(ms: i64) -> String {
 
 async fn messages(db: &Db, reader: &str, terms: &Terms, page: Page, suggested: bool) -> Result<Vec<Value>, DbError> {
     let hits = repo::messages(db, reader, terms, page).await?;
-    let mut chats: Vec<String> = hits.iter().map(|hit| hit.chat_id.clone()).collect();
+    // a thread the reader left keeps its messages for them, but not its people of now
+    let mut chats: Vec<String> = hits
+        .iter()
+        .filter(|hit| !hit.gone)
+        .map(|hit| hit.chat_id.clone())
+        .collect();
     chats.sort_unstable();
     chats.dedup();
     let mut others: BTreeMap<&str, Vec<&str>> = BTreeMap::new();

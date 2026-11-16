@@ -597,15 +597,16 @@ hands out its GTM where it has one.
 | Search | (the origin) | `/search/` | the title bar's suggestions and results ([Search](#search)) |
 | Flight proxy | (the origin) | `/flightproxy/api/v2/` | 1:1 calls |
 | TURN credentials | (the origin) | `/trap/tokens` | yes |
-| Power Automate (Flow API), webhooks | (the client's fixed base) | `/workflows/` | the webhook workflows' subset, while `workflows.enabled` |
-| Power Apps connections | (the client's fixed base) | `/workflow-connections/` | the account's Teams connections, while `workflows.enabled` |
+| Power Automate (Flow API), webhooks | `workflowsService` announces it; requests go to the client's fixed base | `/workflows/` | the webhook workflows' subset, while `workflows.enabled` |
+| Power Apps connections | `workflowsService` announces it; requests go to the client's fixed base | `/workflow-connections/` | the account's Teams connections, while `workflows.enabled` |
 | A bot's token endpoint and metadata | (the bot's authority) | `/<tenant>/oauth2/v2.0/token`, `/<tenant>/v2.0/.well-known/`, `/adfs/` | while `apps.enabled` |
 | The keys bots check activities with | (the bot's settings) | `/bot/v1/.well-known/`, `/<tenant>/discovery/v2.0/keys` | while `apps.enabled` |
 
 ## Optional services
 
 The client hides what an own server doesn't serve, rather than offering it and failing (`teams_core::Capabilities`,
-read from authz's GTMs when the account starts). Each optional service has a GTM that announces it:
+read from authz's GTMs when the account starts; the app asks the server's authz again at each start, so a change to
+the server's services shows after a restart). Each optional service has a GTM that announces it:
 
 | Service | GTM | Served | What the client hides without it |
 |---|---|---|---|
@@ -618,7 +619,9 @@ read from authz's GTMs when the account starts). Each optional service has a GTM
 
 `docs/protocol/endpoints.md` names for every request the client sends whether the server serves it, the client hides
 it, it goes to a public host, or it is a known gap (`own server: …`); `cargo test -p ngteams-server endpoints` checks
-that each row says one, and that each hidden one is a service a default server leaves off.
+that each row's note starts with one (`served`, `hidden (<capability>)`, `public host`, `not served (<why>)`), and
+that each hidden one is a service that a server with its option off leaves off. It does not send the served rows to
+the server: the tests of each service do.
 
 ## Push: the registrar and Trouter
 
@@ -1166,9 +1169,10 @@ The team pickers' people searches are in [Teams and channels](#teams-and-channel
 
 The title bar's search is Substrate's (`docs/protocol/search.md`), under `/search/` with the token of
 `https://outlook.office.com/search`: `POST search/search/api/v1/suggestions` as the query is typed (`Groups`, one
-per kind asked) and `POST searchservice/api/v2/query` once it is entered (`EntitySets`, one per entity request, with
+per kind asked that the server searches) and `POST searchservice/api/v2/query` once it is entered (`EntitySets`, one per entity request, with
 `MoreResultsAvailable`). An ask without entity requests (the web client's empty contextual one) or with more than 16
-is answered 400; a kind the server doesn't search (`Event`, `App`, `Text`) finds nothing. A request takes at most 50
+is answered 400; a kind the server doesn't search (`Event`, `App`, `Text`) finds nothing: a query gives it an empty
+entity set, and the suggestions give it no group. A request takes at most 50
 of its kind, from at most the 1000th.
 
 The query is the user's words, never a syntax: each run of letters and digits (at most 16, lower-cased) must start a

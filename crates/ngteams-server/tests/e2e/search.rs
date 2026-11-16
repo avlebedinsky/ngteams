@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use teams_core::engine::Action;
 use teams_core::{SearchAnswer, SearchScope};
 use teams_proto::chat::MessageText;
-use teams_proto::{Mri, SUBSTRATE_AUDIENCE, SearchKind};
+use teams_proto::{Endpoint, Method, Mri, Request, SUBSTRATE_AUDIENCE, SearchKind, Service};
 use teams_store::OutboxState;
 
 use crate::support::{Backend, TestServer, backends};
@@ -35,6 +35,30 @@ async fn chat(seat: &Seat, others: &[&Seat], topic: Option<&str>) -> String {
         .unwrap();
     assert_eq!(row.state, OutboxState::Sent, "{row:?}");
     row.message_id.unwrap()
+}
+
+/// A member's removal from a group chat, as the chat service takes it.
+struct RemoveMember {
+    chat: String,
+    member: String,
+}
+
+impl Request for RemoveMember {
+    fn service(&self) -> Service {
+        Service::ChatService
+    }
+    fn method(&self) -> Method {
+        Method::Delete
+    }
+    fn endpoint(&self) -> Endpoint {
+        Endpoint::new(["v1", "threads", &self.chat, "members", &self.member])
+    }
+    fn body(&self) -> Option<Value> {
+        None
+    }
+    fn is_write(&self) -> bool {
+        true
+    }
 }
 
 async fn search(seat: &Seat, query: &str, scope: SearchScope) -> SearchAnswer {
@@ -263,6 +287,43 @@ async fn the_search_follows_edits_deletes_and_who_may_read_the_history() {
         let found = search(&office.dan, "harbour", SearchScope::All).await;
         assert_eq!(found.messages.len(), 1, "{:?}", found.messages);
         assert_eq!(found.messages[0].id, later);
+
+        office.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_who_left_keeps_what_they_could_read_but_not_the_chat_or_who_is_in_it() {
+    for backend in backends() {
+        let office = Office::open(backend).await;
+        let before = send(&office.ada, &office.picnic, "Meet at the harbour").await;
+        let removed = office
+            .ada
+            .client
+            .write(RemoveMember {
+                chat: office.picnic.clone(),
+                member: office.cora.mri.clone(),
+            })
+            .await
+            .unwrap();
+        assert!(removed.is_success(), "{}", removed.status());
+        let after = send(&office.ada, &office.picnic, "the kite is in the harbour").await;
+
+        // Cora finds what she could read, without the chat's people of now; nothing said after; not the chat
+        let kept = search(&office.cora, "harbour", SearchScope::All).await;
+        assert_eq!(kept.messages.len(), 1, "{:?}", kept.messages);
+        assert_eq!(kept.messages[0].id, before);
+        assert_eq!(kept.messages[0].to, None, "{:?}", kept.messages[0]);
+        assert!(search(&office.cora, "kite", SearchScope::All).await.messages.is_empty());
+        let chats = search(&office.cora, "picnic", SearchScope::Only(SearchKind::Chats)).await;
+        assert!(chats.chats.is_empty(), "{:?}", chats.chats);
+
+        // Bert, still in it, finds both, with its people of now
+        let seated = search(&office.bert, "harbour", SearchScope::All).await;
+        let ids: Vec<&str> = seated.messages.iter().map(|found| found.id.as_str()).collect();
+        assert_eq!(ids, [after.as_str(), before.as_str()], "{:?}", seated.messages);
+        let to = seated.messages[0].to.as_deref().unwrap_or_default();
+        assert!(to.contains("Ada Lovelace") && !to.contains("Cora"), "{to}");
         office.stop().await;
     }
 }
@@ -320,6 +381,46 @@ async fn files_the_reader_owns_or_was_sent_are_found_by_name() {
         assert!(outsider.files.is_empty(), "{:?}", outsider.files);
         cora.shutdown();
         trio.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_page_of_teams_and_channels_runs_on_from_the_teams_into_the_channels() {
+    for backend in backends() {
+        let office = Office::open(backend).await;
+        let (team, group) = office.ada.make_team("Rocket Science", false).await;
+        office.ada.make_channel(&team, &group, "Rocket Fuel", true).await;
+        let session = office.server.session("ada@own.test").await;
+        let token = session
+            .access_token(SUBSTRATE_AUDIENCE)
+            .await
+            .unwrap()
+            .token
+            .expose()
+            .to_owned();
+        let page = |from: u32| {
+            let request = reqwest::Client::new()
+                .post(office.server.url("/search/searchservice/api/v2/query"))
+                .bearer_auth(&token)
+                .json(&json!({"EntityRequests": [{"entityType": "TeamsChannel",
+                    "query": {"queryString": "rocket"}, "from": from, "size": 1}]}));
+            async move {
+                let answer: Value = request.send().await.unwrap().json().await.unwrap();
+                let set = answer["EntitySets"][0]["ResultSets"][0].clone();
+                let names: Vec<String> = set["Results"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|result| result["Source"]["Name"].as_str().unwrap().to_owned())
+                    .collect();
+                (names, set["MoreResultsAvailable"].as_bool().unwrap())
+            }
+        };
+        // the two teams by name, then the channel
+        assert_eq!(page(0).await, (vec!["Rocket Science".to_owned()], true));
+        assert_eq!(page(1).await, (vec!["Rocket Team".to_owned()], true));
+        assert_eq!(page(2).await, (vec!["Rocket Fuel".to_owned()], false));
+        office.stop().await;
     }
 }
 
