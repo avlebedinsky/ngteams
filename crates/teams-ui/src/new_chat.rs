@@ -6,7 +6,8 @@
 //!   1:1 chat with and the people the directory finds (the service's suggestions, a moment after the typing stops),
 //!   then the group chats whose names hold it, the empty ones the list leaves out among them
 //!   ([`ChatList::findable_rows`]); with nothing typed, the people of the latest 1:1 chats. Up and Down move in them,
-//!   Enter takes the one highlighted (else the first), Escape closes them. A group chat chosen there is opened.
+//!   Enter takes the one highlighted (else the first), Escape closes them. A group chat chosen there is opened. Tab
+//!   goes to the message box, and Shift+Tab from the box comes back, as in Teams.
 //! - **Add group name** (the chevron at the To: line's end, "Group name:" over it): a named chat is always a new group
 //!   chat, as Teams' tooltip says ("Add group name and create a new group chat"); the chevron takes the line away
 //!   again while nothing is typed in it.
@@ -45,9 +46,10 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, AsyncWindowContext, ClickEvent, Context, Entity, EventEmitter, FocusHandle,
-    Focusable as _, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, div, px, rgb,
+    AnyElement, App, AppContext as _, AsyncWindowContext, ClickEvent, Context, Entity, EventEmitter, FocusHandle,
+    Focusable as _, FontWeight, InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Render,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, actions, div,
+    px, rgb,
 };
 use gpui_component::Disableable as _;
 use gpui_component::Selectable as _;
@@ -63,6 +65,7 @@ use crate::chat_list::{self, ChatList, ChatRow, RowKind};
 use crate::chat_people::{ChatPeople, ChatPeopleEvent, ChatPeopleParts, PEOPLE_TIP, PeopleOf, Placed};
 use crate::chat_view::ChatView;
 use crate::compose::{Compose, ComposeEvent, ComposeParts};
+use crate::editor::ShiftTab;
 use crate::icons::{Glyph, icon_button, selected_by};
 use crate::people::{self, Picture};
 use crate::sending::settled_row;
@@ -70,6 +73,17 @@ use crate::shell::ShellParts;
 use crate::switcher::matches;
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
+
+actions!(new_chat, [ToMessageBox]);
+
+/// The To: line's key context.
+const TO_CONTEXT: &str = "NewChatTo";
+
+/// Binds New message's keys, once per app: Tab on the To: line goes to the message box, as in Teams; the kit's Tab
+/// would stop on the box's toolbar first.
+pub fn init(cx: &mut App) {
+    cx.bind_keys([KeyBinding::new("tab", ToMessageBox, Some(TO_CONTEXT))]);
+}
 
 /// The To: box's hint.
 pub const TO_HINT: &str = "Enter name or chat";
@@ -991,39 +1005,62 @@ impl NewChat {
 
     /// The To: line's pointer and keys: a press opens the suggestions (as Teams' does, even while its box already has
     /// the keyboard); Up, Down and Escape are the suggestions' while they are open; Backspace in the empty box takes
-    /// the last person off.
+    /// the last person off; Tab goes to the message box.
     fn line_keys(line: gpui::Stateful<gpui::Div>, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
-        line.on_mouse_down(
-            gpui::MouseButton::Left,
-            cx.listener(|this, _, _, cx| {
-                this.suggesting = true;
-                this.refresh_suggestions(cx);
-            }),
-        )
-        .capture_action(cx.listener(|this, _: &MoveUp, _, cx| {
-            if this.suggesting {
-                this.move_highlight(-1, cx);
-                cx.stop_propagation();
-            }
-        }))
-        .capture_action(cx.listener(|this, _: &MoveDown, _, cx| {
-            if this.suggesting {
-                this.move_highlight(1, cx);
-                cx.stop_propagation();
-            }
-        }))
-        .capture_action(cx.listener(|this, _: &Escape, _, cx| {
-            if this.suggesting {
-                this.suggesting = false;
-                cx.notify();
-                cx.stop_propagation();
-            }
-        }))
-        .capture_action(cx.listener(|this, _: &Backspace, window, cx| {
-            if this.backspace(window, cx) {
-                cx.stop_propagation();
-            }
-        }))
+        line.key_context(TO_CONTEXT)
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.suggesting = true;
+                    this.refresh_suggestions(cx);
+                }),
+            )
+            .on_action(cx.listener(Self::tab_to_box))
+            .capture_action(cx.listener(|this, _: &MoveUp, _, cx| {
+                if this.suggesting {
+                    this.move_highlight(-1, cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &MoveDown, _, cx| {
+                if this.suggesting {
+                    this.move_highlight(1, cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &Escape, _, cx| {
+                if this.suggesting {
+                    this.suggesting = false;
+                    cx.notify();
+                    cx.stop_propagation();
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &Backspace, window, cx| {
+                if this.backspace(window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+    }
+
+    /// Tab on the To: line: the message box takes the keyboard.
+    fn tab_to_box(&mut self, _: &ToMessageBox, window: &mut Window, cx: &mut Context<Self>) {
+        let compose = self.compose(cx);
+        if compose.read(cx).is_read_only() {
+            cx.propagate();
+            return;
+        }
+        self.suggesting = false;
+        compose.update(cx, |compose, cx| compose.focus(window, cx));
+        cx.notify();
+    }
+
+    /// Shift+Tab in the message box that the box does not use: the To: line takes the keyboard again.
+    fn shift_tab_to_line(&mut self, _: &ShiftTab, window: &mut Window, cx: &mut Context<Self>) {
+        if self.kind == Kind::GroupDraft {
+            cx.propagate();
+            return;
+        }
+        self.to.update(cx, |to, cx| to.focus(window, cx));
     }
 
     fn suggestion(&self, at: usize, suggested: &Suggested, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
@@ -1217,6 +1254,7 @@ impl Render for NewChat {
         div()
             .debug_selector(|| "new-chat".to_owned())
             .track_focus(&self.focus)
+            .on_action(cx.listener(Self::shift_tab_to_line))
             .relative()
             .size_full()
             .flex()

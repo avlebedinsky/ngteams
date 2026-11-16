@@ -521,6 +521,38 @@ fn a_new_chat_with_a_draft_left_for_another_chat_keeps_its_row_and_comes_back_wi
 }
 
 #[test]
+fn tab_from_to_goes_to_the_message_box_and_shift_tab_comes_back() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig);
+    cx.simulate_keystrokes("ctrl-n");
+    draw(cx);
+    let view = new_chat(&shell, cx);
+    add(cx, "Bee");
+    add(cx, "Sea");
+    click(cx, "new-chat-group-name-toggle");
+    click(cx, "new-chat-to-input");
+    let compose = cx.update(|_, cx| view.read(cx).compose(cx));
+    cx.simulate_keystrokes("tab");
+    draw(cx);
+    assert!(
+        cx.update(|window, cx| compose.read(cx).focused(window, cx)),
+        "Tab from To: goes to the box, as in Teams"
+    );
+    cx.simulate_input("typed with the keyboard only");
+    draw(cx);
+    assert_eq!(typed(&view, cx), "typed with the keyboard only");
+    cx.simulate_keystrokes("shift-tab");
+    draw(cx);
+    assert!(!cx.update(|window, cx| compose.read(cx).focused(window, cx)));
+    // the keyboard is on To: again: Backspace in its empty box takes the last person off
+    cx.simulate_keystrokes("backspace");
+    draw(cx);
+    let people: Vec<String> = cx.update(|_, cx| view.read(cx).people().into_iter().map(str::to_owned).collect());
+    assert_eq!(people, [LAB_B]);
+    assert_eq!(typed(&view, cx), "typed with the keyboard only");
+}
+
+#[test]
 fn a_draft_typed_to_the_chat_new_message_found_stays_with_that_chat() {
     let rig = seeded();
     let (shell, cx) = shell_window(&rig);

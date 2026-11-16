@@ -49,8 +49,8 @@ pub use convert::CantLoad;
 use doc::{Attrs, Block, Doc, Kind, MAX_INDENT, Pos, Run, Selection};
 pub use keys::{
     Bold, BulletList, CodeBlock, Copy, Cut, Enter, Escape, Heading1, Heading2, Heading3, InlineCode, Italic, MoveDown,
-    MoveUp, NumberedList, Paragraph, Paste, Quote, Redo, ShiftEnter, Strikethrough, Submit, Tab, ToggleExpanded,
-    Underline, Undo,
+    MoveUp, NumberedList, Paragraph, Paste, Quote, Redo, ShiftEnter, ShiftTab, Strikethrough, Submit, Tab,
+    ToggleExpanded, Underline, Undo,
 };
 
 /// The editor's key context.

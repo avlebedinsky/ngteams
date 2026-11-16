@@ -204,6 +204,7 @@ pub fn init(cx: &mut App) {
     cx.set_global(Bound);
     global_search::init(cx);
     crate::activity_view::init(cx);
+    crate::new_chat::init(cx);
     cx.bind_keys([
         KeyBinding::new("secondary-k", ToggleSwitcher, None),
         // Teams' desktop key for New message
