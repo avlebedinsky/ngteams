@@ -30,7 +30,7 @@ const AUTH_BODY_LIMIT: usize = 64 * 1024;
 /// How long a request may take.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// How often a node rotates keys when due and drops expired refresh tokens.
-const MAINTENANCE: Duration = Duration::from_secs(3600);
+pub(crate) const MAINTENANCE: Duration = Duration::from_secs(3600);
 /// Expired refresh tokens are kept this much longer (a late reuse still finds its family).
 const EXPIRED_KEPT: Duration = Duration::from_hours(24);
 
@@ -58,6 +58,8 @@ pub struct App {
     pub workflow_limit: crate::workflows::Limiter,
     /// The node's Redis command connection, with Redis.
     pub redis: Option<crate::fanout::keyspace::Shared>,
+    /// The keys activities to bots are signed with.
+    pub bot_keys: crate::apps::keys::BotKeys,
 }
 
 /// Why a node can't start.
@@ -96,6 +98,7 @@ impl App {
         let tenant = crate::db::meta::tenant(&db).await?;
         let keys = KeyRing::load(db.clone(), config.tokens.rotation(), key_retention(&config)).await?;
         let issuer = Issuer::new(keys, &config.origin(), &tenant, &config.region, config.tokens.access());
+        let bot_keys = crate::apps::keys::BotKeys::load(db.clone(), &config).await?;
         let setup_limits = LoginConfig {
             max_failures: config.setup.max_attempts,
             window: config.setup.window,
@@ -158,6 +161,7 @@ impl App {
             mixers: crate::calling::Mixers::default(),
             workflow_limit,
             redis: shared,
+            bot_keys,
         });
         Ok(app)
     }
@@ -188,6 +192,7 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(crate::trouter::router())
         .merge(crate::calling::router())
         .merge(crate::workflows::router(&app.config))
+        .merge(crate::apps::router(&app.config))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             REQUEST_TIMEOUT,
@@ -240,6 +245,7 @@ async fn rotate(app: &App) {
     if let Err(error) = app.issuer.keys().rotate_if_due().await {
         tracing::warn!(%error, "key rotation failed");
     }
+    crate::apps::keys::rotate(app).await;
 }
 
 async fn purge(app: &App) {

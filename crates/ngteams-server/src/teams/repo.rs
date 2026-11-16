@@ -277,6 +277,7 @@ pub(crate) async fn people(db: &Db, keyword: &str, team: Option<&str>, limit: i6
     let pattern = like(keyword);
     with_conn!(db, |conn| {
         let mut query = users::table
+            .filter(crate::db::users::person())
             .filter(users::disabled.eq(false))
             .filter(users::deleted_at.is_null())
             .filter(

@@ -34,7 +34,8 @@ hyper.workspace = true
 hyper-util.workspace = true
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
 indexmap.workspace = true
-jsonwebtoken.workspace = true
+# `use_pem`: an RSA key in PKCS#8, as aws-lc-rs makes it, is read only from PEM (the bot signing keys)
+jsonwebtoken = { workspace = true, features = ["use_pem"] }
 libsqlite3-sys.workspace = true
 mime_guess.workspace = true
 object_store.workspace = true
@@ -60,6 +61,8 @@ tracing = { workspace = true, features = ["std", "attributes"] }
 tracing-subscriber.workspace = true
 url = { workspace = true, features = ["serde"] }
 uuid.workspace = true
+# Teams app packages
+zip.workspace = true
 
 [dev-dependencies]
 image = { workspace = true, features = ["png"] }

@@ -6965,9 +6965,11 @@ dependencies = [
  "base64 0.23.1",
  "getrandom 0.4.3",
  "js-sys",
+ "pem",
  "serde",
  "serde_json",
  "signature",
+ "simple_asn1",
  "zeroize",
 ]
 
@@ -7996,6 +7998,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "zip",
 ]
 
 [[package]]
@@ -11424,6 +11427,18 @@ checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 dependencies = [
  "bstr",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "simple_asn1"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d585997b0ac10be3c5ee635f1bab02d512760d14b7c468801ac8a01d9ae5f1d"
+dependencies = [
+ "num-bigint",
+ "num-traits",
+ "thiserror 2.0.21",
+ "time",
 ]
 
 [[package]]

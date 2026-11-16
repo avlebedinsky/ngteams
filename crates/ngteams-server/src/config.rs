@@ -76,6 +76,8 @@ pub struct Config {
     /// The meeting rooms the scheduling form's room finder lists (`[[rooms]]`).
     pub rooms: Vec<RoomConfig>,
     pub workflows: crate::workflows::WorkflowsConfig,
+    pub apps: crate::apps::AppsConfig,
+    pub bots: crate::apps::BotsConfig,
 }
 
 impl std::fmt::Debug for Config {
@@ -94,6 +96,8 @@ impl std::fmt::Debug for Config {
             .field("calling", &self.calling)
             .field("workflows", &self.workflows)
             .field("mixer", &self.mixer)
+            .field("apps", &self.apps)
+            .field("bots", &self.bots)
             .finish_non_exhaustive()
     }
 }
@@ -311,6 +315,8 @@ impl Default for Config {
             mixer: crate::mixer::config::MixerConfig::default(),
             rooms: Vec::new(),
             workflows: crate::workflows::WorkflowsConfig::default(),
+            apps: crate::apps::AppsConfig::default(),
+            bots: crate::apps::BotsConfig::default(),
         }
     }
 }
@@ -373,6 +379,11 @@ pub enum ConfigError {
          mixer.internal_url an http or https URL"
     )]
     Mixer,
+    #[error(
+        "bots.scope must be an absolute URL without a trailing slash that no person's token is issued for, \
+         bots.issuer and bots.service_url absolute URLs, and the bots' lifetimes and key rotation above zero"
+    )]
+    Bots,
 }
 
 impl Config {
@@ -462,6 +473,9 @@ impl Config {
         }
         if !self.mixer.usable() {
             return Err(ConfigError::Mixer);
+        }
+        if !self.bots.usable(&self.audiences) {
+            return Err(ConfigError::Bots);
         }
         Ok(())
     }

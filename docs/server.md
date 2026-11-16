@@ -60,7 +60,8 @@ only, its internal API and its UDP socket ([Group calls](#group-calls)). A `medi
 fan-out as any node does.
 
 Commands: `serve`, `migrate`, `user add|list|disable|enable|reset-password|promote|demote|delete`,
-`profile show|set|picture|remove-picture`, `media list|delete`, `setup-code`, `keys rotate`. A password is read from the first line of standard input, never from the command line. Disabling or
+`profile show|set|picture|remove-picture`, `media list|delete`, `app add|list|disable|enable|rotate-secret|remove`
+([Apps and bots](#apps-and-bots)), `setup-code`, `keys rotate`. A password is read from the first line of standard input, never from the command line. Disabling or
 deleting an account, or resetting its password, revokes its refresh tokens and closes its push sockets at once: a
 disabled or deleted account is refused everywhere from then on, and after a new password the sessions end when
 their access tokens run out (one hour by default). `user add --admin` and `user promote` make an admin; `user list`
@@ -146,6 +147,13 @@ takes a double underscore: `NGTEAMS_SERVER_TLS__CERT`, `NGTEAMS_SERVER_TOKENS__A
 | `mixer.heartbeat`, `mixer.dead_after` | `5`, `15` | seconds between the node's heartbeats in Redis; seconds without one after which it is dead and its calls end |
 | `mixer.media_timeout`, `mixer.connect_timeout` | `20`, `30` | seconds a party's media may stay down, or take to come up after its answer, before it is taken out of the call |
 | `mixer.reconcile`, `mixer.drain_timeout` | `30`, `300` | seconds between the node's looks at its rooms' calls; seconds a stopping node serves its rooms before it ends them |
+| `apps.enabled` | `true` | whether the server serves apps and bots ([below](#apps-and-bots)): the registry, a bot's credentials and the keys it checks with |
+| `bots.scope` | `https://api.botframework.com` | the resource a bot asks its token for (`<scope>/.default`) and that token's audience; never one of `audiences` |
+| `bots.issuer`, `bots.service_url` | `<public_origin>/bot`, `<public_origin>/bot/` | the issuer of the tokens activities to bots carry; the `serviceUrl` activities name |
+| `bots.token_lifetime`, `bots.activity_token_lifetime` | `3600`, `3600` | seconds a bot's own token and an activity's token are valid |
+| `bots.key_rotation` | `2592000` | seconds a bot signing key signs before a new one replaces it (30 days) |
+| `bots.allow_unsigned` | `false` | whether a bot may be registered with `auth_mode: "unsigned"` (no authentication either way: development or a private network) |
+| `bots.allow_http_endpoints` | `false` | whether a bot's endpoint may be plain `http` (development only) |
 | `[[rooms]]` | none | the meeting rooms the room finder lists, each `name`, `address` (its mailbox) and optionally `list` (its building), `capacity`, `floor`, `street`, `audio_device`, `video_device`, `display_device`, `wheelchair` |
 
 ## Sign-in and tokens
@@ -475,6 +483,91 @@ Not served: any other template or trigger (schedules, Planner, SharePoint, email
 message, a run by hand, the input-run runtime (`shared_logicflows`), connector operations and their choices, and
 paging of the lists (a list is whole, without `nextLink`).
 
+## Apps and bots
+
+The server becomes a Bot Connector for bots built with the Bot Framework, Teams or Microsoft 365 Agents SDKs. It
+registers apps and bots now and gives each bot its credentials and the keys to check the server with; delivery of
+activities to bots, the connector routes a bot answers on, invokes and installs are not served yet.
+
+**A bot is a principal in chats**: a `users` row of kind `app` with the bot's id, MRI `28:<id>`, no password and no
+sign-in. No people read finds it: not the admin's account list or account changes, not a sign-in, not a profile
+lookup by MRI or address, not a people search (`users.kind`, read through one people scope). An app has at most one
+bot, as a Teams manifest does; its bot's id is the manifest's `botId`, so a bot keeps the `MicrosoftAppId` it has.
+
+### Registering an app
+
+Admins only, with the same bearer token and refusals as the [account routes](#admin-api); every change is audited
+(`app.add`, `app.package`, `app.update`, `app.secret`, `app.delete`, the app's name as `target`). A refused body is
+400 `InvalidRequest`.
+
+| Request | Does | Answers |
+|---|---|---|
+| `POST /api/admin/v1/apps` | registers a bot from the form: `name` (1–30 characters), optional `description`, `endpoint` (an absolute `https` URL without credentials; `http` with `bots.allow_http_endpoints`), `auth_mode` (`signed`, the default, or `unsigned` with `bots.allow_unsigned`). The app and its bot share a new id | 201 app with `secret` |
+| `POST /api/admin/v1/apps/package` | registers the app a Teams app package holds (`Content-Type: application/zip`, at most 5 MiB): `manifest.json` (a GUID `id`, `version`, `name.short` up to 30 characters, `description`, `developer.name`, `accentColor` `#RRGGBB`, at most one bot with a GUID `botId` and scopes of `personal`, `team`, `groupChat`) and its two icons (PNG, color 192×192, outline 32×32, kept in the file store as `apps/<id>/color.png` and `outline.png`). The bot has no endpoint until a `PATCH` sets it | 201 app, with `secret` when it has a bot |
+| `PUT /api/admin/v1/apps/{id}/package` | a new package of the same app and bot: version, names, manifest, icons. The bot keeps its endpoint, mode and secret | 200 app |
+| `GET /api/admin/v1/apps` | every app, by name | 200 `{"apps": [app]}` |
+| `GET /api/admin/v1/apps/{id}` | one app | 200 app |
+| `PATCH /api/admin/v1/apps/{id}` | any of `enabled`, `everyone` (every account may use it) and `users` (the account ids that may when not), the bot's `endpoint` and `auth_mode` | 200 app |
+| `POST /api/admin/v1/apps/{id}/secret` | a new secret for its bot; the old one stops working at once | 200 `{"secret"}` |
+| `DELETE /api/admin/v1/apps/{id}` | deletes the app; its bot gets no token any more, and its row stays (deleted, with its name) for what it posted. The same bot id may be registered again | 204 |
+
+An app is `{"id", "version", "name", "full_name", "short_description", "full_description", "developer",
+"accent_color", "source" ("form" or "package"), "enabled", "everyone", "users", "manifest", "bot", "created_at",
+"updated_at"}`; `bot` is null or `{"id", "mri", "endpoint", "auth_mode", "scopes"}`. The secret (256 random bits,
+base64url) is in the answer that made it and nowhere else: the database keeps its SHA-256, and no read, list, log or
+audit entry holds it.
+
+| Status | `code` | When |
+|---|---|---|
+| 400 | `InvalidName`, `InvalidEndpoint`, `UnsignedNotAllowed`, `UnknownUser`, `NoBot`, `InvalidPackage`, `BotChanged`, `InvalidRequest` | `message` says what is wrong; `UnknownUser` also for a bot's id |
+| 404 | `NotFound` | no such app |
+| 409 | `AppExists`, `BotExists` | the app id is registered; the bot id is another app's bot, a person's or the Workflows bot's |
+| 413 | | a package over 5 MiB |
+
+The operator has the same on the command line: `app add --name <name> [--endpoint <url>] [--description <text>]
+[--unsigned]` or `app add --package <file.zip>` print `added <id> (<name>)` and `secret <secret>`; `app list` prints
+`<id>\t<enabled|disabled>\t<name>\t<28:bot or ->`; `app disable|enable|rotate-secret|remove <id>`.
+
+### A bot's credentials
+
+A bot gets the server's token with MSAL's client-credentials request, unchanged:
+
+- `POST /<tenant>/oauth2/v2.0/token` (the tenant: the server's id, or `botframework.com`) or `POST /adfs/oauth2/token`,
+  form `grant_type=client_credentials`, `client_id` (the bot's id), `client_secret` (or both as HTTP Basic),
+  `scope=<bots.scope>/.default`; anything else MSAL adds is ignored. The OpenID metadata MSAL reads first is at
+  `/<tenant>/v2.0/.well-known/openid-configuration` and `/adfs/.well-known/openid-configuration`; msal-python takes an
+  `/adfs` authority without asking Microsoft, so a Python bot uses `https://<origin>/adfs` as its authority.
+- The answer is Entra's: `{"token_type": "Bearer", "expires_in", "ext_expires_in", "access_token"}`. The token is the
+  server's EdDSA JWT with `aud` `bots.scope`, `appid`, `azp` and `sub` the bot's id, `tid`, `idtyp: "app"`; it has no
+  `oid`, so it never passes for a person's token, and no person's token is ever issued for `bots.scope`.
+- Refusals take Entra's shape and codes: `invalid_client` `AADSTS7000215` (401) for a wrong secret or an unknown bot
+  alike, `7000216` without a secret; `unauthorized_client` `7000112` (400) for a disabled app; `invalid_scope`
+  `70011`; `unsupported_grant_type` `70003` for any other grant; `invalid_request` `90002` for another tenant. Wrong
+  secrets count per bot as password attempts do (`login.max_failures` in `login.window`, across nodes with Redis);
+  after that the bot gets 429 `temporarily_unavailable` with `Retry-After`, its right secret too, until the window
+  ends.
+
+### The keys a bot checks activities with
+
+Each activity the server sends to a bot (signed mode) carries an RS256 JWT with exactly `iss` (`bots.issuer`), `aud`
+(the bot's id), `serviceurl` (the activity's `serviceUrl`, byte for byte), `iat`, `nbf` and `exp`: no `ver`, `appid`
+or `azp`, which would make an SDK take it for an emulator's or a skill's token. The keys are RSA-2048 (the server's
+EdDSA keys can't be used: no SDK accepts them), published where the SDKs look:
+
+| Route | For |
+|---|---|
+| `/bot/v1/.well-known/openidconfiguration` (`issuer`, `jwks_uri`, `id_token_signing_alg_values_supported`) | botbuilder, the Agents and Teams .NET SDKs |
+| `/bot/v1/.well-known/keys` (the JWKS) | its `jwks_uri`; the Teams SDK for TypeScript and Python, which rewrite `openidconfiguration` to `keys` |
+| `/<tenant>/discovery/v2.0/keys`, `/adfs/discovery/keys` (the same JWKS) | the Agents SDK for JavaScript, which computes this path |
+
+Each key carries `endorsements: ["msteams"]` (botbuilder takes no key without its channel's endorsement). The keys
+are rows of `bot_signing_keys`, so every node signs with and publishes the same ones; the JWKS is read from the
+database on each request, so a key one node makes is published by all at once. A new key replaces the signer every
+`bots.key_rotation`; a retired key stays published until no token it signed can still be used (its lifetime, the
+SDKs' five minutes of skew and three housekeeping rounds), then goes.
+
+With `apps.enabled = false` none of these routes is served.
+
 ## Prefix table
 
 Every service lives under the public origin with a fixed prefix. `Served` means the server answers it now, and authz
@@ -503,6 +596,8 @@ hands out its GTM where it has one.
 | TURN credentials | (the origin) | `/trap/tokens` | yes |
 | Power Automate (Flow API), webhooks | (the client's fixed base) | `/workflows/` | the webhook workflows' subset, while `workflows.enabled` |
 | Power Apps connections | (the client's fixed base) | `/workflow-connections/` | the account's Teams connections, while `workflows.enabled` |
+| A bot's token endpoint and metadata | (the bot's authority) | `/<tenant>/oauth2/v2.0/token`, `/<tenant>/v2.0/.well-known/`, `/adfs/` | while `apps.enabled` |
+| The keys bots check activities with | (the bot's settings) | `/bot/v1/.well-known/`, `/<tenant>/discovery/v2.0/keys` | while `apps.enabled` |
 
 ## Push: the registrar and Trouter
 

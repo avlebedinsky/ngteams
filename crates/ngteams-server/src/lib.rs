@@ -18,10 +18,12 @@
 //!   and the reads people are named and drawn from;
 //! - `teams`: teams and channels (CSA, the middle tier's and the provisioning service's team routes); a channel
 //!   is a thread of the chat service;
-//! - [`workflows`]: Workflows with incoming webhooks (the Flow API subset the client uses, and the webhooks).
+//! - [`workflows`]: Workflows with incoming webhooks (the Flow API subset the client uses, and the webhooks);
+//! - [`apps`]: the app registry, a bot's credentials and the keys activities to bots are signed with.
 
 pub mod admin;
 pub mod app;
+pub mod apps;
 pub mod auth;
 mod calendar;
 pub mod calling;

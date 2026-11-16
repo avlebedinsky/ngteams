@@ -8,7 +8,7 @@ use serde_json::{Map, Value, json};
 
 use super::{Actor, AdminError, Changes};
 use crate::db::schema::{admin_audit, refresh_tokens, server_meta, users};
-use crate::db::users::User;
+use crate::db::users::{User, person};
 use crate::db::{Db, DbError, conflict, lower, now, with_conn};
 use crate::presence::presence_manual;
 
@@ -125,6 +125,7 @@ macro_rules! account {
         users::table
             .find($id)
             .filter(users::deleted_at.is_null())
+            .filter(person())
             .select(User::as_select())
             .first($conn)
             .await
@@ -476,6 +477,7 @@ pub async fn get(db: &Db, id: &str) -> Result<Option<User>, DbError> {
     with_conn!(db, |conn| Ok(users::table
         .find(id)
         .filter(users::deleted_at.is_null())
+        .filter(person())
         .select(User::as_select())
         .first(conn)
         .await
@@ -513,6 +515,7 @@ pub async fn list(db: &Db, query: &str, after: &str, limit: i64) -> Result<Vec<U
     let pattern = format!("%{}%", escape_like(&folded));
     with_conn!(db, |conn| Ok(users::table
         .filter(users::deleted_at.is_null())
+        .filter(person())
         .filter(users::upn.gt(after))
         .filter(
             replace(users::upn, FINAL_SIGMA, SIGMA)

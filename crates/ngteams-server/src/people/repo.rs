@@ -162,6 +162,7 @@ pub async fn people(db: &Db, ids: &[String]) -> Result<Vec<Person>, DbError> {
         return Ok(Vec::new());
     }
     let mut found: Vec<User> = with_conn!(db, |conn| users::table
+        .filter(crate::db::users::person())
         .filter(users::id.eq_any(ids))
         .filter(users::deleted_at.is_null())
         .select(User::as_select())
@@ -182,6 +183,7 @@ pub async fn people_by_address(db: &Db, upns: &[String]) -> Result<Vec<Person>, 
         return Ok(Vec::new());
     }
     let mut found: Vec<User> = with_conn!(db, |conn| users::table
+        .filter(crate::db::users::person())
         .filter(users::upn.eq_any(&upns))
         .filter(users::deleted_at.is_null())
         .select(User::as_select())
@@ -215,6 +217,7 @@ pub async fn directs(db: &Db, manager: &str, limit: usize) -> Result<Vec<User>, 
         return Ok(Vec::new());
     }
     let mut found: Vec<User> = with_conn!(db, |conn| users::table
+        .filter(crate::db::users::person())
         .filter(users::id.eq_any(&ids))
         .filter(users::disabled.eq(false))
         .select(User::as_select())
@@ -268,6 +271,7 @@ pub async fn works_with(db: &Db, viewer: &str, person: &str, limit: usize) -> Re
     }
     let ids: Vec<&str> = shared.keys().map(String::as_str).collect();
     let mut found: Vec<User> = with_conn!(db, |conn| users::table
+        .filter(crate::db::users::person())
         .filter(users::id.eq_any(&ids))
         .filter(users::disabled.eq(false))
         .select(User::as_select())

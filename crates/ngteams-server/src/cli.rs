@@ -1,4 +1,4 @@
-//! The command line: `serve`, `migrate`, the account commands, `media`, `setup-code` and `keys rotate`. Every command reads
+//! The command line: `serve`, `migrate`, the account commands, `media`, `app`, `setup-code` and `keys rotate`. Every command reads
 //! the same configuration as the server (`--config`, then `NGTEAMS_SERVER_*`).
 
 use std::io::{IsTerminal as _, Write};
@@ -54,6 +54,9 @@ pub enum Command {
     /// Token signing keys.
     #[command(subcommand)]
     Keys(KeysCommand),
+    /// Apps and bots.
+    #[command(subcommand)]
+    App(crate::apps::cli::AppCommand),
     /// Issues a new first-admin setup code (replacing a pending one) and prints it; refused once an admin exists.
     SetupCode,
 }
@@ -168,7 +171,9 @@ pub enum CliError {
     Profile(#[from] crate::people::ProfileError),
     #[error(transparent)]
     Picture(#[from] crate::people::PictureError),
-    #[error("can't read the picture's file: {0}")]
+    #[error(transparent)]
+    App(#[from] crate::apps::AppError),
+    #[error("can't read the file: {0}")]
     File(#[source] std::io::Error),
     #[error("the account keeps nothing with the id {0}")]
     NotStored(String),
@@ -251,6 +256,7 @@ pub async fn run(
         Command::User(command) => user(config, command, input, &mut Streams { output, warnings }).await,
         Command::Profile(command) => profile(&config, command, output).await,
         Command::Media(command) => media(&config, command, output).await,
+        Command::App(command) => crate::apps::cli::run(&config, command, output).await,
         Command::SetupCode => {
             let db = crate::db::Db::connect(&config.database_url, 1).await?;
             let code = crate::admin::setup::issue(&db).await?;

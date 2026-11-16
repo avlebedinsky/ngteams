@@ -497,6 +497,7 @@ impl Inner {
         let db = &self.db;
         let found: Vec<String> = with_conn!(db, |conn| users::table
             .filter(users::id.eq_any(&ids))
+            .filter(crate::db::users::person())
             .filter(users::disabled.eq(false))
             .select(users::id)
             .load(conn)

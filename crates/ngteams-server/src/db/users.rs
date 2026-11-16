@@ -2,12 +2,26 @@
 //! password hash with the number of times it was replaced, whether the account may sign in, whether it is an admin,
 //! and whether it must change its password before it signs in. A deleted account stays as a disabled row without a sign-in (`deleted_at`), so its id keeps
 //! naming what it authored (`crate::admin::repo::delete`).
+//!
+//! A row is a person's (`kind` [`PERSON`]) or an app's ([`APP`]): an app's bot is a principal in chats that never
+//! signs in. Every read of people goes through [`person`], so no listing, lookup or sign-in finds an app.
 
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
 
 use super::schema::users;
 use super::{Db, DbError, with_conn};
+
+/// A person's row.
+pub const PERSON: &str = "user";
+/// An app's row: its bot (`28:<id>`).
+pub const APP: &str = "app";
+
+/// The people scope: rows of people, never an app's.
+#[must_use]
+pub fn person() -> diesel::dsl::Eq<users::kind, &'static str> {
+    users::kind.eq(PERSON)
+}
 
 /// An account as the database keeps it.
 #[derive(Clone, PartialEq, Eq, Queryable, Selectable, Insertable)]
@@ -53,6 +67,7 @@ pub async fn by_upn(db: &Db, upn: &str) -> Result<Option<User>, DbError> {
     let upn = normalize_upn(upn);
     with_conn!(db, |conn| Ok(users::table
         .filter(users::upn.eq(&upn))
+        .filter(person())
         .select(User::as_select())
         .first(conn)
         .await
@@ -79,6 +94,7 @@ pub async fn by_id(db: &Db, id: &str) -> Result<Option<User>, DbError> {
 pub async fn list(db: &Db) -> Result<Vec<User>, DbError> {
     with_conn!(db, |conn| Ok(users::table
         .filter(users::deleted_at.is_null())
+        .filter(person())
         .order(users::upn.asc())
         .select(User::as_select())
         .load(conn)
