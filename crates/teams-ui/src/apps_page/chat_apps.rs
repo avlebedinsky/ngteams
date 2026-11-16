@@ -172,11 +172,23 @@ impl ChatAppsDialog {
         cx.notify();
     }
 
-    fn close(&mut self, cx: &mut Context<Self>) {
+    /// The dialog closes, the store reading the account's apps again when one was removed. Not while a Remove is in
+    /// flight: the close drops the dialog and its reply.
+    pub fn close(&mut self, cx: &mut Context<Self>) {
+        if self.removing_now.is_some() {
+            return;
+        }
         if self.changed {
             cx.emit(TeamDialogEvent::AppsChanged { words: "App removed" });
         } else {
             cx.emit(TeamDialogEvent::Closed);
+        }
+    }
+
+    /// "Get more apps": the store in the dialog's place. Not while a Remove is in flight, as for [`Self::close`].
+    pub fn get_more(&mut self, cx: &mut Context<Self>) {
+        if self.removing_now.is_none() {
+            cx.emit(TeamDialogEvent::ShowStore);
         }
     }
 
@@ -334,6 +346,7 @@ impl Render for ChatAppsDialog {
                     .child(selected_by(
                         "chat-apps-close",
                         icon_button("chat-apps-close", Glyph::X, "Close")
+                            .disabled(self.removing_now.is_some())
                             .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
                     )),
             )
@@ -348,7 +361,8 @@ impl Render for ChatAppsDialog {
                             .outline()
                             .icon(Glyph::PLUS.icon())
                             .label("Get more apps")
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(TeamDialogEvent::ShowStore))),
+                            .disabled(self.removing_now.is_some())
+                            .on_click(cx.listener(|this, _, _, cx| this.get_more(cx))),
                     ))
                     .child(div().flex_1())
                     .child(div().w(px(220.0)).child(selected_by(

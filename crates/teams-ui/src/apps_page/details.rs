@@ -127,8 +127,12 @@ impl AppDetailsDialog {
         });
     }
 
-    /// The dialog closes, the store reading the account's apps again when one was added.
+    /// The dialog closes, the store reading the account's apps again when one was added. Not while an Add is in
+    /// flight: the close drops the dialog and its reply, and the store would not read the account's apps again.
     pub fn close(&mut self, cx: &mut Context<Self>) {
+        if self.adding {
+            return;
+        }
         if self.changed {
             cx.emit(TeamDialogEvent::AppsChanged { words: "App added" });
         } else {
@@ -230,6 +234,7 @@ impl AppDetailsDialog {
             .child(selected_by(
                 "app-details-close",
                 icon_button("app-details-close", Glyph::X, "Close")
+                    .disabled(self.adding)
                     .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
             ))
     }

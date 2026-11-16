@@ -286,6 +286,37 @@ fn add_to_a_chat_waits_for_an_add_in_flight() {
 }
 
 #[test]
+fn the_details_stay_open_while_an_add_runs() {
+    let rig = Rig::start();
+    let (shell, cx) = shell_window(&rig, true);
+    open_store(&shell, cx);
+    click(cx, "apps-org-0");
+    let dialog = cx
+        .update(|_, cx| shell.read(cx).team_dialog().cloned())
+        .and_then(|dialog| dialog.downcast::<AppDetailsDialog>().ok())
+        .expect("the details");
+    cx.update(|_, cx| {
+        dialog.update(cx, |dialog, cx| {
+            dialog.add(cx);
+            dialog.close(cx);
+        });
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.update(|_, cx| shell.read(cx).team_dialog().is_some()),
+        "the details stay while Add runs"
+    );
+    assert!(cx.update(|_, cx| dialog.read(cx).added()));
+    *rig.core.user_apps.lock().unwrap() = vec![app(HELPER)];
+    click(cx, "app-details-close");
+    assert!(cx.update(|_, cx| shell.read(cx).team_dialog().is_none()));
+    assert!(
+        bounds(cx, "apps-added-check").is_some(),
+        "the store reads the account's apps again"
+    );
+}
+
+#[test]
 fn add_to_a_chat_picks_a_chat_and_go_adds_the_app_there() {
     let rig = Rig::start();
     let (shell, cx) = shell_window(&rig, true);
@@ -479,6 +510,31 @@ fn a_chat_s_second_remove_before_the_reply_sends_no_second_write() {
     });
     cx.run_until_parked();
     assert_eq!(removes(&rig), 1, "{:?}", writes(&rig));
+}
+
+#[test]
+fn a_chat_s_apps_stay_open_while_a_remove_runs() {
+    let rig = Rig::start();
+    *rig.core.chat_apps.lock().unwrap() = vec![app(POLLS)];
+    let (shell, cx) = shell_window(&rig, true);
+    let dialog = chat_apps(&shell, cx);
+    cx.update(|_, cx| {
+        dialog.update(cx, |dialog, cx| {
+            dialog.ask_remove(app(POLLS), cx);
+            dialog.remove(cx);
+            dialog.close(cx);
+            dialog.get_more(cx);
+        });
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.update(|_, cx| shell.read(cx).team_dialog().is_some()),
+        "the chat's apps stay while Remove runs"
+    );
+    assert_ne!(cx.update(|_, cx| shell.read(cx).main().clone()), Main::Apps);
+    assert!(bounds(cx, "chat-apps-none").is_some(), "the app went");
+    click(cx, "chat-apps-close");
+    assert!(cx.update(|_, cx| shell.read(cx).team_dialog().is_none()));
 }
 
 #[test]
