@@ -18,7 +18,7 @@ use teams_proto::{JoinableTeam, TeamWrite};
 
 use crate::bridge::Core;
 use crate::icons::{Glyph, icon_button, selected_by};
-use crate::teams_list::initials;
+use crate::people::team_initials as initials;
 use crate::teams_page::centered;
 use crate::theme::{self, Palette};
 

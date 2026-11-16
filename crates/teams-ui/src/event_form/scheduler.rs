@@ -313,7 +313,7 @@ fn column_heads(columns: &[Column], palette: Palette) -> gpui::Div {
                         .rounded_full()
                         .bg(rgb(mix(palette.surface, palette.brand, 350)))
                         .text_xs()
-                        .child(initials(&column.name)),
+                        .child(crate::people::initials(&column.name)),
                 )
                 .child(
                     div()
@@ -388,26 +388,9 @@ fn span_on(busy: &BusyTime, day: NaiveDate) -> Option<(f32, f32)> {
     Some((top, bottom))
 }
 
-/// Up to two initials of a name (its first letters), or of an address.
-fn initials(name: &str) -> String {
-    name.split(['@', ' ', '.'])
-        .filter_map(|part| part.chars().next())
-        .filter(|letter| letter.is_alphanumeric())
-        .take(2)
-        .flat_map(char::to_uppercase)
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_name_s_initials_are_its_first_letters() {
-        assert_eq!(initials("Bot B"), "BB");
-        assert_eq!(initials("bot-c@lab.example.com"), "BL");
-        assert_eq!(initials("You"), "Y");
-    }
 
     #[test]
     fn a_busy_time_lies_in_its_day_s_column() {

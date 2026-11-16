@@ -415,7 +415,7 @@ impl TeamsList {
             .text_size(px(size * 0.36))
             .bg(rgb(team_colour(&team.name)))
             .text_color(rgb(palette.on_brand))
-            .child(initials(&team.name))
+            .child(crate::people::team_initials(&team.name))
             .into_any_element()
     }
 
@@ -641,16 +641,6 @@ impl TeamsList {
             }))
             .into_any_element()
     }
-}
-
-/// A team's initials as the service draws them: the first letters of its first two words, or its first letter.
-#[must_use]
-pub fn initials(name: &str) -> String {
-    name.split_whitespace()
-        .filter_map(|word| word.chars().find(|c| c.is_alphanumeric()))
-        .take(2)
-        .flat_map(char::to_uppercase)
-        .collect()
 }
 
 /// The colour of a team's initials: one of the service's by its name, the same for a name each time.

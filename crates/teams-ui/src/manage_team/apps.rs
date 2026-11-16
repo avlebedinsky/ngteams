@@ -22,8 +22,8 @@ use teams_store::Team;
 use super::{FUN_BOXES, ManageTeam, ManageTeamEvent, setting_on};
 use crate::icons::{Glyph, icon_button, selected_by};
 use crate::keyboard;
+use crate::people::team_initials as initials;
 use crate::shell::menu_row;
-use crate::teams_list::initials;
 use crate::teams_page::{centered, popup_menu, with_popup};
 use crate::theme::Palette;
 

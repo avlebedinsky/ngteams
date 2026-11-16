@@ -1257,11 +1257,7 @@ fn mark_avatar(mark: Glyph, background: gpui::Background, foreground: u32, selec
 /// A channel's avatar: its team's initial on the brand colour, on a rounded square as Teams draws a team (and as the
 /// Teams list marks one).
 fn team_avatar(team: &str, palette: Palette) -> AnyElement {
-    let initial: String = team
-        .chars()
-        .find(|c| c.is_alphanumeric())
-        .map(|c| c.to_uppercase().collect())
-        .unwrap_or_default();
+    let initial: String = people::team_initials(team).chars().take(1).collect();
     div()
         .debug_selector(|| "avatar-team".to_owned())
         .size(px(AVATAR))
@@ -1309,12 +1305,7 @@ fn half(face: &HalfFace, left: bool, dark: bool, size: f32) -> AnyElement {
         };
         return image.into_any_element();
     }
-    let initial: String = face
-        .name
-        .as_deref()
-        .and_then(|name| name.chars().find(|c| c.is_alphanumeric()))
-        .map(|c| c.to_uppercase().collect())
-        .unwrap_or_default();
+    let initial = face.name.as_deref().map(people::first_initial).unwrap_or_default();
     let (background, foreground) = initials_colour(face.name.as_deref().unwrap_or(""), dark);
     let half = div()
         .w(width)

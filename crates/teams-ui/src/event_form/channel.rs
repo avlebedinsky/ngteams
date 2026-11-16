@@ -14,7 +14,8 @@ use teams_core::MeetingChannel;
 
 use super::EventForm;
 use crate::icons::{Glyph, selected_by};
-use crate::teams_list::{initials, team_colour};
+use crate::people::team_initials as initials;
+use crate::teams_list::team_colour;
 use crate::theme::Palette;
 
 /// The channel a meeting is scheduled in: where it is posted (its thread and its team's mailbox) and what the form

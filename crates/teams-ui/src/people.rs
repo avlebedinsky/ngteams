@@ -16,6 +16,10 @@ use gpui_component::{Sizable as _, Size};
 use teams_core::{NameFrom, Person};
 use teams_store::StoredPicture;
 
+mod initials;
+
+pub use initials::{first_initial, initials, team_initials};
+
 /// Someone as a view shows them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Shown {
@@ -106,8 +110,8 @@ pub fn image_of(picture: &StoredPicture) -> Option<Picture> {
 #[must_use]
 pub fn avatar(name: Option<&SharedString>, picture: Option<&Picture>, size: Size) -> Avatar {
     let mut avatar = Avatar::new().with_size(size);
-    if let Some(name) = name {
-        avatar = avatar.name(name.clone());
+    if let Some(shown) = name.map(|name| initials(name)).filter(|shown| !shown.is_empty()) {
+        avatar = avatar.name(initials::kit_name(&shown));
     }
     if let Some(picture) = picture {
         avatar = avatar.src(Arc::clone(picture.image()));

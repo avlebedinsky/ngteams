@@ -365,12 +365,7 @@ pub(super) fn initial(name: &str, palette: Palette) -> gpui::Div {
         .bg(rgb(palette.hover))
         .text_sm()
         .font_weight(gpui::FontWeight::SEMIBOLD)
-        .child(
-            name.chars()
-                .next()
-                .map(|c| c.to_uppercase().to_string())
-                .unwrap_or_default(),
-        )
+        .child(crate::people::first_initial(name))
 }
 
 /// What owners may do, with Teams' "Learn more" link at its end, in the same run of text.

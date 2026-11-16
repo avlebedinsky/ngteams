@@ -326,7 +326,7 @@ fn place_line(team: &SharedString, channel: &SharedString, palette: Palette) -> 
                 .text_size(px(6.0))
                 .bg(rgb(crate::teams_list::team_colour(team)))
                 .text_color(rgb(palette.on_brand))
-                .child(crate::teams_list::initials(team)),
+                .child(crate::people::team_initials(team)),
         )
         .child(team.clone())
         .child(
