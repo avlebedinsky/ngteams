@@ -58,12 +58,13 @@ pub(super) struct Shown {
     lines: Arc<Mutex<BTreeMap<usize, Seen>>>,
 }
 
-/// What one video line showed: how many frames, and the last one's size.
+/// What one video line showed: how many frames, the last one's size, and when it came.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Seen {
     pub(super) frames: u64,
     pub(super) width: u32,
     pub(super) height: u32,
+    pub(super) last: Option<std::time::Instant>,
 }
 
 /// One line's sink: counted with all the others, and apart.
@@ -79,6 +80,7 @@ impl VideoSink for LineSink {
         let seen = lines.entry(self.line).or_default();
         seen.frames += 1;
         (seen.width, seen.height) = (frame.width, frame.height);
+        seen.last = Some(std::time::Instant::now());
         drop(lines);
         self.all.show(frame)
     }

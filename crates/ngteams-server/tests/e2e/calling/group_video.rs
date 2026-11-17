@@ -30,6 +30,9 @@ const SQUARE: PatternCamera = PatternCamera {
     fps: 15,
 };
 
+/// How long a line shows no frame before its video counts as stopped: many frame times at the cameras' 15 fps.
+const QUIET: Duration = Duration::from_secs(1);
+
 /// A picture's shape: its width over its height.
 fn shape(width: u32, height: u32) -> f32 {
     #[expect(clippy::cast_precision_loss, reason = "a picture's sides are a few thousand at most")]
@@ -68,6 +71,21 @@ async fn sees(engine: &mut Engine, call: CallId, others: &[(&str, PatternCamera)
     lines
 }
 
+/// Waits until `engine`'s line `line` stops showing `what`: no frame for [`QUIET`], and then at most 2 frames more
+/// in a second. The roster tells a stop on the signaling path, and the frames sent before the stop come on the media
+/// path. Teams orders nothing between the two, so frames can still come after the roster told the stop.
+async fn stopped(engine: &Engine, line: usize, what: &str) {
+    let label = format!("{}: {what} stopped on line {line}", engine.mri);
+    wait_until(&label, || {
+        engine.seen(line).last.is_none_or(|last| last.elapsed() >= QUIET)
+    })
+    .await;
+    let shown = engine.seen(line).frames;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let seen = engine.seen(line);
+    assert!(seen.frames <= shown + 2, "{label}, then came again: {seen:?}");
+}
+
 /// Turns `engine`'s camera in `call` on or off.
 async fn camera(engine: &Engine, call: CallId, on: bool) {
     engine.call(CallAction::Camera { call, on }).await;
@@ -99,14 +117,8 @@ async fn three_clients_see_each_others_video_on_the_lines_they_asked_for() {
                 .view(call, |view| party(view, &a_mri).is_some_and(|party| !party.video_on))
                 .await;
         }
-        let shown = [b.seen(lines[0]).frames, c.seen(lines[1]).frames];
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        for (engine, line, shown) in [(&b, lines[0], shown[0]), (&c, lines[1], shown[1])] {
-            assert!(
-                engine.seen(line).frames <= shown + 2,
-                "{}: a's camera still came after it was turned off",
-                engine.mri
-            );
+        for (engine, line) in [(&b, lines[0]), (&c, lines[1])] {
+            stopped(engine, line, "a's camera").await;
         }
         hang_up_all(&mut [&mut a, &mut b, &mut c], &calls).await;
         for engine in [a, b, c] {
@@ -185,12 +197,9 @@ async fn a_shared_screen_reaches_the_others_until_it_stops() {
                 .view(call, |view| party(view, &sharer).is_some_and(|party| !party.sharing))
                 .await;
         }
-        let shown = a.seen(SHARING_LINE).frames;
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        assert!(
-            a.seen(SHARING_LINE).frames <= shown + 2,
-            "b's screen still came after its stop"
-        );
+        for engine in [&a, &c] {
+            stopped(engine, SHARING_LINE, "b's screen").await;
+        }
         hang_up_all(&mut [&mut a, &mut b, &mut c], &calls).await;
         for engine in [a, b, c] {
             engine.shut_down().await;
