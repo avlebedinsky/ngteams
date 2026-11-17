@@ -130,6 +130,7 @@ where
         reply: Waiting,
         now: Instant,
     ) {
+        let offered = matches!(result, Ok(Some(_)));
         let sent = match result {
             Ok(Some(offer)) => {
                 self.calls.set_screen(call, on.then_some(Screen::Sharer));
@@ -162,6 +163,10 @@ where
             live.shares.own = sharing;
             log::info!("call {}: sharing its screen {sharing}", call.get());
             self.emit(Event::CallSharing { call, on: sharing });
+        }
+        if !offered {
+            // no renegotiation went: a camera switch kept while it was open goes now
+            self.offer_camera_again(call);
         }
         let _ = reply.send(sent.map(|()| call).map_err(EngineError::from));
     }

@@ -34,7 +34,9 @@
 //!   makes its offer, since a new offer replaces the one the session waits on: a second one, or one while the call
 //!   isn't up or the far end's waits for our answer, is refused with the session untouched. The camera (a 1:1 call's
 //!   video, [`CallVideo`]; off when a call starts) is one: turned on or off, our video line is offered going that
-//!   way, the call's modalities naming `Video` while a video line is in use. One the call controller turned away
+//!   way, the call's modalities naming `Video` while a video line is in use. A camera switch made while another
+//!   renegotiation is open (either way) is not refused, as in Teams: it is kept, and the camera turns with its line
+//!   offered once that one settled (answered, its answer applied, or given up). One the call controller turned away
 //!   (`491`) for the far end's (both cameras turned on together) gives way: the far end's is answered with our
 //!   camera's line only receiving, then that line is offered again as the camera goes. A camera that stops by itself
 //!   (its device gone) is off, told as [`Event::CameraOff`]; a microphone or speaker whose stream
@@ -1475,6 +1477,8 @@ where
                     }
                     Err(why) => {
                         self.calls.give_up_renegotiation(call);
+                        // a camera switch kept while it was open goes now
+                        self.offer_camera_again(call);
                         Err(CallActionError::Media(why))
                     }
                 };
@@ -1802,7 +1806,7 @@ where
                 },
                 None => Err(CallActionError::NoMedia),
             },
-            Act::Camera(call, on) => match self.live.as_ref().filter(|live| live.call == call) {
+            Act::Camera(call, on) => match self.live.as_mut().filter(|live| live.call == call) {
                 // a group call's camera changes no SDP: its lines are described again once it turned; it opens only
                 // while they can be (the call up, nothing renegotiating it), else it stays shut
                 Some(live) if live.is_group() && live.camera.is_some() => match self.calls.describable(call) {
@@ -1815,6 +1819,8 @@ where
                 },
                 Some(live) if live.camera.is_some() => match self.calls.begin_renegotiation(call) {
                     Ok(()) => {
+                        // this switch's offer settles what the line owed: an older switch kept waiting goes no more
+                        live.reoffer = media::Reoffer::Nothing;
                         let step = media::camera(live, Arc::clone(&self.media.devices), on, reply);
                         self.sdp_step(step);
                         return;

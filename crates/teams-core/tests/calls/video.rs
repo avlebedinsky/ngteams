@@ -3,6 +3,7 @@
 //! answers; the peer's video shown once its renegotiation offers it; the camera turned off stops what is sent; the test
 //! call's camera as a 1:1 call's, the media controller's peer answering. A group call's video is `group`'s.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -211,6 +212,8 @@ struct HeldCamera {
     files: FileDevices,
     asked: Mutex<Option<std::sync::mpsc::Sender<()>>>,
     release: Mutex<std::sync::mpsc::Receiver<()>>,
+    /// How many times the camera was opened.
+    opened: AtomicUsize,
 }
 
 impl HeldCamera {
@@ -226,6 +229,7 @@ impl HeldCamera {
             },
             asked: Mutex::new(Some(asked)),
             release: Mutex::new(released),
+            opened: AtomicUsize::new(0),
         });
         (devices, told, release)
     }
@@ -241,6 +245,7 @@ impl Devices for HeldCamera {
     }
 
     fn camera(&self) -> Result<Box<dyn VideoSource>, DeviceError> {
+        self.opened.fetch_add(1, Ordering::SeqCst);
         if let Some(asked) = self.asked.lock().unwrap().take() {
             let _ = asked.send(());
             let _ = self.release.lock().unwrap().recv();
@@ -316,4 +321,56 @@ async fn the_camera_switched_while_its_own_renegotiation_is_open_ends_as_the_lat
     requests.call(CallAction::HangUp { call }).await.unwrap();
     assert_eq!(a.ended(call).await, End::HungUp);
     assert_eq!(renegotiated_one_at_a_time(&lab, LAB_A), 2);
+}
+
+/// The camera turned off then on again while its own camera-on renegotiation is still open: the later `on` finds the
+/// camera on once the first settled, so the camera isn't opened a second time (an exclusive device wouldn't open
+/// twice), and it goes on sending.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_camera_switched_off_and_on_while_its_own_renegotiation_is_open_is_opened_once() {
+    let lab = Lab::start().await;
+    let (devices, asked, release) = HeldCamera::new();
+    let mut a = lab
+        .account_with_devices(Arc::clone(&devices) as Arc<dyn Devices + Send + Sync>)
+        .await;
+    let id = lab.mock.ring(LAB_C, LAB_A);
+    let incoming = a.incoming().await;
+    let requests = a.handle.requests();
+    let call = requests.call(CallAction::Answer { call: incoming.call }).await.unwrap();
+    a.status(call, &CallStatus::Connected).await;
+
+    let on = tokio::spawn({
+        let requests = requests.clone();
+        async move { requests.call(CallAction::Camera { call, on: true }).await }
+    });
+    tokio::task::spawn_blocking(move || asked.recv_timeout(Duration::from_secs(30)))
+        .await
+        .unwrap()
+        .expect("the camera was asked to open");
+    for on in [false, true] {
+        assert_eq!(requests.call(CallAction::Camera { call, on }).await.unwrap(), call);
+    }
+    release.send(()).unwrap();
+    assert_eq!(on.await.unwrap().unwrap(), call);
+
+    wait_until(|| {
+        renegotiated_one_at_a_time(&lab, LAB_A) >= 1
+            && lab.sent_by(LAB_A).last().map(String::as_str) == Some("acknowledge")
+            && lab
+                .mock
+                .peer_stats(&id, LAB_A)
+                .is_some_and(|stats| stats.video.shown > 0)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let shown = lab.mock.peer_stats(&id, LAB_A).unwrap().video.shown;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        lab.mock.peer_stats(&id, LAB_A).unwrap().video.shown > shown,
+        "a's camera ended on"
+    );
+    assert_eq!(devices.opened.load(Ordering::SeqCst), 1, "the camera opened once");
+
+    requests.call(CallAction::HangUp { call }).await.unwrap();
+    assert_eq!(a.ended(call).await, End::HungUp);
 }

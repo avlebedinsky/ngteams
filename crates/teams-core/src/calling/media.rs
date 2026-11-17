@@ -857,8 +857,9 @@ pub(super) fn group_camera(
     }
 }
 
-/// Answers the far end's renegotiation `offer`, off the engine's thread: with our camera's line only receiving when
-/// a renegotiation of ours gave way to it (that line is offered again next, [`offer_camera`]).
+/// Answers the far end's renegotiation `offer`, off the engine's thread: with our camera's line only receiving while
+/// that line owes a re-offer (`LiveMedia::reoffer`: a renegotiation of ours gave way to it, or the account turned the
+/// camera while one was open); the line is offered again next ([`offer_camera`]), or the camera turned ([`camera`]).
 pub(super) fn answer(live: &LiveMedia, offer: MediaContent) -> impl FnOnce() -> MediaDone + Send + use<> {
     let (call, session, dialect) = (live.call, Arc::clone(&live.session), Arc::clone(&live.dialect));
     let receive_only = live.reoffer != Reoffer::Nothing;
@@ -1021,13 +1022,17 @@ pub(super) fn offer_camera(
     }
 }
 
-/// [`camera`]'s blocking part: a camera that doesn't open, or an offer that can't be made, leaves it off.
+/// [`camera`]'s blocking part: a camera that doesn't open, or an offer that can't be made, leaves it off. A camera
+/// already on is not opened again (an exclusive device wouldn't open twice): only its line is offered.
 fn turn_camera(
     session: &MediaSession,
     dialect: &Mutex<NgcSession>,
     devices: &dyn Devices,
     on: bool,
 ) -> Result<Option<NgcSdp>, String> {
+    if on && session.camera_on() {
+        return offer_line(session, dialect, on);
+    }
     let source = if on {
         Some(devices.camera().map_err(|error| error.to_string())?)
     } else {
