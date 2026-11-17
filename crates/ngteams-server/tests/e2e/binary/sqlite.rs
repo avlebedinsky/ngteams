@@ -13,12 +13,8 @@ const ROUNDS: u64 = 10;
 
 /// A command run beside the starting server: what it was, whether it succeeded, and its error output.
 fn run(node: &Node, args: &[&str], input: &str) -> (String, bool, String) {
-    let output = node.cli_output(args, input);
-    (
-        args.join(" "),
-        output.status.success(),
-        String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-    )
+    let (done, said) = node.try_cli(args, input);
+    (args.join(" "), done, said)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
