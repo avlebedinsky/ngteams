@@ -537,11 +537,17 @@ fn debug_omits_config_credentials_and_minted_tokens() {
 
 /// The head of the answer to `request` (sent with `body`, then the connection left open), as the server writes it.
 async fn answer_head(server: &TestServer, request: &str, body: &[u8]) -> String {
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::io::AsyncWriteExt as _;
     let address = server.origin.trim_start_matches("http://");
     let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
     stream.write_all(request.as_bytes()).await.unwrap();
     stream.write_all(body).await.unwrap();
+    read_head(&mut stream).await
+}
+
+/// The next answer head on `stream`, in lower case.
+async fn read_head(stream: &mut tokio::net::TcpStream) -> String {
+    use tokio::io::AsyncReadExt as _;
     let mut head = Vec::new();
     let mut byte = [0; 1];
     while !head.ends_with(b"\r\n\r\n") {
@@ -558,6 +564,23 @@ async fn answer_head(server: &TestServer, request: &str, body: &[u8]) -> String 
         head.push(byte[0]);
     }
     String::from_utf8(head).unwrap().to_ascii_lowercase()
+}
+
+/// Reads and drops on `stream` the body of the answer that has `head`, which must give its `content-length`.
+async fn skip_body(stream: &mut tokio::net::TcpStream, head: &str) {
+    use tokio::io::AsyncReadExt as _;
+    let length: usize = head
+        .lines()
+        .find_map(|line| line.strip_prefix("content-length:"))
+        .unwrap_or_else(|| panic!("no content-length: {head}"))
+        .trim()
+        .parse()
+        .unwrap();
+    let mut body = vec![0; length];
+    tokio::time::timeout(std::time::Duration::from_secs(20), stream.read_exact(&mut body))
+        .await
+        .expect("the body came in time")
+        .unwrap();
 }
 
 /// A body refused before it was read to its end is read and dropped before the answer, so the connection carries the
@@ -578,6 +601,26 @@ async fn a_body_the_answer_left_unread_is_read_to_its_end_or_closes_the_connecti
         "{read}"
     );
     assert!(!read.contains("connection: close"), "{read}");
+    // a body over the limit but small enough to drain: the next request on the same connection gets its answer
+    {
+        use tokio::io::AsyncWriteExt as _;
+        let over = "POST /oauth2/v2.0/token HTTP/1.1\r\nhost: x\r\ncontent-type: application/x-www-form-urlencoded\r\n\
+                    content-length: 2097152\r\n\r\n";
+        let address = server.origin.trim_start_matches("http://");
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        stream.write_all(over.as_bytes()).await.unwrap();
+        stream.write_all(&vec![b'a'; 2 * 1024 * 1024]).await.unwrap();
+        stream
+            .write_all(b"GET /health/live HTTP/1.1\r\nhost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let drained = read_head(&mut stream).await;
+        assert!(drained.starts_with("http/1.1 413"), "{drained}");
+        assert!(!drained.contains("connection: close"), "{drained}");
+        skip_body(&mut stream, &drained).await;
+        let next = read_head(&mut stream).await;
+        assert!(next.starts_with("http/1.1 204"), "{next}");
+    }
     // a client that sends its next request at once on the same connection never loses it
     let http = reqwest::Client::new();
     for _ in 0..50 {
