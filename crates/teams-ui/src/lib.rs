@@ -59,6 +59,7 @@
 //! - [`account_prompt`]: the personal build's first sign-in screen, a window of its own asking for the work account
 //!   before anything is signed in.
 //! - [`user_admin`]: Manage users, the settings page of an own server's administrator.
+//! - [`app_admin`]: Manage apps, the settings page where that administrator registers apps and bots.
 //! - [`view`]: the window's root view; [`window`] opens it inside the kit's root, which applies the theme to the
 //!   window (its font size as the rem size, its font family and colours) and hosts the kit's dialogs and tooltips.
 //! - [`theme`]: the UI kit's (`gpui-component`) theme in Teams-like colours and compact sizes, light and dark
@@ -88,6 +89,7 @@ macro_rules! ctrl {
 pub mod account_prompt;
 pub mod accounts;
 pub mod activity_view;
+pub mod app_admin;
 pub mod app_icon;
 pub mod apps_page;
 pub mod assets;

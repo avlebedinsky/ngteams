@@ -941,6 +941,20 @@ impl Desktop {
         cx.notify();
     }
 
+    /// Hands account `key` its own server's apps and bots, which its settings' Manage apps page asks
+    /// ([`crate::app_admin`]); the app does once the server says the account is an administrator and serves apps, and
+    /// takes them away (`None`) once the server says it is no administrator any more.
+    pub fn set_app_admin(
+        &mut self,
+        key: &str,
+        admin: Option<Arc<dyn crate::app_admin::AppAdmin>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.accounts
+            .update(cx, |accounts, cx| accounts.set_app_admin(key, admin, cx));
+        cx.notify();
+    }
+
     /// Hands a notification server (the bus's, once it is up; a test's fake) to every account's notifier and call
     /// alert, and to the accounts added later.
     pub fn use_server(&mut self, server: Arc<dyn NotificationServer>, cx: &mut Context<Self>) {

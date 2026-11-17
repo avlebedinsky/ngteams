@@ -158,6 +158,19 @@ fn open(desktop: &Entity<Desktop>, mri: &str, target: &OpenTarget, cx: &mut App)
                     "this account has no Manage users page: it isn't an administrator of an own server",
                 ));
             }
+            let manages_apps = teams_ui::bots_flag::bots_on(cx)
+                && desktop
+                    .read(cx)
+                    .accounts()
+                    .read(cx)
+                    .tile(mri)
+                    .is_some_and(|tile| tile.app_admin.is_some());
+            if page == Some(Page::Apps) && !manages_apps {
+                return Err(CtlError::new(
+                    ErrorCode::BadRequest,
+                    "this account has no Manage apps page: it isn't an administrator of an own server that serves apps",
+                ));
+            }
             desktop.update(cx, |desktop, cx| desktop.open_settings_of(mri, page, cx));
         }
         OpenTarget::Search { query } => {
@@ -181,7 +194,7 @@ fn settings_page(name: &str) -> Result<Page, CtlError> {
     let name = name.trim();
     Page::ALL
         .into_iter()
-        .chain([Page::Users])
+        .chain([Page::Users, Page::Apps])
         .find(|page| page.key().eq_ignore_ascii_case(name) || page.title().eq_ignore_ascii_case(name))
         .ok_or_else(|| {
             let pages: Vec<&str> = Page::ALL.iter().map(|page| page.key()).collect();

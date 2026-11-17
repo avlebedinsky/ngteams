@@ -411,11 +411,62 @@ fn offer_user_admin<S: SecretStore + 'static>(
         }
         log::info!("an own server's account is an administrator: its settings offer Manage users");
         let mut demoted = service.demoted();
+        let apps = Arc::clone(&service);
         // the desktop holds the service from here: once the account goes, so does it, and the wait below ends
         let offered = desktop.update(cx, |desktop, cx| desktop.set_user_admin(&key, Some(service), cx));
+        if offered.is_ok() {
+            offer_app_admin(apps, key.clone(), desktop.clone(), cx);
+        }
         if offered.is_ok() && demoted.wait_for(|demoted| *demoted).await.is_ok() {
-            log::info!("an own server's account is no administrator any more: Manage users goes");
-            let _ = desktop.update(cx, |desktop, cx| desktop.set_user_admin(&key, None, cx));
+            log::info!("an own server's account is no administrator any more: Manage users and Manage apps go");
+            let _ = desktop.update(cx, |desktop, cx| {
+                desktop.set_user_admin(&key, None, cx);
+                desktop.set_app_admin(&key, None, cx);
+            });
+        }
+    })
+    .detach();
+}
+
+/// How many times the app asks whether an administrator's server serves apps before it stops for the run.
+const APPS_ASKED_AT_MOST: u32 = 4;
+
+/// Offers Manage apps to the administrator `key` (its `service`) while the bots are shown (`NGTEAMS_BOTS=1`) and its
+/// server serves apps: asked off the foreground, again after a question that got no answer, a "no" final for the run.
+fn offer_app_admin<S: SecretStore + 'static>(
+    service: Arc<AdminService<S>>,
+    key: String,
+    desktop: WeakEntity<Desktop>,
+    cx: &mut AsyncApp,
+) {
+    if !cx.update(|cx| teams_ui::bots_flag::bots_on(cx)) {
+        return;
+    }
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        let mut wait = ADMIN_ASKED_AGAIN;
+        for _ in 0..APPS_ASKED_AT_MOST {
+            let asked = Arc::clone(&service);
+            let served = cx.background_executor().spawn(async move { asked.serves_apps() }).await;
+            match served {
+                Ok(true) => {
+                    log::info!("an own server serves apps: its administrator's settings offer Manage apps");
+                    let _ = desktop.update(cx, |desktop, cx| desktop.set_app_admin(&key, Some(service), cx));
+                    return;
+                }
+                Ok(false) => return,
+                Err(problem) => {
+                    log::warn!(
+                        "an own server didn't say whether it serves apps ({}): asked again in {} s",
+                        problem.kind(),
+                        wait.as_secs()
+                    );
+                    cx.background_executor().timer(wait).await;
+                    wait = (wait * 2).min(ADMIN_ASKED_AGAIN_AT_MOST);
+                    if desktop.upgrade().is_none() {
+                        return;
+                    }
+                }
+            }
         }
     })
     .detach();

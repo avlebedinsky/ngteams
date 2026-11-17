@@ -1713,7 +1713,9 @@ The client also uses the [first-admin setup](#the-first-admin), the [admin API](
 [account's own endpoints](#the-accounts-own-endpoints): the account window asks `GET /api/admin/v1/setup` for a
 server's address and creates the first administrator there; it replaces a password that must change with
 `POST /api/account/v1/password`; and an administrator's Settings have a "Manage users" page over
-`/api/admin/v1/users` (the page is offered when `GET /api/account/v1/me` says `admin`).
+`/api/admin/v1/users` (the page is offered when `GET /api/account/v1/me` says `admin`); with `NGTEAMS_BOTS=1` they also
+have a "Manage apps" page over `/api/admin/v1/apps` (offered when that list answers) that reads
+`/bot/v1/.well-known/openidconfiguration` for the settings it shows each bot.
 
 ## Tests
 

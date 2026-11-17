@@ -858,13 +858,20 @@ impl Shell {
             let (accounts, _) = shell.accounts.as_ref()?;
             accounts.read(cx).tile(shell.core.me())?.admin.clone()
         });
-        let trace = Arc::clone(trace);
+        let shell = cx.weak_entity();
+        let app_admin: crate::settings_view::AccountAppAdmin = Rc::new(move |cx: &App| {
+            let shell = shell.upgrade()?;
+            let shell = shell.read(cx);
+            let (accounts, _) = shell.accounts.as_ref()?;
+            accounts.read(cx).tile(shell.core.me())?.app_admin.clone()
+        });
         let view = cx.new(|cx| {
             SettingsView::new(settings.clone(), cx)
                 .for_account(account)
                 .with_test_call(offer)
                 .with_server(server)
-                .with_admin(admin, trace)
+                .with_admin(admin, Arc::clone(trace))
+                .with_app_admin(app_admin, Arc::clone(trace))
         });
         let asked = cx.subscribe(&view, |this: &mut Self, _, event, cx| match event {
             SettingsViewEvent::MakeTestCall => this.ask_call(Ask::TestCall, cx),

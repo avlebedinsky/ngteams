@@ -8016,6 +8016,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "wiremock",
  "zbus",
+ "zip",
 ]
 
 [[package]]

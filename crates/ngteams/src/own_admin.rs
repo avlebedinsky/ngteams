@@ -5,18 +5,23 @@
 //!   the server the user named and nothing else, with no token;
 //! - for a running account: [`AdminService`], what the Manage users page asks (`teams_ui::user_admin`), with the
 //!   account's own access token from its session, attached only when the server says the account is an
-//!   administrator ([`AdminService::is_admin`]).
+//!   administrator ([`AdminService::is_admin`]); the same service answers the Manage apps page
+//!   (`teams_ui::app_admin`) once the server also serves apps ([`AdminService::serves_apps`]).
 //!
 //! Only an own server's account has any of it: a Microsoft 365 account gets no service, and nothing here is sent to
 //! a Microsoft host (`teams_auth::admin` builds every URL on the account's own origin).
 
 use std::sync::Arc;
 
-use teams_auth::admin::{AdminClient, AdminError, AdminUser, FirstAdmin, NewUser, Refusal, UserChanges, UserPage};
+use teams_auth::admin::{
+    AdminApp, AdminClient, AdminError, AdminUser, AppChanges, FirstAdmin, MadeApp, NewBot, NewUser, Refusal,
+    UserChanges, UserPage, apps_not_served,
+};
 use teams_auth::secrets::{Secret, SecretStore};
 use teams_auth::session::Session;
 use teams_auth::token::{SPACES_RESOURCE, TokenError};
 use teams_ui::account_prompt::SAME_PASSWORD;
+use teams_ui::app_admin::{AppAdmin, AppProblem, BotConnection, BotForm};
 use teams_ui::user_admin::{AdminProblem, NewAccount, UserAdmin};
 use tokio::sync::watch;
 
@@ -203,29 +208,56 @@ impl<S: SecretStore + 'static> AdminService<S> {
         self.demoted.subscribe()
     }
 
-    /// Runs `ask` with the account's access token, taken on the session's own runtime.
-    fn asked<T>(
-        &self,
-        ask: impl AsyncFnOnce(&AdminClient, &Secret) -> Result<T, AdminError>,
-    ) -> Result<T, AdminProblem> {
+    /// The account's access token, taken on the session's own runtime.
+    fn token(&self) -> Result<Secret, AdminProblem> {
         let session = Arc::clone(&self.session);
         let token = self.runtime.block_on(
             self.sessions
                 .spawn(async move { session.access_token(SPACES_RESOURCE).await }),
         );
-        let token = match token {
-            Ok(token) => token.map_err(|error| token_problem(&error))?,
+        match token {
+            Ok(token) => Ok(token.map_err(|error| token_problem(&error))?.token),
             // the engine stopped: the account is being removed, or the app quits
-            Err(_) => return Err(AdminProblem::SignedOut),
-        };
-        let asked = self
-            .runtime
-            .block_on(ask(&self.client, &token.token))
-            .map_err(AdminProblem::from);
-        if asked.as_ref().is_err_and(|problem| *problem == AdminProblem::NotAdmin) {
+            Err(_) => Err(AdminProblem::SignedOut),
+        }
+    }
+
+    /// Runs `ask` with the account's access token; a refusal that says the account is no administrator any more is
+    /// told ([`AdminService::demoted`]).
+    fn asked_as<T, P: From<AdminError> + From<AdminProblem>>(
+        &self,
+        ask: impl AsyncFnOnce(&AdminClient, &Secret) -> Result<T, AdminError>,
+    ) -> Result<T, P> {
+        let token = self.token()?;
+        let asked = self.runtime.block_on(ask(&self.client, &token));
+        if asked
+            .as_ref()
+            .is_err_and(|error| error.refusal() == Some(Refusal::NotAdmin))
+        {
             self.demoted.send_replace(true);
         }
-        asked
+        asked.map_err(P::from)
+    }
+
+    /// Runs `ask` with the account's access token, for Manage users.
+    fn asked<T>(
+        &self,
+        ask: impl AsyncFnOnce(&AdminClient, &Secret) -> Result<T, AdminError>,
+    ) -> Result<T, AdminProblem> {
+        self.asked_as(ask)
+    }
+
+    /// Whether the server serves apps to its administrator (blocking): Manage apps is offered only then.
+    ///
+    /// # Errors
+    /// [`AdminProblem`] when the server didn't say.
+    pub fn serves_apps(&self) -> Result<bool, AdminProblem> {
+        let token = self.token()?;
+        match self.runtime.block_on(self.client.apps(&token)) {
+            Ok(_) => Ok(true),
+            Err(error) if apps_not_served(&error) => Ok(false),
+            Err(error) => Err(AdminProblem::from(error)),
+        }
     }
 
     /// Whether the server says the account is an administrator now (blocking).
@@ -264,6 +296,53 @@ impl<S: SecretStore + 'static> UserAdmin for AdminService<S> {
 
     fn reset_password(&self, id: &str, password: &Secret, must_change: bool) -> Result<(), AdminProblem> {
         self.asked(async |client, token| client.reset_password(token, id, password, must_change).await)
+    }
+}
+
+impl<S: SecretStore + 'static> AppAdmin for AdminService<S> {
+    fn apps(&self) -> Result<Vec<AdminApp>, AppProblem> {
+        self.asked_as(async |client, token| client.apps(token).await)
+    }
+
+    fn register(&self, form: &BotForm) -> Result<MadeApp, AppProblem> {
+        let new = NewBot {
+            name: &form.name,
+            description: &form.description,
+            endpoint: form.endpoint.as_deref(),
+            auth_mode: form.auth_mode,
+        };
+        self.asked_as(async |client, token| client.register_bot(token, new).await)
+    }
+
+    fn upload(&self, package: Vec<u8>) -> Result<MadeApp, AppProblem> {
+        self.asked_as(async |client, token| client.upload_package(token, package).await)
+    }
+
+    fn change(&self, id: &str, changes: &AppChanges) -> Result<AdminApp, AppProblem> {
+        self.asked_as(async |client, token| client.update_app(token, id, changes).await)
+    }
+
+    fn new_secret(&self, id: &str) -> Result<String, AppProblem> {
+        self.asked_as(async |client, token| client.rotate_secret(token, id).await)
+    }
+
+    fn delete(&self, id: &str) -> Result<(), AppProblem> {
+        self.asked_as(async |client, token| client.delete_app(token, id).await)
+    }
+
+    fn people(&self, query: &str, after: Option<&str>) -> Result<UserPage, AppProblem> {
+        self.asked_as(async |client, token| client.users(token, query, after, PAGE).await)
+    }
+
+    fn connection(&self) -> Result<BotConnection, AppProblem> {
+        let metadata = self
+            .runtime
+            .block_on(self.client.bot_metadata())
+            .map_err(AppProblem::from)?;
+        Ok(BotConnection {
+            origin: self.client.origin(),
+            issuer: metadata.issuer,
+        })
     }
 }
 

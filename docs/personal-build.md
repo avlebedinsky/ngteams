@@ -103,6 +103,16 @@ off is signed out with that said, and no sign-in window opens for it. A Microsof
 asked for it; an own server's account that is no administrator has none either. `ngteamsctl open settings users`
 opens it for an account that has it.
 
+**Manage apps** (with `NGTEAMS_BOTS=1`). The same administrator's Settings also have a "Manage apps" page when the
+server serves apps (`GET /api/admin/v1/apps` answers): the server's apps with a search, "Register a bot" (name,
+description, messaging endpoint, Signed or Unsigned), "Upload an app" (a Teams app package, at most 5 MB), and for
+each app "On", its bot's endpoint and mode, "Who can use it" (everyone or chosen people), "Bot settings" (what the
+.NET, Python, JavaScript, Teams and Agents SDKs take to talk to this server), "New secret" and "Delete app", the last
+two after a confirmation that starts on Cancel. A bot's app id and secret are shown once, with Copy, when it is made
+or gets a new secret. The requests carry the account's token to its own server only; the settings' issuer is read
+from the server's `/bot/v1/.well-known/openidconfiguration`, with no token. `ngteamsctl open settings apps` opens it
+for an account that has it.
+
 An own server's account that is signed out is asked for its password again. Each "Sign in" on that screen reads the account's entry again, so a `ca_file` written while
 the screen is open is used at once; the password goes only to the server the screen shows. Settings > General names the account's server, and `ngteamsctl accounts` lists it.
 An account whose server serves no chats (an older or partial server) is signed in but can't be shown: its sign-in

@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use gpui::{App, AsyncApp, Context, Entity, EventEmitter, SharedString, Subscription, WeakEntity};
 
+use crate::app_admin::AppAdmin;
 use crate::bridge::Core;
 use crate::models::{Account, Models};
 use crate::own_presence::OwnPresence;
@@ -53,6 +54,9 @@ pub struct AccountTile {
     /// Its server's account management, once the app found the account to be an administrator there
     /// ([`Accounts::set_admin`]); `None` for every other account.
     pub admin: Option<Arc<dyn UserAdmin>>,
+    /// Its server's apps and bots, once the app found the account to be an administrator of a server that serves
+    /// apps ([`Accounts::set_app_admin`]); `None` for every other account.
+    pub app_admin: Option<Arc<dyn AppAdmin>>,
     pub core: Arc<dyn Core>,
     pub models: Models,
     /// Its unread total, counted as the tray counts it.
@@ -185,6 +189,7 @@ impl Accounts {
             detail: parts.detail,
             server: parts.server,
             admin: None,
+            app_admin: None,
             core: parts.core,
             models: parts.models,
             tray,
@@ -202,6 +207,14 @@ impl Accounts {
     pub fn set_admin(&mut self, key: &str, admin: Option<Arc<dyn UserAdmin>>, cx: &mut Context<Self>) {
         if let Some(tile) = self.tiles.iter_mut().find(|tile| tile.key == key) {
             tile.admin = admin;
+            cx.notify();
+        }
+    }
+
+    /// Hands account `key` its server's apps and bots (`None` takes them away): its settings then offer Manage apps.
+    pub fn set_app_admin(&mut self, key: &str, admin: Option<Arc<dyn AppAdmin>>, cx: &mut Context<Self>) {
+        if let Some(tile) = self.tiles.iter_mut().find(|tile| tile.key == key) {
+            tile.app_admin = admin;
             cx.notify();
         }
     }
