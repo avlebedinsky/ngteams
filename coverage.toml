@@ -239,7 +239,7 @@ context = { "crates/teams-media/src/devices/native/tests.rs" = "d947175e21956378
 [unmapped_sources."crates/teams-media/src/devices/native/streams/playback_tests.rs"]
 sha256 = "86c53b12e6a70cfc79d434e751a8d24026553e5d69137445f8fa5f6bc8172da6"
 reason = "unit-test module included only by native/streams.rs cfg(test); omitted by cargo-llvm-cov's test-file filter. Its playing tests are ignored: they need a Windows speaker and the win11 console"
-context = { "crates/teams-media/src/devices/native/streams.rs" = "6a6f8f9f1fa05ac6bc01501b06f31ed64890df22ab2a744728644b97a7a3fd1e" }
+context = { "crates/teams-media/src/devices/native/streams.rs" = "74c5e87a727abf20075258d50f2bca5b871647d72dd6ca3ba3a8e73e15b1243f" }
 
 [unmapped_sources."crates/teams-media/src/test_turn/windows.rs"]
 sha256 = "109eb478053a60252c242550ece0a118c0648e9c1c8d0c067d0a35bbcf345c33"

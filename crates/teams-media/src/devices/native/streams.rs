@@ -356,7 +356,7 @@ impl AudioSink for Speaker {
 /// How late the call's playout may hand over a frame and still play in time. libwebrtc's 10 ms playout timer and the
 /// threads between it and the device make frames come in bursts. Each frame plays this long after it comes.
 const PLAYOUT_MARGIN: gst::ClockTime = gst::ClockTime::from_mseconds(50);
-/// The audio the speaker's input holds before it drops the oldest: 200 ms of 48 kHz mono `f32`.
+/// The audio the speaker's input holds before it drops new frames: 200 ms of 48 kHz mono `f32`.
 const SPEAKER_BACKLOG: u64 = 38_400;
 /// The audio the device's own buffer holds, in microseconds: a sink reports it as its latency (`osxaudiosink`'s
 /// default is 200 ms), and each frame plays that much later.
@@ -408,8 +408,8 @@ fn playback(sink: &gst::Element) -> Result<(Running, AppSrc), DeviceError> {
         .max_bytes(SPEAKER_BACKLOG)
         .min_latency(margin)
         .build();
-    // The appsrc queue drops old audio if a driver stops consuming.
-    source.set_property_from_str("leaky-type", "downstream");
+    // Keep old frames: a stalled device's clock stops, and a dropped backlog leaves a jump the sink fills with silence.
+    source.set_property_from_str("leaky-type", "upstream");
     let convert = element("audioconvert")?;
     let resample = element("audioresample")?;
     let elements = [source.upcast_ref(), &convert, &resample, sink];
