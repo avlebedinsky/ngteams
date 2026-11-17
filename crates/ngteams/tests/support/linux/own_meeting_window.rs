@@ -16,7 +16,9 @@
 //!   joins it; c, not invited, joins by its ID and waits: a's call window shows the lobby's card (shots); a clicks
 //!   Admit, and c comes in.
 //! - b's Meet now in a channel of a team of b's, a and c on it, titled from its pre-join: a's channel shows the post
-//!   (shots); a joins from the channel; everyone leaves; the post shows the end (shots).
+//!   (shots); the post's Join opens the pre-join (shots), Escape closes it; a joins from the header's Join; everyone
+//!   leaves; the post shows the end (shots). Then an untitled Meet now and one titled with 200 characters: the post,
+//!   the pre-join and the call (shots).
 //!
 //! Each shot is taken in Teams Light and Dark, the window 1280 and 480 px wide (the call window's minimum is wider:
 //! such a shot is named `-is-<width>`), under `target/ui-shots/own-meeting-*.png` and `$OWN_MEETING_EVIDENCE`, if set.
@@ -25,6 +27,7 @@
 //! without the server binary (`NGTEAMS_QA_SERVER_BIN`, else `ngteams-server` beside the test's target directory) it
 //! says so and passes.
 
+use std::fmt::Write as _;
 use std::io::{self, BufRead as _, BufReader, Write as _};
 use std::os::fd::{AsFd as _, AsRawFd as _};
 use std::path::{Path, PathBuf};
@@ -704,18 +707,21 @@ fn channel_meet_now(rig: &mut Rig<'_>, people: &mut People<'_>, a_mri: &str) -> 
             .requests()
             .title_meet_now(channel.clone(), CHANNEL_TITLE),
     )?;
-    rig.ctl.request(
-        None,
-        Request::Open {
-            target: OpenTarget::Channel {
-                channel: channel.clone(),
-            },
-        },
-    )?;
+    rig.open_channel(&channel)?;
     thread::sleep(SETTLE * 3);
     rig.main_window();
     rig.shots("channel-post")?;
-    // a joins from the channel: its header's Join while the meeting runs (the post's card has a Join too)
+    // the post's Join opens the pre-join of the post's meeting; Escape closes it
+    rig.resize(WIDTHS[0])?;
+    rig.click_post_join()?;
+    thread::sleep(SETTLE * 2);
+    rig.find_window()?;
+    rig.shots("channel-prejoin-from-post")?;
+    rig.focus()?;
+    rig.input.key(keys::ESC)?;
+    thread::sleep(SETTLE * 2);
+    rig.main_window();
+    // a joins from the channel: its header's Join while the meeting runs
     rig.resize(WIDTHS[0])?;
     rig.click_header_join()?;
     thread::sleep(SETTLE * 2);
@@ -733,15 +739,81 @@ fn channel_meet_now(rig: &mut Rig<'_>, people: &mut People<'_>, a_mri: &str) -> 
     rig.main_window();
     people.bert.act(runtime, &CallAction::HangUp { call: b_call })?;
     thread::sleep(SETTLE * 3);
-    rig.ctl.request(
-        None,
-        Request::Open {
-            target: OpenTarget::Channel { channel },
-        },
-    )?;
+    rig.open_channel(&channel)?;
     thread::sleep(SETTLE * 2);
     rig.main_window();
-    rig.shots("channel-post-ended")
+    rig.shots("channel-post-ended")?;
+    let long = long_title();
+    say(&format!("the long title ({} characters): {long}", long.chars().count()));
+    for (name, title) in [("channel-untitled", None), ("channel-long", Some(long.as_str()))] {
+        more_meet_now(rig, people, &channel, name, title)?;
+    }
+    Ok(())
+}
+
+/// A title of 200 characters: emoji, quotes, «», `&` and markup.
+fn long_title() -> String {
+    let mut title = "Sprint ✨ \"review\" «Q4» & <b>demo</b> — 🚀 'launch' ".to_owned();
+    let mut n = 0;
+    while title.chars().count() < 200 {
+        n += 1;
+        let _ = write!(title, "part{n} ");
+    }
+    title.chars().take(199).chain(std::iter::once('!')).collect()
+}
+
+/// b's Meet now in the channel, titled `title` or untitled: a's post (shots), a's pre-join from the header's Join and
+/// its call (shots `<name>-…`); all leave.
+fn more_meet_now(
+    rig: &mut Rig<'_>,
+    people: &mut People<'_>,
+    channel: &str,
+    name: &str,
+    title: Option<&str>,
+) -> SandboxResult {
+    let runtime = rig.runtime;
+    let meet_now = CallAction::MeetNow {
+        channel: channel.to_owned(),
+    };
+    let b_call = people.bert.act(runtime, &meet_now)?;
+    people.bert.status(runtime, b_call, &CallStatus::Connected)?;
+    if let Some(title) = title {
+        runtime.block_on(
+            people
+                .bert
+                .engine
+                .handle
+                .requests()
+                .title_meet_now(channel.to_owned(), title),
+        )?;
+    }
+    rig.open_channel(channel)?;
+    thread::sleep(SETTLE * 3);
+    rig.main_window();
+    rig.shots(&format!("{name}-post"))?;
+    rig.resize(WIDTHS[0])?;
+    rig.click_header_join()?;
+    thread::sleep(SETTLE * 2);
+    rig.find_window()?;
+    rig.resize(WIDTHS[0])?;
+    rig.save(&format!("{name}-prejoin-light-1280"))?;
+    rig.focus()?;
+    rig.input.key(keys::ENTER)?;
+    rig.wait_call("a in the channel's meeting", |row| row.state == "connected")?;
+    thread::sleep(SETTLE * 2);
+    rig.find_window()?;
+    rig.resize(WIDTHS[0])?;
+    rig.save(&format!("{name}-meeting-light-1280"))?;
+    rig.ctl.request(None, Request::HangUp)?;
+    rig.wait_no_call("a left the channel's meeting")?;
+    rig.main_window();
+    people.bert.act(runtime, &CallAction::HangUp { call: b_call })?;
+    thread::sleep(SETTLE * 3);
+    rig.open_channel(channel)?;
+    thread::sleep(SETTLE * 2);
+    rig.main_window();
+    rig.resize(WIDTHS[0])?;
+    rig.save(&format!("{name}-post-ended-light-1280"))
 }
 
 fn evidence_dirs() -> Vec<PathBuf> {
@@ -804,6 +876,27 @@ impl<'a> Rig<'a> {
                 Ok(first.mri.clone())
             }
             other => Err(format!("accounts: {other:?}").into()),
+        }
+    }
+
+    /// Opens the channel `channel` in a's main window, once a's app knows it (a new team reaches it after a sync).
+    fn open_channel(&mut self, channel: &str) -> SandboxResult {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let open = Request::Open {
+                target: OpenTarget::Channel {
+                    channel: channel.to_owned(),
+                },
+            };
+            match self.ctl.request(None, open) {
+                Ok(_) => return Ok(()),
+                Err(error) if Instant::now() < deadline => {
+                    say(&format!("a's app cannot open the channel yet: {error}"));
+                    self.ctl.request(None, Request::Sync)?;
+                    thread::sleep(Duration::from_secs(1));
+                }
+                Err(error) => return Err(error.into()),
+            }
         }
     }
 
@@ -982,6 +1075,11 @@ impl<'a> Rig<'a> {
         self.click_brand("Join", header_join)
     }
 
+    /// Clicks the channel post's Join (Teams Light, the main window 1280 px wide).
+    fn click_post_join(&mut self) -> SandboxResult {
+        self.click_brand("the post's Join", post_join)
+    }
+
     /// Clicks the brand-filled button `find` finds in the window's shot, where the window is on the screen.
     fn click_brand(&mut self, what: &str, find: fn(&RgbImage) -> Option<(i32, i32)>) -> SandboxResult {
         self.focus()?;
@@ -1023,8 +1121,20 @@ fn header_join(window: &RgbImage) -> Option<(i32, i32)> {
     )
 }
 
-/// The middle of the first brand-filled button within `columns` and `rows` of `window`: rows where at least `wide`
-/// brand pixels are, at least 16 of them together.
+/// The middle of the channel post's Join: a brand-filled button wider than the card's tile, in the posts (below the
+/// header, above the message box).
+fn post_join(window: &RgbImage) -> Option<(i32, i32)> {
+    brand_button(
+        window,
+        (380, window.width()),
+        (110, window.height().saturating_sub(70)),
+        44,
+    )
+}
+
+/// The middle of the first brand-filled button within `columns` and `rows` of `window`: rows whose rightmost run of
+/// brand pixels (gaps of 12 px or less, for a button's icon and label) is at least `wide` px wide and at least half
+/// brand, at least 16 such rows together. A smaller brand tile beside the button on the same rows is not part of the run.
 fn brand_button(
     window: &RgbImage,
     (left, right): (u32, u32),
@@ -1037,9 +1147,21 @@ fn brand_button(
     };
     let mut run: Vec<(u32, u32, u32)> = Vec::new();
     for y in top..window.height().min(bottom) {
-        let xs: Vec<u32> = (left..right).filter(|x| brand(window.get_pixel(*x, y))).collect();
-        if xs.len() >= wide {
-            run.push((y, xs[0], xs[xs.len() - 1]));
+        let mut segments: Vec<(u32, u32, usize)> = Vec::new();
+        for x in (left..right.min(window.width())).filter(|x| brand(window.get_pixel(*x, y))) {
+            match segments.last_mut() {
+                Some((_, end, count)) if x - *end <= 12 => {
+                    *end = x;
+                    *count += 1;
+                }
+                _ => segments.push((x, x, 1)),
+            }
+        }
+        let wide_enough = |(first, last, count): &&(u32, u32, usize)| {
+            usize::try_from(*last - *first + 1).is_ok_and(|span| span >= wide) && *count * 2 >= wide
+        };
+        if let Some((first, last, _)) = segments.iter().rev().find(wide_enough) {
+            run.push((y, *first, *last));
         } else if run.len() >= 16 {
             break;
         } else {

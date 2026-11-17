@@ -159,6 +159,11 @@ name = "qa_final_dot_window"
 harness = false
 
 [[test]]
+# QA of task 420: a channel meeting's title, its post's Join and its end in the app's window over the mock
+name = "qa_channel_meeting_window"
+harness = false
+
+[[test]]
 name = "deferred_devices_window"
 harness = false
 
