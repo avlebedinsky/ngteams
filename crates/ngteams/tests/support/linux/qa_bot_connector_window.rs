@@ -18,11 +18,12 @@
 //! Light and Dark. Without weston 15, niri, `dbus-daemon` or the built server binary it says so and passes, unless
 //! `GPUI_SMOKE_REQUIRE=1`.
 
+use std::ffi::OsStr;
 use std::io::{self, BufRead as _, BufReader, Write as _};
-use std::net::{SocketAddr, TcpStream};
+use std::net::SocketAddr;
 use std::os::fd::{AsFd as _, AsRawFd as _, RawFd};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitCode, Stdio};
+use std::process::ExitCode;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 use std::{fs, thread};
@@ -55,6 +56,8 @@ use ui_sandbox::{NIRI_FULL_WINDOW, Running, Sandbox, SandboxOptions, SandboxResu
 #[path = "../own_server_binary.rs"]
 #[expect(dead_code, reason = "the shared binary harness has helpers other QA tests use")]
 mod own_server_binary;
+
+use own_server_binary::BinaryServer;
 #[path = "../window.rs"]
 #[expect(dead_code, reason = "the shared window harness has helpers other tests use")]
 mod support;
@@ -72,8 +75,6 @@ const STARTUP: Duration = Duration::from_secs(90);
 const WAIT: Duration = Duration::from_secs(30);
 /// How long an activity may take to reach the bot (a lost wake-up waits for the outbox's two-second poll).
 const DELIVERY: Duration = Duration::from_secs(30);
-/// How long `serve` has to listen (the host may be loaded).
-const READY: Duration = Duration::from_secs(60);
 const POLL: Duration = Duration::from_millis(100);
 /// How long the screen gets to settle before a shot.
 const SETTLE: Duration = Duration::from_millis(900);
@@ -190,9 +191,9 @@ fn world(
     bot: &TestBot,
     dir: &Path,
 ) -> SandboxResult {
-    let server = OwnServer::start(binary, &dir.join("server"), &bot.ca_file)?;
+    let server = start_server(binary, &dir.join("server"), &bot.ca_file)?;
     let user = server.add_user(USER_UPN, USER_NAME)?;
-    let (bot_id, secret) = server.add_bot(BOT_NAME, &bot.url)?;
+    let (bot_id, secret) = add_bot(&server, BOT_NAME, &bot.url)?;
     step(&format!(
         "own server {}; user {user}; bot 28:{bot_id} at {}",
         server.origin, bot.url
@@ -256,7 +257,7 @@ struct Walk<'a> {
     user: &'a str,
     bot_id: &'a str,
     origin: &'a str,
-    server: &'a OwnServer,
+    server: &'a BinaryServer,
     /// The bot chat's id, once the bot started it.
     chat: String,
     /// The id of the user's message to the bot.
@@ -856,7 +857,12 @@ struct Connector {
 
 impl Connector {
     /// The bot's token from the server's client-credentials grant, as MSAL asks for it.
-    fn sign_in(runtime: &tokio::runtime::Runtime, server: &OwnServer, bot: &str, secret: &str) -> SandboxResult<Self> {
+    fn sign_in(
+        runtime: &tokio::runtime::Runtime,
+        server: &BinaryServer,
+        bot: &str,
+        secret: &str,
+    ) -> SandboxResult<Self> {
         let roots = reqwest::Certificate::from_pem_bundle(&fs::read(&server.ca_file)?)?;
         let http = reqwest::Client::builder().no_proxy().tls_certs_merge(roots).build()?;
         let form = format!(
@@ -908,148 +914,49 @@ impl Connector {
 
 // --- the own server ---
 
-/// The real `ngteams-server` binary on loopback, with TLS and SQLite, its `[bots]` reaching loopback, and its
-/// process trusting only the bot's authority; killed when dropped.
-struct OwnServer {
-    origin: String,
-    ca_file: PathBuf,
-    binary: PathBuf,
-    config: PathBuf,
-    log: PathBuf,
-    serving: Child,
+/// The real `ngteams-server` binary on loopback, its `[bots]` reaching loopback and its process trusting only the
+/// bot's authority; its log and database stay in `dir`.
+fn start_server(binary: &Path, dir: &Path, bot_ca: &Path) -> SandboxResult<BinaryServer> {
+    // the server reaches the bot through the system verifier, which reads only these when they are set
+    let no_roots = dir.join("no-roots");
+    fs::create_dir_all(&no_roots)?;
+    BinaryServer::start_in(
+        binary,
+        Some(dir),
+        "\n[bots]\nallowed_networks = [\"127.0.0.0/8\"]\n",
+        &[
+            ("SSL_CERT_FILE", bot_ca.as_os_str()),
+            ("SSL_CERT_DIR", no_roots.as_os_str()),
+            ("NGTEAMS_SERVER_LOG", OsStr::new("info,tower_http=debug")),
+        ],
+    )
 }
 
-impl OwnServer {
-    fn start(binary: &Path, dir: &Path, bot_ca: &Path) -> SandboxResult<Self> {
-        fs::create_dir_all(dir)?;
-        let ca_file = own_server_binary::write_certificates(dir)?;
-        let port = own_server_binary::free_port()?;
-        let origin = format!("https://127.0.0.1:{port}");
-        let config = dir.join("server.toml");
-        fs::write(
-            &config,
-            format!(
-                "listen = \"127.0.0.1:{port}\"\npublic_origin = \"{origin}\"\ndatabase_url = \"sqlite://{}\"\n\n\
-                 [tls]\ncert = \"{}\"\nkey = \"{}\"\n\n[bots]\nallowed_networks = [\"127.0.0.0/8\"]\n",
-                dir.join("server.sqlite").display(),
-                dir.join("cert.pem").display(),
-                dir.join("key.pem").display(),
-            ),
-        )?;
-        // the server reaches the bot through the system verifier, which reads only these when they are set
-        let no_roots = dir.join("no-roots");
-        fs::create_dir_all(&no_roots)?;
-        let log = dir.join("server.log");
-        let serving = Command::new(binary)
-            .arg("--config")
-            .arg(&config)
-            .arg("serve")
-            .env("SSL_CERT_FILE", bot_ca)
-            .env("SSL_CERT_DIR", &no_roots)
-            .env("NGTEAMS_SERVER_LOG", "info,tower_http=debug")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(fs::File::create(&log)?)
-            .spawn()?;
-        let mut server = Self {
-            origin,
-            ca_file,
-            binary: binary.to_owned(),
-            config,
-            log,
-            serving,
-        };
-        server.wait_until_listening(port)?;
-        Ok(server)
-    }
-
-    fn wait_until_listening(&mut self, port: u16) -> SandboxResult {
-        let address = SocketAddr::from(([127, 0, 0, 1], port));
-        let start = Instant::now();
-        loop {
-            if self.log().contains("serving") && TcpStream::connect_timeout(&address, POLL * 2).is_ok() {
-                return Ok(());
-            }
-            if let Some(status) = self.serving.try_wait()? {
-                return Err(format!("ngteams-server serve exited {status}: {}", self.log()).into());
-            }
-            if start.elapsed() > READY {
-                return Err(format!("ngteams-server serve doesn't listen on {address}: {}", self.log()).into());
-            }
-            thread::sleep(POLL);
-        }
-    }
-
-    /// `user add <upn> --name <name>`, the password on standard input; the user's object id.
-    fn add_user(&self, upn: &str, name: &str) -> SandboxResult<String> {
-        let said = self.run(&["user", "add", upn, "--name", name], Some(own_server_binary::PASSWORD))?;
-        let id = said
-            .trim()
-            .rsplit_once('(')
-            .and_then(|(_, id)| id.strip_suffix(')'))
-            .ok_or_else(|| format!("user add said: {said}"))?;
-        Ok(id.to_owned())
-    }
-
-    /// `app add --name <name> --endpoint <url>`, as the operator registers a signed bot; its id and secret.
-    fn add_bot(&self, name: &str, endpoint: &str) -> SandboxResult<(String, String)> {
-        let said = self.run(
-            &[
-                "app",
-                "add",
-                "--name",
-                name,
-                "--endpoint",
-                endpoint,
-                "--description",
-                "A made-up bot that answers",
-            ],
-            None,
-        )?;
-        let id = said
-            .lines()
-            .find_map(|line| line.strip_prefix("added "))
-            .and_then(|rest| rest.split_whitespace().next())
-            .ok_or("app add printed no id")?;
-        let secret = said
-            .lines()
-            .find_map(|line| line.strip_prefix("secret "))
-            .ok_or("app add printed no secret")?;
-        Ok((id.to_owned(), secret.trim().to_owned()))
-    }
-
-    /// Runs the server's command line with `args` (and `input` on standard input); what it printed.
-    fn run(&self, args: &[&str], input: Option<&str>) -> SandboxResult<String> {
-        let mut running = Command::new(&self.binary)
-            .arg("--config")
-            .arg(&self.config)
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        let mut stdin = running.stdin.take().ok_or("the command's standard input")?;
-        if let Some(input) = input {
-            stdin.write_all(format!("{input}\n").as_bytes())?;
-        }
-        drop(stdin);
-        let output = running.wait_with_output()?;
-        if !output.status.success() {
-            return Err(format!("{args:?}: {}", String::from_utf8_lossy(&output.stderr)).into());
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-    }
-
-    fn log(&self) -> String {
-        fs::read_to_string(&self.log).unwrap_or_default()
-    }
-}
-
-impl Drop for OwnServer {
-    fn drop(&mut self) {
-        let _ = self.serving.kill();
-        let _ = self.serving.wait();
-    }
+/// `app add --name <name> --endpoint <url>`, as the operator registers a signed bot; its id and secret.
+fn add_bot(server: &BinaryServer, name: &str, endpoint: &str) -> SandboxResult<(String, String)> {
+    let said = server.run(
+        &[
+            "app",
+            "add",
+            "--name",
+            name,
+            "--endpoint",
+            endpoint,
+            "--description",
+            "A made-up bot that answers",
+        ],
+        None,
+    )?;
+    let id = said
+        .lines()
+        .find_map(|line| line.strip_prefix("added "))
+        .and_then(|rest| rest.split_whitespace().next())
+        .ok_or("app add printed no id")?;
+    let secret = said
+        .lines()
+        .find_map(|line| line.strip_prefix("secret "))
+        .ok_or("app add printed no secret")?;
+    Ok((id.to_owned(), secret.trim().to_owned()))
 }
 
 // --- the app in the sandbox ---

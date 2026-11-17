@@ -3,6 +3,7 @@
 //! certificate authority signed (the CA's PEM is what an account's `ca_file` names), SQLite in a temporary directory.
 //! Nothing leaves loopback.
 
+use std::ffi::OsStr;
 use std::io::Write as _;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -50,7 +51,8 @@ pub struct BinaryServer {
     binary: PathBuf,
     config: PathBuf,
     serving: Child,
-    dir: tempfile::TempDir,
+    dir: PathBuf,
+    _temporary: Option<tempfile::TempDir>,
 }
 
 impl BinaryServer {
@@ -61,26 +63,39 @@ impl BinaryServer {
 
     /// [`Self::start`] with `tables` added to its configuration (a group call's relay and media node, say).
     pub fn start_with(binary: &Path, tables: &str) -> TestResult<Self> {
-        let dir = tempfile::tempdir()?;
-        let ca_file = write_certificates(dir.path())?;
+        Self::start_in(binary, None, tables, &[])
+    }
+
+    /// [`Self::start_with`] in `dir` (which stays after the server, for a test's evidence), else in a temporary
+    /// directory, with `env` added to the environment of `serve`.
+    pub fn start_in(binary: &Path, dir: Option<&Path>, tables: &str, env: &[(&str, &OsStr)]) -> TestResult<Self> {
+        let (dir, temporary) = if let Some(dir) = dir {
+            std::fs::create_dir_all(dir)?;
+            (dir.to_owned(), None)
+        } else {
+            let temporary = tempfile::tempdir()?;
+            (temporary.path().to_owned(), Some(temporary))
+        };
+        let ca_file = write_certificates(&dir)?;
         let port = free_port()?;
         let origin = format!("https://127.0.0.1:{port}");
-        let config = dir.path().join("server.toml");
+        let config = dir.join("server.toml");
         std::fs::write(
             &config,
             format!(
                 "listen = \"127.0.0.1:{port}\"\npublic_origin = \"{origin}\"\ndatabase_url = \"sqlite://{}\"\n\n\
                  [tls]\ncert = \"{}\"\nkey = \"{}\"\n{tables}",
-                dir.path().join("server.sqlite").display(),
-                dir.path().join("cert.pem").display(),
-                dir.path().join("key.pem").display(),
+                dir.join("server.sqlite").display(),
+                dir.join("cert.pem").display(),
+                dir.join("key.pem").display(),
             ),
         )?;
-        let log = std::fs::File::create(dir.path().join("server.log"))?;
+        let log = std::fs::File::create(dir.join("server.log"))?;
         let serving = Command::new(binary)
             .arg("--config")
             .arg(&config)
             .arg("serve")
+            .envs(env.iter().copied())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(log)
@@ -92,6 +107,7 @@ impl BinaryServer {
             config,
             serving,
             dir,
+            _temporary: temporary,
         };
         server.wait_until_listening(port)?;
         Ok(server)
@@ -196,7 +212,7 @@ impl BinaryServer {
 
     /// What `serve` wrote to standard error so far.
     pub fn log(&self) -> String {
-        std::fs::read_to_string(self.dir.path().join("server.log")).unwrap_or_default()
+        std::fs::read_to_string(self.dir.join("server.log")).unwrap_or_default()
     }
 }
 
