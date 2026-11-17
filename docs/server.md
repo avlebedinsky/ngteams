@@ -736,9 +736,10 @@ through the fan-out (`bots:wake`); a two-second poll covers a lost wake-up. A se
 2xx in `bots.send_timeout` seconds is tried again after each of `bots.retry_delays` (by default 15 s and 45 s: three
 attempts in about a minute), then the row is `failed`; typing is tried once. A planned stop (SIGTERM) sends each
 activity once: the node takes no more rows, and the sends under way end and are recorded before it exits (it waits
-at most `bots.delivery_lease` seconds). After a crash or a kill, a bot can get an activity twice when its lease runs
-out, as with Bot Framework. Its id is the same each time, so a bot can drop the repeat. After 20 failed sends in a row
-a bot gets nothing for a minute (`bot_health`). Sent and failed rows go after a day.
+at most `bots.delivery_lease` seconds). Give a stopping API node 10 s for its HTTP requests, that wait and 10 s more
+before a kill: the Compose file gives 60 s. After a crash or a kill, a bot can get an activity twice when its lease
+runs out, as with Bot Framework. Its id is the same each time, so a bot can drop the repeat. After 20 failed sends in
+a row a bot gets nothing for a minute (`bot_health`). Sent and failed rows go after a day.
 
 **The address guard.** A bot's endpoint is set by an administrator, and the server checks every send: `https` only
 (`http` with `bots.allow_http_endpoints`), no user info, no redirects followed, no proxy, the answer read up to

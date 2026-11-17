@@ -103,11 +103,14 @@ services:
       postgres:
         condition: service_healthy
 
+  # A stopping api node drains HTTP (10 s), ends its bot sends (at most bots.delivery_lease, 30 s), then clears (10 s).
   api-1:
     <<: *server
+    stop_grace_period: 60s
 
   api-2:
     <<: *server
+    stop_grace_period: 60s
 
   media:
     <<: *server
