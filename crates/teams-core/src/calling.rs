@@ -1442,7 +1442,7 @@ where
                     if let Some(live) = self.live.as_mut().filter(|live| live.call == call) {
                         live.applied(now);
                     }
-                    self.offer_camera_again(call);
+                    self.offer_owed(call);
                 }
                 Err(why) => self.media_failed(call, &why, now),
             },
@@ -1463,7 +1463,7 @@ where
                         .map_err(|error| error.to_string())
                 });
                 match answered {
-                    Ok(()) => self.offer_camera_again(call),
+                    Ok(()) => self.offer_owed(call),
                     Err(why) => self.media_failed(call, &why, now),
                 }
             }
@@ -1480,7 +1480,7 @@ where
                     Err(why) => {
                         self.calls.give_up_renegotiation(call);
                         // a camera switch kept while it was open goes now
-                        self.offer_camera_again(call);
+                        self.offer_owed(call);
                         Err(CallActionError::Media(why))
                     }
                 };
@@ -1538,23 +1538,32 @@ where
         }
     }
 
+    /// Once the open renegotiation of `call` settled (answered, its answer applied, or given up), what waits for it
+    /// goes, one offer at a time: our camera's line first ([`Self::offer_camera_again`]), else a share switch
+    /// ([`Self::share_again`]); the other goes once that one settled in turn.
+    fn offer_owed(&mut self, call: CallId) {
+        if !self.offer_camera_again(call) {
+            self.share_again(call);
+        }
+    }
+
     /// Once the far end's renegotiation that ours gave way to is answered (our camera's line only receiving), our
     /// camera's line offered again as the camera goes, when it is on; likewise once a renegotiation open when the
     /// account turned the camera settled (answered, its answer applied, or given up), the camera turned first. Tried
-    /// again after the next answer when another renegotiation is under way.
-    fn offer_camera_again(&mut self, call: CallId) {
+    /// again after the next answer when another renegotiation is under way. Whether a renegotiation began.
+    fn offer_camera_again(&mut self, call: CallId) -> bool {
         let Some(live) = self
             .live
             .as_mut()
             .filter(|live| live.call == call && live.reoffer != media::Reoffer::Nothing)
         else {
-            return;
+            return false;
         };
         let on = match live.camera {
             Some(on) if on || live.reoffer == media::Reoffer::Camera => on,
             _ => {
                 live.reoffer = media::Reoffer::Nothing;
-                return;
+                return false;
             }
         };
         match self.calls.begin_renegotiation(call) {
@@ -1569,11 +1578,15 @@ where
                     let step = media::offer_camera(live, true, reply);
                     self.sdp_step(step);
                 }
+                true
             }
-            Err(error) => log::info!(
-                "call {}: its camera's line waits to be offered again: {error}",
-                call.get()
-            ),
+            Err(error) => {
+                log::info!(
+                    "call {}: its camera's line waits to be offered again: {error}",
+                    call.get()
+                );
+                false
+            }
         }
     }
 
@@ -1620,7 +1633,7 @@ where
         }
         if !offered {
             // no renegotiation went: a later switch's goes now
-            self.offer_camera_again(call);
+            self.offer_owed(call);
         }
         turned
     }

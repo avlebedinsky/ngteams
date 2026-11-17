@@ -207,8 +207,8 @@ async fn native_ends_turn_their_cameras_on_and_each_shows_the_other_s() {
 }
 
 /// File devices whose first camera opens only once the test lets it (`release`), told at `asked` when it is asked: a
-/// camera switch's renegotiation held open.
-struct HeldCamera {
+/// camera switch's renegotiation held open. Its screen is the file backend's.
+pub(crate) struct HeldCamera {
     files: FileDevices,
     asked: Mutex<Option<std::sync::mpsc::Sender<()>>>,
     release: Mutex<std::sync::mpsc::Receiver<()>>,
@@ -217,7 +217,7 @@ struct HeldCamera {
 }
 
 impl HeldCamera {
-    fn new() -> (Arc<Self>, std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+    pub(crate) fn new() -> (Arc<Self>, std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
         let (asked, told) = std::sync::mpsc::channel();
         let (release, released) = std::sync::mpsc::channel();
         let devices = Arc::new(Self {
@@ -252,11 +252,15 @@ impl Devices for HeldCamera {
         }
         self.files.camera()
     }
+
+    fn screen(&self) -> Result<Box<dyn VideoSource>, DeviceError> {
+        self.files.screen()
+    }
 }
 
 /// The renegotiations `mri` sent on the mock's newest call, each answered (acknowledged) before the next went: never
 /// two offers at once.
-fn renegotiated_one_at_a_time(lab: &Lab, mri: &str) -> usize {
+pub(crate) fn renegotiated_one_at_a_time(lab: &Lab, mri: &str) -> usize {
     let sent = lab.sent_by(mri);
     let mut open = false;
     let mut count = 0;

@@ -6,7 +6,9 @@
 //!   account tells the call's conversation it shares (`screenSharerAttributes`) and renegotiates with `["Audio",
 //!   "ScreenSharer"]`, its offer adding a sharing line that only sends ([`media::share`]). **Stop sharing**
 //!   renegotiates `["Audio"]` with that line rejected ([`media::stop_share`]); so does the screen ending at the
-//!   desktop. [`Event::CallSharing`] tells it as it stands.
+//!   desktop. [`Event::CallSharing`] tells it as it stands. As in Teams, a share or a stop while a renegotiation is
+//!   open either way is not refused: it waits ([`media::ShareWait`]) and goes once that one settled
+//!   ([`Calling::share_again`]), never two offers at once; the later switch says how the share ends.
 //! - **The far end's share**: its renegotiation adding a sharing line it sends on is answered receiving, with
 //!   `["Audio", "ScreenViewer"]`; its frames go to the video output's sharing sink. [`Event::CallRemoteShare`] tells it
 //!   shown and, once an offer rejects that line, gone.
@@ -38,15 +40,22 @@ where
     T: Transport<Error = HttpError> + Send + 'static,
 {
     /// The account's Share (`on`) or Stop sharing in `call`; `reply` is answered once its renegotiation's offer went,
-    /// or a group call's lines were described (or why not). Only a call's media that takes video shares.
+    /// or a group call's lines were described, or the switch waits for an open renegotiation (or why not). Only a
+    /// call's media that takes video shares.
     pub(super) fn share(&mut self, call: CallId, on: bool, reply: Waiting) {
-        let Some(live) = self.live.as_ref().filter(|live| live.call == call) else {
+        let Some(live) = self.live.as_mut().filter(|live| live.call == call) else {
             return refuse(reply, CallActionError::NoMedia);
         };
         if live.camera.is_none() {
             return refuse(reply, CallActionError::NoVideo);
         }
-        if live.shares.own == on {
+        if live.share_goes() == on {
+            let _ = reply.send(Ok(call));
+            return;
+        }
+        if live.share_waits.take().is_some() {
+            // the later switch goes back to how the share goes without the waiting one: that one goes no more
+            log::info!("call {}: its waiting share switch goes no more", call.get());
             let _ = reply.send(Ok(call));
             return;
         }
@@ -63,8 +72,13 @@ where
         }
         match self.calls.begin_renegotiation(call) {
             Ok(()) => {
+                live.shares.turning = Some(false);
                 let step = media::stop_share(live, reply);
                 self.sdp_step(step);
+            }
+            Err(_) if self.calls.renegotiating(call) => {
+                self.share_waits(call, media::ShareWait::Stop);
+                let _ = reply.send(Ok(call));
             }
             Err(error) => refuse(reply, error.into()),
         }
@@ -100,7 +114,7 @@ where
                 return refuse(reply, CallActionError::Media(why));
             }
         };
-        let Some(live) = self.live.as_ref().filter(|live| live.call == call) else {
+        let Some(live) = self.live.as_mut().filter(|live| live.call == call) else {
             return refuse(reply, CallActionError::NoMedia);
         };
         if live.is_group() {
@@ -112,12 +126,65 @@ where
             self.media_steps.spawn_blocking(step);
             return;
         }
+        if live.share_goes() {
+            // another share was taken while the user picked this screen
+            let _ = reply.send(Ok(call));
+            return;
+        }
         match self.calls.begin_renegotiation(call) {
             Ok(()) => {
+                live.shares.turning = Some(true);
                 let step = media::share(live, screen, reply);
                 self.sdp_step(step);
             }
+            Err(_) if self.calls.renegotiating(call) => {
+                self.share_waits(call, media::ShareWait::Start(screen));
+                let _ = reply.send(Ok(call));
+            }
             Err(error) => refuse(reply, error.into()),
+        }
+    }
+
+    /// The account's share switch in `call`, a 1:1 call's, while a renegotiation of it is open (either way): as in
+    /// Teams it is taken, and it goes once that one settled ([`Self::share_again`]), never two offers at once.
+    fn share_waits(&mut self, call: CallId, wait: media::ShareWait) {
+        if let Some(live) = self.live.as_mut().filter(|live| live.call == call) {
+            let on = matches!(wait, media::ShareWait::Start(_));
+            live.share_waits = Some(wait);
+            log::info!(
+                "call {}: sharing its screen {on} once its open renegotiation settled",
+                call.get()
+            );
+        }
+    }
+
+    /// A share switch kept while a renegotiation was open goes once that one settled, with a renegotiation of its own
+    /// (nobody waits for its answer). Tried again after the next one settled when another is under way.
+    pub(super) fn share_again(&mut self, call: CallId) {
+        let Some(live) = self
+            .live
+            .as_mut()
+            .filter(|live| live.call == call && live.share_waits.is_some())
+        else {
+            return;
+        };
+        if let Err(error) = self.calls.begin_renegotiation(call) {
+            log::info!("call {}: its share switch waits to go: {error}", call.get());
+            return;
+        }
+        let (reply, _) = oneshot::channel();
+        match live.share_waits.take() {
+            Some(media::ShareWait::Start(screen)) => {
+                live.shares.turning = Some(true);
+                let step = media::share(live, screen, reply);
+                self.sdp_step(step);
+            }
+            Some(media::ShareWait::Stop) => {
+                live.shares.turning = Some(false);
+                let step = media::stop_share(live, reply);
+                self.sdp_step(step);
+            }
+            None => self.calls.give_up_renegotiation(call),
         }
     }
 
@@ -157,16 +224,17 @@ where
             }
         };
         let sharing = sent.is_ok() && on;
-        if let Some(live) = self.live.as_mut().filter(|live| live.call == call)
-            && live.shares.own != sharing
-        {
-            live.shares.own = sharing;
-            log::info!("call {}: sharing its screen {sharing}", call.get());
-            self.emit(Event::CallSharing { call, on: sharing });
+        if let Some(live) = self.live.as_mut().filter(|live| live.call == call) {
+            live.shares.turning = None;
+            if live.shares.own != sharing {
+                live.shares.own = sharing;
+                log::info!("call {}: sharing its screen {sharing}", call.get());
+                self.emit(Event::CallSharing { call, on: sharing });
+            }
         }
         if !offered {
-            // no renegotiation went: a camera switch kept while it was open goes now
-            self.offer_camera_again(call);
+            // no renegotiation went: a switch kept while it was open goes now
+            self.offer_owed(call);
         }
         let _ = reply.send(sent.map(|()| call).map_err(EngineError::from));
     }

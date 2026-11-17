@@ -343,6 +343,16 @@ fn set_up(
 }
 
 impl LiveMedia {
+    /// Whether the account's screen is shared once the share switches it made are done: a switch that waits, else a
+    /// share step that began, else the share as it is now.
+    pub(super) fn share_goes(&self) -> bool {
+        match &self.share_waits {
+            Some(ShareWait::Start(_)) => true,
+            Some(ShareWait::Stop) => false,
+            None => self.shares.turning.unwrap_or(self.shares.own),
+        }
+    }
+
     /// It is a group call's that takes video (its receiving lines assigned, its camera turned by describing its
     /// lines).
     pub(super) fn is_group(&self) -> bool {
@@ -573,6 +583,8 @@ pub(super) struct LiveMedia {
     pub(super) reoffer: Reoffer,
     /// Who shares a screen in the call now.
     pub(super) shares: Shares,
+    /// A 1:1 call's share switch the account made while a renegotiation was open: it goes once that one settled.
+    pub(super) share_waits: Option<ShareWait>,
     /// Who is in the call, whose video each receiving line shows, who speaks; a group call's that takes video
     /// ([`LiveMedia::is_group`]) has its camera go by describing its lines again, its receiving lines carrying the
     /// participants the source requests chose.
@@ -601,6 +613,16 @@ pub(super) enum Reoffer {
 pub(super) struct Shares {
     pub(super) own: bool,
     pub(super) theirs: bool,
+    /// A 1:1 call's share step of the account's that began and is not done yet: whether it shares.
+    pub(super) turning: Option<bool>,
+}
+
+/// A 1:1 call's share switch that waits for the open renegotiation to settle.
+pub(super) enum ShareWait {
+    /// Share this screen, which the user picked.
+    Start(Box<dyn VideoSource>),
+    /// Stop sharing.
+    Stop,
 }
 
 /// What the session's reports since the last look mean for the call.
@@ -634,6 +656,7 @@ impl LiveMedia {
             camera: prepared.video.then_some(false),
             reoffer: Reoffer::Nothing,
             shares: Shares::default(),
+            share_waits: None,
             gallery: Gallery::new(prepared.group_call, prepared.group.is_some()),
             capabilities: 0,
             described: 1,
