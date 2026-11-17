@@ -178,6 +178,11 @@ name = "qa_file_grid_window"
 harness = false
 
 [[test]]
+# QA of task 525: an own server's message with several files, its grid of file cards and their actions, in the UI sandbox
+name = "qa_file_grid_own_window"
+harness = false
+
+[[test]]
 # QA of task 420: a channel meeting's title, its post's Join and its end in the app's window over the mock
 name = "qa_channel_meeting_window"
 harness = false
