@@ -4,6 +4,7 @@
 //! Bot Framework SDK in podman) and the keys a bot checks activities with. Every account, app and bot is synthetic.
 
 mod credentials;
+mod delivery;
 mod nodes;
 mod operator;
 mod packages;
