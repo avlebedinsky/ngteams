@@ -129,6 +129,26 @@ fn ensure(holds: bool, what: impl FnOnce() -> String) -> SandboxResult {
     if holds { Ok(()) } else { Err(what().into()) }
 }
 
+/// Why a check could show nothing, which is not a pass.
+#[derive(Debug)]
+struct Inconclusive(String);
+
+impl std::fmt::Display for Inconclusive {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Inconclusive {}
+
+/// What the checks came to.
+#[derive(Default)]
+struct Tally {
+    passed: Vec<String>,
+    skipped: Vec<(String, String)>,
+    failed: Vec<(String, String)>,
+}
+
 fn shots_dir() -> io::Result<PathBuf> {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .parent()
@@ -335,27 +355,34 @@ fn parent() -> SandboxResult {
         posts.push((seed.key.to_owned(), id));
     }
     let _ = mock.take_events(LAB_A);
-    let mut passed = Vec::new();
-    let mut failed = Vec::new();
+    let mut tally = Tally::default();
     let own = dir.path().join("a");
     {
         let app = AppUnderTest::start(&sandbox, &mock, trouter.origin(), &own, "first")?;
         let mut user = User::new((&sandbox, &mock, &runtime), app, &mut posts)?;
         for (name, check) in CHECKS {
-            user.run_check(name, check, &mut passed, &mut failed);
+            user.run_check(name, check, &mut tally);
         }
         user.quit()?;
     }
     {
         let app = AppUnderTest::start(&sandbox, &mock, trouter.origin(), &own, "restart")?;
         let mut user = User::new((&sandbox, &mock, &runtime), app, &mut posts)?;
-        user.run_check("restart_keeps_the_look", restart, &mut passed, &mut failed);
+        user.run_check("restart_keeps_the_look", restart, &mut tally);
         user.quit()?;
     }
     drop(trouter);
     let mut summary = String::new();
+    let Tally {
+        passed,
+        skipped,
+        failed,
+    } = tally;
     for name in &passed {
         let _ = writeln!(summary, "pass {name}");
+    }
+    for (name, why) in &skipped {
+        let _ = writeln!(summary, "skip {name}: {why}");
     }
     for (name, why) in &failed {
         let _ = writeln!(summary, "FAIL {name}: {why}");
@@ -366,8 +393,9 @@ fn parent() -> SandboxResult {
         let _ = fs::write(PathBuf::from(dir).join("results.txt"), &summary);
     }
     say(&format!(
-        "qa_email_post_window: {} passed, {} failed",
+        "qa_email_post_window: {} passed, {} skipped, {} failed",
         passed.len(),
+        skipped.len(),
         failed.len()
     ));
     if failed.is_empty() {
@@ -518,25 +546,23 @@ impl<'a> User<'a> {
             .ok_or_else(|| format!("no post {key}").into())
     }
 
-    fn run_check(
-        &mut self,
-        name: &'static str,
-        check: fn(&mut User<'_>) -> SandboxResult,
-        passed: &mut Vec<String>,
-        failed: &mut Vec<(String, String)>,
-    ) {
+    fn run_check(&mut self, name: &'static str, check: fn(&mut User<'_>) -> SandboxResult, tally: &mut Tally) {
         say(&format!("check {name}"));
         match check(self) {
             Ok(()) => {
                 say(&format!("  pass {name}"));
-                passed.push(name.to_owned());
+                tally.passed.push(name.to_owned());
+            }
+            Err(error) if error.is::<Inconclusive>() => {
+                say(&format!("  skip {name}: {error}"));
+                tally.skipped.push((name.to_owned(), error.to_string()));
             }
             Err(error) => {
                 let error = error.to_string();
                 let state = self.state().map(|state| state.to_string()).unwrap_or_default();
                 let _ = self.shot(&format!("failed-{name}"), false);
                 say(&format!("  FAIL {name}: {error}\n  state: {state}"));
-                failed.push((name.to_owned(), error));
+                tally.failed.push((name.to_owned(), error));
             }
         }
     }
@@ -1043,10 +1069,12 @@ fn search(user: &mut User<'_>) -> SandboxResult {
     let plain = user.post("plain-after")?;
     let live = user.post("live")?;
     let hits = |n: usize, id: &str| found.lines().nth(n).is_some_and(|line| line.contains(id));
-    ensure(!hits(2, &plain) || hits(1, &live), || {
-        format!("a plain post is found by its words, the email post not: {found}")
-    })?;
-    Ok(())
+    if !hits(2, &plain) {
+        return Err(Inconclusive(format!("search found no plain post either: {found}")).into());
+    }
+    ensure(hits(0, &live) && hits(1, &live), || {
+        format!("a plain post is found by its words, the email post not by its subject and body: {found}")
+    })
 }
 
 fn restart(user: &mut User<'_>) -> SandboxResult {

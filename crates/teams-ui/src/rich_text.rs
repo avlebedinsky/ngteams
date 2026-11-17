@@ -887,12 +887,7 @@ impl<'a> Builder<'a> {
             .map(|row| {
                 row.iter()
                     .map(|cell| {
-                        let mut inner = Builder::new(self.mentions);
-                        inner.web_link.clone_from(&self.web_link);
-                        inner.link.clone_from(&self.link);
-                        inner.quoted = self.quoted;
-                        inner.level = self.level;
-                        inner.span = self.span;
+                        let mut inner = self.nested(self.level);
                         inner.walk(&cell.nodes);
                         TableCellBlock {
                             header: cell.header,
@@ -905,6 +900,17 @@ impl<'a> Builder<'a> {
         self.blocks.push(Block::Table(TableBlock { rows }));
     }
 
+    /// A builder for content nested in this one at `level`, in the link, quote and span it is in.
+    fn nested(&self, level: usize) -> Builder<'a> {
+        let mut inner = Builder::new(self.mentions);
+        inner.web_link.clone_from(&self.web_link);
+        inner.link.clone_from(&self.link);
+        inner.quoted = self.quoted;
+        inner.level = level;
+        inner.span = self.span;
+        inner
+    }
+
     /// A list: each item's blocks laid out as this level's are, one list deeper.
     fn list(&mut self, list: &List) {
         self.end_block();
@@ -912,12 +918,7 @@ impl<'a> Builder<'a> {
             .items
             .iter()
             .map(|item| {
-                let mut inner = Builder::new(self.mentions);
-                inner.web_link.clone_from(&self.web_link);
-                inner.link.clone_from(&self.link);
-                inner.quoted = self.quoted;
-                inner.level = self.level + 1;
-                inner.span = self.span;
+                let mut inner = self.nested(self.level + 1);
                 inner.walk(item);
                 inner.finish()
             })

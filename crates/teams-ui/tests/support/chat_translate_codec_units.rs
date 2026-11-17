@@ -2,7 +2,7 @@
 //! translation that keeps its markers, one that moves, drops or repeats them stays whole, and typed angle brackets stay
 //! text.
 
-use teams_proto::chat::{Code, Image, Quote, SpanStyle, parse_html};
+use teams_proto::chat::{Code, Image, Quote, SpanStyle, Table, TableCell, parse_html};
 
 use super::*;
 
@@ -231,6 +231,22 @@ fn list_items_and_atoms_outside_their_places_are_kept() {
     assert!(
         matches!(&restored.nodes[0], Node::Paragraph(children) if children.iter().any(|node| matches!(node, Node::Code(_))))
     );
+}
+
+#[test]
+fn a_table_the_answer_lost_comes_back_whole() {
+    let table = Node::Table(Table {
+        rows: vec![vec![TableCell {
+            header: false,
+            nodes: vec![text("cell")],
+        }]],
+    });
+    let (_, tabled) = encode(&RichText {
+        nodes: vec![Node::Paragraph(vec![text("see")]), table.clone()],
+        truncated: false,
+    });
+    let restored = decode("<x0>siehe</x0>", &tabled);
+    assert!(matches!(&restored.nodes[0], Node::Paragraph(children) if children.contains(&table)));
 }
 
 #[test]

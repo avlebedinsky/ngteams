@@ -381,14 +381,17 @@ fn fill(shell: Node, children: Vec<Node>) -> Node {
     }
 }
 
-/// Puts back at the end what the answer lost of what can't be lost: a mention, an image or emoji, a block of code.
+/// Puts back at the end what the answer lost of what can't be lost: a mention, an image or emoji, a block of code, a
+/// table.
 fn restore_lost_atoms(built: &mut Vec<Node>, shells: &Shells, used: &[bool]) {
     let lost: Vec<Node> = shells
         .0
         .iter()
         .zip(used)
         .filter_map(|(shell, used)| match shell {
-            Shell::Atom(node @ (Node::Mention { .. } | Node::Image(_) | Node::Code(_))) if !used => Some(node.clone()),
+            Shell::Atom(node @ (Node::Mention { .. } | Node::Image(_) | Node::Code(_) | Node::Table(_))) if !used => {
+                Some(node.clone())
+            }
             _ => None,
         })
         .collect();

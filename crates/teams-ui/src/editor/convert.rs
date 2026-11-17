@@ -26,7 +26,7 @@ pub enum CantLoad {
     #[error("it was read only in part")]
     Truncated,
     /// What the editor would send back otherwise than it was (a block of code in a language, a numbered list from
-    /// another number), though the edit didn't change it.
+    /// another number, a table), though the edit didn't change it.
     #[error("it has formatting the box can't keep")]
     Formatting,
 }
@@ -34,13 +34,14 @@ pub enum CantLoad {
 /// What a load is for, which sets what is done with what the editor can't send back as it was.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Load {
-    /// An edit of a message: a picture, a block of code in a language (but `plaintext`) and a numbered list from
-    /// another number than 1 are refused, so the edit sends back only what the user changed.
+    /// An edit of a message: a picture, a block of code in a language (but `plaintext`), a numbered list from another
+    /// number than 1 and a table are refused, so the edit sends back only what the user changed.
     Edit,
     /// A text shown to edit but kept as it was until edited (an event's body): a picture refused; a block of code's
-    /// language and a list's first number dropped.
+    /// language and a list's first number dropped; a table's rows made lines.
     Body,
-    /// A paste: a picture is its `alt`; a block of code's language and a list's first number dropped.
+    /// A paste: a picture is its `alt`; a block of code's language and a list's first number dropped; a table's rows
+    /// made lines.
     Paste,
 }
 
