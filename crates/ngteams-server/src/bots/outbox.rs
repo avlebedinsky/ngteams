@@ -4,7 +4,9 @@
 //! time; a lease that runs out (its node died) lets another take it. Rows go out oldest first per bot and
 //! conversation: a row waits while an older one of its line is pending.
 
+use diesel::dsl::sql;
 use diesel::prelude::*;
+use diesel::sql_types::{BigInt, Bool};
 use diesel_async::RunQueryDsl;
 
 use super::schema::{bot_deliveries, bot_health};
@@ -63,8 +65,8 @@ impl Delivery {
 }
 
 /// In a chat write's transaction (`$conn`): a row for each bot in `$chat` that `$event` (an
-/// [`super::activity::Event`]) by `$owner` concerns. A bot's own writes and anything in a chat without a bot make
-/// none. Whether one was made, so the caller wakes the senders after its commit.
+/// [`super::activity::Event`]) by `$owner` concerns. A bot's own writes, anything in a chat without a bot and a member
+/// whose app was deleted make none. Whether one was made, so the caller wakes the senders after its commit.
 macro_rules! enqueue {
     ($conn:expr, $chat:expr, $owner:expr, $event:expr, $at:expr) => {{
         use $crate::bots::schema::bot_deliveries;
@@ -76,12 +78,22 @@ macro_rules! enqueue {
             .select(chat_members::user_id)
             .load($conn)
             .await?;
-        let bots: Vec<(String, String)> = if members.len() < 2 {
+        let registered: Vec<String> = if members.len() < 2 {
+            Vec::new()
+        } else {
+            $crate::apps::schema::bots::table
+                .filter($crate::apps::schema::bots::id.eq_any(&members))
+                .select($crate::apps::schema::bots::id)
+                .load($conn)
+                .await?
+        };
+        let bots: Vec<(String, String)> = if registered.is_empty() {
             Vec::new()
         } else {
             users::table
-                .filter(users::id.eq_any(&members))
+                .filter(users::id.eq_any(&registered))
                 .filter(users::kind.eq($crate::db::users::APP))
+                .filter(users::deleted_at.is_null())
                 .filter(users::id.ne($owner))
                 .select((users::id, users::display_name))
                 .load($conn)
@@ -153,13 +165,16 @@ pub(crate) fn concerns(event: &super::activity::Event<'_>, personal: bool, bot: 
 }
 
 /// Up to `limit` rows this node (`node`) now holds for `lease` milliseconds: due, not held by another node, the
-/// oldest of their line, their bot not paused.
+/// oldest of their line, their bot not paused. The query itself leaves out waiting rows, so a bot with many of them
+/// can't fill the window and keep other bots' rows out.
 pub(crate) async fn claim(db: &Db, node: &str, lease: i64, limit: i64) -> Result<Vec<Delivery>, DbError> {
     let now = crate::chatsvc::now();
     let candidates: Vec<Delivery> = with_conn!(db, |conn| bot_deliveries::table
         .filter(bot_deliveries::state.eq(PENDING))
         .filter(bot_deliveries::due_at.le(now))
         .filter(bot_deliveries::locked_until.lt(now))
+        .filter(sql::<Bool>(HEAD_OF_LINE))
+        .filter(sql::<Bool>(NOT_PAUSED).bind::<BigInt, _>(now).sql(")"))
         .order((bot_deliveries::seq, bot_deliveries::id))
         .limit(limit * 4)
         .select(Delivery::as_select())
@@ -170,12 +185,7 @@ pub(crate) async fn claim(db: &Db, node: &str, lease: i64, limit: i64) -> Result
         if i64::try_from(claimed.len()).unwrap_or(i64::MAX) >= limit {
             break;
         }
-        let same_line =
-            |held: &Delivery| held.bot_id == candidate.bot_id && held.conversation_id == candidate.conversation_id;
-        let waits = claimed.iter().any(same_line)
-            || !head_of_line(db, &candidate).await?
-            || paused(db, &candidate.bot_id, now).await?;
-        if !waits && take(db, node, &candidate.id, now, lease).await? {
+        if take(db, node, &candidate.id, now, lease).await? {
             let mut held = candidate;
             held.attempts += 1;
             claimed.push(held);
@@ -183,6 +193,15 @@ pub(crate) async fn claim(db: &Db, node: &str, lease: i64, limit: i64) -> Result
     }
     Ok(claimed)
 }
+
+/// No older row of the row's line is still to be sent.
+const HEAD_OF_LINE: &str = "NOT EXISTS (SELECT 1 FROM bot_deliveries older \
+    WHERE older.bot_id = bot_deliveries.bot_id AND older.conversation_id = bot_deliveries.conversation_id \
+    AND older.state = 'pending' \
+    AND (older.seq < bot_deliveries.seq OR (older.seq = bot_deliveries.seq AND older.id < bot_deliveries.id)))";
+/// The row's bot isn't paused at the time bound after it.
+const NOT_PAUSED: &str = "NOT EXISTS (SELECT 1 FROM bot_health \
+    WHERE bot_health.bot_id = bot_deliveries.bot_id AND bot_health.paused_until > ";
 
 /// Takes row `id`'s lease for `node` unless another node holds it; whether it did.
 async fn take(db: &Db, node: &str, id: &str, now: i64, lease: i64) -> Result<bool, DbError> {
@@ -203,39 +222,12 @@ async fn take(db: &Db, node: &str, id: &str, now: i64, lease: i64) -> Result<boo
     Ok(taken == 1)
 }
 
-/// Whether no older row of `row`'s line is still to be sent.
-async fn head_of_line(db: &Db, row: &Delivery) -> Result<bool, DbError> {
-    let older: i64 = with_conn!(db, |conn| bot_deliveries::table
-        .filter(bot_deliveries::bot_id.eq(&row.bot_id))
-        .filter(bot_deliveries::conversation_id.eq(&row.conversation_id))
-        .filter(bot_deliveries::state.eq(PENDING))
-        .filter(
-            bot_deliveries::seq
-                .lt(row.seq)
-                .or(bot_deliveries::seq.eq(row.seq).and(bot_deliveries::id.lt(&row.id))),
-        )
-        .count()
-        .get_result(conn)
-        .await?);
-    Ok(older == 0)
-}
-
-async fn paused(db: &Db, bot: &str, now: i64) -> Result<bool, DbError> {
-    let until: Option<i64> = with_conn!(db, |conn| bot_health::table
-        .find(bot)
-        .select(bot_health::paused_until)
-        .first(conn)
-        .await
-        .optional()?);
-    Ok(until.is_some_and(|until| until > now))
-}
-
 /// How a send ended.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Outcome {
     Sent,
-    /// Failed; tried again after the delay, if any is left.
-    Retry(Option<i64>, String),
+    /// Failed; tried again after the delay (milliseconds).
+    Retry(i64, String),
     /// Failed for good.
     Failed(String),
 }
@@ -246,8 +238,8 @@ pub(crate) async fn finish(db: &Db, node: &str, row: &Delivery, outcome: &Outcom
     let now = crate::chatsvc::now();
     let (state, due, error) = match outcome {
         Outcome::Sent => (SENT, row.due_at, None),
-        Outcome::Retry(Some(delay), error) => (PENDING, now + delay, Some(error.as_str())),
-        Outcome::Retry(None, error) | Outcome::Failed(error) => (FAILED, row.due_at, Some(error.as_str())),
+        Outcome::Retry(delay, error) => (PENDING, now + delay, Some(error.as_str())),
+        Outcome::Failed(error) => (FAILED, row.due_at, Some(error.as_str())),
     };
     with_conn!(db, |conn| diesel::update(
         bot_deliveries::table

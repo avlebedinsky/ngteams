@@ -77,7 +77,7 @@ async fn send(app: &App, node: &str, row: Delivery) {
 }
 
 fn log(row: &Delivery, outcome: &Outcome) {
-    if let Outcome::Failed(error) | Outcome::Retry(None, error) = outcome {
+    if let Outcome::Failed(error) = outcome {
         tracing::info!(bot = %row.bot_id, kind = activity_kind(row), %error, "an activity to a bot failed for good");
     }
 }
@@ -130,11 +130,11 @@ fn retry(app: &App, row: &Delivery, error: String) -> Outcome {
     };
     let made = usize::try_from(row.attempts).unwrap_or(usize::MAX);
     if made >= most {
-        return Outcome::Retry(None, error);
+        return Outcome::Failed(error);
     }
     let delay = delays.get(made.saturating_sub(1)).copied().unwrap_or(0);
     Outcome::Retry(
-        Some(i64::try_from(delay).unwrap_or(i64::MAX / 2_000).saturating_mul(1000)),
+        i64::try_from(delay).unwrap_or(i64::MAX / 2_000).saturating_mul(1000),
         error,
     )
 }

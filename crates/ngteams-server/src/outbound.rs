@@ -76,7 +76,7 @@ impl Guard {
     }
 }
 
-/// An IPv4 address an IPv6 form carries (mapped or compatible), as itself.
+/// An IPv4-mapped IPv6 address as its IPv4 address, so a network list of IPv4 ranges holds it.
 fn canonical(address: IpAddr) -> IpAddr {
     match address {
         IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(address, IpAddr::V4),
@@ -84,10 +84,26 @@ fn canonical(address: IpAddr) -> IpAddr {
     }
 }
 
-/// The cloud providers' instance metadata services.
+/// The IPv4 address an IPv6 form carries: mapped, compatible, NAT64 or 6to4.
+fn embedded_v4(address: Ipv6Addr) -> Option<Ipv4Addr> {
+    let ([0, 0, 0, 0, 0, 0xffff | 0, high, low] | [0x64, 0xff9b, 0, 0, 0, 0, high, low] | [0x2002, high, low, ..]) =
+        address.segments()
+    else {
+        return None;
+    };
+    let [a, b] = high.to_be_bytes();
+    let [c, d] = low.to_be_bytes();
+    Some(Ipv4Addr::new(a, b, c, d))
+}
+
+/// The cloud providers' instance metadata services, also in any IPv6 form that carries their IPv4 address.
 fn is_metadata(address: IpAddr) -> bool {
     const AWS_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254);
-    matches!(address, IpAddr::V4(v4) if v4 == Ipv4Addr::new(169, 254, 169, 254) || v4 == Ipv4Addr::new(100, 100, 100, 200))
+    let v4 = match address {
+        IpAddr::V4(v4) => Some(v4),
+        IpAddr::V6(v6) => embedded_v4(v6),
+    };
+    v4.is_some_and(|v4| v4 == Ipv4Addr::new(169, 254, 169, 254) || v4 == Ipv4Addr::new(100, 100, 100, 200))
         || address == IpAddr::V6(AWS_V6)
 }
 
@@ -212,6 +228,9 @@ mod tests {
             "169.254.0.0/16",
             "fd00::/8",
             "100.64.0.0/10",
+            "::/96",
+            "64:ff9b::/96",
+            "2002::/16",
         ]);
         for address in [
             "10.1.2.3",
@@ -228,8 +247,12 @@ mod tests {
         for address in [
             "169.254.169.254",
             "::ffff:169.254.169.254",
+            "::169.254.169.254",
+            "64:ff9b::a9fe:a9fe",
+            "2002:a9fe:a9fe::1",
             "fd00:ec2::254",
             "100.100.100.200",
+            "64:ff9b::6464:64c8",
         ] {
             let address: IpAddr = address.parse().unwrap();
             assert!(!open.allows(address), "{address}");
@@ -247,6 +270,7 @@ mod tests {
         }
         assert!(closed.allows("93.184.216.34".parse().unwrap()));
         assert!(closed.allows("2606:4700::1111".parse().unwrap()));
+        assert!(open.allows("64:ff9b::a00:1".parse().unwrap()));
     }
 
     #[test]

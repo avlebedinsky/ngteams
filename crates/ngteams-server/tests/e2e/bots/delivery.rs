@@ -79,6 +79,51 @@ async fn a_dead_endpoint_is_retried_then_failed_without_holding_up_another_bot()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn many_rows_waiting_behind_a_dead_bots_retry_dont_hold_up_another_bot() {
+    for backend in backends() {
+        let setup = Setup::open_with(backend, |config| config.bots.retry_delays = vec![60]).await;
+        setup.bot.answer(500);
+        let dead_chat = setup.chat();
+        setup.send(&dead_chat, "first to the dead bot").await;
+        setup.bot.next_of_within("message", Duration::from_secs(5)).await;
+        // more than a sender's window of candidates (four batches of 32) waits behind the first one's retry
+        for n in 0..130 {
+            setup.send(&dead_chat, &format!("waiting {n}")).await;
+        }
+        let other = TestBot::start().await;
+        let answer = setup.registry.register("Other (synthetic)", &other.url).await;
+        let other_id = answer["id"].as_str().unwrap().to_owned();
+        setup
+            .send(&personal_chat(&setup.ada, &other_id), "to the live bot")
+            .await;
+        let got = other.next_of_within("message", Duration::from_secs(10)).await;
+        assert_eq!(got.activity["text"], "to the live bot");
+        assert_eq!(setup.bot.hits(), 1);
+        setup.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_with_a_deleted_bot_still_takes_messages() {
+    for backend in backends() {
+        let setup = Setup::open(backend).await;
+        let chat = setup.chat();
+        setup.send(&chat, "before the app is deleted").await;
+        setup.bot.next_of("message").await;
+        let (status, _) = setup
+            .registry
+            .call(Method::DELETE, &super::app_path(&setup.bot_id), None)
+            .await;
+        assert_eq!(status, 204);
+        setup.send(&chat, "after the app is deleted").await;
+        assert!(!setup.bot.gets_within("message", Duration::from_secs(3)).await);
+        let rows = deliveries(&setup.registry.server.app.db, &setup.bot_id).await.unwrap();
+        assert!(rows.is_empty(), "{rows:?}");
+        setup.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_private_loopback_or_metadata_address_is_refused_unless_allowed() {
     for backend in backends() {
         let setup = Setup::open_with(backend, |config| config.bots.allowed_networks.clear()).await;

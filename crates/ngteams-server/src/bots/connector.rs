@@ -1,7 +1,7 @@
-//! The Bot Connector API a bot calls at its `serviceUrl` (`/bot/…`, or an unsigned bot's `/bot/u/<credential>/…`):
-//! send, reply, update and delete its messages, typing, the roster, and a 1:1 chat it starts. The SDKs join URLs
-//! differently, so a doubled slash and any letter case in the fixed segments are taken. Answers and refusals take the
-//! Bot Framework's shapes (`ResourceResponse`, `ErrorResponse`).
+//! The Bot Connector API a bot calls at its `serviceUrl` (`/bot/…`, or an unsigned bot's
+//! `/bot/u/<bot id>.<credential>/…`): send, reply, update and delete its messages, typing, the roster, and a 1:1 chat
+//! it starts. The SDKs join URLs differently, so a doubled slash and any letter case in the fixed segments are taken.
+//! Answers and refusals take the Bot Framework's shapes (`ResourceResponse`, `ErrorResponse`).
 //!
 //! A bot acts only as itself and only in a chat it is in; it starts a chat only with a person who may use its app.
 
