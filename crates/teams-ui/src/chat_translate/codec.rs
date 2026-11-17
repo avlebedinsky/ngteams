@@ -3,9 +3,10 @@
 //!
 //! - **Markers**: what wraps words (a paragraph, a mark such as bold, a link, a coloured span, a heading, a quote, a
 //!   list and each of its items) is `<xN>…</xN>`; what stands on its own and is never translated (a mention, an
-//!   image or emoji, a block of code, a line break, a rule) is `<xN/>`. The translator keeps each marker once around
-//!   the words it wraps in its translation; each is put back as the node it stood for, from the message's own
-//!   ([`Shells`]), so a link's address, a mention's person or a picture never pass through the translator's hands.
+//!   image or emoji, a block of code, a line break, a rule, a table) is `<xN/>`. The translator keeps each marker
+//!   once around the words it wraps in its translation; each is put back as the node it stood for, from the
+//!   message's own ([`Shells`]), so a link's address, a mention's person or a picture never pass through the
+//!   translator's hands.
 //! - **Text** is escaped (`&`, `<`, `>`) so typed angle brackets aren't taken for markers, and unescaped on the way
 //!   back.
 //! - **Forgiving to read**: a marker that names nothing, a close without its open or a second copy of an atom is
@@ -136,7 +137,8 @@ fn encode_node(node: &Node, out: &mut String, shells: &mut Shells) {
             }
             let _ = write!(out, "</x{n}>");
         }
-        Node::Break | Node::Mention { .. } | Node::Image(_) | Node::Code(_) | Node::Rule => {
+        // a table's cells keep their words: no shell holds a row or a cell
+        Node::Break | Node::Mention { .. } | Node::Image(_) | Node::Code(_) | Node::Rule | Node::Table(_) => {
             let n = shells.add(Shell::Atom(node.clone()));
             let _ = write!(out, "<x{n}/>");
         }

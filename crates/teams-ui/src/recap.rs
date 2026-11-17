@@ -368,7 +368,8 @@ fn collect_links(nodes: &[Node], links: &mut Vec<(String, String)>) {
             | Node::Break
             | Node::Mention { .. }
             | Node::Image(_)
-            | Node::Rule => {}
+            | Node::Rule
+            | Node::Table(_) => {}
         }
     }
 }
@@ -383,7 +384,7 @@ fn plain(nodes: &[Node], into: &mut String) {
             | Node::Heading { children, .. }
             | Node::Indented { children, .. } => plain(children, into),
             Node::Break => into.push(' '),
-            Node::Quote(_) | Node::List(_) | Node::Code(_) | Node::Image(_) | Node::Rule => {}
+            Node::Quote(_) | Node::List(_) | Node::Code(_) | Node::Image(_) | Node::Rule | Node::Table(_) => {}
         }
     }
 }

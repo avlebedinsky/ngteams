@@ -36,7 +36,7 @@ use crate::chat::MentionKind;
 use crate::chat::code::{Code, language_of};
 use crate::chat::html::{
     INDENT_STEP, List, MAX_CONTENT, MAX_DEPTH, MAX_INDENT, MENTION_ITEMTYPE, Marks, Node, Quote, REPLY_ITEMTYPE,
-    RichText, SpanStyle,
+    RichText, SpanStyle, Table,
 };
 
 /// Why a [`MessageText`] can't be built.
@@ -515,6 +515,7 @@ impl<'a> Render<'a> {
             Node::Image(image) => self.picture(image)?,
             Node::Quote(quote) => self.quote(quote, depth)?,
             Node::List(list) => self.list(list, depth)?,
+            Node::Table(table) => self.table(table, depth)?,
             Node::Code(code) => self.code(code),
         }
         Ok(())
@@ -664,6 +665,24 @@ impl<'a> Render<'a> {
         Ok(())
     }
 
+    /// A table, as it was read: its rows, each its cells (a header's a `th`), inside the three containers it was read
+    /// as (the table, the row, the cell).
+    fn table(&mut self, table: &Table, depth: usize) -> Result<(), ComposeError> {
+        self.html.push_str("<table><tbody>");
+        for row in &table.rows {
+            self.html.push_str("<tr>");
+            for cell in row {
+                let tag = if cell.header { "th" } else { "td" };
+                self.push(&["<", tag, ">"]);
+                self.nodes(&cell.nodes, depth + 3)?;
+                self.push(&["</", tag, ">"]);
+            }
+            self.html.push_str("</tr>");
+        }
+        self.html.push_str("</tbody></table>");
+        Ok(())
+    }
+
     /// A reply's quote (it names a message) in the captured form, or a plain quote.
     fn quote(&mut self, quote: &Quote, depth: usize) -> Result<(), ComposeError> {
         let Some(message_id) = &quote.message_id else {
@@ -723,6 +742,11 @@ fn within_depth(nodes: &[Node], depth: usize) -> Result<(), ComposeError> {
                     within_depth(item, depth + 2)?;
                 }
             }
+            Node::Table(table) => {
+                for cell in table.rows.iter().flatten() {
+                    within_depth(&cell.nodes, depth + 3)?;
+                }
+            }
             Node::Text { .. } | Node::Break | Node::Mention { .. } | Node::Image(_) | Node::Code(_) | Node::Rule => {}
         }
     }
@@ -752,6 +776,11 @@ fn pictures_on(cloud: &crate::Cloud, nodes: &mut [Node]) {
             Node::List(list) => {
                 for item in &mut list.items {
                     pictures_on(cloud, item);
+                }
+            }
+            Node::Table(table) => {
+                for cell in table.rows.iter_mut().flatten() {
+                    pictures_on(cloud, &mut cell.nodes);
                 }
             }
             Node::Text { .. } | Node::Break | Node::Mention { .. } | Node::Code(_) | Node::Rule => {}

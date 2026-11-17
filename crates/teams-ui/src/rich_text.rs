@@ -20,7 +20,10 @@
 //!   emoticons alone ([`Rendered::emoticons_only`]) is drawn as Teams draws one: large, playing, without its bubble. A
 //!   list is [`Block::List`]: each item's blocks beside its marker (its number, or a bullet by how deep the list is
 //!   nested: disc, circle, square), indented as a browser indents one. A paragraph of no-break spaces alone (the web
-//!   client's `<p>&nbsp;</p>`, its blank line) is drawn as a blank line; one of ASCII whitespace alone, none. A block
+//!   client's `<p>&nbsp;</p>`, its blank line) is drawn as a blank line; one of ASCII whitespace alone, none. Line
+//!   breaks between paragraphs (an email's `<br><br>`) are blank lines, and a break that ends its paragraph starts no
+//!   line, as a browser sets them. A table is [`Block::Table`]: its cells' blocks in a bordered grid of equal
+//!   columns, a header cell's text bold. A block
 //!   of code is [`Block::Code`]: Teams' code card ([`crate::code`]), its lines numbered and its tokens coloured by
 //!   their kind.
 //! - [`render`] draws it: paragraphs line under line with no gap between them, as Teams sets them; a forward as
@@ -46,7 +49,8 @@ use gpui::{
 use serde_json::{Value, json};
 use teams_proto::InlinePicture;
 use teams_proto::chat::{
-    Code, Field, FontSize, Image, List, Marks, Mention, MentionKind, Node, Quote, RichText, SpanStyle, WEB_CLIENT,
+    Code, Field, FontSize, Image, List, Marks, Mention, MentionKind, Node, Quote, RichText, SpanStyle, Table,
+    WEB_CLIENT,
 };
 
 pub use crate::code::CodeBlock;
@@ -157,6 +161,22 @@ impl TextBlock {
                 href: href.to_owned(),
             }),
         }
+    }
+
+    /// Drops the line break that ends it, from its text, its pieces and its links.
+    fn drop_last_break(&mut self) {
+        if self.text.pop().is_none() {
+            return;
+        }
+        let end = self.text.len();
+        for (range, _) in &mut self.pieces {
+            range.end = range.end.min(end);
+        }
+        self.pieces.retain(|(range, _)| range.start < range.end);
+        for link in &mut self.links {
+            link.range.end = link.range.end.min(end);
+        }
+        self.links.retain(|link| link.range.start < link.range.end);
     }
 
     /// Nothing a reader would see: markup whitespace alone (a no-break space is a blank line's, kept).
@@ -336,6 +356,46 @@ pub struct ForwardBlock {
     pub blocks: Vec<Block>,
 }
 
+/// A table: its rows, each its cells' blocks.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TableBlock {
+    pub rows: Vec<Vec<TableCellBlock>>,
+}
+
+impl TableBlock {
+    /// How many columns it is drawn with: its longest row's cells.
+    #[must_use]
+    pub fn columns(&self) -> usize {
+        self.rows.iter().map(Vec::len).max().unwrap_or(0)
+    }
+
+    /// Its rows as a reader copies them: a line a row, its cells apart by a tab.
+    fn row_lines(&self) -> Vec<String> {
+        self.rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|cell| {
+                        cell.blocks
+                            .iter()
+                            .flat_map(Block::plain_lines)
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\t")
+            })
+            .collect()
+    }
+}
+
+/// A table's cell: whether it is a header's, and its blocks.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TableCellBlock {
+    pub header: bool,
+    pub blocks: Vec<Block>,
+}
+
 /// One block of a message's text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Block {
@@ -347,6 +407,7 @@ pub enum Block {
     Code(CodeBlock),
     /// A horizontal rule.
     Rule,
+    Table(TableBlock),
 }
 
 impl Block {
@@ -358,6 +419,12 @@ impl Block {
                 .iter()
                 .any(|(_, style)| style.mention == Some(Mentioned::Me)),
             Self::List(list) => list.items.iter().flatten().any(Self::mentions_me),
+            Self::Table(table) => table
+                .rows
+                .iter()
+                .flatten()
+                .flat_map(|cell| &cell.blocks)
+                .any(Self::mentions_me),
             // a forward's mentions are the original's, of its own chat
             Self::Quote(_) | Self::Picture(_) | Self::Forward(_) | Self::Code(_) | Self::Rule => false,
         }
@@ -377,6 +444,7 @@ impl Block {
                 .collect(),
             Self::Forward(forward) => forward.blocks.iter().flat_map(Self::plain_lines).collect(),
             Self::Code(code) => code.lines.iter().map(|line| line.text.clone()).collect(),
+            Self::Table(table) => table.row_lines(),
             Self::Quote(_) | Self::Picture(_) | Self::Rule => Vec::new(),
         }
     }
@@ -457,6 +525,17 @@ fn collect_units<'r>(blocks: &'r [Block], path: &mut Vec<usize>, units: &mut Vec
                     path.pop();
                 }
             }
+            Block::Table(table) => {
+                for (index, row) in table.rows.iter().enumerate() {
+                    path.push(index);
+                    for (column, cell) in row.iter().enumerate() {
+                        path.push(column);
+                        collect_units(&cell.blocks, path, units);
+                        path.pop();
+                    }
+                    path.pop();
+                }
+            }
             Block::Code(code) => units.extend(code.lines.iter().enumerate().map(|(index, line)| {
                 let mut path = path.clone();
                 path.push(index);
@@ -532,6 +611,7 @@ impl Rendered {
                 match block {
                     Block::Picture(picture) => into.push(picture),
                     Block::List(list) => list.items.iter().for_each(|item| walk(item, into)),
+                    Block::Table(table) => table.rows.iter().flatten().for_each(|cell| walk(&cell.blocks, into)),
                     Block::Forward(forward) => walk(&forward.blocks, into),
                     Block::Text(_) | Block::Quote(_) | Block::Code(_) | Block::Rule => {}
                 }
@@ -720,10 +800,15 @@ impl<'a> Builder<'a> {
         self.current.push(text, style, self.link.as_deref());
     }
 
-    /// Ends the paragraph being built, unless it shows nothing.
+    /// Ends the paragraph being built, unless it shows nothing. A break that ends it starts no line, as a browser
+    /// sets it; breaks alone are its blank lines.
     fn end_block(&mut self) {
-        let block = std::mem::take(&mut self.current);
-        if !block.is_blank() {
+        let mut block = std::mem::take(&mut self.current);
+        let breaks_alone = !block.text.is_empty() && block.text.bytes().all(|byte| byte == b'\n');
+        if block.text.ends_with('\n') {
+            block.drop_last_break();
+        }
+        if breaks_alone || !block.is_blank() {
             self.blocks.push(Block::Text(block));
         }
     }
@@ -760,6 +845,7 @@ impl<'a> Builder<'a> {
                 Node::Image(image) => self.image(image),
                 Node::Quote(quote) => self.quote(quote),
                 Node::List(list) => self.list(list),
+                Node::Table(table) => self.table(table),
                 Node::Code(code) => self.code(code),
                 Node::Span { style, children } => {
                     let outer = self.span;
@@ -790,6 +876,33 @@ impl<'a> Builder<'a> {
     fn code(&mut self, code: &Code) {
         self.end_block();
         self.blocks.push(Block::Code(CodeBlock::of(code)));
+    }
+
+    /// A table: each cell's blocks laid out as this level's are.
+    fn table(&mut self, table: &Table) {
+        self.end_block();
+        let rows = table
+            .rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|cell| {
+                        let mut inner = Builder::new(self.mentions);
+                        inner.web_link.clone_from(&self.web_link);
+                        inner.link.clone_from(&self.link);
+                        inner.quoted = self.quoted;
+                        inner.level = self.level;
+                        inner.span = self.span;
+                        inner.walk(&cell.nodes);
+                        TableCellBlock {
+                            header: cell.header,
+                            blocks: inner.finish(),
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        self.blocks.push(Block::Table(TableBlock { rows }));
     }
 
     /// A list: each item's blocks laid out as this level's are, one list deeper.
@@ -1109,6 +1222,7 @@ pub fn render_selectable(
     }
     let mut path = Vec::new();
     div()
+        .debug_selector(|| "rich-all".to_owned())
         .flex()
         .flex_col()
         .children(blocks(&draw, &mut path, &rendered.blocks))
@@ -1139,6 +1253,7 @@ fn blocks(draw: &Draw<'_>, path: &mut Vec<usize>, blocks: &[Block]) -> Vec<AnyEl
                 Block::Quote(quote) => quote_block(draw, path, quote),
                 Block::Picture(picture) => picture_block(draw, path, picture),
                 Block::List(list) => list_block(draw, path, list),
+                Block::Table(table) => table_block(draw, path, table),
                 Block::Forward(forward) => forward_block(draw, path, forward),
                 Block::Rule => rule(draw.palette),
                 Block::Code(code) => crate::code::card(
@@ -1191,6 +1306,59 @@ fn rule(palette: Palette) -> AnyElement {
         .debug_selector(|| "rich-rule".to_owned())
         .py_2()
         .child(div().h(px(1.0)).w_full().bg(rgb(palette.border)))
+        .into_any_element()
+}
+
+/// A table, as a browser draws an email's: a bordered grid, its columns of equal width (a short row keeps them), a
+/// header cell's text bold.
+fn table_block(draw: &Draw<'_>, path: &mut Vec<usize>, table: &TableBlock) -> AnyElement {
+    let border = rgb(draw.palette.border);
+    let columns = table.columns();
+    let rows: Vec<AnyElement> = table
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            path.push(index);
+            let cells: Vec<AnyElement> = (0..columns)
+                .map(|column| {
+                    path.push(column);
+                    let cell = row.get(column);
+                    let content = cell.map(|cell| blocks(draw, path, &cell.blocks)).unwrap_or_default();
+                    path.pop();
+                    div()
+                        .debug_selector(move || format!("rich-table-cell-{index}-{column}"))
+                        .flex_1()
+                        .min_w_0()
+                        .px_2()
+                        .py_1()
+                        .flex()
+                        .flex_col()
+                        .when(column > 0, |cell| cell.border_l_1().border_color(border))
+                        .when(cell.is_some_and(|cell| cell.header), |cell| {
+                            cell.font_weight(FontWeight::SEMIBOLD)
+                        })
+                        .children(content)
+                        .into_any_element()
+                })
+                .collect();
+            path.pop();
+            div()
+                .flex()
+                .when(index > 0, |row| row.border_t_1().border_color(border))
+                .children(cells)
+                .into_any_element()
+        })
+        .collect();
+    div()
+        .debug_selector(|| "rich-table".to_owned())
+        .w_full()
+        .my_1()
+        .border_1()
+        .border_color(border)
+        .flex()
+        .flex_col()
+        .children(rows)
         .into_any_element()
 }
 

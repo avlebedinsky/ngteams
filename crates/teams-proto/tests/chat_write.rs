@@ -226,6 +226,26 @@ fn a_list_is_written_as_html_and_reads_back_the_same() {
 }
 
 #[test]
+fn a_table_is_written_as_html_and_reads_back_the_same() {
+    let cell = |header: bool, text: &str| teams_proto::chat::TableCell {
+        header,
+        nodes: vec![run(text)],
+    };
+    let table = Node::Table(teams_proto::chat::Table {
+        rows: vec![
+            vec![cell(true, "name"), cell(true, "state")],
+            vec![cell(false, "one"), cell(false, "two")],
+        ],
+    });
+    let text = MessageText::new(rich(vec![table.clone()]), []).unwrap();
+    assert_eq!(
+        text.html(),
+        "<table><tbody><tr><th>name</th><th>state</th></tr><tr><td>one</td><td>two</td></tr></tbody></table>"
+    );
+    assert_eq!(parse_html(text.html()).nodes, [table]);
+}
+
+#[test]
 fn a_code_block_is_written_as_the_editor_writes_one_and_reads_back_the_same() {
     let code = |language: Option<&str>, text: &str| {
         Node::Code(Code {

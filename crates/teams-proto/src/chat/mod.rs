@@ -42,8 +42,8 @@ pub use files::{
 };
 pub use html::{
     AMS_IMAGE_ITEMTYPE, EMOJI_ITEMTYPE, FORWARD_ITEMTYPE, FontSize, INDENT_STEP, Image, List, MAX_CONTENT, MAX_DEPTH,
-    MAX_INDENT, MAX_LIST_START, MENTION_ITEMTYPE, Marks, Node, Quote, REPLY_ITEMTYPE, Rgb, RichText, SpanStyle,
-    ThreadActivity, parse as parse_html, thread_activity,
+    MAX_INDENT, MAX_LIST_START, MENTION_ITEMTYPE, Marks, Node, Quote, REPLY_ITEMTYPE, Rgb, RichText, SpanStyle, Table,
+    TableCell, ThreadActivity, parse as parse_html, thread_activity,
 };
 pub use links::{HYPERLINK_TYPE, LinkPreview, link_previews};
 pub use model::{

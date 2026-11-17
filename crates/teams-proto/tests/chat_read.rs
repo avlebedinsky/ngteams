@@ -17,8 +17,8 @@ use teams_mock::{AB_CHAT, ABC_CHAT, CHANNEL, CHAT_BASE, ChatServiceMock, LAB_A, 
 use teams_proto::chat::{
     AppConsumptionHorizon, ChatReadError, ChatReads, Code, CodeRun, Conversation, ConversationKind, ConversationList,
     Field, FileKind, FilePreview, List, MAX_CONTENT, MAX_DEPTH, Marks, MemberList, MentionKind, Message, MessagePage,
-    MessageType, Node, Quote, RichText, SharedFile, SharedFiles, Thread, Token, Unshown, WEB_CLIENT, forwarded,
-    link_endpoint, parse_html, shared_files, unshown_parts, web_chat_link,
+    MessageType, Node, Quote, RichText, SharedFile, SharedFiles, Table, TableCell, Thread, Token, Unshown, WEB_CLIENT,
+    forwarded, link_endpoint, parse_html, shared_files, unshown_parts, web_chat_link,
 };
 use teams_proto::{Client, Credentials, HttpError, HttpTransport};
 use wiremock::matchers::{method, path_regex};
@@ -1617,6 +1617,54 @@ fn an_ordered_and_a_bulleted_list_are_read_as_lists_of_items() {
         parse_html("<li>alone</li>").nodes,
         [Node::Paragraph(vec![text_node("alone")])]
     );
+}
+
+#[test]
+fn a_table_is_read_as_rows_of_cells_a_header_cell_marked() {
+    // as an email's body has one: a `thead` and a `tbody` (read through), whitespace between the cells, a cell with
+    // more than text
+    let read = parse_html(
+        "<p>Before</p>\n<table border=\"1\">\n<thead><tr><th>Name</th> <th>State</th></tr></thead>\n<tbody>\n\
+         <tr><td>Cell one</td>\n<td><b>Cell</b> two<br>more</td></tr>\n<tr><td></td><td>last</td></tr></tbody></table>",
+    );
+    let cell = |header: bool, nodes: Vec<Node>| TableCell { header, nodes };
+    assert_eq!(
+        read.nodes,
+        [
+            Node::Paragraph(vec![text_node("Before")]),
+            Node::Table(Table {
+                rows: vec![
+                    vec![
+                        cell(true, vec![text_node("Name")]),
+                        cell(true, vec![text_node("State")]),
+                    ],
+                    vec![
+                        cell(false, vec![text_node("Cell one")]),
+                        cell(
+                            false,
+                            vec![
+                                Node::Text {
+                                    text: "Cell".to_owned(),
+                                    marks: Marks::BOLD,
+                                },
+                                text_node(" two"),
+                                Node::Break,
+                                text_node("more"),
+                            ],
+                        ),
+                    ],
+                    vec![cell(false, Vec::new()), cell(false, vec![text_node("last")])],
+                ],
+            }),
+        ]
+    );
+    // a reader sees each row on a line, its cells apart
+    assert_eq!(
+        read.plain_text(),
+        "Before\nName State\nCell one Cell two\nmore\n last\n"
+    );
+    // a cell or a row outside a table is no table, as a browser reads it
+    assert_eq!(parse_html("<td>alone</td>").nodes, [text_node("alone")]);
 }
 
 /// A block of code as Teams' code block editor sends one (the shape of a received message, every value made up): the

@@ -3,7 +3,9 @@
 //! then walked without recursion.
 //!
 //! - **Kept**: text, `br`; `p`, `div`, `li` and `h1`–`h6` as paragraphs; `ol` and `ul` as lists, each `li` (any
-//!   paragraph) directly in one an item, numbered from `ol`'s `start`; `pre` as a block of code ([`Code`]: its text,
+//!   paragraph) directly in one an item, numbered from `ol`'s `start`; `table` as a table ([`Table`]): each `tr` a
+//!   row, each `td` or `th` in it a cell (a `th` marked a header's), its `thead`, `tbody` and `tfoot` read through;
+//!   `pre` as a block of code ([`Code`]: its text,
 //!   its language's id and its tokens' kinds, every other element in it giving its text, a `br` a line feed), the code
 //!   block editor's own paragraph before it dropped; `b`/`strong`, `i`/`em`, `u`/`ins`,
 //!   `s`/`strike`/`del`, `code` as marks; a mention (`<span itemtype="http://schema.skype.com/Mention" itemid="<n>">`,
@@ -165,6 +167,8 @@ pub enum Node {
     },
     /// A horizontal rule (`hr`).
     Rule,
+    /// A table (`table`).
+    Table(Table),
 }
 
 impl Node {
@@ -181,6 +185,7 @@ impl Node {
                 | Self::List(_)
                 | Self::Code(_)
                 | Self::Rule
+                | Self::Table(_)
         )
     }
 }
@@ -374,6 +379,20 @@ pub struct List {
     /// The first item's number: an `ol`'s `start` (digits, at most [`MAX_LIST_START`]), else 1.
     pub start: u32,
     pub items: Vec<Vec<Node>>,
+}
+
+/// A table: its rows, each its cells in order.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Table {
+    pub rows: Vec<Vec<TableCell>>,
+}
+
+/// A table's cell: what one `td` or `th` holds.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableCell {
+    /// A `th`: a browser sets its text bold.
+    pub header: bool,
+    pub nodes: Vec<Node>,
 }
 
 /// An image the content shows. Its source is kept, never fetched here.
@@ -634,6 +653,12 @@ enum Container {
     Heading(u8),
     /// A paragraph indented by that many steps.
     Indented(u8),
+    /// A table: its content is its rows, each a one-row table, joined when it closes.
+    Table,
+    /// A table's row: its content is its cells.
+    Row,
+    /// A table's cell, and whether it is a header's (`th`).
+    Cell(bool),
 }
 
 impl Container {
@@ -647,6 +672,9 @@ impl Container {
                 | Self::Code(_)
                 | Self::Heading(_)
                 | Self::Indented(_)
+                | Self::Table
+                | Self::Row
+                | Self::Cell(_)
         )
     }
 }
@@ -862,6 +890,18 @@ impl Builder {
                 code.finish();
                 Node::Code(code)
             }
+            Container::Table => Node::Table(Table {
+                rows: table_rows(children),
+            }),
+            Container::Row => Node::Table(Table {
+                rows: vec![table_cells(children)],
+            }),
+            Container::Cell(header) => Node::Table(Table {
+                rows: vec![vec![TableCell {
+                    header,
+                    nodes: children,
+                }]],
+            }),
             Container::Sender(mri) => {
                 let mut name = String::new();
                 plain_text(&children, &mut name);
@@ -944,6 +984,9 @@ fn container(element: &Element) -> Option<Container> {
                 .and_then(list_start)
                 .unwrap_or(1),
         }),
+        "table" => Some(Container::Table),
+        "tr" => Some(Container::Row),
+        "td" | "th" => Some(Container::Cell(name == "th")),
         "blockquote" => {
             let reply = element.attr("itemtype") == Some(REPLY_ITEMTYPE);
             let quote = Quote {
@@ -986,6 +1029,56 @@ fn list_items(children: Vec<Node>) -> Vec<Vec<Node>> {
         items.push(stray);
     }
     items
+}
+
+/// A row's cells: each a one-cell table its cell closed as ([`Builder::close_container`]); any other content (a cell
+/// past [`MAX_DEPTH`] gives its content to the row) a cell of its own, in order.
+fn table_cells(children: Vec<Node>) -> Vec<TableCell> {
+    let mut cells = Vec::new();
+    let mut stray = Vec::new();
+    for child in children {
+        match child {
+            Node::Table(mut table) if table.rows.len() == 1 && table.rows[0].len() == 1 => {
+                if !stray.is_empty() {
+                    cells.push(TableCell {
+                        header: false,
+                        nodes: std::mem::take(&mut stray),
+                    });
+                }
+                cells.extend(table.rows.pop().into_iter().flatten());
+            }
+            other => stray.push(other),
+        }
+    }
+    if !stray.is_empty() {
+        cells.push(TableCell {
+            header: false,
+            nodes: stray,
+        });
+    }
+    cells
+}
+
+/// A table's rows: each row closed as a one-row table; any other content (a row past [`MAX_DEPTH`] gives its cells
+/// to the table) a row of its own, in order.
+fn table_rows(children: Vec<Node>) -> Vec<Vec<TableCell>> {
+    let mut rows = Vec::new();
+    let mut stray = Vec::new();
+    for child in children {
+        match child {
+            Node::Table(table) => {
+                if !stray.is_empty() {
+                    rows.push(table_cells(std::mem::take(&mut stray)));
+                }
+                rows.extend(table.rows);
+            }
+            other => stray.push(other),
+        }
+    }
+    if !stray.is_empty() {
+        rows.push(table_cells(stray));
+    }
+    rows
 }
 
 /// An image with an `https` source.
@@ -1097,8 +1190,27 @@ fn text_of(nodes: &[Node], out: &mut String, include_quotes: bool) {
                     item_text(item, out, include_quotes);
                 }
             }
+            Node::Table(table) => {
+                for row in &table.rows {
+                    row_text(row, out, include_quotes);
+                }
+            }
         }
     }
+}
+
+/// The text of a table's row: on a line of its own, its cells apart.
+fn row_text(cells: &[TableCell], out: &mut String, include_quotes: bool) {
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    for (index, cell) in cells.iter().enumerate() {
+        if index > 0 {
+            out.push(' ');
+        }
+        text_of(&cell.nodes, out, include_quotes);
+    }
+    out.push('\n');
 }
 
 /// The text of a paragraph with its `children`: on a line of its own.

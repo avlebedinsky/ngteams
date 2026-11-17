@@ -384,9 +384,13 @@ fn an_image_of_a_chat_message_is_followed_by_its_link_to_the_web() {
         .iter()
         .find_map(|block| match block {
             Block::Quote(quote) => Some(quote),
-            Block::Text(_) | Block::Picture(_) | Block::List(_) | Block::Forward(_) | Block::Code(_) | Block::Rule => {
-                None
-            }
+            Block::Text(_)
+            | Block::Picture(_)
+            | Block::List(_)
+            | Block::Forward(_)
+            | Block::Code(_)
+            | Block::Rule
+            | Block::Table(_) => None,
         })
         .unwrap();
     let Block::Text(inner) = &quoted.blocks[0] else {
@@ -474,6 +478,79 @@ fn a_list_s_items_are_numbered_or_bulleted_and_a_no_break_space_is_a_blank_line(
             "        \u{25aa} deep"
         ]
     );
+}
+
+/// `content` drawn once in a test window of the kit's theme; the window's context and the text's line height.
+fn drawn(content: &str) -> (&'static mut gpui::VisualTestContext, gpui::Pixels) {
+    let rendered = Arc::new(laid_out(content));
+    let app: &'static mut TestAppContext = Box::leak(Box::new(TestAppContext::single()));
+    app.update(teams_ui::theme::init);
+    let (_, cx) = app.add_window_view(|_, _| Holder { rendered });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let line = cx.update(|window, _| window.text_style().line_height_in_pixels(window.rem_size()));
+    (cx, line)
+}
+
+/// How tall `content` is drawn, in lines of its text.
+fn drawn_lines(content: &str) -> f32 {
+    let (cx, line) = drawn(content);
+    let all = cx.debug_bounds("rich-all").expect("the text is drawn");
+    all.size.height / line
+}
+
+#[test]
+fn line_breaks_between_paragraphs_are_blank_lines_and_a_last_break_makes_none() {
+    // an email's body: two `br`s between its paragraphs are two blank lines, as a browser draws them
+    let rendered = laid_out("<p>Before</p><br><br><p>After two blank lines</p>");
+    assert_eq!(rendered.blocks.len(), 3, "{:?}", rendered.blocks);
+    assert_eq!(text_block(&rendered, 0).text, "Before");
+    assert_eq!(text_block(&rendered, 2).text, "After two blank lines");
+    let lines = drawn_lines("<p>Before</p><br><br><p>After two blank lines</p>");
+    assert!((lines - 4.0).abs() < 0.1, "{lines} lines");
+    let lines = drawn_lines("<p>Before</p><br><p>After one blank line</p>");
+    assert!((lines - 3.0).abs() < 0.1, "{lines} lines");
+    // a break that ends its paragraph starts no line, as a browser sets it; a line of its own still shows
+    let lines = drawn_lines("<p>one<br></p><p>two</p>");
+    assert!((lines - 2.0).abs() < 0.1, "{lines} lines");
+    let lines = drawn_lines("<p>one<br><br>two</p>");
+    assert!((lines - 3.0).abs() < 0.1, "{lines} lines");
+    // the web client's blank line and markup whitespace stay as they were
+    let lines = drawn_lines("<p>one</p><p>&nbsp;</p><p>two</p><p>  </p>");
+    assert!((lines - 3.0).abs() < 0.1, "{lines} lines");
+}
+
+#[test]
+fn a_table_s_cells_are_drawn_apart_in_rows_and_columns() {
+    let content = "<p>Before</p><table><tr><th>Name</th><th>State</th></tr><tr><td>Cell one</td><td>Cell <b>two</b>\
+                   </td></tr><tr><td>alone</td></tr></table><p>After</p>";
+    let rendered = laid_out(content);
+    let Block::Table(table) = &rendered.blocks[1] else {
+        panic!("a table: {:?}", rendered.blocks);
+    };
+    assert_eq!(table.columns(), 2);
+    assert!(table.rows[0].iter().all(|cell| cell.header));
+    assert!(!table.rows[1][0].header);
+    // copied as a reader sees it: a row a line, its cells apart
+    assert_eq!(
+        rendered.blocks[1].plain_lines(),
+        ["Name\tState", "Cell one\tCell two", "alone"]
+    );
+    let (cx, _) = drawn(content);
+    let mut cell = |row: usize, column: usize| {
+        cx.debug_bounds(Box::leak(format!("rich-table-cell-{row}-{column}").into_boxed_str()))
+            .unwrap_or_else(|| panic!("cell {row} {column} is drawn"))
+    };
+    let (one, two) = (cell(1, 0), cell(1, 1));
+    assert!(one.right() <= two.left(), "{one:?} {two:?}");
+    // the columns line up, row under row
+    assert_eq!(cell(0, 1).left(), two.left());
+    assert!(cell(0, 0).bottom() <= one.top() && one.bottom() <= cell(2, 0).top());
+    // a short row keeps the table's columns
+    assert_eq!(cell(2, 1).left(), two.left());
+    let table = cx.debug_bounds("rich-table").expect("the table is drawn");
+    assert!(table.left() <= one.left() && two.right() <= table.right());
 }
 
 #[test]
@@ -698,9 +775,13 @@ fn a_gif_from_the_gif_picker_is_a_picture_block_at_its_size() {
         .iter()
         .filter_map(|block| match block {
             Block::Picture(picture) => Some(picture),
-            Block::Text(_) | Block::Quote(_) | Block::List(_) | Block::Forward(_) | Block::Code(_) | Block::Rule => {
-                None
-            }
+            Block::Text(_)
+            | Block::Quote(_)
+            | Block::List(_)
+            | Block::Forward(_)
+            | Block::Code(_)
+            | Block::Rule
+            | Block::Table(_) => None,
         })
         .collect();
     assert_eq!(pictures.len(), 1, "{rendered:#?}");
@@ -708,8 +789,13 @@ fn a_gif_from_the_gif_picker_is_a_picture_block_at_its_size() {
     assert!(
         rendered.blocks.iter().all(|block| match block {
             Block::Text(text) => !text.text.contains(IMAGE_PLACEHOLDER),
-            Block::Picture(_) | Block::Quote(_) | Block::List(_) | Block::Forward(_) | Block::Code(_) | Block::Rule =>
-                true,
+            Block::Picture(_)
+            | Block::Quote(_)
+            | Block::List(_)
+            | Block::Forward(_)
+            | Block::Code(_)
+            | Block::Rule
+            | Block::Table(_) => true,
         }),
         "no placeholder beside it: {rendered:#?}"
     );

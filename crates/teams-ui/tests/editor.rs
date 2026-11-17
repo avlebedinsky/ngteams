@@ -208,6 +208,18 @@ fn pasted_html_keeps_what_the_editor_writes() {
     assert_eq!(doc.blocks[2].kind, Kind::Heading(3));
 }
 
+#[test]
+fn a_table_pastes_as_a_line_a_row_and_an_edit_of_one_is_refused() {
+    let nodes =
+        parse_html("<table><tr><th>Area</th><th>State</th></tr><tr><td>Notes</td><td><b>Ready</b></td></tr></table>")
+            .nodes;
+    let doc = from_nodes(&nodes, &HashMap::<String, String>::new(), Load::Paste).unwrap();
+    assert_eq!(doc.plain_text(), "Area\tState\nNotes\tReady");
+    assert!(doc.blocks[1].runs.iter().any(|run| run.attrs.marks == Marks::BOLD));
+    // the box has no table: an edit would send it back as lines
+    assert!(from_nodes(&nodes, &HashMap::<String, String>::new(), Load::Edit).is_err());
+}
+
 // --- typed, on GPUI's test context ---
 
 /// The editor in a window, as its owner holds it.

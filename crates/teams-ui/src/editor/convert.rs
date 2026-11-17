@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::hash::BuildHasher;
 
 use teams_proto::Mri;
-use teams_proto::chat::{Code, CodeRun, Image, List, Marks, Node, Quote, Token};
+use teams_proto::chat::{Code, CodeRun, Image, List, Marks, Node, Quote, Table, Token};
 
 use super::doc::{Attrs, Block, Doc, Kind, MAX_INDENT, Run};
 
@@ -450,6 +450,26 @@ impl<S: BuildHasher> Loader<'_, S> {
                 self.flush();
                 self.blocks.push(Block::new(Kind::Rule, 0, Vec::new()));
             }
+            Node::Table(table) => self.table(table, context)?,
+        }
+        Ok(())
+    }
+
+    /// A table: the box has none, so an edit is refused (it would send the table back as lines); elsewhere each row is
+    /// a line, its cells apart by a tab.
+    fn table(&mut self, table: &Table, context: &Context) -> Result<(), CantLoad> {
+        if self.load == Load::Edit {
+            return Err(CantLoad::Formatting);
+        }
+        for row in &table.rows {
+            self.flush();
+            for (column, cell) in row.iter().enumerate() {
+                if column > 0 {
+                    self.push("\t", context.attrs.clone(), context);
+                }
+                self.walk(&cell.nodes, context)?;
+            }
+            self.flush();
         }
         Ok(())
     }
