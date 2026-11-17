@@ -1117,7 +1117,6 @@ impl AppUnderTest {
         Ok(())
     }
 
-    /// Asks the app to quit and waits for it to exit cleanly.
     /// The far end's window presents a's camera anew: a frame of it after now.
     fn presents_camera(&mut self, what: &str) -> SandboxResult {
         self.trace
@@ -1138,6 +1137,7 @@ impl AppUnderTest {
         Ok(())
     }
 
+    /// Asks the app to quit and waits for it to exit cleanly.
     fn quit(mut self, sandbox: &Sandbox) -> SandboxResult {
         fs::write(sandbox.path(QUIT_TRIGGER), "")?;
         self.running

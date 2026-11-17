@@ -656,8 +656,19 @@ async fn a_share_waiting_while_the_media_is_set_up_again_goes_on_the_new_session
         "{answered:?}"
     );
 
-    assert!(share_told(&mut held.a, call, true).await, "a shares on the new session");
+    assert!(
+        share_told(&mut held.a, call, true).await,
+        "told sharing while the camera still opens"
+    );
     shares_described(&held.lab, "sendonly").await;
+    let flipped: Vec<_> = held
+        .a
+        .events_within(Duration::from_millis(500))
+        .await
+        .into_iter()
+        .filter(|event| matches!(event, Event::CallSharing { call: of, on: false } if *of == call))
+        .collect();
+    assert!(flipped.is_empty(), "the share stays told as on: {flipped:?}");
     held.hang_up().await;
 }
 

@@ -224,6 +224,8 @@ where
             log::info!("call {}: its waiting screen goes no more: {error}", call.get());
             return;
         }
+        // the share stays told as on while the screen starts to go out (`group_shared` ends the step)
+        live.shares.turning = Some(true);
         let (reply, _) = oneshot::channel();
         let step = media::share_group(live, Some(screen), reply);
         self.media_steps.spawn_blocking(step);
@@ -289,8 +291,11 @@ where
         let Some(live) = self.live.as_mut().filter(|live| live.call == call) else {
             return refuse(reply, CallActionError::NoMedia);
         };
+        // the share step of a screen that waited for the media to be set up again is done
+        live.shares.turning = None;
         if let Err(why) = result {
             log::info!("call {}: its screen isn't shared: {why}", call.get());
+            self.tell_sharing(call);
             return refuse(reply, CallActionError::Media(why));
         }
         if on && let Err(error) = self.calls.tell_screen_shared(call) {
@@ -310,6 +315,7 @@ where
                 );
                 let session = Arc::clone(&live.session);
                 tokio::task::spawn_blocking(move || session.stop_group_screen());
+                self.tell_sharing(call);
                 return refuse(reply, error.into());
             }
             Err(error) => {
