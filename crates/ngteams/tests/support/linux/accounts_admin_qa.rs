@@ -30,9 +30,9 @@ use ui_sandbox::{NIRI_FULL_WINDOW, Running, Sandbox, SandboxOptions, SandboxResu
 
 use super::admin::{offers_manage_users, server_user, tabs};
 use super::{
-    OWN_CA_ENV, OWN_NAME, OWN_ORIGIN_ENV, OWN_SEGMENT_AT, OWN_UPN, RAIL_ADD_AT, ROOT_ENV, SIGN_IN, SIGN_IN_AGAIN_FILE,
-    TraceReader, WAIT, accounts_shown, ctl, ensure, field, own, prompt_active, prompt_line, prompt_now,
-    quit_and_finish, say, shot, start_with,
+    ENGINE_STOPPED_FILE, OWN_CA_ENV, OWN_NAME, OWN_ORIGIN_ENV, OWN_SEGMENT_AT, OWN_UPN, RAIL_ADD_AT, ROOT_ENV, SIGN_IN,
+    SIGN_IN_AGAIN_FILE, TraceReader, WAIT, accounts_shown, ctl, ensure, field, own, prompt_active, prompt_line,
+    prompt_now, quit_and_finish, say, shot, start_with,
 };
 
 /// The administrator's password, typed into the first-run form.
@@ -1031,8 +1031,9 @@ fn turned_off_while_running(
     (rita, admin, rita_id): (&str, &str, &str),
     notes: &mut Vec<String>,
 ) -> SandboxResult {
-    // the sandbox dir outlives this app: only what this app opened counts
+    // the sandbox dir outlives this app: only what this app opened or stopped counts
     let _ = fs::remove_file(sandbox.path(SIGN_IN_AGAIN_FILE));
+    let _ = fs::remove_file(sandbox.path(ENGINE_STOPPED_FILE));
     let root = tempfile::tempdir()?;
     let (running, mut trace) = seeded_app(sandbox, server, "admin-two", &root)?;
     let mut input = sandbox.input()?;
@@ -1062,11 +1063,16 @@ fn turned_off_while_running(
         "Rita's client signed out {} ms after the switch",
         out_after.as_millis()
     ));
-    // the turned-off account's sign-out ends with nothing more to see: the window again would come within this time
+    let rita_mri = format!("8:orgid:{rita_id}");
+    let stopped_after = engine_stopped_after(sandbox, &rita_mri)?;
+    notes.push(format!(
+        "Rita's engine stopped {} ms after her client was signed out",
+        stopped_after.as_millis()
+    ));
+    // the app opens the sign-in window again just after the engine stops: it would come within this time
     std::thread::sleep(UNASKED);
     let again = fs::read_to_string(sandbox.path(SIGN_IN_AGAIN_FILE)).unwrap_or_default();
     let asked = again.lines().any(|upn| upn == RUNNING);
-    let rita_mri = format!("8:orgid:{rita_id}");
     let trace_lines: Vec<String> = trace
         .seen
         .iter()
@@ -1087,10 +1093,26 @@ fn turned_off_while_running(
     quit_and_finish(sandbox, &mut trace, running)
 }
 
-/// How long the app has, once Rita's client is signed out, to open the sign-in window again. It opens nothing for an
-/// account that an administrator turned off; for an account signed out for another reason it opens the window once
-/// the account's engine stops.
-const UNASKED: Duration = Duration::from_secs(5);
+/// How long the app has, after Rita's engine stopped, to open the sign-in window again. It opens nothing for an
+/// account that an administrator turned off. For an account signed out for another reason, it opens the window some
+/// foreground steps after the engine's thread is joined.
+const UNASKED: Duration = Duration::from_secs(2);
+
+/// Waits until the child writes `mri` to [`ENGINE_STOPPED_FILE`]: the engine of that account stopped and its thread is
+/// joined. Gives the time from the call.
+fn engine_stopped_after(sandbox: &Sandbox, mri: &str) -> SandboxResult<Duration> {
+    let start = Instant::now();
+    loop {
+        let stopped = fs::read_to_string(sandbox.path(ENGINE_STOPPED_FILE)).unwrap_or_default();
+        if stopped.lines().any(|line| line == mri) {
+            return Ok(start.elapsed());
+        }
+        ensure(start.elapsed() < WAIT, || {
+            format!("Rita's engine did not stop after she was signed out: stopped {stopped:?}")
+        })?;
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
 
 /// Waits until `ngteamsctl status` says that Rita's client on `server` is signed out: the time from the call.
 fn signed_out_after(sandbox: &Sandbox, server: &own::Own) -> SandboxResult<Duration> {

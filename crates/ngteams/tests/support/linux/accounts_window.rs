@@ -128,6 +128,9 @@ const CTL_SOCKET: &str = "ctl.sock";
 /// The file in the sandbox dir the child adds a line `<UPN>` to each time the app opens the sign-in window again for
 /// an account signed out (a release's `main` opens it; the child only says it).
 const SIGN_IN_AGAIN_FILE: &str = "sign-in-again";
+/// The file in the sandbox dir the child adds a line `<MRI>` to, one time, when an account's engine has stopped and its
+/// thread is joined (`Bridge::running` is false). The app opens the sign-in window again only after this.
+const ENGINE_STOPPED_FILE: &str = "engine-stopped";
 /// The file in the sandbox dir the parent writes to have the mock's requests said.
 const MOCK_ASK: &str = "say-mock";
 /// The rail's "+", and the "Own server" segment of the window it opens, as the sandbox's output shows them.
@@ -1702,11 +1705,47 @@ fn tell_the_parent(
             card_qa::answer(window, Arc::clone(&mock), setup.clone(), origin.clone(), cx);
         }
         say_when_own_signed_in(setup.clone(), cx);
+        write_stopped_engines(cx);
         own::hand_over_secrets_when_asked(setup.clone(), cx);
         own::say_requests_when_asked(origin, dead, cx);
         say_mock_requests_when_asked(Arc::clone(&mock), setup.clone(), cx);
         admin_qa::say_mock_needles_when_asked(mock, setup, cx);
     }
+}
+
+/// Adds the MRI of each account whose engine has stopped (its thread joined) to [`ENGINE_STOPPED_FILE`], one time.
+fn write_stopped_engines(cx: &mut App) {
+    let Ok(dir) = own::sandbox_dir() else {
+        say("no sandbox dir");
+        return;
+    };
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        let mut written = std::collections::HashSet::new();
+        loop {
+            cx.background_executor().timer(Duration::from_millis(100)).await;
+            let stopped: Vec<String> = cx.update(|cx| {
+                app::bridges(cx)
+                    .iter()
+                    .map(|bridge| bridge.read(cx))
+                    .filter(|bridge| !bridge.running())
+                    .map(|bridge| bridge.core().me().to_owned())
+                    .collect()
+            });
+            for mri in stopped {
+                if !written.insert(mri.clone()) {
+                    continue;
+                }
+                let file = fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(dir.join(ENGINE_STOPPED_FILE));
+                if let Ok(mut file) = file {
+                    let _ = writeln!(file, "{mri}");
+                }
+            }
+        }
+    })
+    .detach();
 }
 
 /// An origin nothing listens on, written to the sandbox dir for the parent to type.
