@@ -1,6 +1,6 @@
 //! Requests that the server refuses before it reads their bodies, on a connection that a client keeps for its next
 //! requests: an upload over its limit, an upload with a wrong token, a message too big to send. The client's next
-//! requests on that same connection (a message, a file that fits, a picture that fits) get their answers.
+//! requests on that same connection (a message, a file that fits, a health read) get their answers.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -70,7 +70,8 @@ impl Relay {
 }
 
 /// Copies both ways between a client and the node. If the node ends the connection before the client does, it
-/// counts one in `closed`.
+/// counts one in `closed`. Only a clean end of the client's stream is the client's end: if a write to the node fails
+/// (the node closed the socket during a body), that is a close by the node.
 async fn relay(inbound: TcpStream, outbound: TcpStream, closed: Arc<AtomicUsize>) {
     use tokio::io::AsyncWriteExt as _;
     let (mut client_read, mut client_write) = inbound.into_split();
@@ -78,8 +79,9 @@ async fn relay(inbound: TcpStream, outbound: TcpStream, closed: Arc<AtomicUsize>
     let client_left = Arc::new(AtomicBool::new(false));
     let left = Arc::clone(&client_left);
     let up = tokio::spawn(async move {
-        let _ = tokio::io::copy(&mut client_read, &mut node_write).await;
-        left.store(true, Ordering::SeqCst);
+        if tokio::io::copy(&mut client_read, &mut node_write).await.is_ok() {
+            left.store(true, Ordering::SeqCst);
+        }
         let _ = node_write.shutdown().await;
     });
     let _ = tokio::io::copy(&mut node_read, &mut client_write).await;
@@ -116,7 +118,8 @@ struct Caller {
     /// For each connection after the first: the request before it. The client's pool can open one while the
     /// last connection is not back in the pool yet, so this only tells where it happened.
     reopened: Vec<String>,
-    /// For each connection that the node closed while the client kept it: the request before it.
+    /// For each connection that the node closed while the client kept it: the request before it. Also each answer
+    /// with `connection: close`.
     closed: Vec<String>,
     closes: usize,
 }
@@ -164,6 +167,10 @@ impl Caller {
             self.reopened.push(format!("after {}", self.last));
         }
         self.last = format!("{what} ({status}, connection: {connection:?})");
+        // an answer that tells the client to close is a close by the node, also when the relay does not see it
+        if connection.is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(b"close")) {
+            self.closed.push(format!("at {}", self.last));
+        }
         status
     }
 

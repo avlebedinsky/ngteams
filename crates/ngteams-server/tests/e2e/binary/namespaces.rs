@@ -560,15 +560,20 @@ async fn a_message_reaches_its_deployments_clients_on_both_nodes_and_no_client_o
     x.stop().await;
 }
 
-/// `x` and a deployment `y` made from a copy of `x`'s database: the same tenant id, account ids and names. `y` set
-/// `redis_namespace`; `x` keeps the default.
-async fn original_and_restored_copy(redis: &str) -> (Site, Site) {
+/// `x` and a deployment `name` made from a copy of `x`'s database: the same tenant id, account ids and names. The
+/// copy has the root config `keys`; `x` keeps the default.
+async fn original_and_copy(redis: &str, name: &'static str, keys: &str) -> (Site, Site) {
     let mut x = Site::new("x", redis, "", "").await;
     x.provision(&all_users());
     let copy = restored_copy(&mut x).await;
-    let keys = format!("redis_namespace = \"restored-{}\"\n", uuid::Uuid::new_v4().simple());
-    let y = Site::on("y", redis, Some(copy), &keys, "").await;
+    let y = Site::on(name, redis, Some(copy), keys, "").await;
     (x, y)
+}
+
+/// [`original_and_copy`] where the copy `y` set its own `redis_namespace`.
+async fn original_and_restored_copy(redis: &str) -> (Site, Site) {
+    let keys = format!("redis_namespace = \"restored-{}\"\n", uuid::Uuid::new_v4().simple());
+    original_and_copy(redis, "y", &keys).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -726,10 +731,7 @@ async fn deployments_in_one_namespace_share_holds_and_a_copy_without_its_own_nam
     w.stop().await;
     x.stop().await;
 
-    let mut x = Site::new("x", &redis, "", "").await;
-    x.provision(&all_users());
-    let copy = restored_copy(&mut x).await;
-    let mut z = Site::on("z", &redis, Some(copy), "", "").await;
+    let (mut x, mut z) = original_and_copy(&redis, "z", "").await;
     x.start().await;
     z.start().await;
     one_tenant(&x, &z, "qa-10@own.test").await;
@@ -811,10 +813,7 @@ async fn an_account_online_on_the_original_shows_online_in_a_copy_only_when_the_
     y.stop().await;
     x.stop().await;
 
-    let mut x = Site::new("x", &redis, "", "").await;
-    x.provision(&all_users());
-    let copy = restored_copy(&mut x).await;
-    let mut z = Site::on("z", &redis, Some(copy), "", "").await;
+    let (mut x, mut z) = original_and_copy(&redis, "z", "").await;
     x.start().await;
     z.start().await;
     one_tenant(&x, &z, "qa-10@own.test").await;
