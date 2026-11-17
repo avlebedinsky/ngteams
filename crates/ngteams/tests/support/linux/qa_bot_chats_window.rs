@@ -1462,7 +1462,7 @@ type OwnStart = (
 
 fn own_account(dir: &Path) -> SandboxResult<OwnStart> {
     let paths = ngteams::accounts_file::PersonalPaths::new(dir.join("config"), dir.join("data"));
-    let setup = ngteams::setup::Setup::new(paths)?.with_own_servers(true);
+    let setup = ngteams::setup::Setup::new(paths)?;
     let server = ngteams::accounts_file::OwnServer::parse(&std::env::var(ORIGIN_ENV)?, &std::env::var(CA_ENV)?)?;
     let store = MemorySecretStore::new();
     let runtime = ngteams::accounts::runtime()?;
