@@ -222,19 +222,19 @@ sha256 = "299a4bec8ffeef7583f8f289c3a772674efa8e650c434944165afbb04061a4d5"
 reason = "Windows-only system picker and Windows Graphics Capture adapter; its ignored hardware contract has no fixture window or runner yet, so nothing automated exercises it (docs/backlog/windows-screen-picker-contract.md); absent from Linux compilation"
 
 [unmapped_sources."crates/teams-media/src/devices/native/tests.rs"]
-sha256 = "999591817136e2492136990f7b5c6eb9aab5c9b8e1ad00a45a2e693899ecc3d4"
+sha256 = "d947175e219563780fb6512f1cee34411c81326643aa09b137b5ae1288da0adf"
 reason = "unit-test module included only by native.rs cfg(test); omitted by cargo-llvm-cov's test-file filter"
 context = { "crates/teams-media/src/devices/native.rs" = "151b703df64f634e37c4e40a26156af122e321cef79789b28b58076bfd9f2694" }
 
 [unmapped_sources."crates/teams-media/src/devices/native/tests/formats.rs"]
-sha256 = "b658fcde5c87bf3d58695c8af57ad6f14eb556730e4cfd2b1d555f66c74a06f8"
+sha256 = "7c4a0e90c403c47f5de3e83b5c36c15a484f5038e1f16db9257e5394171ec24f"
 reason = "unit-test module (the device formats of the native speaker and microphone) included only by native/tests.rs; omitted by cargo-llvm-cov's test-file filter"
-context = { "crates/teams-media/src/devices/native/tests.rs" = "999591817136e2492136990f7b5c6eb9aab5c9b8e1ad00a45a2e693899ecc3d4" }
+context = { "crates/teams-media/src/devices/native/tests.rs" = "d947175e219563780fb6512f1cee34411c81326643aa09b137b5ae1288da0adf" }
 
 [unmapped_sources."crates/teams-media/src/devices/native/tests/jitter.rs"]
-sha256 = "c3a5640378e5bd673b083d4d6c3b23279dd2cd96785955d702c3a984ea49bf66"
+sha256 = "39c30d1a739bd4f703ba57c08fc59960e16cf7c243ff11a3aa14ecc738ffe326"
 reason = "unit-test module (the native speaker under a call's delivery jitter, on a paced test device) included only by native/tests.rs; omitted by cargo-llvm-cov's test-file filter"
-context = { "crates/teams-media/src/devices/native/tests.rs" = "999591817136e2492136990f7b5c6eb9aab5c9b8e1ad00a45a2e693899ecc3d4" }
+context = { "crates/teams-media/src/devices/native/tests.rs" = "d947175e219563780fb6512f1cee34411c81326643aa09b137b5ae1288da0adf" }
 
 [unmapped_sources."crates/teams-media/src/devices/native/streams/playback_tests.rs"]
 sha256 = "86c53b12e6a70cfc79d434e751a8d24026553e5d69137445f8fa5f6bc8172da6"

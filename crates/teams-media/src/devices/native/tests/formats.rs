@@ -42,10 +42,11 @@ fn received() -> &'static Mutex<HashMap<String, Vec<u8>>> {
     RECEIVED.get_or_init(Mutex::default)
 }
 
+/// A microphone that captures its tone in real time: a live `audiotestsrc` waits on a timer, and a late timer gives a
+/// burst.
 pub(super) fn microphone(caps: &str) -> Result<gst::Element, glib::BoolError> {
     let bin = gst::Bin::new();
     let source = gst::ElementFactory::make("audiotestsrc")
-        .property("is-live", true)
         .property("freq", f64::from(TONE.hz))
         .property("volume", f64::from(TONE.amplitude))
         .build()?;
@@ -57,12 +58,26 @@ pub(super) fn microphone(caps: &str) -> Result<gst::Element, glib::BoolError> {
     let pad = filter
         .static_pad("src")
         .ok_or_else(|| glib::bool_error!("no source pad"))?;
+    let start = OnceLock::new();
+    pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+        if let Some(buffer) = info.buffer() {
+            let start = *start.get_or_init(Instant::now);
+            let captured = buffer.pts().unwrap_or_default() + buffer.duration().unwrap_or_default();
+            wait_until(start + Duration::from_nanos(captured.nseconds()));
+        }
+        gst::PadProbeReturn::Ok
+    });
     bin.add_pad(&gst::GhostPad::with_target(&pad)?)?;
     Ok(bin.upcast())
 }
 
+/// A speaker that takes each buffer when it comes: a sink on the clock waits on a timer, and a late timer gives the
+/// queued frames one time stamp.
 pub(super) fn speaker(label: &str, caps: &str) -> gst::Element {
-    let sink = AppSink::builder().caps(&gst::Caps::from_str(caps).unwrap()).build();
+    let sink = AppSink::builder()
+        .caps(&gst::Caps::from_str(caps).unwrap())
+        .sync(false)
+        .build();
     let label = label.to_owned();
     let callbacks = AppSinkCallbacks::builder().new_sample(move |sink| {
         let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
@@ -132,9 +147,7 @@ fn a_speaker_of_each_common_format_receives_the_tone_whole() {
             let mut frame = AudioFrame::silence();
             tone.fill(frame.samples_mut());
             speaker.play(&frame).unwrap();
-            if let Some(wait) = (start + FRAME_DURATION * (index + 1)).checked_duration_since(Instant::now()) {
-                thread::sleep(wait);
-            }
+            wait_until(start + FRAME_DURATION * (index + 1));
         }
         thread::sleep(Duration::from_millis(200));
         drop(speaker);

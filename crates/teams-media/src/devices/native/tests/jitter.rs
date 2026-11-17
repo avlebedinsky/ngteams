@@ -92,7 +92,12 @@ mod imp {
         fn metadata() -> Option<&'static gst::subclass::ElementMetadata> {
             static META: OnceLock<gst::subclass::ElementMetadata> = OnceLock::new();
             Some(META.get_or_init(|| {
-                gst::subclass::ElementMetadata::new("Paced speaker", "Sink/Audio", "A device in real time", "ngteams")
+                gst::subclass::ElementMetadata::new(
+                    "Paced speaker",
+                    "Sink/Audio",
+                    "A device in real time",
+                    "teams-media",
+                )
             }))
         }
         fn pad_templates() -> &'static [gst::PadTemplate] {
@@ -132,7 +137,7 @@ mod imp {
                 let next = line.next_stall.get_or_insert(start + every);
                 if now >= *next {
                     *next += every;
-                    thread::sleep(model.stall);
+                    wait_until(now + model.stall);
                 }
             }
             let now = Instant::now();
@@ -146,11 +151,8 @@ mod imp {
             line.taken += taken;
             let next = start + Duration::from_secs_f64(line.taken / model.speed);
             drop(line);
-            if let Some(wait) = next
-                .checked_sub(AHEAD)
-                .and_then(|ready| ready.checked_duration_since(Instant::now()))
-            {
-                thread::sleep(wait);
+            if let Some(ready) = next.checked_sub(AHEAD) {
+                wait_until(ready);
             }
             Ok(i32::try_from(data.len()).unwrap())
         }
@@ -260,7 +262,7 @@ fn play(model: &str, seconds: u32, seed: u32) -> Heard {
                 played += 1;
                 continue;
             }
-            thread::sleep(wait.min(FRAME_DURATION));
+            wait_until(now + wait.min(FRAME_DURATION));
         }
         let mut frame = AudioFrame::silence();
         tone.fill(frame.samples_mut());

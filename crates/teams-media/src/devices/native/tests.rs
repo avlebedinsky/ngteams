@@ -1,3 +1,4 @@
+use std::sync::OnceLock;
 use std::sync::atomic::AtomicUsize;
 use std::time::Instant;
 
@@ -57,8 +58,51 @@ mod synthetic {
 }
 glib::wrapper! { pub struct SyntheticDevice(ObjectSubclass<synthetic::Device>) @extends gst::Device, gst::Object; }
 
+/// Waits until `deadline` as a device does. A sleep comes only so near the deadline as the timers allow: on a hosted
+/// macOS runner, a sleep of 5 ms can take 200 ms. The rest of the wait spins.
+fn wait_until(deadline: Instant) {
+    let margin = *timer_margin();
+    loop {
+        let now = Instant::now();
+        let Some(left) = deadline.checked_duration_since(now) else {
+            return;
+        };
+        match left.checked_sub(margin) {
+            Some(nap) if !nap.is_zero() => thread::sleep(nap),
+            _ => thread::yield_now(),
+        }
+    }
+}
+
+/// How late this process's timers wake, with room: the median of several sleeps, so a busy CPU's rare delay does not
+/// count.
+fn timer_margin() -> &'static Duration {
+    static MARGIN: OnceLock<Duration> = OnceLock::new();
+    MARGIN.get_or_init(|| {
+        let late = [1, 5]
+            .into_iter()
+            .map(|nap| {
+                let nap = Duration::from_millis(nap);
+                let mut late: Vec<Duration> = (0..5)
+                    .map(|_| {
+                        let due = Instant::now() + nap;
+                        thread::sleep(nap);
+                        Instant::now().saturating_duration_since(due)
+                    })
+                    .collect();
+                late.sort();
+                late[2]
+            })
+            .max()
+            .unwrap_or_default();
+        late.min(Duration::from_secs(1)) * 2 + Duration::from_millis(1)
+    })
+}
+
 fn device(kind: DeviceKind, name: &str, default: bool) -> Entry {
     gst::init().unwrap();
+    // measured before a device runs: it takes a second where the timers are late
+    timer_margin();
     let device: SyntheticDevice = glib::Object::builder()
         .property("display-name", name)
         .property("device-class", "Synthetic/Offline")
