@@ -4,7 +4,6 @@
 //! tool's process. Nothing here logs the transcript, the notes or the summary.
 
 use std::fmt::Write as _;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -13,7 +12,7 @@ use std::time::Duration;
 use super::{
     FIX_REQUEST, Input, Line, Made, instructions, notes_instructions, parse, sections, stamp, transcript_text,
 };
-use crate::local_ai::{Backend, Failure, Launch, Model, Tool, Work, cap};
+use crate::local_ai::{Backend, Failure, Launch, Model, Target, Tool, Work, cap};
 
 /// The longest notes kept of one section.
 const MAX_NOTES: usize = 12_000;
@@ -77,7 +76,7 @@ pub enum Update {
 #[derive(Clone, Debug)]
 pub struct Request {
     pub backend: Backend,
-    pub program: PathBuf,
+    pub target: Target,
     pub model: Model,
     pub input: Input,
     pub limits: Limits,
@@ -211,7 +210,7 @@ impl Worker {
     ) -> Result<T, Failure> {
         let launch = Launch {
             backend: self.request.backend,
-            program: self.request.program.clone(),
+            target: self.request.target.clone(),
             work: Work::Summary,
             model: self.request.model.clone(),
             instructions,

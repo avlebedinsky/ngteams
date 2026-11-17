@@ -90,7 +90,7 @@ sha256 = "7bdd5ebbbf07a8daf3659fc52c93eb5866aa515311ff1a0b1b3e31fe7d38b9ee"
 reason = "module declarations, re-exports and documentation only; no executable items"
 
 [unmapped_sources."crates/ngteams/src/lib.rs"]
-sha256 = "dd66d90141528a4a3f53f7035e2c6b23994c93bc27b83a771896aaa02d7282ea"
+sha256 = "3e62acc5c19592f35b68562594d780478a00a856dff65ca8b633335d403dd2ef"
 reason = "module declarations, re-exports, documentation and a string constant only; no executable bodies"
 
 [unmapped_sources."crates/proto-lab/src/bundles.rs"]
@@ -286,7 +286,7 @@ sha256 = "a6f2ec0d6d3739d55bd3ea8712c10a64d77f30241135c2556443b8a36553cf5c"
 reason = "Windows and macOS only: GPUI's image path for video (Linux paints its external surface); measured by the Windows video fixture in the win11 console"
 
 [unmapped_sources."crates/teams-ui/src/local_ai/windows_prompt.rs"]
-sha256 = "12e293514261be58d38d44d77a0ba0d3cc133f7797a40ffa83585fe4748ab6db"
+sha256 = "5ae8cffe6c697246a2f6203356bb05040fd2a2bbfff80031817697fce044f078"
 reason = "Windows-only Claude batch-shim private prompt-file adapter; native windows_local_ai exercises exact multiline instructions and prompt lifetime through a synthetic batch/PowerShell process tree without an account or network."
 
 [unmapped_sources."crates/teams-ui/src/desktop/windows/apartment.rs"]

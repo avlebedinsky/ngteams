@@ -63,7 +63,7 @@ fn jobs_are_answered_in_order_and_a_worn_process_is_renewed() {
     let dir = tempfile::tempdir().unwrap();
     let session = Session::start(Spec {
         backend: Backend::Claude,
-        program: fake(dir.path()),
+        target: crate::local_ai::Target::Program(fake(dir.path())),
         model: Model::Recommended,
         language: "German",
         limits: Limits {
@@ -128,7 +128,7 @@ fn a_failure_is_told_with_its_job_and_the_next_job_starts_the_tool_anew() {
     let dir = tempfile::tempdir().unwrap();
     let session = Session::start(Spec {
         backend: Backend::Claude,
-        program: fake(dir.path()),
+        target: crate::local_ai::Target::Program(fake(dir.path())),
         model: Model::Recommended,
         language: "German",
         limits: Limits {
@@ -164,7 +164,7 @@ fn a_failure_is_told_with_its_job_and_the_next_job_starts_the_tool_anew() {
     // a tool that isn't there fails its job
     let missing = Session::start(Spec {
         backend: Backend::Claude,
-        program: dir.path().join("no-such-claude"),
+        target: crate::local_ai::Target::Program(dir.path().join("no-such-claude")),
         model: Model::Recommended,
         language: "German",
         limits: Limits::default(),
@@ -265,7 +265,7 @@ fn claude_s_batch_answers_come_a_message_at_a_time_as_it_writes_them() {
     let dir = tempfile::tempdir().unwrap();
     let session = Session::start(Spec {
         backend: Backend::Claude,
-        program: fake_tool::write(dir.path(), "claude", STREAMING_CLAUDE),
+        target: crate::local_ai::Target::Program(fake_tool::write(dir.path(), "claude", STREAMING_CLAUDE)),
         model: Model::Recommended,
         language: "German",
         limits: quick(),
@@ -291,7 +291,7 @@ fn codex_s_batch_answers_come_from_its_message_deltas() {
     let dir = tempfile::tempdir().unwrap();
     let session = Session::start(Spec {
         backend: Backend::Codex,
-        program: fake_tool::write(dir.path(), "codex", STREAMING_CODEX),
+        target: crate::local_ai::Target::Program(fake_tool::write(dir.path(), "codex", STREAMING_CODEX)),
         model: Model::Recommended,
         language: "German",
         limits: quick(),
@@ -355,7 +355,7 @@ fn a_session_dropped_mid_batch_stops_its_tool_and_tells_nothing_more() {
     let dir = tempfile::tempdir().unwrap();
     let session = Session::start(Spec {
         backend: Backend::Claude,
-        program: fake_tool::write(dir.path(), "claude", GATED_CLAUDE),
+        target: crate::local_ai::Target::Program(fake_tool::write(dir.path(), "claude", GATED_CLAUDE)),
         model: Model::Recommended,
         language: "German",
         limits: quick(),
@@ -524,7 +524,7 @@ fn a_batch_s_terms_are_told_and_a_new_process_is_told_the_chat_again() {
     let dir = tempfile::tempdir().unwrap();
     let session = Session::start(Spec {
         backend: Backend::Claude,
-        program: fake_tool::write(dir.path(), "claude", TERMING),
+        target: crate::local_ai::Target::Program(fake_tool::write(dir.path(), "claude", TERMING)),
         model: Model::Recommended,
         language: "English",
         limits: Limits { turns: 2, ..quick() },

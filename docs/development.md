@@ -508,7 +508,11 @@ it, and its More options downloads a recording the account may download
 as Fathom's call summaries (purpose, key takeaways, topics with their moments, next steps with owners, open
 questions), by Claude Code or the Codex CLI with any model it takes (by default Claude Sonnet or GPT-6.1-Terra;
 Settings → Calls → Meeting recaps, the same tool-and-model control as the captions'): the transcript then goes to that
-tool and its provider. It is kept per recording, copied as Markdown, or sent to the
+tool and its provider. Each AI setting can also pick an AI provider that the app asks with an API key: the Anthropic
+API, the OpenAI API, or an OpenAI-compatible server at its own base URL (`crates/teams-ui/src/local_ai/providers.rs`,
+`api.rs`; Settings → General → AI providers). Automatic is the first provider in the user's order that can work. A
+Claude Code or Codex CLI found on the `PATH` joins the list by itself. The keys stay in the system keyring; the
+settings file keeps only `key = "keyring"`. The summary is kept per recording, copied as Markdown, or sent to the
 meeting's chat after a preview. Settings control appearance, notifications, privacy,
 calls/devices and diagnostics. Native sandbox tests in `crates/ngteams/tests/{window,accounts_window,call_window,ui_tour}.rs`
 exercise these views against the mock.

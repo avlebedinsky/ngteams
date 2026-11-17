@@ -51,7 +51,7 @@ use teams_proto::ManualAvailability;
 use toml::{Table, Value};
 
 use crate::effects::CameraPreview;
-use crate::local_ai::{AiChoice, Model, ToolChoice, Work};
+use crate::local_ai::{AiChoice, Model, Provider, ToolChoice, Work, providers};
 use crate::sounds::{self, PackInfo, SoundPlayer, SoundSettings, SoundSource};
 use crate::theme::{self, Appearance};
 use crate::translate;
@@ -386,6 +386,9 @@ pub struct Settings {
     pub message_translate_to: String,
     /// Which tool, and model, translates a draft in its box.
     pub message_translator: AiChoice,
+    /// The AI providers the user set, in the user's order ([`crate::local_ai::providers`]); the command-line tools
+    /// found on this computer that it does not hold come after them.
+    pub ai_providers: Vec<Provider>,
     /// Which sound plays for each event, how loud, and the pack they come from ([`crate::sounds`]).
     pub sounds: SoundSettings,
 }
@@ -609,6 +612,7 @@ impl Default for Settings {
             message_corrector: AiChoice::default(),
             message_translate_to: crate::draft_translate::DEFAULT_LANGUAGE.to_owned(),
             message_translator: AiChoice::default(),
+            ai_providers: Vec::new(),
             sounds: SoundSettings::default(),
         }
     }
@@ -764,6 +768,7 @@ fn take(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem
         keys::CAPTION_TRANSLATE_TO | keys::CAPTION_TRANSLATOR | keys::RECAP_SUMMARIZER => {
             take_captions(settings, key, value)?;
         }
+        providers::FILE_KEY => take_providers(settings, value)?,
         keys::SOUND_PACK | keys::SOUNDS_WHILE_BUSY | keys::SOUNDS_VOLUME | keys::SOUNDS => {
             sounds::take(&mut settings.sounds, key, value)?;
         }
@@ -1009,7 +1014,21 @@ fn take_captions(settings: &mut Settings, key: &str, value: &Value) -> Result<()
 }
 
 /// What a local AI choice that can't be read isn't.
-const AI_CHOICE_SHAPE: &str = "not a tool (automatic, claude, codex) or a table of a tool and a model";
+const AI_CHOICE_SHAPE: &str =
+    "not a provider (automatic, claude, codex or an AI provider's id) or a table of a provider and a model";
+
+/// Takes the AI providers: those that can be read (the others are left out, and said).
+fn take_providers(settings: &mut Settings, value: &Value) -> Result<(), Problem> {
+    let (list, bad) = providers::from_value(value);
+    settings.ai_providers = list;
+    if bad {
+        return Err(Problem::BadValue {
+            key: providers::FILE_KEY,
+            why: "an entry is not a provider (id, kind, name, enabled, base_url, model, key) or repeats one",
+        });
+    }
+    Ok(())
+}
 
 /// A local AI choice as the file keeps it: a table of its tool and model, or (a file of an earlier build) the tool's
 /// name alone, its model the recommended one.
@@ -1135,6 +1154,12 @@ pub fn render(settings: &Settings) -> String {
         Value::String(settings.time_format.key().to_owned()),
     );
     render_captions(settings, &mut table);
+    if !settings.ai_providers.is_empty() {
+        table.insert(
+            providers::FILE_KEY.to_owned(),
+            providers::to_value(&settings.ai_providers),
+        );
+    }
     table.insert(
         keys::RECAP_SUMMARIZER.to_owned(),
         ai_choice_value(&settings.recap_summarizer),
@@ -1481,6 +1506,12 @@ impl SettingsModel {
         }
     }
 
+    /// Makes the settings' AI providers the app's ([`crate::local_ai::Providers`]): once, when the app starts; each
+    /// change after that does it by itself.
+    pub fn publish_ai(&self, cx: &mut App) {
+        crate::local_ai::Providers::publish(&self.settings.ai_providers, cx);
+    }
+
     /// Settings kept in memory only: nothing is read or written.
     #[must_use]
     pub fn in_memory(settings: Settings) -> Self {
@@ -1794,6 +1825,9 @@ impl SettingsModel {
             preview.set_background(self.background());
         }
         self.apply_sounds();
+        if self.settings.ai_providers != before.ai_providers {
+            crate::local_ai::Providers::publish(&self.settings.ai_providers, cx);
+        }
         self.problems
             .retain(|problem| !matches!(problem, Problem::Unsaved { .. }));
         if let Some(file) = &self.file {

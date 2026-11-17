@@ -32,7 +32,7 @@ while ($null -ne [Console]::ReadLine()) {}
     let instructions = "First line & literal %PATH%\r\nSecond line: \"quoted\"\nUnicode: λ";
     let launch = Launch {
         backend: Backend::Claude,
-        program,
+        target: teams_ui::local_ai::Target::Program(program),
         work: Work::Summary,
         model: Model::ToolDefault,
         instructions: instructions.to_owned(),

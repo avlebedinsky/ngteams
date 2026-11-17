@@ -81,11 +81,11 @@ fn changed() -> Settings {
         time_format: TimeFormat::Twelve,
         caption_translate_to: Some("de"),
         caption_translator: AiChoice {
-            tool: TranslatorChoice::Only(Backend::Codex),
+            tool: TranslatorChoice::cli(Backend::Codex),
             model: Model::Named("gpt-6.1-sol".to_owned()),
         },
         recap_summarizer: AiChoice {
-            tool: TranslatorChoice::Only(Backend::Claude),
+            tool: TranslatorChoice::cli(Backend::Claude),
             model: Model::ToolDefault,
         },
         accounts: [(
@@ -109,18 +109,19 @@ fn changed() -> Settings {
         }],
         sounds: teams_ui::sounds::SoundSettings::default(),
         chat_translator: AiChoice {
-            tool: TranslatorChoice::Only(Backend::Codex),
+            tool: TranslatorChoice::cli(Backend::Codex),
             model: teams_ui::local_ai::Model::Named("my-team-model".to_owned()),
         },
         message_corrector: AiChoice {
-            tool: TranslatorChoice::Only(Backend::Claude),
+            tool: TranslatorChoice::cli(Backend::Claude),
             model: teams_ui::local_ai::Model::ToolDefault,
         },
         message_translate_to: "Klingon".to_owned(),
         message_translator: AiChoice {
-            tool: TranslatorChoice::Only(Backend::Codex),
+            tool: TranslatorChoice::cli(Backend::Codex),
             model: teams_ui::local_ai::Model::Recommended,
         },
+        ai_providers: vec![teams_ui::local_ai::Provider::new_api(Backend::Anthropic, &[])],
     }
 }
 
@@ -784,10 +785,20 @@ fn ai_choices() -> Vec<AiChoice> {
         Model::Named("claude-opus-5-5".to_owned()),
         Model::Named("sonnet[1m]".to_owned()),
     ];
-    TranslatorChoice::ALL
-        .into_iter()
-        .flat_map(|tool| models.clone().map(|model| AiChoice { tool, model }))
-        .collect()
+    [
+        TranslatorChoice::Automatic,
+        TranslatorChoice::cli(Backend::Claude),
+        TranslatorChoice::cli(Backend::Codex),
+        TranslatorChoice::Only("api-1".to_owned()),
+    ]
+    .into_iter()
+    .flat_map(|tool| {
+        models.clone().map(|model| AiChoice {
+            tool: tool.clone(),
+            model,
+        })
+    })
+    .collect()
 }
 
 #[test]
@@ -902,9 +913,9 @@ fn caption_translation_is_off_by_default_and_its_language_and_tool_go_through_th
     for (bad, key) in [
         ("caption_translate_to = \"klingon\"", "caption_translate_to"),
         ("caption_translate_to = 3", "caption_translate_to"),
-        ("caption_translator = \"luna\"", "caption_translator"),
+        ("caption_translator = \"two words\"", "caption_translator"),
         ("caption_translator = 3", "caption_translator"),
-        ("caption_translator = { tool = \"gemini\" }", "caption_translator"),
+        ("caption_translator = { tool = \"gem ini\" }", "caption_translator"),
         ("caption_translator = { tool = 1 }", "caption_translator"),
         (
             "caption_translator = { tool = \"claude\", model = 3 }",
@@ -948,7 +959,7 @@ fn the_recap_summarizer_is_automatic_by_default_and_goes_through_the_file() {
         assert_eq!(read, settings);
         assert!(problems.is_empty(), "{problems:?}");
     }
-    let (read, problems) = parse("recap_summarizer = \"opus\"").expect("TOML");
+    let (read, problems) = parse("recap_summarizer = \"no such tool\"").expect("TOML");
     assert_eq!(read, Settings::default());
     assert!(
         matches!(
@@ -964,15 +975,19 @@ fn the_recap_summarizer_is_automatic_by_default_and_goes_through_the_file() {
 
 #[test]
 fn an_earlier_builds_tool_alone_keeps_its_tool_with_the_recommended_model_and_is_written_anew() {
-    for tool in TranslatorChoice::ALL {
+    for tool in [
+        TranslatorChoice::Automatic,
+        TranslatorChoice::cli(Backend::Claude),
+        TranslatorChoice::cli(Backend::Codex),
+    ] {
         let earlier = format!(
             "caption_translator = \"{key}\"\nrecap_summarizer = \"{key}\"\n",
             key = tool.key()
         );
         let (read, problems) = parse(&earlier).expect("TOML");
         assert!(problems.is_empty(), "{problems:?}");
-        assert_eq!(read.caption_translator, AiChoice::of(tool));
-        assert_eq!(read.recap_summarizer, AiChoice::of(tool));
+        assert_eq!(read.caption_translator, AiChoice::of(tool.clone()));
+        assert_eq!(read.recap_summarizer, AiChoice::of(tool.clone()));
         let text = render(&read);
         assert!(
             text.contains(&format!(
@@ -989,7 +1004,7 @@ fn an_earlier_builds_tool_alone_keeps_its_tool_with_the_recommended_model_and_is
     assert!(problems.is_empty(), "{problems:?}");
     assert_eq!(
         read.caption_translator,
-        AiChoice::of(TranslatorChoice::Only(Backend::Codex))
+        AiChoice::of(TranslatorChoice::cli(Backend::Codex))
     );
     assert_eq!(
         read.recap_summarizer,
@@ -1066,7 +1081,7 @@ fn a_chat_s_language_is_kept_per_account_and_chat_and_a_bad_one_left_out() {
     assert_eq!(problems.len(), 1, "{problems:?}");
     assert_eq!(
         read.chat_translator,
-        AiChoice::of(TranslatorChoice::Only(Backend::Claude))
+        AiChoice::of(TranslatorChoice::cli(Backend::Claude))
     );
     assert_eq!(read.chat_language_of("8:orgid:a", "19:one@thread.v2"), Some("de"));
     assert_eq!(read.chat_language_of("8:orgid:a", "19:two@thread.v2"), None);
@@ -1094,7 +1109,7 @@ fn a_chat_s_language_is_changed_turned_off_and_forgotten_with_its_account() {
     // off by default; a bad tool or list is reported
     assert!(Settings::default().chat_languages.is_empty());
     assert_eq!(Settings::default().chat_translator, AiChoice::default());
-    assert_eq!(parse("chat_translator = \"luna\"").unwrap().1.len(), 1);
+    assert_eq!(parse("chat_translator = \"no such tool\"").unwrap().1.len(), 1);
     assert_eq!(parse("chat_languages = 3").unwrap().1.len(), 1);
 }
 
@@ -1155,5 +1170,69 @@ fn settings_follow_media_preparation_and_failure_even_when_the_list_stays_empty(
     assert_eq!(
         model.read_with(cx, |model, _| model.media_status()),
         DeviceStatus::Ready
+    );
+}
+
+/// A settings file of a build before the AI providers: its choices name the same command-line tools, it has no list
+/// (the tools found fill it in), and it is written back the same.
+#[test]
+fn a_file_of_an_earlier_build_keeps_its_tools_and_gets_no_list() {
+    let earlier = "caption_translator = \"codex\"\n\
+                   [recap_summarizer]\ntool = \"claude\"\nmodel = \"opus\"\n\
+                   [message_corrector]\ntool = \"automatic\"\nmodel = \"recommended\"\n";
+    let (read, problems) = parse(earlier).expect("TOML");
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(
+        read.caption_translator,
+        AiChoice::of(TranslatorChoice::cli(Backend::Codex))
+    );
+    assert_eq!(
+        read.recap_summarizer,
+        AiChoice {
+            tool: TranslatorChoice::cli(Backend::Claude),
+            model: Model::Named("opus".to_owned()),
+        }
+    );
+    assert_eq!(read.message_corrector, AiChoice::default());
+    assert!(read.ai_providers.is_empty());
+    let text = render(&read);
+    assert!(!text.contains("ai_providers"), "{text}");
+    assert!(text.contains("tool = \"codex\""), "{text}");
+    assert_eq!(parse(&text).expect("TOML").0, read);
+}
+
+/// The providers go through the file in their order, and a key never does: only that the keyring has one.
+#[test]
+fn the_ai_providers_go_through_the_file_without_their_keys() {
+    use teams_ui::local_ai::Provider;
+    let mut codex = Provider::cli(Backend::Codex);
+    codex.enabled = false;
+    let mut openai = Provider::new_api(Backend::OpenAi, &[]);
+    openai.has_key = true;
+    let mut local = Provider::new_api(Backend::Compatible, std::slice::from_ref(&openai));
+    local.name = "Ollama".to_owned();
+    local.base_url = Some("http://localhost:11434/v1".to_owned());
+    local.model = Some("llama-synthetic".to_owned());
+    let settings = Settings {
+        ai_providers: vec![openai, codex, local],
+        chat_translator: AiChoice::of(TranslatorChoice::Only("api-2".to_owned())),
+        ..Settings::default()
+    };
+    let text = render(&settings);
+    assert!(text.contains("[[ai_providers]]"), "{text}");
+    assert!(text.contains("key = \"keyring\""), "{text}");
+    assert!(!text.contains("sk-"), "{text}");
+    let (read, problems) = parse(&text).expect("TOML");
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(read, settings);
+    let (read, problems) =
+        parse("[[ai_providers]]\nid = \"api-1\"\nkind = \"openai\"\nname = \"x\"\nkey = \"sk-synthetic\"\n")
+            .expect("TOML");
+    assert!(read.ai_providers.is_empty(), "a key in the file is not taken");
+    assert!(
+        problems
+            .iter()
+            .any(|problem| problem.to_string().contains("ai_providers")),
+        "{problems:?}"
     );
 }

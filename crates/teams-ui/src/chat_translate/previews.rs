@@ -41,7 +41,7 @@ use super::{
     key_of, original_row, quote_line, stored_original, translatable,
 };
 use crate::bridge::Core;
-use crate::local_ai::{AiChoice, Failure, Tools};
+use crate::local_ai::{AiChoice, Failure};
 use crate::settings::SettingsModel;
 use crate::translate::language;
 
@@ -682,11 +682,11 @@ impl Previews {
         if self.sessions.contains_key(language) {
             return Ok(());
         }
-        let (backend, program) = Tools::of(cx).pick(self.choice.tool)?;
+        let crate::local_ai::Picked { backend, target, .. } = crate::local_ai::pick(&self.choice.tool, cx)?;
         let name = self::language(language).map_or("English", |(_, name)| name);
         let session = Session::start(Spec {
             backend,
-            program,
+            target,
             model: self.choice.model.clone(),
             language: name,
             limits: self.limits,

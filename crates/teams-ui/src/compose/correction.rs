@@ -228,13 +228,13 @@ impl Compose {
 
     fn run_correction(&mut self, doc: Doc, encoded: Encoded, window: &mut Window, cx: &mut Context<Self>) {
         let choice = self.settings.read(cx).settings().ai(Work::Correction).clone();
-        let (backend, program) = match Tools::of(cx).pick(choice.tool) {
+        let crate::local_ai::Picked { backend, target, .. } = match crate::local_ai::pick(&choice.tool, cx) {
             Ok(picked) => picked,
             Err(failure) => return self.correction_failed(doc, &failure, cx),
         };
         let correcting = Correcting::start(Request {
             backend,
-            program,
+            target,
             model: choice.model.clone(),
             context: self.correction_context(cx),
             draft: encoded,

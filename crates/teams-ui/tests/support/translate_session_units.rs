@@ -63,7 +63,7 @@ fn fake(dir: &Path, name: &str, body: &str) -> PathBuf {
 fn spec(backend: Backend, program: PathBuf, limits: Limits) -> Spec {
     Spec {
         backend,
-        program,
+        target: crate::local_ai::Target::Program(program),
         model: Model::Recommended,
         language: "German",
         limits,
@@ -462,7 +462,7 @@ fn answers_lose_a_repeated_caption_tag_and_are_capped() {
 fn the_installed_tools_translate() {
     let translators = crate::local_ai::Tools::detect();
     for backend in translators.installed() {
-        let (_, program) = translators.pick(crate::local_ai::ToolChoice::Only(backend)).unwrap();
+        let program = translators.program(backend).unwrap();
         let session = Session::start(spec(backend, program, Limits::default()));
         let mut first = caption(
             "Lab Speaker",

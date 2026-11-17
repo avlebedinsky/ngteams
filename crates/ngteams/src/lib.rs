@@ -15,6 +15,7 @@
 
 pub mod accounts;
 pub mod accounts_file;
+pub mod ai_keys;
 pub mod app;
 pub mod calling;
 pub mod cli;

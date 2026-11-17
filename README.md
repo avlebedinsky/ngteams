@@ -60,7 +60,7 @@ built for your desktop instead of a web page in a wrapper.
 - Keep every call's captions as a searchable transcript, saved only on this computer
 - Get an AI summary of a meeting: purpose, key takeaways, topics, next steps and open questions
 
-Translation, corrections and summaries use your own [Claude Code](https://claude.com/product/claude-code) or Codex CLI, and stay off until you turn them on.
+Translation, corrections and summaries use your own [Claude Code](https://claude.com/product/claude-code) or Codex CLI, or your own Anthropic, OpenAI or OpenAI-compatible API key (OpenRouter, Ollama, LM Studio, Azure). Each feature can use a different provider (Settings > General > AI providers), and all stay off until you turn them on. API keys stay in the system keyring.
 
 **Make it yours**
 - Teams Light and Dark, High Contrast, Solarized Light and Dark, Nord and Dracula themes

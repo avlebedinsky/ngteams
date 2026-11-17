@@ -276,7 +276,7 @@ impl RecapView {
     /// What a summary is, what it sends where, and Generate; without a tool, how to get one.
     fn offer(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let choice = self.summary_choice(cx);
-        let picked = Tools::of(cx).pick(choice.tool);
+        let picked = crate::local_ai::pick(&choice.tool, cx);
         let action = match &picked {
             Ok(_) => selected_by(
                 "recap-summary-generate",
@@ -297,17 +297,24 @@ impl RecapView {
             .into_any_element(),
         };
         let privacy = match &picked {
-            Ok((backend, _)) => format!(
+            Ok(picked) if picked.backend.is_cli() => format!(
                 "The transcript goes to {} ({}) on this computer, which sends it to {}. Pick the tool in Settings \
                  > Calls.",
-                backend.tool(),
-                backend.label_of(Work::Summary, &choice.model),
-                backend.provider()
+                picked.backend.tool(),
+                picked.backend.label_of(Work::Summary, &choice.model),
+                picked.backend.provider()
             ),
-            Err(failure) => format!(
+            Ok(picked) => format!(
+                "The transcript goes to {} ({}), which runs the model on its server. Pick the provider in Settings \
+                 > Calls.",
+                picked.name,
+                picked.backend.label_of(Work::Summary, &choice.model),
+            ),
+            Err(failure @ Failure::NotInstalled(_)) => format!(
                 "{} Install Claude Code (claude) or the Codex CLI (codex), then try again.",
                 failure.message()
             ),
+            Err(failure) => failure.message(),
         };
         div()
             .debug_selector(|| "recap-summary-offer".to_owned())
@@ -611,11 +618,15 @@ fn running(
         )
         .child(selected_by("recap-summary-cancel", cancel))
         .child(privacy_note(
-            format!(
-                "The transcript is with {} on this computer, which sends it to {}.",
-                backend.tool(),
-                backend.provider()
-            ),
+            if backend.is_cli() {
+                format!(
+                    "The transcript is with {} on this computer, which sends it to {}.",
+                    backend.tool(),
+                    backend.provider()
+                )
+            } else {
+                format!("The transcript is with {}.", backend.tool())
+            },
             palette,
         ))
         .into_any_element()

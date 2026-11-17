@@ -116,7 +116,7 @@ impl Session for FakeSession {
 fn request(doc: &Doc, language: &str) -> Request {
     Request {
         backend: Backend::Claude,
-        program: "/made-up/claude".into(),
+        target: crate::local_ai::Target::Program("/made-up/claude".into()),
         model: Model::Recommended,
         language: language.to_owned(),
         draft: encode(doc),
@@ -409,7 +409,7 @@ fn local_tool() -> (tempfile::TempDir, std::path::PathBuf, Arc<dyn Engine>) {
 
 fn local_request(program: std::path::PathBuf, doc: &Doc) -> Request {
     Request {
-        program,
+        target: crate::local_ai::Target::Program(program),
         ..request(doc, "German")
     }
 }
@@ -491,7 +491,7 @@ fn the_app_engine_with_no_tool_there_says_it_isnt_installed() {
     let engine = app.update(|cx| super::engine(cx));
     let launch = Launch {
         backend: Backend::Claude,
-        program: "/made-up/no-such-claude".into(),
+        target: crate::local_ai::Target::Program("/made-up/no-such-claude".into()),
         work: Work::Draft,
         model: Model::Recommended,
         instructions: prompt::instructions(),

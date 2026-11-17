@@ -262,7 +262,7 @@ impl CaptionTranslation {
             return;
         };
         self.schedule = Some(Schedule::new(code));
-        let (backend, program) = match crate::local_ai::Tools::of(cx).pick(choice.tool) {
+        let crate::local_ai::Picked { backend, target, .. } = match crate::local_ai::pick(&choice.tool, cx) {
             Ok(picked) => picked,
             Err(failure) => {
                 self.status = Status::Failed { failure, language };
@@ -272,7 +272,7 @@ impl CaptionTranslation {
         let by = backend.label_of(Work::Captions, &choice.model);
         let session = Session::start(Spec {
             backend,
-            program,
+            target,
             model: choice.model,
             language,
             limits: self.limits,

@@ -2,18 +2,19 @@
 //! does some work on this computer (live captions' translation, recaps' summaries, chats' translation, drafts'
 //! proofreading and translation): a box titled by the work, of
 //!
-//! - **the tool**: Automatic (Claude Code when it is installed, else Codex), Claude or Codex, side by side; under it
-//!   what goes to the tool, or that the tool isn't installed;
-//! - **the model**: a dropdown of the one recommended for the work, the tool's own default, every model the tool
-//!   reports ([`Catalog`]) and "Other model…";
+//! - **the provider**: a dropdown of Automatic (the first provider in the user's order that can work) and each AI
+//!   provider that is on ([`crate::local_ai::providers`]); under it what goes to the provider, or why it cannot work;
+//! - **the model**: a dropdown of the one recommended for the work, the provider's own default, every model the
+//!   provider reports (a tool's [`Catalog`], an API's [`ApiModels`]) and "Other model…";
 //! - **the model's name**, while another model is being typed or one the tool didn't list is set: any name the tool
 //!   takes, used on Enter (or when the field is left).
 //!
 //! A draft's translation adds its language's row on top: the menu the compose box's language button opens
 //! ([`crate::draft_translate::menu`]), its button `message-language` and its rows `message-language-<language>`.
 //!
-//! Changing the tool sets its recommended model again: a model of one tool means nothing to the other. Test selectors:
-//! the tool's segments `<setting>-<tool>` (`caption-translator-claude`), the model's dropdown `<setting>-model` and
+//! Changing the provider sets its recommended model again: a model of one provider means nothing to the other. Test
+//! selectors: the provider's dropdown `<setting>` and its rows `<setting>-<provider id>` (`caption-translator-claude`,
+//! `caption-translator-automatic`), the model's dropdown `<setting>-model` and
 //! its rows `<setting>-model-<id>` (`recommended`, `default`, `other`, or the model's), the name's field
 //! `<setting>-model-name`.
 
@@ -25,9 +26,12 @@ use gpui::{
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 
-use super::{Pick, group, picker, row_with, segmented};
+use super::{Pick, group, picker, row_with};
 use crate::draft_translate::menu::{self, LanguageMenu};
-use crate::local_ai::{AiChoice, Backend, Catalog, Failure, Model, ToolChoice, Tools, Work};
+use crate::local_ai::providers::{ApiModels, Picked};
+use crate::local_ai::{
+    AiChoice, Backend, Catalog, Failure, Listed, Model, Provider, Providers, ToolChoice, Tools, Work,
+};
 use crate::settings::SettingsModel;
 use crate::theme;
 
@@ -37,6 +41,8 @@ struct Words {
     tool: &'static str,
     /// What goes to the tool, and when.
     sends: &'static str,
+    /// What goes to an API provider, as a sentence's subject.
+    what: &'static str,
     /// What installing a tool lets the user do.
     install: &'static str,
     /// Why its recommended model is the one.
@@ -54,6 +60,7 @@ fn words(work: Work) -> Words {
             sends: "When you translate live captions, their text goes to this tool on your computer and its provider.",
             install: "translate live captions",
             model: "A fast model keeps translations up with the call.",
+            what: "The text of live captions that you translate",
             selector: "caption-translator",
             model_selector: "caption-translator-model",
             name_selector: "caption-translator-model-name",
@@ -65,6 +72,7 @@ fn words(work: Work) -> Words {
                     provider.",
             install: "summarize meeting recaps",
             model: "A stronger model writes a better summary of a long meeting.",
+            what: "The transcript of a recap that you summarize",
             selector: "recap-summarizer",
             model_selector: "recap-summarizer-model",
             name_selector: "recap-summarizer-model-name",
@@ -76,6 +84,7 @@ fn words(work: Work) -> Words {
             install: "translate chats",
             model: "A fast model keeps your messages from waiting; each request carries the chat, so terms and tone \
                     stay consistent.",
+            what: "The messages of a chat that you translate, and your own before they are sent,",
             selector: "chat-translator",
             model_selector: "chat-translator-model",
             name_selector: "chat-translator-model-name",
@@ -86,6 +95,7 @@ fn words(work: Work) -> Words {
             sends: crate::message_correct::SETTINGS_NOTE,
             install: "correct your messages",
             model: "A stronger model finds the word that fits; you wait only when you ask for a correction.",
+            what: "A draft that you ask to correct",
             selector: "message-corrector",
             model_selector: "message-corrector-model",
             name_selector: "message-corrector-model-name",
@@ -96,6 +106,7 @@ fn words(work: Work) -> Words {
             sends: crate::draft_translate::SETTINGS_NOTE,
             install: "translate your messages",
             model: "A stronger model writes the message as a native speaker would; you wait only when you translate.",
+            what: "A draft that you translate",
             selector: "message-translator",
             model_selector: "message-translator-model",
             name_selector: "message-translator-model-name",
@@ -115,7 +126,7 @@ pub struct AiPicker {
     focus_name: bool,
     /// The name typed couldn't be used.
     bad_name: bool,
-    _observing: [Subscription; 3],
+    _observing: [Subscription; 5],
     /// The name field's Enter and leaving, while it is there.
     name_events: Option<Subscription>,
     /// A draft's translation's language menu, made the first time it shows (it needs the window).
@@ -128,6 +139,8 @@ impl AiPicker {
             cx.observe(&model, |_, _, cx| cx.notify()),
             cx.observe_global::<Catalog>(|_, cx| cx.notify()),
             cx.observe_global::<Tools>(|_, cx| cx.notify()),
+            cx.observe_global::<Providers>(|_, cx| cx.notify()),
+            cx.observe_global::<ApiModels>(|_, cx| cx.notify()),
         ];
         Self {
             model,
@@ -161,7 +174,7 @@ impl AiPicker {
         });
     }
 
-    /// The tool chosen, with its recommended model (unless it was chosen already).
+    /// The provider chosen, with its recommended model (unless it was chosen already).
     pub fn choose_tool(&mut self, tool: ToolChoice, cx: &mut Context<Self>) {
         if self.choice(cx).tool != tool {
             self.set(AiChoice::of(tool), cx);
@@ -268,51 +281,83 @@ impl AiPicker {
         )
     }
 
-    /// The tool's row: its segments, and what goes to it (or that it isn't installed).
+    /// The provider's row: its dropdown, and what goes to it (or why it cannot work).
     fn tool_row(
         &self,
         choice: &AiChoice,
-        picked: &Result<(Backend, std::path::PathBuf), Failure>,
+        list: &[Provider],
+        picked: &Result<Picked, Failure>,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
         let palette = theme::current(cx);
         let words = words(self.work);
-        let picks = ToolChoice::ALL
-            .into_iter()
-            .map(|tool| Pick {
-                key: tool.key().to_owned(),
-                label: tool.label().into(),
-                status: None,
-                chosen: tool == choice.tool,
-                apply: Self::act(cx, move |this, cx| this.choose_tool(tool, cx)),
-            })
-            .collect();
+        let tools = cx.try_global::<Tools>().cloned().unwrap_or_default();
+        let pick = |tool: ToolChoice, label: String| Pick {
+            key: tool.key().to_owned(),
+            label: label.into(),
+            status: None,
+            chosen: tool == choice.tool,
+            apply: Self::act(cx, move |this, cx| this.choose_tool(tool.clone(), cx)),
+        };
+        let mut picks = vec![pick(ToolChoice::Automatic, "Automatic".to_owned())];
+        for provider in list {
+            let tool = ToolChoice::Only(provider.id.clone());
+            if !provider.enabled && tool != choice.tool {
+                continue;
+            }
+            let label = if !provider.enabled {
+                format!("{} (off)", provider.name)
+            } else if provider.ready(&tools) {
+                provider.name.clone()
+            } else if provider.kind.is_cli() {
+                format!("{} (not installed)", provider.name)
+            } else {
+                format!("{} (no key)", provider.name)
+            };
+            picks.push(pick(tool, label));
+        }
+        if let ToolChoice::Only(id) = &choice.tool
+            && !list.iter().any(|provider| provider.id == *id)
+        {
+            let label = Backend::from_key(id).filter(|backend| backend.is_cli()).map_or_else(
+                || "Removed provider".to_owned(),
+                |backend| format!("{} (not installed)", backend.name()),
+            );
+            picks.push(pick(choice.tool.clone(), label));
+        }
         let note: SharedString = match picked {
+            Ok(picked) if !picked.backend.is_cli() => format!(
+                "{} goes to {} with your API key. The model runs on its server.",
+                words.what, picked.name
+            )
+            .into(),
             Ok(_) => words.sends.into(),
             Err(Failure::NotInstalled(None)) => format!(
-                "Neither Claude Code (claude) nor the Codex CLI (codex) is installed. Install one to {}.",
+                "No AI provider can do this. Install Claude Code (claude) or the Codex CLI (codex), or add an API \
+                 key under AI providers, to {}.",
                 words.install
             )
             .into(),
-            Err(failure) => format!("{} Install it to {}.", failure.message(), words.install).into(),
+            Err(failure @ Failure::NotInstalled(Some(_))) => {
+                format!("{} Install it to {}.", failure.message(), words.install).into()
+            }
+            Err(failure) => failure.message().into(),
         };
         row_with(
             words.tool.into(),
             Some(note),
-            div()
-                .debug_selector(move || words.selector.to_owned())
-                .child(segmented(words.selector, picks, palette)),
+            picker(words.selector, picks, palette),
             palette,
         )
     }
 
-    /// The model's dropdown: the recommended model, the tool's default, the models the tool lists (and one set that it
+    /// The model's dropdown: the recommended model, the provider's default, the models it lists (and one set that it
     /// doesn't), then "Other model…".
     fn model_picks(
         &self,
         choice: &AiChoice,
-        picked: Option<Backend>,
-        catalog: &Catalog,
+        picked: Option<&Picked>,
+        listed: &[Listed],
         cx: &Context<Self>,
     ) -> Vec<Pick> {
         let work = self.work;
@@ -323,24 +368,24 @@ impl AiPicker {
             chosen: choice.model == model,
             apply: Self::act(cx, move |this, cx| this.choose_model(model.clone(), cx)),
         };
-        let backend = match choice.tool {
-            ToolChoice::Only(backend) => Some(backend),
-            ToolChoice::Automatic => None,
-        };
-        // the tool chosen, or the one Automatic comes to
-        let recommended = backend.or(picked).map_or_else(
+        let chosen = matches!(choice.tool, ToolChoice::Only(_));
+        // the provider chosen, or the one Automatic comes to
+        let recommended = picked.map_or_else(
             || "Recommended".to_owned(),
-            |backend| format!("Recommended ({})", backend.label(work)),
+            |picked| match picked.backend.recommended(work) {
+                Some(_) if picked.backend.is_cli() => format!("Recommended ({})", picked.backend.label(work)),
+                Some(model) => format!("Recommended ({model})"),
+                None => format!("Recommended ({}'s model)", picked.name),
+            },
         );
-        let own = backend.map_or_else(
-            || "The tool's default".to_owned(),
-            |backend| format!("{}'s default", backend.name()),
+        let own = picked.filter(|_| chosen).map_or_else(
+            || "The provider's default".to_owned(),
+            |picked| format!("{}'s default", picked.name),
         );
         let mut picks = vec![
             pick("recommended", recommended, Model::Recommended),
             pick("default", own, Model::ToolDefault),
         ];
-        let listed = backend.map_or(&[][..], |backend| catalog.models(backend));
         picks.extend(
             listed
                 .iter()
@@ -351,7 +396,7 @@ impl AiPicker {
         {
             picks.push(pick(name, name.clone(), choice.model.clone()));
         }
-        if backend.is_some() {
+        if chosen {
             picks.push(Pick {
                 key: "other".to_owned(),
                 label: "Other model\u{2026}".into(),
@@ -367,7 +412,7 @@ impl AiPicker {
     fn name_row(
         &mut self,
         choice: &AiChoice,
-        backend: Backend,
+        provider: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
@@ -404,11 +449,7 @@ impl AiPicker {
         let note: SharedString = if self.bad_name {
             "A model's name has no spaces and doesn't start with a dash.".into()
         } else {
-            format!(
-                "Any model {} takes, by an alias or its full name. Press Enter to use it.",
-                backend.name()
-            )
-            .into()
+            format!("Any model {provider} takes, by an alias or its full name. Press Enter to use it.").into()
         };
         row_with(
             "Model name".into(),
@@ -422,25 +463,51 @@ impl AiPicker {
     }
 }
 
+impl AiPicker {
+    /// The models the provider chosen lists, and whether they are still being looked for.
+    fn listed(
+        choice: &AiChoice,
+        list: &[Provider],
+        picked: Option<&Picked>,
+        cx: &mut Context<Self>,
+    ) -> (Vec<Listed>, bool) {
+        let ToolChoice::Only(id) = &choice.tool else {
+            return (Vec::new(), false);
+        };
+        let Some(picked) = picked else {
+            return (Vec::new(), false);
+        };
+        if picked.backend.is_cli() {
+            let catalog = Catalog::of(cx);
+            return (catalog.models(picked.backend).to_vec(), !catalog.is_listed());
+        }
+        let Some(provider) = list.iter().find(|provider| provider.id == *id) else {
+            return (Vec::new(), false);
+        };
+        match ApiModels::of(provider, cx) {
+            Some(Ok(listed)) => (listed, false),
+            Some(Err(_)) => (Vec::new(), false),
+            None => (Vec::new(), true),
+        }
+    }
+}
+
 impl Render for AiPicker {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::current(cx);
         let words = words(self.work);
         let choice = self.choice(cx);
-        let tools = Tools::of(cx);
-        let catalog = Catalog::of(cx);
-        let picked = tools.pick(choice.tool);
-        let backend = picked.as_ref().ok().map(|(backend, _)| *backend);
+        let list = Providers::of(cx);
+        let picked = crate::local_ai::pick(&choice.tool, cx);
+        let (listed, looking) = Self::listed(&choice, &list, picked.as_ref().ok(), cx);
         let mut rows = Vec::new();
         if self.work == Work::Draft {
             rows.push(self.language_row(window, cx));
         }
-        rows.push(self.tool_row(&choice, &picked, cx));
-        let picks = self.model_picks(&choice, backend, &catalog, cx);
-        let model_note: SharedString = match choice.tool {
-            ToolChoice::Only(backend) if tools.pick(choice.tool).is_ok() && !catalog.is_listed() => {
-                format!("Looking for the models {} offers\u{2026}", backend.name()).into()
-            }
+        rows.push(self.tool_row(&choice, &list, &picked, cx));
+        let picks = self.model_picks(&choice, picked.as_ref().ok(), &listed, cx);
+        let model_note: SharedString = match (&picked, looking) {
+            (Ok(picked), true) => format!("Looking for the models {} offers\u{2026}", picked.name).into(),
             _ => words.model.into(),
         };
         rows.push(row_with(
@@ -449,11 +516,15 @@ impl Render for AiPicker {
             picker(words.model_selector, picks, palette),
             palette,
         ));
-        if let ToolChoice::Only(backend) = choice.tool {
+        if let ToolChoice::Only(id) = &choice.tool {
             let unlisted = matches!(&choice.model, Model::Named(name)
-                if !catalog.models(backend).iter().any(|listed| listed.id == *name));
+                if !listed.iter().any(|listed| listed.id == *name));
             if self.typing || unlisted {
-                rows.push(self.name_row(&choice, backend, window, cx));
+                let name = list
+                    .iter()
+                    .find(|provider| provider.id == *id)
+                    .map_or_else(|| id.clone(), |provider| provider.name.clone());
+                rows.push(self.name_row(&choice, &name, window, cx));
             }
         }
         group(Some(words.title), rows, palette)

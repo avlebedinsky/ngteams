@@ -218,6 +218,7 @@ pub fn launch<S: SecretStore + 'static>(cx: &mut App, launch: Launch<S>) -> Resu
     play_videos_on(runner.devices.as_ref(), cx);
     // closing the window keeps the app in the tray: it quits itself once the engines are shut down
     cx.set_quit_mode(QuitMode::Explicit);
+    crate::ai_keys::install(&runner.setup.secrets(), read_only, cx);
     let settings = shared_settings(settings, first.calls.as_ref(), cx);
     let first_session = Arc::clone(&first.engine.session);
     let first_runtime = first.engine.handle.runtime();
@@ -872,6 +873,7 @@ fn settings_entity(settings: SettingsModel, video: Option<VideoFeed>, cx: &mut A
         }
         None => settings,
     };
+    settings.publish_ai(cx);
     let settings = cx.new(|_| settings);
     if let Some(feed) = video {
         cx.observe(&settings, move |model, cx| {

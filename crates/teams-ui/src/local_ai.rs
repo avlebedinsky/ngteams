@@ -34,11 +34,14 @@ use gpui::{App, Global};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+pub mod api;
 pub mod catalog;
+pub mod providers;
 #[cfg(windows)]
 mod windows_prompt;
 
 pub use catalog::{Catalog, Listed};
+pub use providers::{AiKeys, KeyVault, Picked, Provider, Providers, pick};
 
 /// How long a wait on the tool polls before it looks at whether its work was dropped.
 const POLL: Duration = Duration::from_millis(100);
@@ -57,13 +60,19 @@ const SIGN_IN: [&str; 9] = [
     "credential",
 ];
 
-/// An AI command-line tool.
+/// The kind of an AI provider: a command-line tool on this computer, or an API that the app asks with a key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Backend {
     /// Claude Code (`claude`).
     Claude,
     /// The Codex CLI (`codex`).
     Codex,
+    /// The Anthropic Messages API.
+    Anthropic,
+    /// The OpenAI Chat Completions API.
+    OpenAi,
+    /// An API that takes OpenAI's Chat Completions at its own base URL (OpenRouter, Ollama, LM Studio, Azure).
+    Compatible,
 }
 
 /// What a tool is asked to do: each work has the model it needs.
@@ -84,7 +93,15 @@ pub enum Work {
 }
 
 impl Backend {
-    pub const ALL: [Self; 2] = [Self::Claude, Self::Codex];
+    pub const ALL: [Self; 5] = [
+        Self::Claude,
+        Self::Codex,
+        Self::Anthropic,
+        Self::OpenAi,
+        Self::Compatible,
+    ];
+    /// The command-line tools, in the order Automatic tries them when the user did not order the providers.
+    pub const CLI: [Self; 2] = [Self::Claude, Self::Codex];
 
     /// Its name in the settings file.
     #[must_use]
@@ -92,7 +109,21 @@ impl Backend {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Anthropic => "anthropic",
+            Self::OpenAi => "openai",
+            Self::Compatible => "openai-compatible",
         }
+    }
+
+    #[must_use]
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|backend| backend.key() == key)
+    }
+
+    /// Whether it is a command-line tool on this computer (else an API asked with a key).
+    #[must_use]
+    pub fn is_cli(self) -> bool {
+        matches!(self, Self::Claude | Self::Codex)
     }
 
     /// The command it runs.
@@ -101,15 +132,17 @@ impl Backend {
         self.key()
     }
 
-    /// The model recommended for `work` ([`Model::Recommended`]). Codex has no model named plain `luna`: it refuses it
-    /// for a `ChatGPT` account, so the newest Luna it lists is asked for captions, and its mid-sized Terra for a summary.
+    /// The model recommended for `work` ([`Model::Recommended`]); `None`: this app knows none (an OpenAI-compatible
+    /// API serves the models of its own server). Codex has no model named plain `luna`: it refuses it for a `ChatGPT`
+    /// account, so the newest Luna it lists is asked for captions, and its mid-sized Terra for a summary.
     #[must_use]
-    pub fn model(self, work: Work) -> &'static str {
-        match (self, work) {
-            (Self::Claude, Work::Captions | Work::Chat) => "haiku",
-            (Self::Claude, Work::Summary | Work::Correction | Work::Draft) => "sonnet",
-            (Self::Codex, Work::Captions | Work::Chat) => "gpt-6-luna",
-            (Self::Codex, Work::Summary | Work::Correction | Work::Draft) => "gpt-6.1-terra",
+    pub fn recommended(self, work: Work) -> Option<&'static str> {
+        let fast = matches!(work, Work::Captions | Work::Chat);
+        match self {
+            Self::Claude => Some(if fast { "haiku" } else { "sonnet" }),
+            Self::Codex | Self::OpenAi => Some(if fast { "gpt-6-luna" } else { "gpt-6.1-terra" }),
+            Self::Anthropic => Some(if fast { "claude-haiku-5-5" } else { "claude-sonnet-5-5" }),
+            Self::Compatible => None,
         }
     }
 
@@ -126,7 +159,7 @@ impl Backend {
     #[must_use]
     pub fn model_of(self, work: Work, model: &Model) -> Option<String> {
         match model {
-            Model::Recommended => Some(self.model(work).to_owned()),
+            Model::Recommended => self.recommended(work).map(str::to_owned),
             Model::ToolDefault => None,
             Model::Named(name) => Some(name.clone()),
         }
@@ -143,23 +176,45 @@ impl Backend {
         }
     }
 
-    /// Its name in a label: "Claude Code", "Codex".
+    /// Its name in a label: "Claude Code", "Codex", "Anthropic API".
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
             Self::Claude => "Claude Code",
             Self::Codex => "Codex",
+            Self::Anthropic => "Anthropic API",
+            Self::OpenAi => "OpenAI API",
+            Self::Compatible => "OpenAI-compatible API",
         }
     }
 
     /// What the views call it doing `work` with its recommended model.
     #[must_use]
     pub fn label(self, work: Work) -> &'static str {
-        match (self, work) {
-            (Self::Claude, Work::Captions | Work::Chat) => "Claude Haiku",
-            (Self::Claude, Work::Summary | Work::Correction | Work::Draft) => "Claude Sonnet",
-            (Self::Codex, Work::Captions | Work::Chat) => "Codex GPT-6-Luna",
-            (Self::Codex, Work::Summary | Work::Correction | Work::Draft) => "Codex GPT-6.1-Terra",
+        let fast = matches!(work, Work::Captions | Work::Chat);
+        match self {
+            Self::Claude | Self::Anthropic => {
+                if fast {
+                    "Claude Haiku"
+                } else {
+                    "Claude Sonnet"
+                }
+            }
+            Self::Codex => {
+                if fast {
+                    "Codex GPT-6-Luna"
+                } else {
+                    "Codex GPT-6.1-Terra"
+                }
+            }
+            Self::OpenAi => {
+                if fast {
+                    "GPT-6-Luna"
+                } else {
+                    "GPT-6.1-Terra"
+                }
+            }
+            Self::Compatible => self.name(),
         }
     }
 
@@ -169,6 +224,9 @@ impl Backend {
         match self {
             Self::Claude => "Claude Code",
             Self::Codex => "The Codex CLI",
+            Self::Anthropic => "The Anthropic API",
+            Self::OpenAi => "The OpenAI API",
+            Self::Compatible => "The OpenAI-compatible API",
         }
     }
 
@@ -176,8 +234,9 @@ impl Backend {
     #[must_use]
     pub fn provider(self) -> &'static str {
         match self {
-            Self::Claude => "Anthropic",
-            Self::Codex => "OpenAI",
+            Self::Claude | Self::Anthropic => "Anthropic",
+            Self::Codex | Self::OpenAi => "OpenAI",
+            Self::Compatible => "the API's server",
         }
     }
 
@@ -187,6 +246,7 @@ impl Backend {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex login",
+            Self::Anthropic | Self::OpenAi | Self::Compatible => "",
         }
     }
 
@@ -225,6 +285,7 @@ impl Backend {
                 );
                 args
             }
+            Self::Anthropic | Self::OpenAi | Self::Compatible => Vec::new(),
             Self::Codex => {
                 let mut args = vec![
                     "app-server".to_owned(),
@@ -261,39 +322,39 @@ const CODEX_OFF: [&str; 13] = [
     "skill_search",
 ];
 
-/// Which tool does a work, as the settings keep it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+/// Which provider does a work, as the settings keep it ([`providers`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub enum ToolChoice {
-    /// Claude Code when it is installed, else Codex.
+    /// The first provider in the user's order that is on and can work ([`providers::pick`]).
     #[default]
     Automatic,
-    Only(Backend),
+    /// The provider of this id ([`providers::Provider::id`]): the command-line tools keep their kind's key (`claude`,
+    /// `codex`), so a choice of an earlier build names the same tool.
+    Only(String),
 }
 
 impl ToolChoice {
-    pub const ALL: [Self; 3] = [Self::Automatic, Self::Only(Backend::Claude), Self::Only(Backend::Codex)];
+    /// The command-line tool `backend`.
+    #[must_use]
+    pub fn cli(backend: Backend) -> Self {
+        Self::Only(backend.key().to_owned())
+    }
 
     /// Its name in the settings file.
     #[must_use]
-    pub fn key(self) -> &'static str {
+    pub fn key(&self) -> &str {
         match self {
             Self::Automatic => "automatic",
-            Self::Only(backend) => backend.key(),
+            Self::Only(id) => id,
         }
     }
 
+    /// The choice `key` names: `automatic`, or a provider's id ([`providers::id_shaped`]).
     #[must_use]
     pub fn from_key(key: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|choice| choice.key() == key)
-    }
-
-    /// Its segment's words in the settings.
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Automatic => "Automatic",
-            Self::Only(Backend::Claude) => "Claude",
-            Self::Only(Backend::Codex) => "Codex",
+        match key {
+            "automatic" => Some(Self::Automatic),
+            _ => providers::id_shaped(key).then(|| Self::Only(key.to_owned())),
         }
     }
 }
@@ -377,7 +438,7 @@ impl Tools {
     #[must_use]
     pub fn detect() -> Self {
         let path = std::env::var_os("PATH").unwrap_or_default();
-        let found = Backend::ALL
+        let found = Backend::CLI
             .into_iter()
             .filter_map(|backend| {
                 std::env::split_paths(&path)
@@ -422,29 +483,18 @@ impl Tools {
 
     /// The tools installed, Claude Code first.
     pub fn installed(&self) -> impl Iterator<Item = Backend> + '_ {
-        Backend::ALL
+        Backend::CLI
             .into_iter()
             .filter(|backend| self.found.iter().any(|(found, _)| found == backend))
     }
 
-    /// The tool `choice` comes to, and its program.
-    ///
-    /// # Errors
-    /// It isn't installed (for [`ToolChoice::Automatic`], neither is).
-    pub fn pick(&self, choice: ToolChoice) -> Result<(Backend, PathBuf), Failure> {
-        let program = |backend: Backend| {
-            self.found
-                .iter()
-                .find(|(found, _)| *found == backend)
-                .map(|(_, program)| (backend, program.clone()))
-        };
-        match choice {
-            ToolChoice::Automatic => Backend::ALL
-                .into_iter()
-                .find_map(program)
-                .ok_or(Failure::NotInstalled(None)),
-            ToolChoice::Only(backend) => program(backend).ok_or(Failure::NotInstalled(Some(backend))),
-        }
+    /// Where `backend` is, when it is installed.
+    #[must_use]
+    pub fn program(&self, backend: Backend) -> Option<PathBuf> {
+        self.found
+            .iter()
+            .find(|(found, _)| *found == backend)
+            .map(|(_, program)| program.clone())
     }
 }
 
@@ -481,13 +531,31 @@ fn program_paths(dir: &Path, program: &str) -> Vec<PathBuf> {
 /// Why a tool's work ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Failure {
-    /// The tool asked for isn't on the `PATH`; `None`: neither is.
+    /// The tool asked for isn't on the `PATH`; `None`: no provider can do the work.
     NotInstalled(Option<Backend>),
+    /// The tool is not signed in, or the API refused its key.
     SignedOut(Backend),
     TimedOut(Backend),
     /// The tool stopped or refused, in its own words when it gave some.
     Stopped(Backend, Option<String>),
+    /// The API provider has no key in the keyring.
+    NoKey(Backend),
+    /// The API account has no credit left.
+    NoCredit(Backend),
+    /// The API refused more requests for now.
+    RateLimited(Backend),
+    /// The API does not know this model.
+    UnknownModel(Backend, String),
+    /// No model is chosen, and the provider has no default one.
+    NoModel(Backend),
+    /// The provider chosen is turned off in the settings.
+    TurnedOff(Backend),
+    /// The provider chosen is not in the settings any more.
+    NoProvider,
 }
+
+/// Where the settings of the AI providers are.
+const PROVIDERS_PLACE: &str = "Settings under General, AI providers";
 
 impl Failure {
     /// What a draft's failure line adds when the tool isn't installed: install the one named, or one of the two.
@@ -510,6 +578,12 @@ impl Failure {
             Self::NotInstalled(Some(backend)) => {
                 format!("{} ({}) isn't installed.", backend.tool(), backend.program())
             }
+            Self::SignedOut(backend) if !backend.is_cli() => {
+                format!(
+                    "{} refused the API key. Check the key in {PROVIDERS_PLACE}.",
+                    backend.tool()
+                )
+            }
             Self::SignedOut(backend) => format!(
                 "{} isn't signed in. Run {} in a terminal, then try again.",
                 backend.tool(),
@@ -518,15 +592,45 @@ impl Failure {
             Self::TimedOut(backend) => format!("{} took too long to answer.", backend.tool()),
             Self::Stopped(backend, Some(why)) => format!("{} stopped: {why}", backend.tool()),
             Self::Stopped(backend, None) => format!("{} stopped unexpectedly.", backend.tool()),
+            Self::NoKey(backend) => format!("{} has no API key. Add one in {PROVIDERS_PLACE}.", backend.tool()),
+            Self::NoCredit(backend) => format!(
+                "{} says that the account has no credit left. Add credit to it, then try again.",
+                backend.tool()
+            ),
+            Self::RateLimited(backend) => format!(
+                "{} refused more requests for now (rate limit). Wait a moment, then try again.",
+                backend.tool()
+            ),
+            Self::UnknownModel(backend, model) => format!(
+                "{} does not know the model {model}. Choose another model in Settings under General.",
+                backend.tool()
+            ),
+            Self::NoModel(backend) => format!(
+                "{} has no model chosen. Choose one in Settings under General.",
+                backend.tool()
+            ),
+            Self::TurnedOff(backend) => format!("{} is turned off in {PROVIDERS_PLACE}.", backend.name()),
+            Self::NoProvider => {
+                "The AI provider chosen for this is not in the settings any more. Choose another in Settings \
+                 under General."
+                    .to_owned()
+            }
         }
     }
+}
+
+/// Where a [`Tool`] goes: a program on this computer, or an API.
+#[derive(Clone, Debug)]
+pub enum Target {
+    Program(PathBuf),
+    Api(providers::ApiTarget),
 }
 
 /// What a [`Tool`] runs: the tool, where it is, its work, model and instructions, and how long it may take to start.
 #[derive(Clone, Debug)]
 pub struct Launch {
     pub backend: Backend,
-    pub program: PathBuf,
+    pub target: Target,
     pub work: Work,
     pub model: Model,
     pub instructions: String,
@@ -544,8 +648,98 @@ pub fn cap(text: &str, max: usize) -> String {
     text[..end].to_owned()
 }
 
-/// A running tool and where its conversation stands.
+/// A running tool and where its conversation stands: a process, or a conversation with an API.
 pub struct Tool {
+    link: Link,
+    /// Questions asked, and their characters.
+    turns: usize,
+    chars: usize,
+    /// It answered once: later answers may get a shorter wait.
+    answered: bool,
+}
+
+enum Link {
+    Process(Box<Process>),
+    Api(Box<api::Conversation>),
+}
+
+impl Tool {
+    /// Starts `launch`'s tool (Codex's thread started too; an API's key read), giving up once `stop` is set.
+    ///
+    /// # Errors
+    /// The tool couldn't start, refused, or took longer than [`Launch::first`].
+    pub fn start(launch: &Launch, stop: &AtomicBool) -> Result<Self, Failure> {
+        let link = match &launch.target {
+            Target::Program(program) => Link::Process(Box::new(Process::start(launch, program, stop)?)),
+            Target::Api(api) => Link::Api(Box::new(api::Conversation::start(launch, api)?)),
+        };
+        Ok(Self {
+            link,
+            turns: 0,
+            chars: 0,
+            answered: false,
+        })
+    }
+
+    /// Questions asked so far.
+    #[must_use]
+    pub fn turns(&self) -> usize {
+        self.turns
+    }
+
+    /// Characters asked so far.
+    #[must_use]
+    pub fn chars(&self) -> usize {
+        self.chars
+    }
+
+    /// Whether it answered once.
+    #[must_use]
+    pub fn answered(&self) -> bool {
+        self.answered
+    }
+
+    /// Sends `message` and waits up to `wait` for the answer, trimmed.
+    ///
+    /// # Errors
+    /// The tool refused, stopped, took longer than `wait`, or `stop` was set.
+    pub fn ask(&mut self, message: &str, wait: Duration, stop: &AtomicBool) -> Result<String, Failure> {
+        self.ask_streaming(message, wait, stop, &mut |_| {})
+    }
+
+    /// [`Self::ask`], telling `partial` the answer's text so far each time more of it comes (when the tool streams it:
+    /// Claude Code started for [`Work::Chat`], Codex and the APIs), before the whole answer is given back.
+    ///
+    /// # Errors
+    /// As [`Self::ask`].
+    pub fn ask_streaming(
+        &mut self,
+        message: &str,
+        wait: Duration,
+        stop: &AtomicBool,
+        partial: &mut dyn FnMut(&str),
+    ) -> Result<String, Failure> {
+        let deadline = Instant::now() + wait;
+        self.turns += 1;
+        self.chars += message.len();
+        let text = match &mut self.link {
+            Link::Process(process) => process.ask(message, deadline, stop, partial),
+            Link::Api(conversation) => conversation.ask(message, deadline, stop, partial),
+        }?;
+        self.answered = true;
+        Ok(text.trim().to_owned())
+    }
+
+    /// Ends it: a process's stdin closed (both tools leave then), and after a moment its whole group killed.
+    pub fn close(self) {
+        if let Link::Process(process) = self.link {
+            process.close();
+        }
+    }
+}
+
+/// A running command-line tool.
+struct Process {
     backend: Backend,
     work: Work,
     /// The model asked for, `None`: the tool's default.
@@ -557,28 +751,19 @@ pub struct Tool {
     /// Codex's thread.
     thread: Option<String>,
     next_id: u64,
-    /// Questions asked, and their characters.
-    turns: usize,
-    chars: usize,
-    /// It answered once: later answers may get a shorter wait.
-    answered: bool,
     // Dropped after the process tree: a tool may read its prompt after startup.
     #[cfg(windows)]
     _prompt: Option<tempfile::TempDir>,
 }
 
-impl Tool {
-    /// Starts `launch`'s tool (Codex's thread started too), giving up once `stop` is set.
-    ///
-    /// # Errors
-    /// The tool couldn't start, refused, or took longer than [`Launch::first`].
-    pub fn start(launch: &Launch, stop: &AtomicBool) -> Result<Self, Failure> {
+impl Process {
+    fn start(launch: &Launch, program: &Path, stop: &AtomicBool) -> Result<Self, Failure> {
         let backend = launch.backend;
         let args = backend.args(launch.work, &launch.model, &launch.instructions);
         #[cfg(windows)]
-        let (args, prompt) = windows_prompt::prepare(launch, args)
+        let (args, prompt) = windows_prompt::prepare(launch, program, args)
             .map_err(|error| Failure::Stopped(backend, Some(error.to_string())))?;
-        let mut command = Command::new(&launch.program);
+        let mut command = Command::new(program);
         command
             .args(args)
             .current_dir(std::env::temp_dir())
@@ -613,9 +798,6 @@ impl Tool {
             stderr,
             thread: None,
             next_id: 1,
-            turns: 0,
-            chars: 0,
-            answered: false,
             #[cfg(windows)]
             _prompt: prompt,
         };
@@ -628,22 +810,18 @@ impl Tool {
         Ok(tool)
     }
 
-    /// Questions asked so far.
-    #[must_use]
-    pub fn turns(&self) -> usize {
-        self.turns
-    }
-
-    /// Characters asked so far.
-    #[must_use]
-    pub fn chars(&self) -> usize {
-        self.chars
-    }
-
-    /// Whether it answered once.
-    #[must_use]
-    pub fn answered(&self) -> bool {
-        self.answered
+    fn ask(
+        &mut self,
+        message: &str,
+        deadline: Instant,
+        stop: &AtomicBool,
+        partial: &mut dyn FnMut(&str),
+    ) -> Result<String, Failure> {
+        if self.backend == Backend::Codex {
+            self.ask_codex(message, deadline, stop, partial)
+        } else {
+            self.ask_claude(message, deadline, stop, partial)
+        }
     }
 
     /// Codex: initializes the app server and starts the thread the questions go to.
@@ -705,37 +883,6 @@ impl Tool {
             self.write(&json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "not supported"}}))?;
         }
         Ok(())
-    }
-
-    /// Sends `message` and waits up to `wait` for the answer, trimmed.
-    ///
-    /// # Errors
-    /// The tool refused, stopped, took longer than `wait`, or `stop` was set.
-    pub fn ask(&mut self, message: &str, wait: Duration, stop: &AtomicBool) -> Result<String, Failure> {
-        self.ask_streaming(message, wait, stop, &mut |_| {})
-    }
-
-    /// [`Self::ask`], telling `partial` the answer's text so far each time more of it comes (when the tool streams it:
-    /// Claude Code started for [`Work::Chat`], and Codex), before the whole answer is given back.
-    ///
-    /// # Errors
-    /// As [`Self::ask`].
-    pub fn ask_streaming(
-        &mut self,
-        message: &str,
-        wait: Duration,
-        stop: &AtomicBool,
-        partial: &mut dyn FnMut(&str),
-    ) -> Result<String, Failure> {
-        let deadline = Instant::now() + wait;
-        self.turns += 1;
-        self.chars += message.len();
-        let text = match self.backend {
-            Backend::Claude => self.ask_claude(message, deadline, stop, partial),
-            Backend::Codex => self.ask_codex(message, deadline, stop, partial),
-        }?;
-        self.answered = true;
-        Ok(text.trim().to_owned())
     }
 
     fn ask_claude(
@@ -889,7 +1036,7 @@ impl Tool {
     }
 
     /// Ends the process: its stdin closed (both tools leave then), and after a moment its whole group killed.
-    pub fn close(mut self) {
+    fn close(mut self) {
         drop(self.stdin.take());
         let deadline = Instant::now() + Duration::from_secs(1);
         while matches!(self.child.try_wait(), Ok(None)) && Instant::now() < deadline {

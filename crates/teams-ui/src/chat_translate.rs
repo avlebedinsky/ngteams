@@ -70,7 +70,7 @@ pub use session::{Limits, Outcome, Session, Spec};
 
 use crate::bridge::Core;
 use crate::icons::{Glyph, selected_by};
-use crate::local_ai::{AiChoice, Backend, Failure, Tools};
+use crate::local_ai::{AiChoice, Backend, Failure};
 use crate::settings::SettingsModel;
 use crate::theme::{self, Palette};
 use crate::translate::{TARGET_LANGUAGES, language, same_language};
@@ -951,11 +951,11 @@ impl ChatTranslation {
         if self.session.is_some() {
             return Ok(());
         }
-        let (backend, program) = Tools::of(cx).pick(self.choice.tool)?;
+        let crate::local_ai::Picked { backend, target, .. } = crate::local_ai::pick(&self.choice.tool, cx)?;
         let name = crate::translate::language(language).map_or("English", |(_, name)| name);
         let session = Session::start(Spec {
             backend,
-            program,
+            target,
             model: self.choice.model.clone(),
             language: name,
             limits: self.limits,

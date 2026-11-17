@@ -28,7 +28,6 @@
 //!   one. Nothing here logs a message, a translation or the tool's output.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -37,7 +36,7 @@ use std::time::Duration;
 
 use super::prompt::{self, Answer, Brief, Item, Preface, Said, Term};
 pub use crate::local_ai::Failure;
-use crate::local_ai::{Backend, Launch, Model, Tool, Work};
+use crate::local_ai::{Backend, Launch, Model, Target, Tool, Work};
 use crate::translate::TARGET_LANGUAGES;
 
 /// How long a wait for the next job polls before it looks at whether the session was dropped.
@@ -81,7 +80,7 @@ impl Default for Limits {
 #[derive(Clone, Debug)]
 pub struct Spec {
     pub backend: Backend,
-    pub program: PathBuf,
+    pub target: Target,
     pub model: Model,
     /// The chat's language's English name, as the instructions name it.
     pub language: &'static str,
@@ -401,7 +400,7 @@ impl Worker {
             Tool::start(
                 &Launch {
                     backend: self.spec.backend,
-                    program: self.spec.program.clone(),
+                    target: self.spec.target.clone(),
                     work: Work::Chat,
                     model: self.spec.model.clone(),
                     instructions: prompt::instructions(self.spec.language),

@@ -480,7 +480,7 @@ fn the_tool_chosen_for_this_work_is_the_one_asked_for() {
     let rig = Rig::start();
     let _fake = Fake::new(&rig);
     let settings = Settings {
-        message_corrector: AiChoice::of(ToolChoice::Only(Backend::Codex)),
+        message_corrector: AiChoice::of(ToolChoice::cli(Backend::Codex)),
         ..Settings::default()
     };
     let (compose, cx) = chat_with(&rig, settings);

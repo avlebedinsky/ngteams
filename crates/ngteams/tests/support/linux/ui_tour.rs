@@ -1932,7 +1932,7 @@ const STEPS: [Step; 5 + 320 + 8 + 5 + 15] = [
                 |settings| {
                     settings.appearance.theme = teams_ui::theme::DARK_KEY;
                     settings.caption_translator = teams_ui::translate::AiChoice::of(
-                        teams_ui::local_ai::ToolChoice::Only(teams_ui::translate::Backend::Codex),
+                        teams_ui::local_ai::ToolChoice::cli(teams_ui::translate::Backend::Codex),
                     );
                 },
                 cx,
@@ -3353,11 +3353,11 @@ fn show_ai_tools(shell: &Entity<Shell>, cx: &mut App) {
         model.change(
             |settings| {
                 settings.caption_translator = AiChoice {
-                    tool: ToolChoice::Only(Backend::Claude),
+                    tool: ToolChoice::cli(Backend::Claude),
                     model: Model::Named("opus".to_owned()),
                 };
                 settings.recap_summarizer = AiChoice {
-                    tool: ToolChoice::Only(Backend::Codex),
+                    tool: ToolChoice::cli(Backend::Codex),
                     model: Model::Named("my-team-model".to_owned()),
                 };
             },

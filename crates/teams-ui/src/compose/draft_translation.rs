@@ -177,14 +177,14 @@ impl Compose {
         let settings = self.settings.read(cx).settings();
         let choice = settings.ai(Work::Draft).clone();
         let language = settings.message_translate_to.clone();
-        let (backend, program) = match Tools::of(cx).pick(choice.tool) {
+        let crate::local_ai::Picked { backend, target, .. } = match crate::local_ai::pick(&choice.tool, cx) {
             Ok(picked) => picked,
             Err(failure) => return self.draft_translation_failed(&failure, cx),
         };
         let translating = Translating::start(
             Request {
                 backend,
-                program,
+                target,
                 model: choice.model.clone(),
                 language: language.clone(),
                 draft: encoded,

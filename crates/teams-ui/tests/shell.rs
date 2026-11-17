@@ -1095,7 +1095,7 @@ fn a_model_typed_is_used_when_the_tool_can_take_it(shell: &Entity<Shell>, cx: &m
     assert_eq!(
         settings_of(shell, cx).caption_translator,
         AiChoice {
-            tool: ToolChoice::Only(Backend::Claude),
+            tool: ToolChoice::cli(Backend::Claude),
             model: Model::Named("claude-next".to_owned()),
         }
     );
@@ -1112,16 +1112,18 @@ fn a_model_typed_is_used_when_the_tool_can_take_it(shell: &Entity<Shell>, cx: &m
 /// The recaps' summarizer: its own choice, and Automatic offers no model by name.
 fn the_recaps_summarizer_is_kept_apart(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     // the recaps' summarizer has the same control, kept apart; Automatic offers no model by name
+    click(cx, "recap-summarizer");
     click(cx, "recap-summarizer-codex");
     click(cx, "recap-summarizer-model");
     click(cx, "recap-summarizer-model-gpt-6.1-sol");
     assert_eq!(
         settings_of(shell, cx).recap_summarizer,
         AiChoice {
-            tool: ToolChoice::Only(Backend::Codex),
+            tool: ToolChoice::cli(Backend::Codex),
             model: Model::Named("gpt-6.1-sol".to_owned()),
         }
     );
+    click(cx, "recap-summarizer");
     click(cx, "recap-summarizer-automatic");
     click(cx, "recap-summarizer-model");
     assert!(bounds(cx, "recap-summarizer-model-recommended").is_some());
@@ -1141,9 +1143,10 @@ fn every_ai_setting_picks_its_tool_then_any_model_the_tool_lists_or_one_typed() 
     synthetic_ai_tools(cx);
     ai_pickers_shown(&shell, cx);
     let captions = |cx: &mut VisualTestContext| settings_of(&shell, cx).caption_translator;
-    let claude = ToolChoice::Only(Backend::Claude);
+    let claude = ToolChoice::cli(Backend::Claude);
 
     // a tool chosen comes with its recommended model; its models are listed, with its own default and Other
+    click(cx, "caption-translator");
     click(cx, "caption-translator-claude");
     assert_eq!(captions(cx), AiChoice::of(claude));
     click(cx, "caption-translator-model");
@@ -1167,14 +1170,15 @@ fn every_ai_setting_picks_its_tool_then_any_model_the_tool_lists_or_one_typed() 
     a_model_typed_is_used_when_the_tool_can_take_it(&shell, cx);
 
     // another tool: its recommended model again
+    click(cx, "caption-translator");
     click(cx, "caption-translator-codex");
-    assert_eq!(captions(cx), AiChoice::of(ToolChoice::Only(Backend::Codex)));
+    assert_eq!(captions(cx), AiChoice::of(ToolChoice::cli(Backend::Codex)));
     assert!(bounds(cx, "caption-translator-model-name").is_none());
 
     the_recaps_summarizer_is_kept_apart(&shell, cx);
     assert_eq!(
         captions(cx),
-        AiChoice::of(ToolChoice::Only(Backend::Codex)),
+        AiChoice::of(ToolChoice::cli(Backend::Codex)),
         "each setting its own"
     );
 }
@@ -1183,7 +1187,7 @@ fn every_ai_setting_picks_its_tool_then_any_model_the_tool_lists_or_one_typed() 
 fn an_ai_setting_draws_without_its_tool_and_shows_a_model_set_that_isn_t_listed() {
     let rig = seeded();
     let settings = Settings {
-        caption_translator: AiChoice::of(ToolChoice::Only(Backend::Codex)),
+        caption_translator: AiChoice::of(ToolChoice::cli(Backend::Codex)),
         ..Settings::default()
     };
     let (shell, cx) = shell_window(&rig, settings, Arc::new(ViewTrace::off()));
@@ -1209,7 +1213,7 @@ fn an_ai_setting_draws_without_its_tool_and_shows_a_model_set_that_isn_t_listed(
             model.change(
                 |settings| {
                     settings.recap_summarizer = AiChoice {
-                        tool: ToolChoice::Only(Backend::Claude),
+                        tool: ToolChoice::cli(Backend::Claude),
                         model: Model::Named("from-the-file".to_owned()),
                     };
                 },

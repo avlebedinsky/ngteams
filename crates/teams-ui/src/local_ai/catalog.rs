@@ -25,7 +25,7 @@ use super::{Backend, Tools};
 /// How long a tool may take to list its models.
 const LISTING: Duration = Duration::from_secs(15);
 /// The most of a tool's listing read, in bytes.
-const MAX_LISTING: u64 = 4 << 20;
+pub(super) const MAX_LISTING: u64 = 4 << 20;
 
 /// A model a tool offers.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,6 +78,7 @@ impl Catalog {
         match backend {
             Backend::Claude => &self.claude,
             Backend::Codex => &self.codex,
+            Backend::Anthropic | Backend::OpenAi | Backend::Compatible => &[],
         }
     }
 
@@ -126,6 +127,7 @@ impl Catalog {
             match backend {
                 Backend::Claude => catalog.claude = list_claude(program, &claude_home()),
                 Backend::Codex => catalog.codex = list_codex(program, &codex_home()),
+                Backend::Anthropic | Backend::OpenAi | Backend::Compatible => {}
             }
         }
         catalog

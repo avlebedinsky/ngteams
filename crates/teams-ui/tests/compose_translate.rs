@@ -438,7 +438,7 @@ fn the_one_tool_chosen_missing_is_named_with_install_it() {
     rig.cx.update(|cx| {
         model.update(cx, |model, cx| {
             model.change(
-                |settings| settings.message_translator = AiChoice::of(ToolChoice::Only(Backend::Codex)),
+                |settings| settings.message_translator = AiChoice::of(ToolChoice::cli(Backend::Codex)),
                 cx,
             );
         });
@@ -498,7 +498,7 @@ fn the_tool_chosen_for_translating_messages_is_the_one_started() {
     rig.cx.update(|cx| {
         model.update(cx, |model, cx| {
             model.change(
-                |settings| settings.message_translator = AiChoice::of(ToolChoice::Only(Backend::Codex)),
+                |settings| settings.message_translator = AiChoice::of(ToolChoice::cli(Backend::Codex)),
                 cx,
             );
         });

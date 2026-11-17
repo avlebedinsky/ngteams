@@ -42,7 +42,7 @@ use teams_proto::transcript::Turn;
 
 pub use run::{Limits, Request, Stage, Summarizing, Update};
 
-use crate::local_ai::{AiChoice, Backend, Failure, Model, Tools, Work, cap};
+use crate::local_ai::{AiChoice, Backend, Failure, Model, Work, cap};
 
 /// The folder beside the settings file the summaries are kept in.
 pub const SUMMARY_DIR: &str = "recap-summaries";
@@ -710,7 +710,7 @@ impl RecapSummary {
 
     /// Makes a summary of `input` with the tool and model `choice` comes to (anew, when one was made).
     pub fn start(&mut self, choice: AiChoice, input: Input, cx: &mut Context<Self>) {
-        let (backend, program) = match Tools::of(cx).pick(choice.tool) {
+        let crate::local_ai::Picked { backend, target, .. } = match crate::local_ai::pick(&choice.tool, cx) {
             Ok(picked) => picked,
             Err(failure) => {
                 self.state = State::Failed(failure);
@@ -721,7 +721,7 @@ impl RecapSummary {
         let label = backend.label_of(Work::Summary, &choice.model);
         let job = Summarizing::start(Request {
             backend,
-            program,
+            target,
             model: choice.model,
             input,
             limits: self.limits,
