@@ -161,31 +161,53 @@ where
     /// A share switch kept while a renegotiation was open goes once that one settled, with a renegotiation of its own
     /// (nobody waits for its answer). Tried again after the next one settled when another is under way.
     pub(super) fn share_again(&mut self, call: CallId) {
-        let Some(live) = self
-            .live
-            .as_mut()
-            .filter(|live| live.call == call && live.share_waits.is_some())
-        else {
+        let Some(live) = self.live.as_mut().filter(|live| live.call == call) else {
+            return;
+        };
+        let Some(wait) = live.share_waits.take() else {
             return;
         };
         if let Err(error) = self.calls.begin_renegotiation(call) {
             log::info!("call {}: its share switch waits to go: {error}", call.get());
+            live.share_waits = Some(wait);
             return;
         }
         let (reply, _) = oneshot::channel();
-        match live.share_waits.take() {
-            Some(media::ShareWait::Start(screen)) => {
+        match wait {
+            media::ShareWait::Start(screen) => {
                 live.shares.turning = Some(true);
                 let step = media::share(live, screen, reply);
                 self.sdp_step(step);
             }
-            Some(media::ShareWait::Stop) => {
+            media::ShareWait::Stop => {
                 live.shares.turning = Some(false);
                 let step = media::stop_share(live, reply);
                 self.sdp_step(step);
             }
-            None => self.calls.give_up_renegotiation(call),
         }
+    }
+
+    /// A share switch that waited while the media of `call` was set up again ([`Self::share_waits`]), once the new
+    /// session answered: a screen goes out on the new session's sharing line as a group call's does, or with a
+    /// renegotiation of its own on a 1:1 session. A stop has nothing to do: the new session shares nothing.
+    pub(super) fn share_after_rebuild(&mut self, call: CallId, wait: media::ShareWait) {
+        let media::ShareWait::Start(screen) = wait else {
+            return;
+        };
+        let Some(live) = self.live.as_mut().filter(|live| live.call == call) else {
+            return;
+        };
+        if !live.is_group() {
+            live.share_waits = Some(media::ShareWait::Start(screen));
+            return self.share_again(call);
+        }
+        if let Err(error) = self.calls.describable(call) {
+            log::info!("call {}: its waiting screen goes no more: {error}", call.get());
+            return;
+        }
+        let (reply, _) = oneshot::channel();
+        let step = media::share_group(live, Some(screen), reply);
+        self.media_steps.spawn_blocking(step);
     }
 
     /// The account's screen shared (`on`) or no longer, with the offer that adds or rejects its line: the sharer's
@@ -219,6 +241,8 @@ where
                 Ok(())
             }
             Err(why) => {
+                // a switch that waited has nobody to tell why it failed: the log tells it
+                log::info!("call {}: its share switch {on} didn't go: {why}", call.get());
                 self.calls.give_up_renegotiation(call);
                 Err(CallActionError::Media(why))
             }

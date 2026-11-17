@@ -1171,6 +1171,8 @@ where
         let sdp = prepared.sdp.clone();
         let muted = self.live.as_ref().is_some_and(|live| live.session.is_muted());
         let camera_on = self.live.as_ref().is_some_and(|live| live.camera == Some(true));
+        // a share switch that waited for the old session's renegotiation goes on the new session
+        let share_waits = self.live.as_mut().and_then(|live| live.share_waits.take());
         // who is in the call stays as the roster told it: the roster tells only changes from here
         let participants = self
             .live
@@ -1199,6 +1201,9 @@ where
             let (reply, _) = oneshot::channel();
             self.media_steps
                 .spawn_blocking(media::group_camera(live, Arc::clone(&self.media.devices), true, reply));
+        }
+        if let Some(wait) = share_waits {
+            self.share_after_rebuild(call, wait);
         }
         self.show_participants(now);
     }
@@ -1479,7 +1484,7 @@ where
                     }
                     Err(why) => {
                         self.calls.give_up_renegotiation(call);
-                        // a camera switch kept while it was open goes now
+                        // a switch kept while it was open (the camera's, else a share's) goes now
                         self.offer_owed(call);
                         Err(CallActionError::Media(why))
                     }

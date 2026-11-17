@@ -9,8 +9,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::support::{A_TONE, Account, B_TONE, Lab, PEER_TONE, wait_until};
-use crate::video::{HeldCamera, renegotiated_one_at_a_time};
+use crate::support::{A_TONE, Account, B_TONE, HeldCamera, Lab, PEER_TONE, renegotiated_one_at_a_time, wait_until};
 use teams_core::{CallAction, CallId, CallStatus, End, Event};
 use teams_mock::{AB_CHAT, ABC_CHAT, LAB_A, LAB_B, LAB_C};
 

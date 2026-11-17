@@ -3,14 +3,13 @@
 //! answers; the peer's video shown once its renegotiation offers it; the camera turned off stops what is sent; the test
 //! call's camera as a 1:1 call's, the media controller's peer answering. A group call's video is `group`'s.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use crate::support::{A_TONE, B_TONE, Lab, wait_until};
+use crate::support::{A_TONE, B_TONE, HeldCamera, Lab, renegotiated_one_at_a_time, wait_until};
 use teams_core::{CallAction, CallStatus, End};
-use teams_media::devices::file::{AudioInput, FileDevices, Pacing, PatternCamera};
-use teams_media::devices::{AudioSink, AudioSource, DeviceError, Devices, VideoSource};
+use teams_media::devices::Devices;
 use teams_mock::{AB_CHAT, ECHO, LAB_A, LAB_B, LAB_C};
 use teams_proto::Mri;
 
@@ -204,78 +203,6 @@ async fn native_ends_turn_their_cameras_on_and_each_shows_the_other_s() {
             "{who}: {sent:?}"
         );
     }
-}
-
-/// File devices whose first camera opens only once the test lets it (`release`), told at `asked` when it is asked: a
-/// camera switch's renegotiation held open. Its screen is the file backend's.
-pub(crate) struct HeldCamera {
-    files: FileDevices,
-    asked: Mutex<Option<std::sync::mpsc::Sender<()>>>,
-    release: Mutex<std::sync::mpsc::Receiver<()>>,
-    /// How many times the camera was opened.
-    opened: AtomicUsize,
-}
-
-impl HeldCamera {
-    pub(crate) fn new() -> (Arc<Self>, std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
-        let (asked, told) = std::sync::mpsc::channel();
-        let (release, released) = std::sync::mpsc::channel();
-        let devices = Arc::new(Self {
-            files: FileDevices {
-                input: AudioInput::Tone(A_TONE),
-                recording: None,
-                camera: PatternCamera::default(),
-                pacing: Pacing::RealTime,
-            },
-            asked: Mutex::new(Some(asked)),
-            release: Mutex::new(released),
-            opened: AtomicUsize::new(0),
-        });
-        (devices, told, release)
-    }
-}
-
-impl Devices for HeldCamera {
-    fn microphone(&self) -> Result<Box<dyn AudioSource>, DeviceError> {
-        self.files.microphone()
-    }
-
-    fn speaker(&self) -> Result<Box<dyn AudioSink>, DeviceError> {
-        self.files.speaker()
-    }
-
-    fn camera(&self) -> Result<Box<dyn VideoSource>, DeviceError> {
-        self.opened.fetch_add(1, Ordering::SeqCst);
-        if let Some(asked) = self.asked.lock().unwrap().take() {
-            let _ = asked.send(());
-            let _ = self.release.lock().unwrap().recv();
-        }
-        self.files.camera()
-    }
-
-    fn screen(&self) -> Result<Box<dyn VideoSource>, DeviceError> {
-        self.files.screen()
-    }
-}
-
-/// The renegotiations `mri` sent on the mock's newest call, each answered (acknowledged) before the next went: never
-/// two offers at once.
-pub(crate) fn renegotiated_one_at_a_time(lab: &Lab, mri: &str) -> usize {
-    let sent = lab.sent_by(mri);
-    let mut open = false;
-    let mut count = 0;
-    for op in &sent {
-        match op.as_str() {
-            "renegotiate" => {
-                assert!(!open, "two offers at once: {sent:?}");
-                open = true;
-                count += 1;
-            }
-            "acknowledge" => open = false,
-            _ => {}
-        }
-    }
-    count
 }
 
 /// The camera turned off while its own camera-on renegotiation is still open (the camera opening): as in Teams the

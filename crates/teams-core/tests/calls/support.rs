@@ -8,8 +8,8 @@
 
 use std::future::{self, Future};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use teams_auth::secrets::Secret;
@@ -588,4 +588,76 @@ pub async fn wait_until(done: impl Fn() -> bool) {
         assert!(tokio::time::Instant::now() < deadline, "it didn't happen in time");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+/// File devices whose first camera opens only once the test lets it (`release`), told at `asked` when it is asked: a
+/// camera switch's renegotiation held open. Its screen is the file backend's.
+pub struct HeldCamera {
+    files: FileDevices,
+    asked: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+    /// How many times the camera was opened.
+    pub opened: AtomicUsize,
+}
+
+impl HeldCamera {
+    pub fn new() -> (Arc<Self>, std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (asked, told) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let devices = Arc::new(Self {
+            files: FileDevices {
+                input: AudioInput::Tone(A_TONE),
+                recording: None,
+                camera: PatternCamera::default(),
+                pacing: Pacing::RealTime,
+            },
+            asked: Mutex::new(Some(asked)),
+            release: Mutex::new(released),
+            opened: AtomicUsize::new(0),
+        });
+        (devices, told, release)
+    }
+}
+
+impl Devices for HeldCamera {
+    fn microphone(&self) -> Result<Box<dyn AudioSource>, DeviceError> {
+        self.files.microphone()
+    }
+
+    fn speaker(&self) -> Result<Box<dyn AudioSink>, DeviceError> {
+        self.files.speaker()
+    }
+
+    fn camera(&self) -> Result<Box<dyn VideoSource>, DeviceError> {
+        self.opened.fetch_add(1, Ordering::SeqCst);
+        if let Some(asked) = self.asked.lock().unwrap().take() {
+            let _ = asked.send(());
+            let _ = self.release.lock().unwrap().recv();
+        }
+        self.files.camera()
+    }
+
+    fn screen(&self) -> Result<Box<dyn VideoSource>, DeviceError> {
+        self.files.screen()
+    }
+}
+
+/// The renegotiations `mri` sent on the mock's newest call, each answered (acknowledged) before the next went: never
+/// two offers at once.
+pub fn renegotiated_one_at_a_time(lab: &Lab, mri: &str) -> usize {
+    let sent = lab.sent_by(mri);
+    let mut open = false;
+    let mut count = 0;
+    for op in &sent {
+        match op.as_str() {
+            "renegotiate" => {
+                assert!(!open, "two offers at once: {sent:?}");
+                open = true;
+                count += 1;
+            }
+            "acknowledge" => open = false,
+            _ => {}
+        }
+    }
+    count
 }
