@@ -530,20 +530,34 @@ fn kind_in(line: &serde_json::Value, id: &str) -> Option<String> {
 }
 
 /// `srv-a` sets Busy; `srv-b`'s header of their chat shows it busy. How long it took.
+///
+/// First `srv-a` sets Available and `srv-b`'s header shows it: on a server deployed beforehand `srv-a` can still be
+/// Busy from an earlier run (a status the user sets stays for days), and then setting Busy again changes nothing.
 fn presence(a: &mut Instance, b: &mut Instance, chat: &str) -> SandboxResult<Duration> {
+    a.ctl(Request::SetStatus {
+        status: StatusChoice::Available,
+    })?;
+    b.trace.until(WAIT, "srv-a available in srv-b's header", |seen| {
+        seen.iter()
+            .rev()
+            .find(|(_, line)| header_of(line, chat))
+            .is_some_and(|(_, line)| strings(line, "kinds").iter().any(|kind| kind == "available"))
+    })?;
     let mark = b.trace.mark();
     let asked = Instant::now();
     a.ctl(Request::SetStatus {
         status: StatusChoice::Busy,
     })?;
     let shown = b.trace.after(mark, WAIT, "srv-a busy in srv-b's header", |line| {
-        line["view"] == "header"
-            && line["change"] == "shown"
-            && line["conversation"] == chat
-            && strings(line, "kinds").iter().any(|kind| kind == "busy")
+        header_of(line, chat) && strings(line, "kinds").iter().any(|kind| kind == "busy")
     })?;
     b.shot("presence-busy")?;
     Ok(shown.saturating_duration_since(asked))
+}
+
+/// Whether `line` is the header of `chat` as shown.
+fn header_of(line: &serde_json::Value, chat: &str) -> bool {
+    line["view"] == "header" && line["change"] == "shown" && line["conversation"] == chat
 }
 
 // --- step 4 ---
