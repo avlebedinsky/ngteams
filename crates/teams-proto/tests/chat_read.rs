@@ -1627,6 +1627,47 @@ fn a_file_without_a_sharepoint_link_is_drawn_by_its_name_and_kept_as_unread() ->
 }
 
 #[test]
+fn a_file_without_a_sharepoint_link_keeps_no_preview() -> TestResult {
+    let mut entries = grid_entries()?;
+    let off = "https://files.example.test/made-up-photo.jpg";
+    for key in ["shareUrl", "fileUrl"] {
+        entries[0]["fileInfo"][key] = json!(off);
+    }
+    entries[0]["objectUrl"] = json!(off);
+    entries[0]["fileType"] = json!("jpg");
+    entries[0]["filePreview"] = json!({
+        "previewUrl": "https://us-api.asm.skype.com/v1/objects/0-made-up-photo-0001/views/imgo",
+        "previewWidth": 501,
+        "previewHeight": 500,
+    });
+    let read = shared_files(Some(&Value::Array(entries[..1].to_vec())));
+    let [file] = read.files.as_slice() else {
+        return Err("one file".into());
+    };
+    assert_eq!(file.kind(), FileKind::Image);
+    assert_eq!(
+        (file.open_link(), &file.preview),
+        (None, &None),
+        "never opened or fetched"
+    );
+    assert_eq!(read.unread, Some(json!([entries[0]])));
+    Ok(())
+}
+
+#[test]
+fn a_files_location_is_the_first_site_link_with_a_path() -> TestResult {
+    let mut entries = grid_entries()?;
+    entries[0]["fileInfo"]["siteUrl"] = json!("https://contoso-my.sharepoint.com/");
+    entries[0]["baseUrl"] = json!("https://contoso-my.sharepoint.com/personal/made_up_other_contoso_test/");
+    let read = shared_files(Some(&Value::Array(entries[..1].to_vec())));
+    let [file] = read.files.as_slice() else {
+        return Err("one file".into());
+    };
+    assert_eq!(file.location.as_deref(), Some("personal > made_up_other_contoso_test"));
+    Ok(())
+}
+
+#[test]
 fn a_card_beside_five_files_leaves_every_file_read() -> TestResult {
     let mut read = fixture("files-grid.json")?["read_back"].clone();
     read["properties"]["cards"] = json!("[{\"made-up\":\"card\"}]");

@@ -557,7 +557,7 @@ impl Message {
 
     /// `properties.files`, a JSON string of a list: received files ([`crate::chat::shared_files`]), each entry read
     /// only in the shape `docs/protocol/chat.md` records ("Files: received"); any other is kept as it came, never
-    /// guessed at (and nothing is fetched here).
+    /// guessed at, and a file with no link is read and also kept as it came (nothing is fetched here).
     #[must_use]
     pub fn files(&self) -> SharedFiles {
         self.files_in(&crate::Cloud::Microsoft)
@@ -1019,8 +1019,8 @@ fn number(value: &Value) -> Option<u64> {
 /// view shows that the message has content it can't show, never a guess at it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Unshown {
-    /// `properties.files` entries this build can't read ([`SharedFiles::unread`]: not a file's in the shape
-    /// `docs/protocol/chat.md` records), or a `files` that isn't a list.
+    /// `properties.files` entries this build can't read or open ([`SharedFiles::unread`]: not a file's in the shape
+    /// `docs/protocol/chat.md` records, or a file with no link), or a `files` of another shape.
     Files(Value),
     /// `properties.cards` with an entry, or in a form that isn't a list (only `"[]"` was captured; a card comes from a
     /// bot or a connector, none in the lab).

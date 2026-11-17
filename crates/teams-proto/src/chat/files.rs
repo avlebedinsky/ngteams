@@ -14,9 +14,10 @@
 //! - **Read strictly, shown in part**: an entry is a file when its `@type` is a file's (or it has none), it has a
 //!   name, and its `state` (when there is one) is `active`. Only an `https` URL on a SharePoint host
 //!   ([`is_file_link`]) is kept as its link. A file with no such link is drawn by its name and type, never opened or
-//!   fetched, and its entry is kept as unread too. Any other entry, and a `files` that isn't a list (or a JSON string of
-//!   one), is kept as it came ([`SharedFiles::unread`]): a view says the message has content it can't show, never a
-//!   guess at it, and still draws the files it read.
+//!   fetched (its preview is not kept), and its entry is kept as unread too. `files` is a list, a JSON string of one
+//!   (also encoded twice), or one entry alone. Any other entry, and a `files` of another shape, is kept as it came
+//!   ([`SharedFiles::unread`]): a view says the message has content it can't show, never a guess at it, and still
+//!   draws the files it read.
 //! - **Location**: the card's second line is the path of the file's site (`personal > <owner>`, [`location_of`]).
 //!   Teams' card for a received file shows it under the name.
 
@@ -131,10 +132,11 @@ impl SharedFile {
 /// What a message's `properties.files` holds.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SharedFiles {
-    /// The entries read, in their order.
+    /// The files read, in their order. A file with no link it is opened by is here and also in `unread`.
     pub files: Vec<SharedFile>,
-    /// What couldn't be read, kept as it came: the whole value when it isn't a list (or a JSON string of one), else a
-    /// list of the entries that weren't read. `None` when everything was read (or there was nothing).
+    /// What couldn't be read, kept as it came: the whole value when it is not a list, a JSON string of one (also
+    /// encoded twice) or one entry alone; else a list of the entries that weren't read, and of the files with no link.
+    /// `None` when everything was read (or there was nothing).
     pub unread: Option<Value>,
 }
 
@@ -315,7 +317,8 @@ fn read_entry(cloud: &crate::Cloud, entry: &Value) -> Entry {
         return Entry::Not;
     };
     if file.share_url.is_none() && file.object_url.is_none() {
-        Entry::Linkless(file)
+        // never fetched: its picture on AMS is not kept either
+        Entry::Linkless(SharedFile { preview: None, ..file })
     } else {
         Entry::File(file)
     }
@@ -390,13 +393,14 @@ fn file_of(cloud: &crate::Cloud, entry: &Map<String, Value>) -> Option<SharedFil
 const MAX_LOCATION: usize = 200;
 
 /// Where an entry's file is kept, as Teams names it on the card: the path of its site (`fileInfo.siteUrl`, else
-/// `baseUrl`, else `sharepointIds.siteUrl`), each part decoded, joined by ` > ` (`personal > <owner>`). An own
-/// server's site path starts with `sp`, which is not a part of it. `None` when no site link has a path.
+/// `baseUrl`, else `sharepointIds.siteUrl`; the first one with a path), each part decoded, joined by ` > `
+/// (`personal > <owner>`). An own server's site path starts with `sp`, which is not a part of it. `None` when no site
+/// link has a path.
 #[must_use]
 pub fn location_of(entry: &Map<String, Value>) -> Option<String> {
     let info = entry.get("fileInfo").and_then(Value::as_object);
     let ids = entry.get("sharepointIds").and_then(Value::as_object);
-    let site = [
+    [
         info.and_then(|info| info.get("siteUrl")),
         entry.get("baseUrl"),
         ids.and_then(|ids| ids.get("siteUrl")),
@@ -404,7 +408,12 @@ pub fn location_of(entry: &Map<String, Value>) -> Option<String> {
     .into_iter()
     .flatten()
     .filter_map(Value::as_str)
-    .find_map(|link| Url::parse(link.trim()).ok())?;
+    .find_map(site_path)
+}
+
+/// The path of one site link, as [`location_of`] names it; `None` when it has none.
+fn site_path(link: &str) -> Option<String> {
+    let site = Url::parse(link.trim()).ok()?;
     let mut parts: Vec<String> = site
         .path_segments()?
         .filter(|part| !part.is_empty())

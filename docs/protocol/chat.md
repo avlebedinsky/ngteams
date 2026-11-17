@@ -861,9 +861,11 @@ its shape (two files, made-up names and links). No lab capture holds a received 
 - **The web client draws** each file as a card under the text, side by side: a header with the file type's icon, the
   name cut with an ellipsis, Share and "More options", then a picture of the file filling the card (a video's frame).
   A click opens the file at its sharing link (Stream's player for a video).
-- **The native client** reads an entry only in this shape (`teams_proto::chat::shared_files`: the file's `@type`, a
-  name, `state` `active` when given, a SharePoint `https` sharing link or object URL); any other entry is kept as it
-  came and the message says it has content it can't show. It draws the card from the name, the extension and the
+- **The native client** reads an entry as a file in this shape (`teams_proto::chat::shared_files`: the file's
+  `@type`, another `…File` type or none, a name, `state` `active` when given). It keeps only a SharePoint `https`
+  sharing link or object URL. A file with no such link is drawn by its name with no link and no preview, and is also
+  kept as it came ("Several files in one message" below). Any other entry is kept as it came, and the message says it
+  has content it can't show. It draws the card from the name, the extension and the
   links, opens the sharing link in the browser on a click, offers "Open in browser", "Download" (the sharing link with
   `download=1`) and "Copy link", and reads a video's or an image's picture from Graph by the sharing link
   ([graph.md](graph.md#a-shared-files-thumbnail)). A video is played in its card (by GStreamer),
