@@ -2,7 +2,7 @@
 //! (`teams-core`, `teams-media` on the file device backend) call in a group chat, relayed through the loopback TURN
 //! server to the node, and each hears the others' tones mixed, never its own.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ngteams_server::mixer::MediaNode;
 use teams_core::engine::Action;
@@ -205,16 +205,36 @@ async fn one_client_hears_its_own_silence_and_gets_the_control_planes_ack() {
 /// Each engine's call id once all are connected: the first places the call, the others answer their rings.
 pub(super) async fn connect_all(chat: &str, engines: &mut [&mut Engine]) -> Vec<CallId> {
     let (first, rest) = engines.split_first_mut().unwrap();
+    let started = Instant::now();
     let call = first.call(CallAction::Call { chat: chat.to_owned() }).await;
-    first.status(call, &CallStatus::Connected).await;
-    let mut calls = vec![call];
-    for engine in rest.iter_mut() {
-        let incoming = engine.incoming().await;
-        let answered = engine.call(CallAction::Answer { call: incoming.call }).await;
-        engine.status(answered, &CallStatus::Connected).await;
-        calls.push(answered);
-    }
-    calls
+    // every ring runs out a fixed time after the start: each callee answers at once, not after the others connected
+    let caller = first.status(call, &CallStatus::Connected);
+    let callees = futures_util::future::join_all(rest.iter_mut().map(|engine| answer(engine, started)));
+    let ((), answered) = tokio::join!(caller, callees);
+    std::iter::once(call).chain(answered).collect()
+}
+
+/// `engine` answers its ring and waits until it is connected. An answer the engine refuses fails at once, with what
+/// the engine told since the ring and the time since the call's start: nothing it waits for makes a refused answer go.
+async fn answer(engine: &mut Engine, started: Instant) -> CallId {
+    let incoming = engine.incoming().await;
+    let action = CallAction::Answer { call: incoming.call };
+    let answered = match engine.handle.requests().call(action).await {
+        Ok(answered) => answered,
+        Err(error) => {
+            let mut told = Vec::new();
+            while let Ok(Some(event)) = tokio::time::timeout(Duration::from_secs(1), engine.handle.next_event()).await {
+                told.push(event);
+            }
+            panic!(
+                "{}: the answer {:?} after the start: {error}; told since the ring: {told:#?}",
+                engine.mri,
+                started.elapsed()
+            );
+        }
+    };
+    engine.status(answered, &CallStatus::Connected).await;
+    answered
 }
 
 /// Each engine hangs up its call, and waits for its end.
