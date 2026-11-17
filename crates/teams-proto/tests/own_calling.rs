@@ -164,7 +164,7 @@ fn own_channel_and_group_call_posts_keep_exact_conversation_links() {
     );
     let csa = json!({"teams": [{"channels": [{"id": THREAD, "activeMeetups": [{"status": "Active", "messageId": "1", "conversationUrl": controller, "organizerId": ORGANIZER, "tenantId": TENANT}]}]}]}).to_string();
     assert_eq!(
-        CsaTeams::meetup_for_cloud(&cloud, csa.as_bytes(), THREAD)
+        CsaTeams::meetup_of_post(&cloud, csa.as_bytes(), THREAD, None)
             .unwrap()
             .conversation
             .as_str(),
@@ -173,10 +173,11 @@ fn own_channel_and_group_call_posts_keep_exact_conversation_links() {
     let foreign = content.replace(ORIGIN, "https://other.example");
     assert!(running_call_in(&cloud, [("Event/Call", foreign.as_str())]).is_none());
     assert!(
-        CsaTeams::meetup_for_cloud(
+        CsaTeams::meetup_of_post(
             &cloud,
             csa.replace(ORIGIN, "https://teams.microsoft.com").as_bytes(),
-            THREAD
+            THREAD,
+            None
         )
         .is_none()
     );

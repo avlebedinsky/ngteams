@@ -302,17 +302,11 @@ impl CsaTeams {
     /// calling service, its meeting's post and its organizer and tenant named.
     #[must_use]
     pub fn meetup_in(body: &[u8], channel: &str) -> Option<ChannelMeetup> {
-        Self::meetup_for_cloud(&crate::Cloud::Microsoft, body, channel)
+        Self::meetup_of_post(&crate::Cloud::Microsoft, body, channel, None)
     }
 
-    /// Reads with the account's service origin.
-    #[must_use]
-    pub fn meetup_for_cloud(cloud: &crate::Cloud, body: &[u8], channel: &str) -> Option<ChannelMeetup> {
-        Self::meetup_of_post(cloud, body, channel, None)
-    }
-
-    /// The meeting of the post `post` in the channel `channel`, as [`Self::meetup_for_cloud`] reads it: only the active
-    /// meetup whose `messageId` is `post`. With no `post`, the first active meetup.
+    /// The meeting of the post `post` in the channel `channel`, as [`Self::meetup_in`] reads it, with the account's
+    /// service origin: only the active meetup whose `messageId` is `post`. With no `post`, the first active meetup.
     #[must_use]
     pub fn meetup_of_post(
         cloud: &crate::Cloud,

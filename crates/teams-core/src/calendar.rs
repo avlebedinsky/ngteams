@@ -739,8 +739,8 @@ pub(crate) fn settle_write(store: &mut Store, touched: &Touched, kept: Option<&S
 /// The meeting that runs in the channel `channel` now: as CSA's teams read names it under the channel's
 /// `activeMeetups` ([`CsaTeams::meetup_in`]), else as the channel's newest posts tell it ([`ChannelMeetup::of_posts`]:
 /// CSA names a channel's meeting only to some of the team, seen 2026-11-03, where the web client joins by the post's
-/// card). With a `post`, only the meeting of that post: the one its Join stands for. `Ok(None)` when neither names
-/// one; an error saying what couldn't be read when neither read.
+/// card). With a `post`, only the meeting of that post: the one its Join stands for, looked for in older posts too
+/// ([`meetup_posts`]). `Ok(None)` when neither names one; an error saying what couldn't be read when neither read.
 ///
 /// # Errors
 /// As above.
@@ -757,8 +757,8 @@ pub(crate) async fn find_channel_meetup<C: Credentials + 'static>(
         },
         Err(error) => Err(format!("the channel's meeting couldn't be read: {error}")),
     };
-    match ChatReads::new(client).messages(channel, POSTS_LOOKED_AT).await {
-        Ok(page) => Ok(ChannelMeetup::of_post_in(cloud, &page.messages, post)),
+    match meetup_posts(client, channel, post).await {
+        Ok(posts) => Ok(ChannelMeetup::of_post_in(cloud, &posts, post)),
         Err(error) => {
             log::info!("the channel's posts couldn't be read for its meeting: {error}");
             csa.map(|()| None)
@@ -766,8 +766,48 @@ pub(crate) async fn find_channel_meetup<C: Credentials + 'static>(
     }
 }
 
+/// The posts of the channel `channel` that tell the meeting running in it, newest first: its newest page
+/// ([`POSTS_LOOKED_AT`]). With a `post`, also the older pages (`backwardLink`) until a page holds the post, the history
+/// ends, or [`POST_PAGES`] pages are read: a meeting's post can be older than the newest page, and the newer pages
+/// tell whether its call ended. When an older page doesn't read, the pages read before it are the answer.
+///
+/// # Errors
+/// When the newest page couldn't be read.
+async fn meetup_posts<C: Credentials + 'static>(
+    client: &Client<HttpTransport<C>>,
+    channel: &str,
+    post: Option<&str>,
+) -> Result<Vec<teams_proto::chat::Message>, teams_proto::chat::ChatReadError> {
+    let reads = ChatReads::new(client);
+    let mut page = reads.messages(channel, POSTS_LOOKED_AT).await?;
+    let mut posts = Vec::new();
+    let mut pages = 1;
+    loop {
+        let found = post.is_none_or(|post| page.messages.iter().any(|message| message.id == post));
+        let older = page
+            .backward_link()
+            .filter(|_| !found && pages < POST_PAGES)
+            .map(str::to_owned);
+        posts.append(&mut page.messages);
+        let Some(older) = older else {
+            return Ok(posts);
+        };
+        page = match reads.messages_from(channel, &older).await {
+            Ok(page) => page,
+            Err(error) => {
+                log::info!("the channel's older posts couldn't be read for its meeting: {error}");
+                return Ok(posts);
+            }
+        };
+        pages += 1;
+    }
+}
+
 /// How many of a channel's newest posts are looked at for the meeting running in it.
 const POSTS_LOOKED_AT: u32 = 50;
+
+/// The most pages of a channel's posts read for the meeting of one post ([`meetup_posts`]).
+const POST_PAGES: usize = 20;
 
 /// How long a Meet now's post is waited for to title it, and how often the channel's posts are looked at meanwhile.
 const TITLE_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
@@ -1149,5 +1189,135 @@ mod tests {
             message: None,
         };
         assert_eq!(cancel.kind(), "cancellation");
+    }
+
+    /// No CSA base: the CSA read fails at once, so the channel's posts tell the meeting.
+    struct PostTokens;
+
+    impl Credentials for PostTokens {
+        fn bearer(
+            &self,
+            _: &str,
+        ) -> impl Future<Output = Result<teams_auth::secrets::Secret, teams_auth::token::TokenError>> + Send {
+            std::future::ready(Ok(teams_auth::secrets::Secret::new("synthetic-posts-token")))
+        }
+
+        fn bearer_rejected(
+            &self,
+            audience: &str,
+            _: &teams_auth::secrets::Secret,
+        ) -> impl Future<Output = Result<teams_auth::secrets::Secret, teams_auth::token::TokenError>> + Send {
+            self.bearer(audience)
+        }
+    }
+
+    const CHANNEL: &str = "19:channel0001@thread.tacv2";
+    const CHAT_BASE: &str = "https://teams.microsoft.com/api/chatsvc/amer";
+
+    /// A channel's call post (`Event/Call`) of the call `call`, as a Meet now posts it.
+    fn call_post(id: &str, kind: &str, call: &str) -> Value {
+        let meeting = serde_json::json!({"organizerId": "00000000-0000-4000-8000-00000000000a",
+            "tenantId": "00000000-0000-4000-8000-0000000000d0"})
+        .to_string();
+        serde_json::json!({
+            "id": id,
+            "messagetype": "Event/Call",
+            "conversationid": CHANNEL,
+            "content": format!("<callEventType>{kind}</callEventType><conversationUrl>https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/{call}?i=1</conversationUrl><callId>{call}</callId>"),
+            "properties": {"meeting": meeting},
+        })
+    }
+
+    /// The channel's posts on `server`: `newest` its newest page, whose `backwardLink` leads to `older`.
+    async fn channel_posts(server: &wiremock::MockServer, newest: Vec<Value>, older: Vec<Value>) {
+        use wiremock::matchers::{method, path, query_param};
+        let messages = format!("/api/chatsvc/amer/v1/users/ME/conversations/{CHANNEL}/messages");
+        wiremock::Mock::given(method("GET"))
+            .and(path(messages.as_str()))
+            .and(query_param("syncState", "made-up-older"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"messages": older, "_metadata": {}})),
+            )
+            .with_priority(1)
+            .mount(server)
+            .await;
+        let link = format!("{CHAT_BASE}/v1/users/ME/conversations/{CHANNEL}/messages?syncState=made-up-older");
+        wiremock::Mock::given(method("GET"))
+            .and(path(messages.as_str()))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"messages": newest, "_metadata": {"backwardLink": link}})),
+            )
+            .mount(server)
+            .await;
+    }
+
+    async fn meetup_of(server: &wiremock::MockServer, post: Option<&str>) -> Option<ChannelMeetup> {
+        let transport =
+            HttpTransport::with_mock_origin(Arc::new(PostTokens), CHAT_BASE, &server.uri()).expect("a transport");
+        find_channel_meetup(&Client::new(transport), CHANNEL, post)
+            .await
+            .expect("the posts read")
+    }
+
+    async fn older_reads(server: &wiremock::MockServer) -> usize {
+        let requests = server.received_requests().await.expect("requests kept");
+        requests
+            .iter()
+            .filter(|request| request.url.query().is_some_and(|query| query.contains("made-up-older")))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn the_meeting_of_a_post_older_than_the_newest_page_is_found_on_an_older_page() {
+        let server = wiremock::MockServer::start().await;
+        channel_posts(
+            &server,
+            vec![call_post("1700000000009", "callStarted", "call-2")],
+            vec![call_post("1700000000001", "callStarted", "call-1")],
+        )
+        .await;
+        let newest = meetup_of(&server, None).await.expect("the newest meeting");
+        assert_eq!(newest.message_id, "1700000000009");
+        assert_eq!(
+            older_reads(&server).await,
+            0,
+            "with no post, only the newest page is read"
+        );
+        let older = meetup_of(&server, Some("1700000000001"))
+            .await
+            .expect("the post's meeting");
+        assert_eq!(older.message_id, "1700000000001");
+        assert_eq!(
+            older.conversation.as_str(),
+            "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/call-1?i=1"
+        );
+        assert_eq!(older_reads(&server).await, 1);
+        assert_eq!(
+            meetup_of(&server, Some("1700000000005")).await,
+            None,
+            "a post no page holds"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_older_post_s_meeting_that_a_newer_page_ends_is_no_meeting() {
+        let server = wiremock::MockServer::start().await;
+        channel_posts(
+            &server,
+            vec![
+                call_post("1700000000009", "callStarted", "call-2"),
+                call_post("1700000000008", "callEnded", "call-1"),
+            ],
+            vec![call_post("1700000000001", "callStarted", "call-1")],
+        )
+        .await;
+        assert_eq!(meetup_of(&server, Some("1700000000001")).await, None);
+        assert_eq!(
+            older_reads(&server).await,
+            1,
+            "the post was looked for on the older page"
+        );
     }
 }
