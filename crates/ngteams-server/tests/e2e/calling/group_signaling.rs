@@ -281,30 +281,62 @@ async fn the_caller_is_accepted_at_once_and_a_callees_answer_puts_it_in_the_rost
     }
 }
 
+/// Ada's call goes on: no end comes to her client, and the call is still connected.
+async fn goes_on(group: &mut Group) {
+    let quiet = group.a.client.events_within(Duration::from_millis(500)).await;
+    assert!(
+        !quiet
+            .iter()
+            .any(|event| matches!(event, teams_call::CallEvent::Ended { .. })),
+        "{quiet:#?}"
+    );
+    assert_eq!(group.open_call().await.phase, "connected");
+}
+
+// the default ring time: under load, a decline can come after a short ring's end
 #[tokio::test(flavor = "multi_thread")]
-async fn a_decline_or_an_unanswered_ring_leaves_the_call_running_for_the_others() {
+async fn a_decline_takes_only_the_one_who_declined_out_and_the_call_goes_on() {
     for backend in backends() {
-        let mut group = Group::start_with(backend, |config| config.calling.ring_timeout = 3).await;
+        let mut group = Group::start(backend).await;
         group.a.client.call_group(&group.chat, &group.others);
         group.a.client.state(CallState::Connected).await;
         let call = group.open_call().await;
         let rings = group.b.client.incoming().await;
         group.c.client.incoming().await;
+        let rung = group.mixer.legs(&call.id).len();
         group.b.client.decline(rings.call);
         assert_eq!(group.b.client.ended().await, End::Declined);
-        let end = group.c.client.ring_ended().await;
-        assert_eq!(end.code, Some(487), "{end:?}");
-        // the ring ended for everyone who didn't answer: only Ada's leg is left, and her call goes on
         let legs = group.mixer.legs(&call.id);
-        assert_eq!(legs.len(), 1, "{legs:?}");
-        let quiet = group.a.client.events_within(Duration::from_millis(500)).await;
+        assert_eq!(legs.len(), rung - 1, "only Bert's leg went: {legs:?}");
+        goes_on(&mut group).await;
+        let quiet = group.c.client.events_within(Duration::from_millis(500)).await;
         assert!(
             !quiet
                 .iter()
-                .any(|event| matches!(event, teams_call::CallEvent::Ended { .. })),
-            "{quiet:#?}"
+                .any(|event| matches!(event, teams_call::CallEvent::RingEnded { .. })),
+            "Cora still rings: {quiet:#?}"
         );
-        assert_eq!(group.open_call().await.phase, "connected");
+        group.server.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unanswered_ring_ends_at_its_time_and_the_call_goes_on() {
+    for backend in backends() {
+        let mut group = Group::start_with(backend, |config| config.calling.ring_timeout = 3).await;
+        group.a.client.call_group(&group.chat, &group.others);
+        group.a.client.state(CallState::Connected).await;
+        let call = group.open_call().await;
+        group.b.client.incoming().await;
+        group.c.client.incoming().await;
+        for callee in [&mut group.b, &mut group.c] {
+            let end = callee.client.ring_ended().await;
+            assert_eq!(end.code, Some(487), "{end:?}");
+        }
+        // the ring ended for everyone who didn't answer: only Ada's leg is left, and her call goes on
+        let legs = group.mixer.legs(&call.id);
+        assert_eq!(legs.len(), 1, "{legs:?}");
+        goes_on(&mut group).await;
         group.server.stop().await;
     }
 }
