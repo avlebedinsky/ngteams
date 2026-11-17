@@ -392,7 +392,7 @@ fn signed_in(
     runtime: &tokio::runtime::Runtime,
 ) -> SandboxResult<(ngteams::accounts::Started<MemorySecretStore>, Setup)> {
     let paths = PersonalPaths::new(dir.join("config"), dir.join("data"));
-    let setup = Setup::new(paths)?.with_own_servers(true);
+    let setup = Setup::new(paths)?;
     let store = MemorySecretStore::new();
     let account = runtime.block_on(ngteams::signin::add_own(
         &setup,
