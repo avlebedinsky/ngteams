@@ -33,9 +33,7 @@ const EXTENSION_APPS: &str = include_str!("../../../tests/fixtures/bots/extensio
 /// [`crate::ChatServiceMock::install_app`].
 #[must_use]
 pub fn extension_apps() -> Vec<(Value, String)> {
-    let Ok(fixture) = serde_json::from_str::<Value>(EXTENSION_APPS) else {
-        return Vec::new();
-    };
+    let fixture = extension_apps_answer();
     let value = &fixture["value"];
     value["userEntitlements"]
         .as_object()
@@ -51,10 +49,26 @@ pub fn extension_apps() -> Vec<(Value, String)> {
         .collect()
 }
 
-/// The answer of `tests/fixtures/bots/extension-apps.json` as a whole, as the middle tier gives the account's apps.
+/// The answer of `tests/fixtures/bots/extension-apps.json` as a whole, its placeholders filled with the mock's made-up
+/// ids (the account's, `…e00N` for each app and `…eb0N` for its bot), as the middle tier gives the account's apps.
 #[must_use]
 pub fn extension_apps_answer() -> Value {
-    serde_json::from_str(EXTENSION_APPS).unwrap_or(Value::Null)
+    let filled = [
+        ("<guid:a>", "00000000-0000-4000-8000-00000000000a"),
+        ("<guid:app-finder>", "00000000-0000-4000-8000-00000000e001"),
+        ("<guid:app-praise>", "00000000-0000-4000-8000-00000000e002"),
+        ("<guid:app-tasks>", "00000000-0000-4000-8000-00000000e003"),
+        ("<guid:app-tickets>", "00000000-0000-4000-8000-00000000e004"),
+        ("<guid:bot-finder>", "00000000-0000-4000-8000-00000000eb01"),
+        ("<guid:bot-praise>", "00000000-0000-4000-8000-00000000eb02"),
+        ("<guid:bot-tasks>", "00000000-0000-4000-8000-00000000eb03"),
+        ("<guid:bot-tickets>", "00000000-0000-4000-8000-00000000eb04"),
+    ]
+    .iter()
+    .fold(EXTENSION_APPS.to_owned(), |text, (placeholder, id)| {
+        text.replace(placeholder, id)
+    });
+    serde_json::from_str(&filled).unwrap_or(Value::Null)
 }
 
 /// How a scripted bot answers one invoke name.

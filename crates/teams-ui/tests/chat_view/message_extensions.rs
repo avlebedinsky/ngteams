@@ -15,14 +15,14 @@ use teams_ui::chat_view::{ChatView, ChatViewEvent};
 use super::common::{LAB_B, Rig};
 use super::{AB, NOON, chat_window, draw, message, rig_with, trace};
 
-const APPS: &[u8] = include_bytes!("../../../../tests/fixtures/bots/extension-apps.json");
 const FINDER: &str = "00000000-0000-4000-8000-00000000e001";
 const ID: &str = "701";
 
 fn apps_rig(flag: bool) -> Rig {
     let rig = rig_with(vec![message(ID, LAB_B, "<p>A made-up order</p>", NOON)]);
     rig.cx.update(|cx| cx.set_global(BotsFlag(flag)));
-    *rig.core.extension_apps.lock().unwrap() = teams_proto::extension_apps(APPS);
+    *rig.core.extension_apps.lock().unwrap() =
+        teams_proto::extension_apps(teams_mock::extension_apps_answer().to_string().as_bytes());
     rig
 }
 

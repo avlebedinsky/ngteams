@@ -51,7 +51,6 @@ const BOT: &str = "28:00000000-0000-4000-8000-00000000eb01";
 const FINDER: &str = "00000000-0000-4000-8000-00000000e001";
 const PRAISE: &str = "00000000-0000-4000-8000-00000000e002";
 const ID: &str = "1";
-const APPS: &[u8] = include_bytes!("../../../../../tests/fixtures/bots/extension-apps.json");
 const PAGES: [&str; 8] = [
     "flyout",
     "search",
@@ -296,7 +295,8 @@ fn child(mode: &str) -> SandboxResult {
         *fake
             .extension_apps
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = teams_proto::extension_apps(APPS);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            teams_proto::extension_apps(teams_mock::extension_apps_answer().to_string().as_bytes());
         let core: Arc<dyn Core> = Arc::clone(&fake) as Arc<dyn Core>;
         let settings = cx.new(|_| SettingsModel::in_memory(Settings::default()));
         let models = Models::new(cx);
