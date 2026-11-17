@@ -463,8 +463,9 @@ async fn connect(node_a: &TestServer, node_b: &TestServer, dir: &Path) -> Talk {
     b.status(answered, &CallStatus::Connected).await;
     a.status(call, &CallStatus::Connected).await;
     let shows = |who: String| move |view: &CallView| view.participants.iter().any(|party| party.mri == who);
-    a.view(call, shows(b.mri.clone())).await;
-    b.view(answered, shows(a.mri.clone())).await;
+    // the roster can come before `Connected`, whose wait passes over it: the last view counts too
+    a.shown(call, shows(b.mri.clone())).await;
+    b.shown(answered, shows(a.mri.clone())).await;
     Talk {
         a,
         b,
