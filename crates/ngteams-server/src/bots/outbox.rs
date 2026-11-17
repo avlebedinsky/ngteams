@@ -420,17 +420,14 @@ mod tests {
                 ("live".to_owned(), "second".to_owned(), 102)
             ]
         );
-        // the pause ends: the paused bot's rows come out, oldest first; the live bot's 101 waits behind its 100
+        // the pause ends: the paused bot's rows come out, oldest first; the live bot's 101 waits behind its 100,
+        // which node "a" still holds (the window of 30 rows has all rows, so only the filter keeps 101 out)
         pause(&db, "paused", 0).await?;
-        let second = claimed(&db, "b", 3).await?;
-        assert_eq!(
-            second,
-            [
-                ("paused".to_owned(), "c0".to_owned(), 0),
-                ("paused".to_owned(), "c1".to_owned(), 1),
-                ("paused".to_owned(), "c2".to_owned(), 2)
-            ]
-        );
+        let second = claimed(&db, "b", 30).await?;
+        let paused: Vec<_> = (0..20)
+            .map(|seq| ("paused".to_owned(), format!("c{seq}"), seq))
+            .collect();
+        assert_eq!(second, paused);
         Ok(())
     }
 
