@@ -755,7 +755,7 @@ fn one_to_one_call(a: &mut Instance, b: &mut Instance, chat: &str) -> SandboxRes
     b.ctl(Request::Answer)?;
     for instance in [&mut *a, &mut *b] {
         instance.wait_call("connected", |row| row.state == "connected")?;
-        camera_on_past_the_known_race(instance)?;
+        instance.ctl(Request::Camera { op: Toggle::On })?;
     }
     for (instance, mark) in [(&mut *a, a_mark), (&mut *b, b_mark)] {
         instance
@@ -776,25 +776,6 @@ fn one_to_one_call(a: &mut Instance, b: &mut Instance, chat: &str) -> SandboxRes
     b.shot("call-1-1-dark")?;
     b.theme(teams_ui::theme::LIGHT_KEY)?;
     hang_up(&mut [a, b])
-}
-
-/// Turns the camera on in a 1:1 call. A camera that the engine refuses while the other side's renegotiation is open
-/// is a known client race (the lead's task "Camera turns on while the far end renegotiates (1:1)"): it is said, and
-/// the camera is asked again, as a user clicks again.
-fn camera_on_past_the_known_race(instance: &mut Instance) -> SandboxResult {
-    for _ in 0..10 {
-        match instance.ctl(Request::Camera { op: Toggle::On }) {
-            Err(error) if error.to_string().contains("the call can't do that now") => {
-                say(&format!(
-                    "{}: KNOWN RACE: the camera was refused ({error}); asked again",
-                    instance.name
-                ));
-                thread::sleep(Duration::from_millis(500));
-            }
-            other => return other.map(|_| ()),
-        }
-    }
-    Err(format!("{}: the camera was refused ten times", instance.name).into())
 }
 
 /// Everyone leaves; no call is up anywhere.
