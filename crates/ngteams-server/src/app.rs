@@ -217,6 +217,7 @@ pub fn router(app: Arc<App>) -> Router {
         .layer(TraceLayer::new_for_http())
         // after the trace: a webhook's link carries its secret in the query, which that trace would log
         .merge(crate::workflows::hook::router(&app.config))
+        .layer(axum::middleware::from_fn(crate::serve::drain_unread_body))
         .with_state(app)
 }
 

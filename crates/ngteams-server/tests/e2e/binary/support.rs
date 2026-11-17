@@ -77,6 +77,7 @@ impl Deployment {
             process: None,
             http: http_client(),
             role: None,
+            log: None,
             _port: own,
         }
     }
@@ -94,6 +95,8 @@ pub struct Node {
     /// What `serve --role` runs, and for `media` (no public listener) the internal API's address it is ready at; the
     /// default role when unset.
     pub role: Option<(&'static str, Option<std::net::SocketAddr>)>,
+    /// Where `serve` writes its log: the test's output shows it when the test fails.
+    log: Option<PathBuf>,
     _port: Option<Port>,
 }
 
@@ -148,8 +151,16 @@ impl Node {
         assert!(!added.contains(password));
     }
 
+    /// Starts it with its log (standard error) added to the file beside its configuration.
     pub async fn start(&mut self) {
-        self.start_with_log(Stdio::null()).await;
+        let log = self.config.with_extension("log");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+            .unwrap();
+        self.log = Some(log);
+        self.start_with_log(file.into()).await;
     }
 
     /// Starts it with its log (standard error) written to `log`; a start that fails shows that log.
@@ -166,6 +177,7 @@ impl Node {
                 .unwrap_or("panic");
             panic!("{why}; its log:\n{}", std::fs::read_to_string(log).unwrap_or_default());
         }
+        self.log = Some(log.to_owned());
     }
 
     async fn start_with_log(&mut self, log: Stdio) {
@@ -299,11 +311,25 @@ impl Node {
     }
 }
 
+/// The most of a node's log a failed test shows: its end.
+const LOG_SHOWN: usize = 64 * 1024;
+
 impl Drop for Node {
     fn drop(&mut self) {
         if let Some(mut process) = self.process.take() {
             let _ = process.kill();
             let _ = process.wait();
+        }
+        if std::thread::panicking()
+            && let Some(log) = &self.log
+            && let Ok(text) = std::fs::read(log)
+        {
+            let end = String::from_utf8_lossy(&text[text.len().saturating_sub(LOG_SHOWN)..]).into_owned();
+            eprintln!(
+                "---- the serve log of {} ({}) ----\n{end}",
+                self.endpoint,
+                log.display()
+            );
         }
     }
 }

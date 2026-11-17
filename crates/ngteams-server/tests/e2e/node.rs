@@ -5,7 +5,7 @@ use ngteams_server::app::App;
 use ngteams_server::config::{Config, ConfigError, TlsConfig};
 use ngteams_server::serve::Listener;
 
-use crate::support::{TestServer, backends};
+use crate::support::{Backend, TestServer, backends};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_node_answers_live_and_ready_while_its_database_answers() {
@@ -533,4 +533,64 @@ fn debug_omits_config_credentials_and_minted_tokens() {
     let debug = format!("{minted:?}");
     assert!(!debug.contains("synthetic-minted-token-secret"));
     assert!(debug.contains("42"));
+}
+
+/// The head of the answer to `request` (sent with `body`, then the connection left open), as the server writes it.
+async fn answer_head(server: &TestServer, request: &str, body: &[u8]) -> String {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let address = server.origin.trim_start_matches("http://");
+    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    stream.write_all(request.as_bytes()).await.unwrap();
+    stream.write_all(body).await.unwrap();
+    let mut head = Vec::new();
+    let mut byte = [0; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        let read = tokio::time::timeout(std::time::Duration::from_secs(20), stream.read(&mut byte))
+            .await
+            .expect("the head came in time")
+            .unwrap();
+        assert_eq!(
+            read,
+            1,
+            "the connection ended before the head: {}",
+            String::from_utf8_lossy(&head)
+        );
+        head.push(byte[0]);
+    }
+    String::from_utf8(head).unwrap().to_ascii_lowercase()
+}
+
+/// A body refused before it was read to its end is read and dropped before the answer, so the connection carries the
+/// next request. A body too big for that closes the connection, and the answer says so.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_body_the_answer_left_unread_is_read_to_its_end_or_closes_the_connection() {
+    let server = TestServer::start(Backend::Sqlite).await;
+    let too_big = "POST /oauth2/v2.0/token HTTP/1.1\r\nhost: x\r\ncontent-type: application/x-www-form-urlencoded\r\n\
+                   content-length: 100000000\r\n\r\n";
+    let refused = answer_head(&server, too_big, &vec![b'a'; 256 * 1024]).await;
+    assert!(refused.starts_with("http/1.1 413"), "{refused}");
+    assert!(refused.contains("\r\nconnection: close\r\n"), "{refused}");
+    let small = "POST /oauth2/v2.0/token HTTP/1.1\r\nhost: x\r\ncontent-type: application/x-www-form-urlencoded\r\n\
+                 content-length: 4\r\n\r\n";
+    let read = answer_head(&server, small, b"a=bc").await;
+    assert!(
+        read.starts_with("http/1.1 4") && !read.starts_with("http/1.1 413"),
+        "{read}"
+    );
+    assert!(!read.contains("connection: close"), "{read}");
+    // a client that sends its next request at once on the same connection never loses it
+    let http = reqwest::Client::new();
+    for _ in 0..50 {
+        let refused = http
+            .post(server.token_endpoint())
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(vec![b'a'; 2 * 1024 * 1024])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), 413);
+        let live = http.get(server.url("/health/live")).send().await.unwrap();
+        assert_eq!(live.status(), 204);
+    }
+    server.stop().await;
 }
