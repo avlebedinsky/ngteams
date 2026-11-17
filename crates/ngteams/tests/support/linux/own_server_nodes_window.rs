@@ -29,10 +29,10 @@
 //! `srv-a` and `srv-b` (made beforehand on that server with `user add` and the tests' password) run steps 1 to 4 on
 //! the server at that origin, such as a Compose deployment behind its reverse proxy.
 //!
-//! Screenshots under `target/ui-shots/own-server-nodes-*.png`. Without weston 15, niri or `dbus-daemon`, the server
-//! binary (`NGTEAMS_QA_SERVER_BIN`, else beside the test's target directory), Postgres and Redis
-//! (`NGTEAMS_SERVER_PG_URL`, `NGTEAMS_SERVER_REDIS_URL`) or coturn (`NGTS_TEST_COTURN`, `NGTS_TEST_COTURN_SECRET`) it
-//! says so and passes, unless `GPUI_SMOKE_REQUIRE=1`.
+//! Screenshots under `target/ui-shots/own-server-nodes-*.png`. Without a coturn (`NGTS_TEST_COTURN`,
+//! `NGTS_TEST_COTURN_SECRET`) it says so and passes, as the other call tests do. Without weston 15, niri or
+//! `dbus-daemon`, the server binary (`NGTEAMS_QA_SERVER_BIN`, else beside the test's target directory), Postgres or
+//! Redis (`NGTEAMS_SERVER_PG_URL`, `NGTEAMS_SERVER_REDIS_URL`) it says so and passes, unless `GPUI_SMOKE_REQUIRE=1`.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -57,7 +57,7 @@ mod own_server_nodes;
 mod support;
 
 use instance::{Instance, WAIT, Who, ensure, say, strings};
-use own_server_nodes::{Needs, Nodes};
+use own_server_nodes::{COTURN_ENV, COTURN_SECRET_ENV, Needs, Nodes};
 use ui_sandbox::SandboxResult;
 
 /// The V key's code (`KEY_V`), for Ctrl+V.
@@ -128,6 +128,11 @@ fn parent() -> SandboxResult {
     if let Ok(origin) = std::env::var(DEPLOYED_ORIGIN_ENV) {
         let ca_file = std::env::var(DEPLOYED_CA_ENV).map_err(|_| format!("{DEPLOYED_CA_ENV} isn't set"))?;
         return deployed(&origin, Path::new(&ca_file));
+    }
+    // CI gives Postgres and Redis but no coturn: a missing coturn is a skip, also under `GPUI_SMOKE_REQUIRE=1`.
+    if std::env::var(COTURN_ENV).is_err() || std::env::var(COTURN_SECRET_ENV).is_err() {
+        say(&format!("skipped: no coturn named ({COTURN_ENV}, {COTURN_SECRET_ENV})"));
+        return Ok(());
     }
     let needs = match Needs::from_env() {
         Ok(needs) => needs,

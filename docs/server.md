@@ -1685,4 +1685,5 @@ NGTS_TEST_COTURN_SECRET=… cargo test -p ngteams-server --test e2e -- binary::c
 `srv-*` app in a UI sandbox of its own, signed in from the first sign-in screen ("Own server", typed). The nodes share
 one `public_origin`, so a front on its port passes each TLS connection through to the node the app is pinned to, and
 to the other node once that one is down. It needs Postgres, Redis and coturn (S3 is optional, as above) and the
-server binary (`cargo build -p ngteams-server`); screenshots go to `target/ui-shots/own-server-nodes-*.png`.
+server binary (`cargo build -p ngteams-server`); screenshots go to `target/ui-shots/own-server-nodes-*.png`. Without
+coturn it says so and passes, also under `GPUI_SMOKE_REQUIRE=1`, as the other call tests do.
