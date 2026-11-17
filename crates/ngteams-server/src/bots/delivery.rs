@@ -5,6 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
 
 use super::outbox::{self, Delivery, Outcome};
 use crate::app::App;
@@ -24,8 +26,40 @@ pub(crate) async fn wake(app: &App) {
     }
 }
 
-/// Sends what the outbox holds, until the task is dropped.
-pub async fn keep_delivering(app: Arc<App>) {
+/// The sender of a node: started with its API, stopped before the node exits.
+pub struct Senders {
+    stop: watch::Sender<bool>,
+    task: JoinHandle<()>,
+}
+
+impl Senders {
+    /// Starts to send what the outbox holds.
+    #[must_use]
+    pub fn start(app: Arc<App>) -> Self {
+        let (stop, stopping) = watch::channel(false);
+        let task = tokio::spawn(keep_delivering(app, stopping));
+        Self { stop, task }
+    }
+
+    /// A planned stop: the sender takes no more rows, and the sends under way end and their results are recorded.
+    /// It waits for them at most `within` (each send ends in `bots.send_timeout`). After that it drops them, and
+    /// their leases run out: another node sends them again, as after a crash.
+    pub async fn stop(mut self, within: Duration) {
+        let _ = self.stop.send(true);
+        if tokio::time::timeout(within, &mut self.task).await.is_err() {
+            tracing::warn!("bot deliveries under way didn't end in time; another node sends them again");
+        }
+    }
+}
+
+impl Drop for Senders {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// Sends what the outbox holds until `stopping` turns true (or its sender goes); a round under way ends first.
+async fn keep_delivering(app: Arc<App>, mut stopping: watch::Receiver<bool>) {
     let node = uuid::Uuid::new_v4().simple().to_string();
     let mut wake = None;
     loop {
@@ -33,7 +67,10 @@ pub async fn keep_delivering(app: Arc<App>) {
             // a closed fan-out closes every subscription: subscribe again, and poll meanwhile
             wake = app.fanout.subscribe(WAKE).await.ok();
         }
-        while round(&app, &node).await > 0 {}
+        while !*stopping.borrow() && round(&app, &node).await > 0 {}
+        if *stopping.borrow() {
+            return;
+        }
         let woken = async {
             match wake.as_mut() {
                 Some(subscription) => !matches!(subscription.recv().await, Err(crate::fanout::Missed::Closed)),
@@ -47,6 +84,7 @@ pub async fn keep_delivering(app: Arc<App>) {
                 }
             }
             () = tokio::time::sleep(POLL) => {}
+            _ = stopping.wait_for(|stopped| *stopped) => return,
         }
     }
 }

@@ -95,7 +95,7 @@ pub struct TestServer {
     shutdown: Option<oneshot::Sender<()>>,
     task: Option<tokio::task::JoinHandle<()>>,
     sweeper: tokio::task::JoinHandle<()>,
-    delivering: tokio::task::JoinHandle<()>,
+    _senders: ngteams_server::bots::Senders,
     _dir: TempDir,
 }
 
@@ -136,14 +136,14 @@ impl TestServer {
             listener.serve(router, None, closing).await.unwrap();
         });
         let sweeper = tokio::spawn(ngteams_server::calling::keep_sweeping(Arc::clone(&app)));
-        let delivering = tokio::spawn(ngteams_server::bots::keep_delivering(Arc::clone(&app)));
+        let senders = ngteams_server::bots::Senders::start(Arc::clone(&app));
         Self {
             origin,
             app,
             shutdown: Some(shutdown),
             task: Some(task),
             sweeper,
-            delivering,
+            _senders: senders,
             _dir: dir,
         }
     }
@@ -231,7 +231,6 @@ impl TestServer {
 impl Drop for TestServer {
     fn drop(&mut self) {
         self.sweeper.abort();
-        self.delivering.abort();
         if let Some(task) = self.task.take() {
             task.abort();
         }

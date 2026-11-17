@@ -356,8 +356,7 @@ async fn serve_api(
     crate::admin::setup::announce(app).await;
     tracing::info!(address = %listener.local_addr()?, origin = %app.config.origin(), tls = tls.is_some(), "serving");
     let sweeper = tokio::spawn(crate::calling::keep_sweeping(std::sync::Arc::clone(app)));
-    let delivering =
-        (app.config.apps.enabled).then(|| tokio::spawn(crate::bots::keep_delivering(std::sync::Arc::clone(app))));
+    let senders = (app.config.apps.enabled).then(|| crate::bots::Senders::start(std::sync::Arc::clone(app)));
     let db = app.db.clone();
     let indexing = tokio::spawn(async move {
         match crate::search::backfill(&db).await {
@@ -372,8 +371,11 @@ async fn serve_api(
         .await;
     sweeper.abort();
     indexing.abort();
-    if let Some(delivering) = delivering {
-        delivering.abort();
+    if let Some(senders) = senders {
+        // a planned stop sends each activity once: the sends under way end and are recorded while the rows' leases
+        // still hold them
+        let lease = std::time::Duration::from_secs(app.config.bots.delivery_lease);
+        senders.stop(lease).await;
     }
     Ok(served?)
 }

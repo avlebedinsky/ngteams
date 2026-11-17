@@ -2,7 +2,7 @@
 //! (`crate::apps`).
 //!
 //! - **To a bot.** A chat event a bot should get is a row of the outbox ([`outbox`]), written in the chat write's own
-//!   transaction; every API node runs [`keep_delivering`], which takes rows under a lease and posts each as an
+//!   transaction; every API node runs its [`Senders`], which takes rows under a lease and posts each as an
 //!   activity to the bot's endpoint through the address guard ([`crate::outbound`]). A signed bot's activity carries
 //!   the server's RS256 token (`crate::apps::keys`); an unsigned bot's carries none, and its own `serviceUrl` holds
 //!   its credential instead. No account's token ever enters an activity.
@@ -32,7 +32,7 @@ use crate::apps::schema::{app_users, apps, bots};
 use crate::db::schema::users;
 use crate::db::{Db, DbError, with_conn};
 
-pub use delivery::keep_delivering;
+pub use delivery::Senders;
 pub(crate) use delivery::wake;
 
 /// A registered bot, as delivery and the connector need it.
