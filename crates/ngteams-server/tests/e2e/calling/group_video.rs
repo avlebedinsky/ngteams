@@ -3,7 +3,7 @@
 //! (source requests), and the node forwards each camera onto the lines that asked for it; a shared screen comes on
 //! the others' sharing line. Each camera's picture has a shape of its own, so a line shows whose video it carries.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use teams_core::{CallAction, CallId, CallParticipant, CallStatus, CallView};
 use teams_media::devices::file::PatternCamera;
@@ -32,6 +32,10 @@ const SQUARE: PatternCamera = PatternCamera {
 
 /// How long a line shows no frame before its video counts as stopped: many frame times at the cameras' 15 fps.
 const QUIET: Duration = Duration::from_secs(1);
+
+/// How long after the roster told a stop the frames sent before it can still come: the media path's delay and jitter
+/// buffer. Under load they came up to 693 ms late, so this has room, but a video that goes on does not fit in it.
+const SLACK: Duration = Duration::from_secs(3);
 
 /// A picture's shape: its width over its height.
 fn shape(width: u32, height: u32) -> f32 {
@@ -71,15 +75,21 @@ async fn sees(engine: &mut Engine, call: CallId, others: &[(&str, PatternCamera)
     lines
 }
 
-/// Waits until `engine`'s line `line` stops showing `what`: no frame for [`QUIET`], and then at most 2 frames more
-/// in a second. The roster tells a stop on the signaling path, and the frames sent before the stop come on the media
-/// path. Teams orders nothing between the two, so frames can still come after the roster told the stop.
-async fn stopped(engine: &Engine, line: usize, what: &str) {
+/// Waits until `engine`'s line `line` stops showing `what`, which the roster told at `told`: no frame for [`QUIET`]
+/// by [`SLACK`] after `told`, and then at most 2 frames more in a second. The roster tells a stop on the signaling
+/// path, and the frames sent before the stop come on the media path. Teams orders nothing between the two, so frames
+/// can still come after the roster told the stop, but not for longer than [`SLACK`].
+async fn stopped(engine: &Engine, line: usize, what: &str, told: Instant) {
     let label = format!("{}: {what} stopped on line {line}", engine.mri);
-    wait_until(&label, || {
-        engine.seen(line).last.is_none_or(|last| last.elapsed() >= QUIET)
-    })
-    .await;
+    let deadline = told + SLACK + QUIET;
+    while engine.seen(line).last.is_some_and(|last| last.elapsed() < QUIET) {
+        assert!(
+            Instant::now() < deadline,
+            "{label}: frames still came {SLACK:?} after the roster told the stop: {:?}",
+            engine.seen(line)
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     let shown = engine.seen(line).frames;
     tokio::time::sleep(Duration::from_secs(1)).await;
     let seen = engine.seen(line);
@@ -112,13 +122,15 @@ async fn three_clients_see_each_others_video_on_the_lines_they_asked_for() {
         ];
         // a's camera off: the others are told, and its line shows nothing more
         camera(&a, calls[0], false).await;
+        let mut told = Vec::new();
         for (engine, call) in [(&mut b, calls[1]), (&mut c, calls[2])] {
             engine
                 .view(call, |view| party(view, &a_mri).is_some_and(|party| !party.video_on))
                 .await;
+            told.push(Instant::now());
         }
-        for (engine, line) in [(&b, lines[0]), (&c, lines[1])] {
-            stopped(engine, line, "a's camera").await;
+        for ((engine, line), told) in [(&b, lines[0]), (&c, lines[1])].into_iter().zip(told) {
+            stopped(engine, line, "a's camera", told).await;
         }
         hang_up_all(&mut [&mut a, &mut b, &mut c], &calls).await;
         for engine in [a, b, c] {
@@ -192,13 +204,15 @@ async fn a_shared_screen_reaches_the_others_until_it_stops() {
             on: false,
         })
         .await;
+        let mut told = Vec::new();
         for (engine, call) in [(&mut a, calls[0]), (&mut c, calls[2])] {
             engine
                 .view(call, |view| party(view, &sharer).is_some_and(|party| !party.sharing))
                 .await;
+            told.push(Instant::now());
         }
-        for engine in [&a, &c] {
-            stopped(engine, SHARING_LINE, "b's screen").await;
+        for (engine, told) in [&a, &c].into_iter().zip(told) {
+            stopped(engine, SHARING_LINE, "b's screen", told).await;
         }
         hang_up_all(&mut [&mut a, &mut b, &mut c], &calls).await;
         for engine in [a, b, c] {

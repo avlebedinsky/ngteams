@@ -303,11 +303,15 @@ async fn a_decline_takes_only_the_one_who_declined_out_and_the_call_goes_on() {
         let call = group.open_call().await;
         let rings = group.b.client.incoming().await;
         group.c.client.incoming().await;
-        let rung = group.mixer.legs(&call.id).len();
+        let offer = rings.offer.clone().unwrap().blob;
+        let rung = group.mixer.legs(&call.id);
+        let bert = rung.keys().find(|leg| offer == offer_to(leg)).cloned();
+        let bert = bert.expect("Bert rings with the node's offer to his leg");
         group.b.client.decline(rings.call);
         assert_eq!(group.b.client.ended().await, End::Declined);
         let legs = group.mixer.legs(&call.id);
-        assert_eq!(legs.len(), rung - 1, "only Bert's leg went: {legs:?}");
+        assert!(!legs.contains_key(&bert), "Bert's leg went: {legs:?}");
+        assert_eq!(legs.len(), rung.len() - 1, "only Bert's leg went: {legs:?}");
         goes_on(&mut group).await;
         let quiet = group.c.client.events_within(Duration::from_millis(500)).await;
         assert!(
