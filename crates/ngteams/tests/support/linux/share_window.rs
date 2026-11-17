@@ -17,11 +17,13 @@
 //! - **Group call**: the mock's c rings a and b in the a–b–c chat, both answer. a shares: a new portal session, the
 //!   sharing line described `sendonly` to the service, a's screen read for [`HOLD`], the session open; a stops: the
 //!   session closed, the line described `recvonly`; repeated three times. (The mock's mixer doesn't pass a's frames on to b.)
-//! - **Renegotiation (1:1)**: three calls a makes to b. a's camera opens slowly here (a USB camera can take seconds),
-//!   so a's camera switch holds its renegotiation open meanwhile. a turns the camera on and shares at once: the share
-//!   waits, no refusal is told, and once the camera's offer settled the share's goes; b presents a's camera, then a's
-//!   screen. a stops sharing while the camera's renegotiation is open: the stop waits, then goes, and b presents a's
-//!   camera and no longer the screen. a shares twice while it is open: one share goes. a's offers go one at a time.
+//! - **Renegotiation (1:1)**: four calls a makes to b. a's camera opens slowly here (a USB camera can take seconds),
+//!   so a's camera switch holds its renegotiation open meanwhile. a's toolbar shows each switch at once all the same:
+//!   the camera on, Stop sharing in Share's place. a turns the camera on and shares at once: the share waits, no
+//!   refusal is told, and once the camera's offer settled the share's goes; b presents a's camera, then a's screen. a
+//!   stops sharing while the camera's renegotiation is open: the stop waits, then goes, and b presents a's camera and
+//!   no longer the screen. a shares and stops while it is open: the later switch decides, nothing is shared. a turns
+//!   the camera on, off and on again: b presents a's camera again. a's offers go one at a time.
 //! - Screenshots of a's window while it shares and of b's window showing a's screen, under `target/ui-shots/` (and
 //!   `$SHARE_EVIDENCE`, if set).
 //!
@@ -336,9 +338,9 @@ fn group_call(user: &mut User<'_>, a: &mut AppUnderTest, b: &mut AppUnderTest) -
     Ok(())
 }
 
-/// Three 1:1 calls a makes to b. a's camera opens slowly, so when a turns it on, its renegotiation stays open until
-/// the test lets the camera open: a shares, stops sharing, or shares twice in that time. Each case has a call of its
-/// own, so that the camera turns on for the first time in it.
+/// Four 1:1 calls a makes to b. a's camera opens slowly, so when a turns it on, its renegotiation stays open until
+/// the test lets the camera open: a shares, stops sharing, or shares and stops in that time. Then a turns the camera
+/// on, off and on again. Each case has a call of its own.
 fn renegotiation(user: &mut User<'_>, a: &mut AppUnderTest, b: &mut AppUnderTest) -> SandboxResult {
     // 1. the camera and Share at once: the share waits for the camera's renegotiation, then goes after it
     let refused = call_up(user, a, b)?;
@@ -346,6 +348,7 @@ fn renegotiation(user: &mut User<'_>, a: &mut AppUnderTest, b: &mut AppUnderTest
     user.camera_on_held(a)?;
     user.share(a, round)?;
     user.waits(a, b, refused, (0, true), "share while the camera turns on")?;
+    user.share_button(true)?;
     user.shot_a("share-reneg-1-waits.png")?;
     user.release_camera()?;
     b.trace
@@ -371,6 +374,7 @@ fn renegotiation(user: &mut User<'_>, a: &mut AppUnderTest, b: &mut AppUnderTest
     user.click_stop_sharing(a, round)?;
     let read = user.screen_frames()?;
     user.waits(a, b, refused, (1, false), "stop sharing while the camera turns on")?;
+    user.share_button(false)?;
     if user.calls("ScreenCast.Close") >= round {
         return Err("stop sharing while the camera turns on: the portal session closed before the stop went".into());
     }
@@ -388,37 +392,42 @@ fn renegotiation(user: &mut User<'_>, a: &mut AppUnderTest, b: &mut AppUnderTest
     say("renegotiation 2: the stop went after the camera's offer; b no longer presents a's screen");
     leave(user, a, b, refused)?;
 
-    // 3. Share twice while the camera's renegotiation is open: one share goes
+    // 3. Share, then Stop sharing while the camera's renegotiation is open: the later switch decides
     let refused = call_up(user, a, b)?;
     let round = round + 1;
     user.camera_on_held(a)?;
     user.share(a, round)?;
-    let asked = a.trace.asked("share");
-    user.a_keys("ctrl+shift+e")?;
-    user.a_keys("down")?;
-    user.a_keys("enter")?;
-    a.trace.next_where("the second share: asked", |line| {
-        line["view"] == "call" && line["change"] == "asked" && strings(line, "kinds").iter().any(|kind| kind == "share")
-    })?;
-    if a.trace.asked("share") <= asked {
-        return Err("the second share wasn't asked".into());
-    }
-    user.waits(a, b, refused, (0, true), "two shares while the camera turns on")?;
-    if user.calls("ScreenCast.OpenPipeWireRemote") > round {
-        return Err(format!("the second share opened another portal session: {:?}", user.portal()).into());
-    }
+    user.click_stop_sharing(a, round)?;
+    user.waits(a, b, refused, (0, true), "share and stop while the camera turns on")?;
+    user.share_button(false)?;
+    user.shot_a("share-reneg-3-taken-back.png")?;
     user.release_camera()?;
-    b.presents_share("two shares")?;
-    user.holds("two shares", round)?;
-    user.settled(2)?;
-    if user.calls("ScreenCast.OpenPipeWireRemote") > round {
-        return Err(format!("two shares opened two portal sessions: {:?}", user.portal()).into());
+    user.stopped(round, "share and stop while the camera turns on")?;
+    user.settled(1)?;
+    let mark = b.trace.mark();
+    thread::sleep(Duration::from_secs(3));
+    if b.trace.since(mark, is_share_presented) || user.offers()?.0 != 1 {
+        return Err("share and stop while the camera turns on: a's screen went out".into());
     }
-    user.shot_a("share-reneg-3-sharing.png")?;
-    user.shot_b("share-reneg-3-far-end.png")?;
-    say("renegotiation 3: two shares while the camera turned on; one share went");
-    user.stop_sharing(a, round)?;
-    user.settled(3)?;
+    say("renegotiation 3: share and stop while the camera turned on; nothing was shared");
+    leave(user, a, b, refused)?;
+
+    // 4. the camera on, off and on again: b presents a's camera again
+    let refused = call_up(user, a, b)?;
+    for (turn, on) in [true, false, true].into_iter().enumerate() {
+        // what b presented before this switch is not looked at
+        b.trace.mark();
+        user.a_keys("ctrl+shift+o")?;
+        user.settled(turn + 1)?;
+        if on {
+            b.presents_camera(&format!("camera on {}", turn / 2 + 1))?;
+        } else {
+            b.no_camera("camera off")?;
+        }
+    }
+    user.shot_a("share-reneg-4-camera-again.png")?;
+    user.shot_b("share-reneg-4-far-end-camera-again.png")?;
+    say("renegotiation 4: the camera on, off and on again; b presents a's camera again");
     leave(user, a, b, refused)
 }
 
@@ -678,11 +687,21 @@ impl<'a> User<'a> {
         let _ = fs::remove_file(self.a_box.path(CAMERA_HELD));
         fs::write(self.a_box.path(HOLD_CAMERA), "")?;
         let asked = a.trace.asked("camera");
+        let mark = a.trace.mark();
         self.a_keys("ctrl+shift+o")?;
         wait_until(WAIT, || self.a_box.path(CAMERA_HELD).exists().then_some(()))
             .ok_or("a's camera wasn't asked for")?;
         if a.trace.asked("camera") <= asked {
             return Err("a's camera wasn't asked".into());
+        }
+        // shown on at once, while it opens
+        let camera_on = |line: &Value| {
+            line["view"] == "in-call"
+                && line["change"] == "shown"
+                && strings(line, "kinds").iter().any(|kind| kind == "camera-on")
+        };
+        if !a.trace.since(mark, camera_on) {
+            a.trace.next_where("a's camera shown on while it opens", camera_on)?;
         }
         Ok(())
     }
@@ -1099,6 +1118,26 @@ impl AppUnderTest {
     }
 
     /// Asks the app to quit and waits for it to exit cleanly.
+    /// The far end's window presents a's camera anew: a frame of it after now.
+    fn presents_camera(&mut self, what: &str) -> SandboxResult {
+        self.trace
+            .next_where(&format!("{what}: a's camera presented"), |line| {
+                is_presented(line, "remote")
+            })?;
+        Ok(())
+    }
+
+    /// The far end's window presents no more of a's camera.
+    fn no_camera(&mut self, what: &str) -> SandboxResult {
+        thread::sleep(Duration::from_secs(2));
+        let mark = self.trace.mark();
+        thread::sleep(Duration::from_secs(3));
+        if self.trace.since(mark, |line| is_presented(line, "remote")) {
+            return Err(format!("{what}: {} still presents a's camera", self.alias).into());
+        }
+        Ok(())
+    }
+
     fn quit(mut self, sandbox: &Sandbox) -> SandboxResult {
         fs::write(sandbox.path(QUIT_TRIGGER), "")?;
         self.running
