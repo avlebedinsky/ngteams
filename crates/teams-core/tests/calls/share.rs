@@ -659,3 +659,27 @@ async fn a_stop_waiting_while_the_media_is_set_up_again_ends_the_share() {
     assert!(share_told(&mut held.a, call, true).await, "a shares again");
     held.hang_up().await;
 }
+
+/// The far end shares in the 1:1 call, and the service sets the call's media up again: the new session shows no share
+/// yet, so a is told the far end's share gone and its answer names no `ScreenViewer`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_far_end_s_share_shown_when_the_media_is_set_up_again_is_told_gone() {
+    let mut held = HeldCall::answered_by_a().await;
+    let (call, answered) = (held.call, held.answered);
+    let share = CallAction::Share {
+        call: answered,
+        on: true,
+    };
+    assert_eq!(held.b.handle.requests().call(share).await.unwrap(), answered);
+    assert!(share_told(&mut held.b, answered, true).await, "b shares");
+    assert!(share_told(&mut held.a, call, false).await, "a is shown b's screen");
+
+    let on = held.camera_held_on().await;
+    let (_mixer, modalities) = new_session(&held, on).await;
+    assert!(!share_told(&mut held.a, call, false).await, "b's share gone for a");
+    assert!(
+        !modalities.iter().any(|modality| modality == "ScreenViewer"),
+        "{modalities:?}"
+    );
+    held.hang_up().await;
+}

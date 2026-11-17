@@ -1173,8 +1173,9 @@ where
         let camera_on = self.live.as_ref().is_some_and(|live| live.camera == Some(true));
         // a share switch that waited for the old session's renegotiation goes on the new session
         let share_waits = self.live.as_mut().and_then(|live| live.share_waits.take());
-        // the new session shares nothing: a screen the old one shared ends with it
+        // the new session shares nothing and shows no share yet: a screen the old one shared or showed ends with it
         let shared = self.live.as_ref().is_some_and(|live| live.shares.own);
+        let shown = self.live.as_ref().is_some_and(|live| live.shares.theirs);
         // who is in the call stays as the roster told it: the roster tells only changes from here
         let participants = self
             .live
@@ -1194,13 +1195,23 @@ where
             let session = old.session;
             tokio::task::spawn_blocking(move || close(call, session));
         }
-        if shared {
+        if shared || shown {
             self.calls.set_screen(call, None);
+        }
+        if shared {
             log::info!(
                 "call {}: sharing its screen false: its media was set up again",
                 call.get()
             );
             self.emit(Event::CallSharing { call, on: false });
+        }
+        // the new session's sharing line tells a share it shows again (`show_participants`)
+        if shown {
+            log::info!(
+                "call {}: a shared screen shown false: its media was set up again",
+                call.get()
+            );
+            self.emit(Event::CallRemoteShare { call, on: false });
         }
         self.open_devices(call);
         if let Err(error) = self.calls.answer_media(call, content) {
