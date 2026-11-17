@@ -1228,30 +1228,55 @@ mod tests {
         })
     }
 
-    /// The channel's posts on `server`: `newest` its newest page, whose `backwardLink` leads to `older`.
-    async fn channel_posts(server: &wiremock::MockServer, newest: Vec<Value>, older: Vec<Value>) {
+    /// The channel's posts on `server`: `newest` its newest page, whose `backwardLink` leads to `older`. The
+    /// `backwardLink` of `older` leads to the page `older_link` names ([`OLDER`] again, or the empty [`OLDEST`]), or to
+    /// no page.
+    async fn channel_posts(
+        server: &wiremock::MockServer,
+        newest: Vec<Value>,
+        older: Vec<Value>,
+        older_link: Option<&str>,
+    ) {
         use wiremock::matchers::{method, path, query_param};
         let messages = format!("/api/chatsvc/amer/v1/users/ME/conversations/{CHANNEL}/messages");
+        let link = |state: &str| format!("{CHAT_BASE}/v1/users/ME/conversations/{CHANNEL}/messages?syncState={state}");
+        let older_metadata = older_link.map_or_else(
+            || serde_json::json!({}),
+            |state| serde_json::json!({"backwardLink": link(state)}),
+        );
         wiremock::Mock::given(method("GET"))
             .and(path(messages.as_str()))
-            .and(query_param("syncState", "made-up-older"))
+            .and(query_param("syncState", OLDEST))
             .respond_with(
                 wiremock::ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"messages": older, "_metadata": {}})),
+                    .set_body_json(serde_json::json!({"messages": [], "_metadata": {}})),
             )
             .with_priority(1)
             .mount(server)
             .await;
-        let link = format!("{CHAT_BASE}/v1/users/ME/conversations/{CHANNEL}/messages?syncState=made-up-older");
+        wiremock::Mock::given(method("GET"))
+            .and(path(messages.as_str()))
+            .and(query_param("syncState", OLDER))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"messages": older, "_metadata": older_metadata})),
+            )
+            .with_priority(1)
+            .mount(server)
+            .await;
         wiremock::Mock::given(method("GET"))
             .and(path(messages.as_str()))
             .respond_with(
                 wiremock::ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"messages": newest, "_metadata": {"backwardLink": link}})),
+                    .set_body_json(serde_json::json!({"messages": newest, "_metadata": {"backwardLink": link(OLDER)}})),
             )
             .mount(server)
             .await;
     }
+
+    /// The `syncState` of the older page of [`channel_posts`], and of the empty page before it.
+    const OLDER: &str = "made-up-older";
+    const OLDEST: &str = "made-up-oldest";
 
     async fn meetup_of(server: &wiremock::MockServer, post: Option<&str>) -> Option<ChannelMeetup> {
         let transport =
@@ -1261,11 +1286,17 @@ mod tests {
             .expect("the posts read")
     }
 
-    async fn older_reads(server: &wiremock::MockServer) -> usize {
+    /// How many reads of the page with the `syncState` `state` `server` got.
+    async fn reads_of(server: &wiremock::MockServer, state: &str) -> usize {
         let requests = server.received_requests().await.expect("requests kept");
         requests
             .iter()
-            .filter(|request| request.url.query().is_some_and(|query| query.contains("made-up-older")))
+            .filter(|request| {
+                request
+                    .url
+                    .query_pairs()
+                    .any(|(key, value)| key == "syncState" && value == state)
+            })
             .count()
     }
 
@@ -1276,14 +1307,24 @@ mod tests {
             &server,
             vec![call_post("1700000000009", "callStarted", "call-2")],
             vec![call_post("1700000000001", "callStarted", "call-1")],
+            Some(OLDEST),
         )
         .await;
         let newest = meetup_of(&server, None).await.expect("the newest meeting");
         assert_eq!(newest.message_id, "1700000000009");
         assert_eq!(
-            older_reads(&server).await,
+            reads_of(&server, OLDER).await,
             0,
             "with no post, only the newest page is read"
+        );
+        let on_newest = meetup_of(&server, Some("1700000000009"))
+            .await
+            .expect("the post's meeting");
+        assert_eq!(on_newest.message_id, "1700000000009");
+        assert_eq!(
+            reads_of(&server, OLDER).await,
+            0,
+            "a post on the newest page reads no older page"
         );
         let older = meetup_of(&server, Some("1700000000001"))
             .await
@@ -1293,11 +1334,39 @@ mod tests {
             older.conversation.as_str(),
             "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/call-1?i=1"
         );
-        assert_eq!(older_reads(&server).await, 1);
+        assert_eq!(reads_of(&server, OLDER).await, 1);
+        assert_eq!(
+            reads_of(&server, OLDEST).await,
+            0,
+            "the page that holds the post is the last one read, though more history is there"
+        );
         assert_eq!(
             meetup_of(&server, Some("1700000000005")).await,
             None,
             "a post no page holds"
+        );
+        assert_eq!(
+            reads_of(&server, OLDEST).await,
+            1,
+            "a post no page holds is looked for until the history ends"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_post_of_a_meeting_is_looked_for_on_no_more_than_post_pages_pages() {
+        let server = wiremock::MockServer::start().await;
+        channel_posts(
+            &server,
+            vec![call_post("1700000000009", "callStarted", "call-2")],
+            vec![call_post("1700000000002", "callEnded", "call-0")],
+            Some(OLDER),
+        )
+        .await;
+        assert_eq!(meetup_of(&server, Some("1700000000001")).await, None);
+        assert_eq!(
+            reads_of(&server, OLDER).await,
+            POST_PAGES - 1,
+            "a history that doesn't end is read for POST_PAGES pages, the newest one too"
         );
     }
 
@@ -1311,11 +1380,12 @@ mod tests {
                 call_post("1700000000008", "callEnded", "call-1"),
             ],
             vec![call_post("1700000000001", "callStarted", "call-1")],
+            None,
         )
         .await;
         assert_eq!(meetup_of(&server, Some("1700000000001")).await, None);
         assert_eq!(
-            older_reads(&server).await,
+            reads_of(&server, OLDER).await,
             1,
             "the post was looked for on the older page"
         );
