@@ -232,12 +232,12 @@ reason = "unit-test module (the device formats of the native speaker and microph
 context = { "crates/teams-media/src/devices/native/tests.rs" = "999591817136e2492136990f7b5c6eb9aab5c9b8e1ad00a45a2e693899ecc3d4" }
 
 [unmapped_sources."crates/teams-media/src/devices/native/tests/jitter.rs"]
-sha256 = "e9dd790936b9fe031d326c596b86d8e43e3e518f9bf7efe8da1468d81e1b8b79"
+sha256 = "c3a5640378e5bd673b083d4d6c3b23279dd2cd96785955d702c3a984ea49bf66"
 reason = "unit-test module (the native speaker under a call's delivery jitter, on a paced test device) included only by native/tests.rs; omitted by cargo-llvm-cov's test-file filter"
 context = { "crates/teams-media/src/devices/native/tests.rs" = "999591817136e2492136990f7b5c6eb9aab5c9b8e1ad00a45a2e693899ecc3d4" }
 
 [unmapped_sources."crates/teams-media/src/devices/native/streams/playback_tests.rs"]
-sha256 = "3851d227b41fe22f517e7bc5ad7503612f114848cfdece9b7b41a7f70a1a0086"
+sha256 = "86c53b12e6a70cfc79d434e751a8d24026553e5d69137445f8fa5f6bc8172da6"
 reason = "unit-test module included only by native/streams.rs cfg(test); omitted by cargo-llvm-cov's test-file filter. Its playing tests are ignored: they need a Windows speaker and the win11 console"
 context = { "crates/teams-media/src/devices/native/streams.rs" = "6a6f8f9f1fa05ac6bc01501b06f31ed64890df22ab2a744728644b97a7a3fd1e" }
 
