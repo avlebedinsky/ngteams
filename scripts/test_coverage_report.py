@@ -347,8 +347,15 @@ keys = ["PROTO_LAB_REQUIRE_CHROME", "GPUI_SMOKE_REQUIRE", "PROTO_LAB_LIVE",
         "TEAMS_MEDIA_TURN_SERVER", "TEAMS_MEDIA_TURN_USER", "TEAMS_MEDIA_TURN_PASSWORD",
         "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "LLVM_PROFILE_FILE_NAME",
         "CARGO_LLVM_COV_TARGET_DIR", "LK_CUSTOM_WEBRTC"]
+def is_open(descriptor):
+    try:
+        os.fstat(descriptor)
+    except OSError:
+        return False
+    return True
 Path("execution.json").write_text(json.dumps({
-    "args": sys.argv[1:], "environment": {key: os.environ.get(key) for key in keys}}))
+    "args": sys.argv[1:], "environment": {key: os.environ.get(key) for key in keys},
+    "lock_inherited": is_open(9)}))
 if status := int(os.environ.get("SYNTHETIC_TEST_EXIT", "0")):
     sys.exit(status)
 shutil.copyfile("llvm-fixture.json", sys.argv[sys.argv.index("--output-path") + 1])
@@ -447,6 +454,12 @@ shutil.copyfile("llvm-fixture.json", sys.argv[sys.argv.index("--output-path") + 
         self.assertIn("invalid cache signature", result.stderr)
         self.assertEqual(tag.read_text(), "unrecognized cache directory\n")
         self.assertFalse(self.execution.exists())
+
+    def test_the_measured_tests_do_not_inherit_the_measurement_lock(self):
+        # A child that outlives the tests, such as a container a test stopped, must not hold the lock.
+        result = self.run_wrapper()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(json.loads(self.execution.read_text())["lock_inherited"])
 
     def test_measurement_is_serial_requires_dependencies_and_removes_live_configuration(self):
         self.environment.update({

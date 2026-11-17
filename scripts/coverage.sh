@@ -112,8 +112,9 @@ if ! "$report_only"; then
     # LLVM scans every workspace executable in this target dir, including unselected consumers that embed an old
     # copy of a selected library. Remove all workspace artifacts; third-party dependency builds remain cached.
     "${measurement_env[@]}" cargo llvm-cov clean --workspace
+    # A test's child can outlive the run (a container it stopped): it must not hold the lock.
     "${measurement_env[@]}" cargo llvm-cov "${package_args[@]}" --locked --no-fail-fast --json --output-path "$output/llvm.json" \
-        -- --test-threads "$test_threads" || measurement_status=$?
+        -- --test-threads "$test_threads" 9>&- || measurement_status=$?
     if ((measurement_status)); then
         # cargo-llvm-cov does not export after failed tests. Preserve their status while making the retained
         # profiles inspectable; partial coverage cannot turn a failing test run green.
