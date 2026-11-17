@@ -350,19 +350,20 @@ impl Walk<'_> {
         let service = self.service;
         let chat = service.helper_chat.clone();
         self.run.open(&chat)?;
-        let state = self.run.until_chat("the bot's messages", |state| {
+        self.run.until_chat("the bot's messages", |state| {
             state["items"].as_array().is_some_and(|items| items.len() >= 2)
         })?;
+        // the engine names the bot's app after the first frame: wait for it, then judge the last state
+        let state = match self.run.until_chat("the bot's app", |state| {
+            state["bot"] == HELPER_BOT && misnamed(state).is_empty()
+        }) {
+            Ok(state) => state,
+            Err(_) => self.run.state_in("chat")?,
+        };
         expect(state["bot"] == HELPER_BOT, || {
             format!("the open chat's bot is {}, expected {HELPER_BOT}", state["bot"])
         });
-        let misnamed: Vec<&Value> = state["items"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|item| item["own"] == false && item["sender_name"] != HELPER)
-            .map(|item| &item["sender_name"])
-            .collect();
+        let misnamed = misnamed(&state);
         expect(misnamed.is_empty(), || {
             format!("the bot's messages are named {misnamed:?} over them, expected the app's name {HELPER}")
         });
@@ -738,6 +739,17 @@ fn mentions_of(sent: &Value) -> Vec<Value> {
         .and_then(|text| serde_json::from_str::<Value>(text).ok())
         .unwrap_or_else(|| mentions.clone());
     parsed.as_array().cloned().unwrap_or_default()
+}
+
+/// The names over the messages of others in the chat's `state` that are not the bot's app's name.
+fn misnamed(state: &Value) -> Vec<&Value> {
+    state["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| item["own"] == false && item["sender_name"] != HELPER)
+        .map(|item| &item["sender_name"])
+        .collect()
 }
 
 /// Notes what is wrong with `sent` as a message that mentions the bot `bot` of the app `app` named `name`.
