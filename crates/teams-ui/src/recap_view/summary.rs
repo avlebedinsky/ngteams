@@ -310,6 +310,7 @@ impl RecapView {
                 picked.name,
                 picked.backend.label_of(Work::Summary, &choice.model),
             ),
+            Err(failure @ Failure::NotInstalled(None)) => format!("{}{}", failure.message(), failure.install_hint()),
             Err(failure @ Failure::NotInstalled(_)) => format!(
                 "{} Install Claude Code (claude) or the Codex CLI (codex), then try again.",
                 failure.message()

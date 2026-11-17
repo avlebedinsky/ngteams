@@ -14,8 +14,9 @@ license.workspace = true
 test-support = ["teams-proto/test-support"]
 
 [dependencies]
-# the AI APIs asked with a key that the user gives (`ai_api`): their requests block on a thread of the app's own
-reqwest = { workspace = true, features = ["blocking"] }
+# the AI APIs asked with a key that the user gives (`ai_api`): async requests that a stop can drop at once, run on
+# the API's own runtime (one worker) while the thread that asks blocks
+reqwest.workspace = true
 # a calendar event's time without an offset placed in the desktop's time zone, as the calendar view places it
 chrono.workspace = true
 # The calendar service expects an IANA zone; Windows does not have /etc/localtime.
@@ -41,8 +42,8 @@ teams-store.workspace = true
 # the push channel the engine runs and takes its deliveries from
 teams-trouter.workspace = true
 thiserror.workspace = true
-# the engine's own runtime (current-thread, on a thread of its own) and its channels
-tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+# the engine's own runtime (current-thread, on a thread of its own) and its channels; an AI API's runtime (one worker)
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
 # Synthetic actor/audience credentials for native caption integration tests.

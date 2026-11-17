@@ -3,7 +3,8 @@
 //! read a key out of its `Secret`, so these requests are made here; `teams-ui` keeps the conversation and its words.
 //!
 //! - [`Api::ask`] blocks while the answer streams (server-sent events), and gives each part of the text as it comes.
-//!   Once its stop flag is set, it drops the response at the next line that comes, so the API stops the answer.
+//!   Once its stop flag is set, it drops the request at once (also while the server is quiet: a model that thinks, a
+//!   local server that loads its model), so the API stops the answer.
 //! - No redirect is followed, so the key goes only to the base URL that the user gave. This is not the Teams
 //!   transport: no Teams token goes here, and a local OpenAI-compatible server can be on plain `http`.
 //! - An [`ApiError`] tells what the user can do: the key refused, no credit, a rate limit, a model that the API does
@@ -11,7 +12,7 @@
 //!   a key.
 
 use std::fmt;
-use std::io::{BufRead as _, BufReader, Read as _};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -24,10 +25,12 @@ pub const ANTHROPIC_VERSION: &str = "2026-10-21";
 const MAX_TOKENS: u32 = 16_000;
 /// How long a connection may take to open.
 const CONNECT: Duration = Duration::from_secs(15);
+/// How often a request that waits looks at its stop flag.
+const STOP_CHECK: Duration = Duration::from_millis(50);
 /// The most of an error's body read, in bytes.
-const MAX_ERROR: u64 = 64 << 10;
+const MAX_ERROR: usize = 64 << 10;
 /// The most of a listing of the models read, in bytes.
-const MAX_LISTING: u64 = 4 << 20;
+const MAX_LISTING: usize = 4 << 20;
 /// The most of the API's own words that a failure keeps, in bytes.
 const MAX_SAID: usize = 160;
 
@@ -87,7 +90,9 @@ pub struct Api {
     kind: ApiKind,
     base_url: String,
     key: Option<Secret>,
-    http: reqwest::blocking::Client,
+    http: reqwest::Client,
+    /// The runtime that runs the requests (one worker, as a blocking client has), while the thread that asks blocks.
+    runtime: Arc<tokio::runtime::Runtime>,
 }
 
 impl fmt::Debug for Api {
@@ -105,9 +110,15 @@ impl Api {
     /// The API of `kind` at `base_url`, asked with `key` (none for a local server that takes no key).
     ///
     /// # Errors
-    /// The HTTP client could not be made.
+    /// The HTTP client or its runtime could not be made.
     pub fn new(kind: ApiKind, base_url: &str, key: Option<Secret>) -> Result<Self, ApiError> {
-        let http = reqwest::blocking::Client::builder()
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("ngteams-ai-api-io")
+            .enable_all()
+            .build()
+            .map_err(|error| ApiError::Stopped(error.to_string()))?;
+        let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(CONNECT)
             .user_agent(concat!("ngteams/", env!("CARGO_PKG_VERSION")))
@@ -118,11 +129,12 @@ impl Api {
             base_url: base_url.trim_end_matches('/').to_owned(),
             key,
             http,
+            runtime: Arc::new(runtime),
         })
     }
 
     /// Asks `question` within `timeout`, giving `part` each part of the answer as it comes (this blocks), until `stop`
-    /// is set: then the response is dropped at its next line.
+    /// is set: then the request is dropped at once, also while the server sends nothing.
     ///
     /// # Errors
     /// The API refused, failed, took too long, gave no text, or `stop` was set.
@@ -136,15 +148,34 @@ impl Api {
         if stop.load(Ordering::Relaxed) {
             return Err(ApiError::Cancelled);
         }
+        self.runtime.block_on(async {
+            // the request is dropped with the branch that loses: its connection closes, so the API stops the answer
+            tokio::select! {
+                biased;
+                () = stopped(stop) => Err(ApiError::Cancelled),
+                answer = self.answer(question, timeout, stop, part) => answer,
+            }
+        })
+    }
+
+    /// The answer to `question` within `timeout` (see [`Self::ask`]).
+    async fn answer(
+        &self,
+        question: &Question,
+        timeout: Duration,
+        stop: &AtomicBool,
+        part: &mut dyn FnMut(&str),
+    ) -> Result<String, ApiError> {
         let response = self
             .question(question)
             .timeout(timeout.max(Duration::from_millis(1)))
             .send()
+            .await
             .map_err(|error| unreachable(&error))?;
         if !response.status().is_success() {
-            return Err(self.refused(response));
+            return Err(self.refused(response).await);
         }
-        self.read_stream(response, stop, part)
+        self.read_stream(response, stop, part).await
     }
 
     /// The models that the API lists (`/v1/models`), in its order, within `timeout` (this blocks).
@@ -152,6 +183,11 @@ impl Api {
     /// # Errors
     /// The API refused, failed, or took too long.
     pub fn models(&self, timeout: Duration) -> Result<Vec<ApiModel>, ApiError> {
+        self.runtime.block_on(self.listing(timeout))
+    }
+
+    /// The models that the API lists (see [`Self::models`]).
+    async fn listing(&self, timeout: Duration) -> Result<Vec<ApiModel>, ApiError> {
         let mut request = if self.kind == ApiKind::Anthropic {
             self.http
                 .get(format!("{}/v1/models?limit=1000", self.base_url))
@@ -160,20 +196,18 @@ impl Api {
             self.http.get(format!("{}/models", self.base_url))
         };
         request = self.with_key(request.timeout(timeout));
-        let response = request.send().map_err(|error| unreachable(&error))?;
+        let response = request.send().await.map_err(|error| unreachable(&error))?;
         if !response.status().is_success() {
-            return Err(self.refused(response));
+            return Err(self.refused(response).await);
         }
-        let mut body = String::new();
-        response
-            .take(MAX_LISTING)
-            .read_to_string(&mut body)
-            .map_err(|error| ApiError::Stopped(self.scrub(&error.to_string())))?;
+        let body = body_of(response, MAX_LISTING)
+            .await
+            .map_err(|error| self.broken(&error))?;
         Ok(models_in(&body))
     }
 
     /// The request that asks `question`.
-    fn question(&self, question: &Question) -> reqwest::blocking::RequestBuilder {
+    fn question(&self, question: &Question) -> reqwest::RequestBuilder {
         let messages: Vec<Value> = question
             .turns
             .iter()
@@ -213,7 +247,7 @@ impl Api {
     }
 
     /// `request` with the key in the header that the kind takes.
-    fn with_key(&self, request: reqwest::blocking::RequestBuilder) -> reqwest::blocking::RequestBuilder {
+    fn with_key(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         let Some(key) = &self.key else { return request };
         let (name, value) = if self.kind == ApiKind::Anthropic {
             ("x-api-key", key.expose().to_owned())
@@ -229,48 +263,35 @@ impl Api {
         }
     }
 
-    /// The answer in the server-sent events of `response`, given to `part` as it comes, until `stop` is set.
-    fn read_stream(
+    /// The answer in the server-sent events of `response`, given to `part` as it comes, until `stop` is set (a line
+    /// that came with the one that set it is not read).
+    async fn read_stream(
         &self,
-        response: reqwest::blocking::Response,
+        mut response: reqwest::Response,
         stop: &AtomicBool,
         part: &mut dyn FnMut(&str),
     ) -> Result<String, ApiError> {
         let mut text = String::new();
-        for line in BufReader::new(response).lines() {
-            if stop.load(Ordering::Relaxed) {
-                return Err(ApiError::Cancelled);
+        let mut pending = Vec::new();
+        'stream: loop {
+            let chunk = response.chunk().await.map_err(|error| self.broken(&error))?;
+            let end = chunk.is_none();
+            pending.extend_from_slice(chunk.as_deref().unwrap_or_default());
+            if end && !pending.is_empty() && !pending.ends_with(b"\n") {
+                pending.push(b'\n');
             }
-            let line = line.map_err(|error| ApiError::Stopped(self.scrub(&error.to_string())))?;
-            let Some(data) = line.strip_prefix("data:").map(str::trim) else {
-                continue;
-            };
-            if data == "[DONE]" {
-                break;
-            }
-            let Ok(event) = serde_json::from_str::<Value>(data) else {
-                continue;
-            };
-            if let Some(error) = event.get("error") {
-                return Err(self.classify(None, error));
-            }
-            let delta = if self.kind == ApiKind::Anthropic {
-                match event.get("type").and_then(Value::as_str) {
-                    Some("content_block_delta") if event.pointer("/delta/type") == Some(&json!("text_delta")) => {
-                        event.pointer("/delta/text").and_then(Value::as_str)
-                    }
-                    Some("message_delta") if event.pointer("/delta/stop_reason") == Some(&json!("refusal")) => {
-                        return Err(ApiError::Stopped("it declined to answer.".to_owned()));
-                    }
-                    Some("message_stop") => break,
-                    _ => None,
+            while let Some(at) = pending.iter().position(|&byte| byte == b'\n') {
+                if stop.load(Ordering::Relaxed) {
+                    return Err(ApiError::Cancelled);
                 }
-            } else {
-                event.pointer("/choices/0/delta/content").and_then(Value::as_str)
-            };
-            if let Some(delta) = delta.filter(|delta| !delta.is_empty()) {
-                text.push_str(delta);
-                part(delta);
+                let line: Vec<u8> = pending.drain(..=at).collect();
+                let line = String::from_utf8_lossy(&line);
+                if self.event(line.trim_end_matches(['\n', '\r']), &mut text, part)? == Flow::End {
+                    break 'stream;
+                }
+            }
+            if end {
+                break;
             }
         }
         // no text (all the tokens went to thinking, a filter, only spaces): an empty turn in the conversation would
@@ -281,11 +302,53 @@ impl Api {
         Ok(text)
     }
 
+    /// One `line` of the server-sent events: its text added to `text` and given to `part`. Whether the answer ended.
+    fn event(&self, line: &str, text: &mut String, part: &mut dyn FnMut(&str)) -> Result<Flow, ApiError> {
+        let Some(data) = line.strip_prefix("data:").map(str::trim) else {
+            return Ok(Flow::More);
+        };
+        if data == "[DONE]" {
+            return Ok(Flow::End);
+        }
+        let Ok(event) = serde_json::from_str::<Value>(data) else {
+            return Ok(Flow::More);
+        };
+        if let Some(error) = event.get("error") {
+            return Err(self.classify(None, error));
+        }
+        let delta = if self.kind == ApiKind::Anthropic {
+            match event.get("type").and_then(Value::as_str) {
+                Some("content_block_delta") if event.pointer("/delta/type") == Some(&json!("text_delta")) => {
+                    event.pointer("/delta/text").and_then(Value::as_str)
+                }
+                Some("message_delta") if event.pointer("/delta/stop_reason") == Some(&json!("refusal")) => {
+                    return Err(ApiError::Stopped("it declined to answer.".to_owned()));
+                }
+                Some("message_stop") => return Ok(Flow::End),
+                _ => None,
+            }
+        } else {
+            event.pointer("/choices/0/delta/content").and_then(Value::as_str)
+        };
+        if let Some(delta) = delta.filter(|delta| !delta.is_empty()) {
+            text.push_str(delta);
+            part(delta);
+        }
+        Ok(Flow::More)
+    }
+
+    /// The failure of a response whose body broke off.
+    fn broken(&self, error: &reqwest::Error) -> ApiError {
+        if error.is_timeout() {
+            return ApiError::TimedOut;
+        }
+        ApiError::Stopped(self.scrub(&error.to_string()))
+    }
+
     /// Why the API refused the request: from its status and its error's body.
-    fn refused(&self, response: reqwest::blocking::Response) -> ApiError {
+    async fn refused(&self, response: reqwest::Response) -> ApiError {
         let status = response.status().as_u16();
-        let mut body = String::new();
-        let _ = response.take(MAX_ERROR).read_to_string(&mut body);
+        let body = body_of(response, MAX_ERROR).await.unwrap_or_default();
         let error = serde_json::from_str::<Value>(&body)
             .ok()
             .and_then(|value| value.get("error").cloned())
@@ -347,6 +410,31 @@ impl Api {
             None => text.to_owned(),
         }
     }
+}
+
+/// Whether the server-sent events go on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Flow {
+    More,
+    End,
+}
+
+/// Returns once `stop` is set.
+async fn stopped(stop: &AtomicBool) {
+    while !stop.load(Ordering::Relaxed) {
+        tokio::time::sleep(STOP_CHECK).await;
+    }
+}
+
+/// The first `max` bytes of `response`'s body, as text.
+async fn body_of(mut response: reqwest::Response, max: usize) -> Result<String, reqwest::Error> {
+    let mut body = Vec::new();
+    while body.len() < max {
+        let Some(chunk) = response.chunk().await? else { break };
+        body.extend_from_slice(&chunk);
+    }
+    body.truncate(max);
+    Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
 /// Why a request that could not be sent failed.

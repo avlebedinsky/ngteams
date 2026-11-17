@@ -5,8 +5,8 @@
 //!
 //! - Each answer streams, and a request runs on a thread of its own: the wait that asks it looks at its deadline and
 //!   its stop flag while the answer comes, as for a tool's process. When the wait ends without the answer (stopped,
-//!   too slow), the request's own flag is set, and its thread drops the response at the next line, so the API stops
-//!   the answer. No request stays open between two questions.
+//!   too slow), the request's own flag is set, and its thread drops the request at once (also while the server sends
+//!   nothing), so the API stops the answer. No request stays open between two questions.
 //! - **Failures** say what the user can do: the key refused, no credit, a rate limit, a model that the API does not
 //!   know, or the API's own words with the key cut out of them. Nothing here logs what is asked or answered, or a key.
 

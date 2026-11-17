@@ -741,8 +741,8 @@ impl Tool {
     }
 
     /// Ends it: a process's stdin closed (both tools leave then), and after a moment its whole group killed. An API
-    /// conversation has no request open between two questions (a wait that ends drops its request), so nothing is left
-    /// to end.
+    /// conversation has no request open between two questions (a wait that ends drops its request at once), so nothing
+    /// is left to end.
     pub fn close(self) {
         if let Link::Process(process) = self.link {
             process.close();

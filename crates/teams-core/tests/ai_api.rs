@@ -1,6 +1,7 @@
 //! The AI APIs' requests (`teams_core::ai_api`) against a mock HTTP server on the loopback (synthetic keys, no
-//! network): each kind's request and its headers, the streamed answer, each refusal, a server that cannot be reached
-//! or is slow, and the listing of the models. No key is in a failure or a `Debug` output.
+//! network): each kind's request and its headers, the streamed answer, each refusal, a stop (also while the server is
+//! quiet), a server that cannot be reached or is slow, and the listing of the models. No key is in a failure or a
+//! `Debug` output.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -363,6 +364,66 @@ fn a_stop_drops_the_request() {
     });
     assert_eq!(stopped, Err(ApiError::Cancelled));
     assert_eq!(parts, ["Bon"]);
+}
+
+/// A server that takes one request, answers `head` (nothing when empty) and then stays quiet: whether it saw the
+/// connection close within 5 s.
+fn quiet_server(head: &'static str) -> (String, mpsc::Receiver<bool>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let (closed, saw) = mpsc::channel();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut line = String::new();
+        while reader.read_line(&mut line).is_ok_and(|read| read > 0) && line != "\r\n" {
+            line.clear();
+        }
+        stream.write_all(head.as_bytes()).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        // the body of the request, then the end of the connection (0), else a timeout
+        let mut rest = [0; 4096];
+        let ended = loop {
+            match reader.read(&mut rest) {
+                Ok(0) => break true,
+                Ok(_) => {}
+                Err(_) => break false,
+            }
+        };
+        let _ = closed.send(ended);
+    });
+    (base, saw)
+}
+
+#[test]
+fn a_stop_drops_a_quiet_request_at_once() {
+    // no headers yet (the server thinks), then headers and no line (a model that reasons, a local server that loads)
+    let heads = [
+        "",
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n",
+    ];
+    for head in heads {
+        let (base, closed) = quiet_server(head);
+        let stop = Arc::new(AtomicBool::new(false));
+        let setter = Arc::clone(&stop);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(300));
+            setter.store(true, Ordering::Relaxed);
+        });
+        let started = Instant::now();
+        let asked = api(ApiKind::OpenAi, &base).ask(&question(Some("medium")), TIME, &stop, &mut |_| {});
+        assert_eq!(asked, Err(ApiError::Cancelled), "head {head:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "head {head:?}: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            closed.recv_timeout(Duration::from_secs(6)),
+            Ok(true),
+            "head {head:?}: the connection stays open"
+        );
+    }
 }
 
 #[test]
