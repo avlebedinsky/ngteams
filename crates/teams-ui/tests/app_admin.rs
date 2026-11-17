@@ -316,6 +316,18 @@ impl Opened {
         self.settle();
     }
 
+    /// `key` pressed and let go: a focused button takes Enter or Space as it is let go.
+    fn press(&mut self, key: &str) {
+        let keystroke = gpui::Keystroke::parse(key).unwrap();
+        self.cx.simulate_event(gpui::KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        self.cx.simulate_event(gpui::KeyUpEvent { keystroke });
+        self.settle();
+    }
+
     fn page(&mut self) -> Page {
         let view = self.view.clone();
         self.cx.read(|cx| view.read(cx).page())
@@ -486,7 +498,10 @@ fn a_bot_registered_shows_its_id_and_secret_once_then_its_settings(cx: &mut Test
         .cx
         .read(|cx| teams_ui::app_admin::shown_secret(dialog.read(cx)).map(str::to_owned));
     assert_eq!(shown.as_deref(), Some(SECRET));
-    opened.click("app-dialog-secret-copy");
+    // from the keyboard: Enter on the focused Copy secret button (after Copy app id) copies, and the dialog stays
+    opened.keys("tab tab");
+    opened.press("enter");
+    assert_eq!(opened.kind(), Some(DialogKind::Made));
     assert_eq!(
         opened.cx.read_from_clipboard().and_then(|item| item.text()).as_deref(),
         Some(SECRET)

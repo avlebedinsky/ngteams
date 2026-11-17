@@ -36,7 +36,7 @@ use crate::icons::{Glyph, selected_by};
 use crate::keyboard;
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
-use crate::user_admin::AdminProblem;
+use crate::user_admin::{AdminProblem, badge, short};
 
 mod dialog;
 mod forms;
@@ -225,18 +225,6 @@ pub trait AppAdmin: Send + Sync + 'static {
     /// # Errors
     /// [`AppProblem`].
     fn connection(&self) -> Result<BotConnection, AppProblem>;
-}
-
-/// The most of a name a title or a sentence shows, in characters: a longer one ends in an ellipsis.
-const SHOWN_NAME: usize = 60;
-
-/// `name`, cut to [`SHOWN_NAME`] characters with an ellipsis.
-fn short(name: &str) -> String {
-    if name.chars().count() <= SHOWN_NAME {
-        return name.to_owned();
-    }
-    let cut: String = name.chars().take(SHOWN_NAME - 1).collect();
-    format!("{}…", cut.trim_end())
 }
 
 /// The app's tile: its first letter on its accent colour (the brand's when it has none).
@@ -467,19 +455,6 @@ impl ManageApps {
     }
 }
 
-/// A small mark beside a name: an outlined pill in `color`.
-pub(crate) fn badge(words: &'static str, color: u32) -> gpui::Div {
-    div()
-        .px_2()
-        .py_0p5()
-        .rounded_full()
-        .border_1()
-        .border_color(rgb(color))
-        .text_xs()
-        .text_color(rgb(color))
-        .child(words)
-}
-
 impl ManageApps {
     fn row(
         (at, app): (usize, &AdminApp),
@@ -692,13 +667,6 @@ impl Render for ManageApps {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_long_name_is_cut_with_an_ellipsis() {
-        assert_eq!(short("Notes"), "Notes");
-        let cut = short(&"Bartholomew ".repeat(20));
-        assert!(cut.ends_with('…') && cut.chars().count() <= SHOWN_NAME, "{cut}");
-    }
 
     #[test]
     fn every_problem_has_words_and_a_kind() {

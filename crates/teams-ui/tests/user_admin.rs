@@ -399,12 +399,16 @@ fn a_list_that_cant_be_read_says_why_and_reads_again(cx: &mut TestAppContext) {
     );
 }
 
-/// The password given shows once, with Copy (which copies `password`), as a reset shows it; Done closes.
+/// The password given shows once, with Copy (which copies `password`, from the keyboard too), as a reset shows it;
+/// Done closes.
 fn shown_once_then_done(opened: &mut Opened, password: &str) {
     let dialog = opened.dialog().expect("the password given");
     assert!(opened.cx.read(|cx| dialog.read(cx).shows_given()));
     assert!(opened.shows("user-dialog-given") && opened.shows("user-dialog-copy"));
-    opened.click("user-dialog-copy");
+    // Enter on the focused Copy button copies, and the dialog stays
+    opened.keys("tab");
+    opened.press("enter");
+    assert!(opened.dialog().is_some());
     assert_eq!(
         opened.cx.read_from_clipboard().and_then(|item| item.text()).as_deref(),
         Some(password)

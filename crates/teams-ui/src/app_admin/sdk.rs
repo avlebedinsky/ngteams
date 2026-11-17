@@ -52,22 +52,43 @@ impl Sdk {
 }
 
 /// The settings of one SDK: where they go, what to know about them, and the text to paste.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SdkSettings {
     /// Where the text goes (a file, or the bot's code).
     pub place: &'static str,
     /// What the SDK needs beyond the text, if anything.
     pub note: Option<&'static str>,
+    /// Can hold the bot's secret: never in `Debug`.
     pub text: String,
 }
 
+impl std::fmt::Debug for SdkSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SdkSettings")
+            .field("place", &self.place)
+            .field("note", &self.note)
+            .field("text", &"<redacted>")
+            .finish()
+    }
+}
+
 /// The bot's own values in its settings.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct BotValues<'a> {
     pub app_id: &'a str,
     /// Shown once, when the bot just got it; [`SECRET_PLACEHOLDER`] stands for it after.
     pub secret: Option<&'a str>,
     pub mode: BotAuthMode,
+}
+
+impl std::fmt::Debug for BotValues<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BotValues")
+            .field("app_id", &self.app_id)
+            .field("secret", &self.secret.map(|_| "<redacted>"))
+            .field("mode", &self.mode)
+            .finish()
+    }
 }
 
 /// The server's addresses a signed bot's settings name.
@@ -271,6 +292,16 @@ mod tests {
             app_id: ID,
             secret,
             mode: BotAuthMode::Signed,
+        }
+    }
+
+    #[test]
+    fn debug_output_never_holds_the_secret() {
+        let values = signed_values(Some("made-up-secret"));
+        assert!(!format!("{values:?}").contains("made-up-secret"));
+        for sdk in Sdk::ALL {
+            let shown = settings(sdk, &connection(), values);
+            assert!(!format!("{shown:?}").contains("made-up-secret"), "{}", sdk.key());
         }
     }
 

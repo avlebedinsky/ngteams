@@ -124,7 +124,10 @@ pub struct AppDialog {
     /// The dialog itself takes the keyboard at the next draw (the field that had it is gone).
     pub(super) focus_dialog: bool,
     pub(super) working: Option<Task<()>>,
+    /// The people search, read again as the search changes.
     pub(super) searching: Option<Task<()>>,
+    /// The names of the app's people, or the server's addresses: apart from the search, which must not stop them.
+    pub(super) reading: Option<Task<()>>,
     pub(super) focus: FocusHandle,
     _inputs: Vec<Subscription>,
 }
@@ -198,6 +201,7 @@ impl AppDialog {
             focus_dialog: false,
             working: None,
             searching: None,
+            reading: None,
             focus: cx.focus_handle(),
             _inputs: inputs,
         };
@@ -511,10 +515,6 @@ impl AppDialog {
 
     /// The confirming button, or Enter in a field: the step's change goes to the server.
     pub fn confirm(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.kind, DialogKind::Made | DialogKind::Settings) {
-            cx.emit(AppDialogEvent::Closed);
-            return;
-        }
         if !self.can_confirm(cx) {
             return;
         }
@@ -524,7 +524,11 @@ impl AppDialog {
             cx.notify();
             return;
         }
-        let asked = self.ask(cx);
+        let Some(asked) = self.ask(cx) else {
+            // a step that only shows something: its button closes the dialog
+            cx.emit(AppDialogEvent::Closed);
+            return;
+        };
         self.busy = true;
         self.problem = None;
         cx.notify();
@@ -534,11 +538,11 @@ impl AppDialog {
         }));
     }
 
-    /// The step's request, off the foreground.
-    fn ask(&mut self, cx: &mut Context<Self>) -> Task<Result<Answer, AppProblem>> {
+    /// The step's request, off the foreground; none for a step that only shows something.
+    fn ask(&mut self, cx: &mut Context<Self>) -> Option<Task<Result<Answer, AppProblem>>> {
         let admin = Arc::clone(&self.admin);
         let id = self.app.as_ref().map(|app| app.id.clone()).unwrap_or_default();
-        match self.kind {
+        Some(match self.kind {
             DialogKind::Register => {
                 let endpoint = Self::value(&self.endpoint, cx);
                 let form = BotForm {
@@ -567,8 +571,8 @@ impl AppDialog {
             }
             DialogKind::NewSecret => cx.background_spawn(async move { admin.new_secret(&id).map(Answer::Secret) }),
             DialogKind::Delete => cx.background_spawn(async move { admin.delete(&id).map(|()| Answer::Deleted) }),
-            DialogKind::Made | DialogKind::Settings => Task::ready(Ok(Answer::Deleted)),
-        }
+            DialogKind::Made | DialogKind::Settings => return None,
+        })
     }
 
     fn answered(&mut self, answer: Result<Answer, AppProblem>, cx: &mut Context<Self>) {
@@ -644,7 +648,7 @@ impl AppDialog {
         }
         self.connection = None;
         let admin = Arc::clone(&self.admin);
-        self.searching = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+        self.reading = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let read = cx.background_spawn(async move { admin.connection() }).await;
             let _ = this.update(cx, |this, cx| {
                 this.connection = Some(read);
@@ -665,7 +669,7 @@ impl AppDialog {
             return;
         }
         let admin = Arc::clone(&self.admin);
-        self.searching = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+        self.reading = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let named = cx
                 .background_spawn(async move { named_among(admin.as_ref(), &wanted) })
                 .await;

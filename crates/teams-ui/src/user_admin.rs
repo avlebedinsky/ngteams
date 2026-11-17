@@ -201,12 +201,25 @@ pub trait UserAdmin: Send + Sync + 'static {
 const SHOWN_NAME: usize = 60;
 
 /// `name`, cut to [`SHOWN_NAME`] characters with an ellipsis.
-fn short(name: &str) -> String {
+pub(crate) fn short(name: &str) -> String {
     if name.chars().count() <= SHOWN_NAME {
         return name.to_owned();
     }
     let cut: String = name.chars().take(SHOWN_NAME - 1).collect();
     format!("{}…", cut.trim_end())
+}
+
+/// A small mark beside a name: an outlined pill in `color`.
+pub(crate) fn badge(words: &'static str, color: u32) -> gpui::Div {
+    div()
+        .px_2()
+        .py_0p5()
+        .rounded_full()
+        .border_1()
+        .border_color(rgb(color))
+        .text_xs()
+        .text_color(rgb(color))
+        .child(words)
 }
 
 /// Whether `text` reads as a user name (`name@domain`, no spaces).
@@ -532,7 +545,7 @@ impl UserDialog {
         cx.notify();
     }
 
-    fn key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event.keystroke.key.as_str() {
             "escape" => {
                 cx.stop_propagation();
@@ -547,8 +560,9 @@ impl UserDialog {
                 };
                 cx.emit(closed);
             }
-            // the password given is read, then Enter closes
-            "enter" if self.given.is_some() => {
+            // the password given is read, then Enter on the dialog itself closes; Enter on a focused button (Copy
+            // password) does what that button does
+            "enter" if self.given.is_some() && self.focus.is_focused(window) => {
                 cx.stop_propagation();
                 cx.emit(UserDialogEvent::Changed);
             }
@@ -1079,18 +1093,6 @@ impl ManageUsers {
         self.scroll.set_offset(offset);
     }
 
-    fn badge(words: &'static str, color: u32) -> gpui::Div {
-        div()
-            .px_2()
-            .py_0p5()
-            .rounded_full()
-            .border_1()
-            .border_color(rgb(color))
-            .text_xs()
-            .text_color(rgb(color))
-            .child(words)
-    }
-
     fn row(
         &self,
         (at, user): (usize, &AdminUser),
@@ -1113,14 +1115,12 @@ impl ManageUsers {
             .flex()
             .flex_wrap()
             .gap_2()
-            .when(own, |row| row.child(Self::badge("You", palette.muted_foreground)))
-            .when(user.admin, |row| row.child(Self::badge("Administrator", palette.brand)))
+            .when(own, |row| row.child(badge("You", palette.muted_foreground)))
+            .when(user.admin, |row| row.child(badge("Administrator", palette.brand)))
             .when(user.must_change_password, |row| {
-                row.child(Self::badge("New password due", palette.muted_foreground))
+                row.child(badge("New password due", palette.muted_foreground))
             })
-            .when(!user.enabled, |row| {
-                row.child(Self::badge("Can't sign in", theme::DANGER))
-            });
+            .when(!user.enabled, |row| row.child(badge("Can't sign in", theme::DANGER)));
         let marked = own || user.admin || user.must_change_password || !user.enabled;
         let (under, beside) = match (marked, narrow) {
             (false, _) => (None, None),

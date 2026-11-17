@@ -625,11 +625,14 @@ impl AppDialog {
             if !self.busy {
                 cx.emit(AppDialogEvent::Closed);
             }
-        } else if event.keystroke.key.as_str() == "enter" && self.kind == DialogKind::Made {
+        } else if event.keystroke.key.as_str() == "enter"
+            && self.kind == DialogKind::Made
+            && self.focus.is_focused(window)
+        {
+            // only on the dialog itself: Enter on a focused button (Copy secret) does what that button does
             cx.stop_propagation();
             cx.emit(AppDialogEvent::Closed);
         }
-        let _ = window;
     }
 
     fn form(&self, palette: Palette, cx: &mut Context<Self>) -> Vec<gpui::Div> {
