@@ -470,13 +470,16 @@ impl Global for ApiModels {}
 impl ApiModels {
     /// What `provider` listed; `None` while it is asked, which starts on first use.
     pub fn of(provider: &Provider, cx: &mut App) -> Option<Listing> {
-        let held = cx.default_global::<Self>();
-        if let Some(listing) = held.listed.get(&provider.id) {
-            return Some(listing.clone());
+        // only read: a mutable access tells the observers, and a view that draws this observes it
+        if let Some(held) = cx.try_global::<Self>() {
+            if let Some(listing) = held.listed.get(&provider.id) {
+                return Some(listing.clone());
+            }
+            if held.asking.contains_key(&provider.id) {
+                return None;
+            }
         }
-        if !held.asking.contains_key(&provider.id) {
-            Self::relist(provider, cx);
-        }
+        Self::relist(provider, cx);
         None
     }
 

@@ -4,7 +4,8 @@
 //! and its control trailing.
 //!
 //! - **General**: the account's manual status, whether its availability is reported, the idle time after which
-//!   it no longer is, and the time format (following the system's locale, 12-hour or 24-hour).
+//!   it no longer is, the time format (following the system's locale, 12-hour or 24-hour), the AI providers
+//!   ([`ai_providers::AiProviders`]), then the AI choices of the chats and the drafts.
 //! - **Appearance**: the theme (following the system's light or dark mode with a theme for each, or one theme
 //!   whatever the system says), each a tile drawn in its own colours; the font size with its steps; the font family,
 //!   searchable among the system's.
@@ -57,12 +58,14 @@ use crate::local_ai::Work;
 use crate::presence;
 use crate::settings::{LogLevel, ManualStatus, Notifications, Settings, SettingsModel, TimeFormat};
 use crate::settings_view::ai_picker::AiPicker;
+use crate::settings_view::ai_providers::AiProviders;
 use crate::shell::shown_as;
 use crate::theme::{self, Appearance, FONT_SIZE, FONT_SIZES, Palette, THEMES, ThemeSpec};
 use crate::trace::ViewTrace;
 use crate::user_admin::{ManageUsers, UserAdmin};
 
 pub mod ai_picker;
+pub mod ai_providers;
 pub mod sounds;
 
 /// The font picker's first row: the system's UI font (no family named).
@@ -386,6 +389,8 @@ pub struct SettingsView {
     effects: Option<Entity<EffectsPicker>>,
     /// The local AI choices' pickers (captions, then recaps), made the first time the Calls page shows.
     ai: Option<[Entity<AiPicker>; 2]>,
+    /// The AI providers' box, once the General page showed it.
+    ai_providers: Option<Entity<AiProviders>>,
     /// The chats' translator's picker, once the General page showed it.
     chat_ai: Option<Entity<AiPicker>>,
     correction_ai: Option<Entity<AiPicker>>,
@@ -422,6 +427,7 @@ impl SettingsView {
             apps_gone: false,
             effects: None,
             ai: None,
+            ai_providers: None,
             chat_ai: None,
             correction_ai: None,
             message_translation_ai: None,
@@ -1211,6 +1217,14 @@ impl SettingsView {
         rows
     }
 
+    /// The AI providers' box, on the General page before the AI choices.
+    pub fn ai_providers(&mut self, cx: &mut Context<Self>) -> Entity<AiProviders> {
+        let model = self.model.clone();
+        self.ai_providers
+            .get_or_insert_with(|| cx.new(|cx| AiProviders::new(model, cx)))
+            .clone()
+    }
+
     /// The chats' translator's picker ([`crate::chat_translate`]), on the General page beside the chats' other
     /// settings.
     pub fn chat_ai_picker(&mut self, cx: &mut Context<Self>) -> Entity<AiPicker> {
@@ -1506,6 +1520,7 @@ impl SettingsView {
                 if self.apps_gone {
                     boxes.insert(0, note_box("settings-apps-gone", APPS_GONE, palette));
                 }
+                boxes.push(self.ai_providers(cx).into_any_element());
                 boxes.push(self.chat_ai_picker(cx).into_any_element());
                 boxes.push(self.correction_ai_picker(cx).into_any_element());
                 boxes.push(self.message_translation_ai_picker(cx).into_any_element());
