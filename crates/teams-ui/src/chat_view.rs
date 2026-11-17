@@ -2046,7 +2046,13 @@ impl ChatView {
             .text_of(held)
             .map_or_else(|| compose::rich_text_of(held), |shown| shown.as_ref().clone());
         let loaded = compose::load(&text, &mentioned);
-        let bots = rich_text::mentioned_bots(held.properties.as_deref());
+        // the apps of the message's bots, only while the bots are shown (`NGTEAMS_BOTS=1`): with the bots hidden, the
+        // box refuses to send a bot's mention, as for a pasted one
+        let bots = if crate::bots_flag::bots_on(cx) {
+            rich_text::mentioned_bots(held.properties.as_deref())
+        } else {
+            std::collections::BTreeMap::new()
+        };
         let id = held.id.clone();
         self.compose.update(cx, |compose, cx| match loaded {
             Ok(loaded) => {

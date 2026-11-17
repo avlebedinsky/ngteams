@@ -28,6 +28,7 @@ use teams_ui::apps_page::AppsPage;
 use teams_ui::apps_page::chat_apps::ChatAppsDialog;
 use teams_ui::apps_page::details::AppDetailsDialog;
 use teams_ui::bots_flag::BotsFlag;
+use teams_ui::chat_view::MessageAction;
 use teams_ui::settings::{Settings, SettingsModel};
 use teams_ui::shell::{Main, Shell, ShellParts};
 
@@ -1078,6 +1079,67 @@ fn a_pasted_bot_s_app_that_could_not_be_read_is_asked_again() {
         text.bots().get(&teams_proto::Mri::new(POLLS_BOT)).map(String::as_str),
         Some(POLLS)
     );
+}
+
+/// An edit of the account's own message that mentions the Polls bot with its app (as browser Teams sends it): with the
+/// bots shown, the edit sends the bot's mention with its app's id again; with the bots hidden, the box refuses the
+/// edit and sends nothing.
+#[test]
+fn an_edit_of_a_bot_s_mention_keeps_its_app_only_with_the_bots_shown() {
+    for bots in [true, false] {
+        let rig = Rig::start();
+        let mut mine = text_message(GROUP_CHAT, 400, common::LAB_A, Some("Lab A"));
+        mine.content = "<p><readonly class=\"skipProofing\" itemtype=\"http://schema.skype.com/Mention\" \
+                        spellcheck=\"false\"><span itemtype=\"http://schema.skype.com/Mention\" itemscope \
+                        itemid=\"0\">Made-up Polls</span></readonly>&nbsp;who's in?</p>"
+            .to_owned();
+        mine.properties = Some(
+            json!({ "mentions": [{
+                "@type": "http://schema.skype.com/Mention",
+                "itemid": "0",
+                "mri": POLLS_BOT,
+                "mentionType": "bot",
+                "displayName": "Made-up Polls",
+                "appId": POLLS,
+            }] })
+            .to_string(),
+        );
+        rig.core
+            .messages
+            .lock()
+            .unwrap()
+            .insert(GROUP_CHAT.to_owned(), vec![mine]);
+        let (shell, cx) = shell_window(&rig, bots);
+        cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(GROUP_CHAT.to_owned(), window, cx)));
+        cx.run_until_parked();
+        let chat = cx.update(|_, cx| shell.read(cx).chat().cloned()).expect("the chat");
+        cx.update(|window, cx| chat.update(cx, |chat, cx| chat.act(MessageAction::Edit, "400", window, cx)));
+        cx.run_until_parked();
+        cx.simulate_input(" now");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let actions = std::mem::take(&mut *rig.core.actions.lock().unwrap());
+        let edits: Vec<_> = actions
+            .iter()
+            .filter_map(|action| match action {
+                teams_core::Action::Edit { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        if bots {
+            let [text] = edits.as_slice() else {
+                panic!("one edit: {actions:?}");
+            };
+            assert_eq!(
+                text.bots().get(&teams_proto::Mri::new(POLLS_BOT)).map(String::as_str),
+                Some(POLLS),
+                "{}",
+                text.html()
+            );
+        } else {
+            assert!(edits.is_empty(), "{actions:?}");
+        }
+    }
 }
 
 const OTHER_GROUP: &str = "19:made-up-other-group@thread.v2";
