@@ -4,6 +4,7 @@
 //! (else a directory), which the nodes are given by configuration alone.
 
 mod files;
+mod kept_alive;
 mod limits;
 mod links;
 mod nodes;
