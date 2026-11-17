@@ -13,9 +13,12 @@
 //! - **Five files** in one message (a zip, two videos, a PDF and a picture): five cards, two in a row at most, 10 px
 //!   apart, inside the message's bubble, never the line "This message has content that cannot be shown here". Teams
 //!   Light and Teams Dark.
-//! - **The actions**: Share on the videos alone; Share's "Copy link"; "More options": "Download" saves the bytes b
-//!   sent, "Copy link" puts the file's link on the clipboard, "Open in desktop app" saves the file and opens it; a
-//!   click on a video's picture plays it in the card.
+//! - **The actions**: Share on the videos alone; Share's "Copy link"; "More options" (Teams' rows: "Open in desktop
+//!   app", "Download", "Share", "Copy link"; a video's has no "Open"): "Download" saves the bytes b sent, "Copy link"
+//!   puts the file's link on the clipboard, "Open in desktop app" saves the file and opens it; a click on a video's
+//!   picture plays it in the card.
+//! - **The location**: each card's second line names its owner by name (`personal > Bert Made-Up`), never by the
+//!   account's id.
 //! - **Text over two files** in a second message: its text and two cards in one row; "Download" of its video.
 //!
 //! Every name, address and file is made up; nothing leaves loopback. Screenshots go to `target/ui-shots/qa525-own-*.png`,
@@ -91,6 +94,9 @@ const NIRI_CONFIG: &str = "layout {\n    gaps 0\n    default-column-width { prop
 const CARD_WIDTH: u32 = 316;
 const HEADER: u32 = 64;
 const GAP: u32 = 10;
+
+/// The largest box (width, height) "More options" of four rows takes, px.
+const MENU_MOST: (u32, u32) = (240, 170);
 
 /// The band at the bottom of the screen the compose box takes.
 const COMPOSE_BAND: u32 = 90;
@@ -399,9 +405,13 @@ impl Walk<'_> {
         if let Some(link) = item.links.iter().find(|link| !link.starts_with("https://127.0.0.1:")) {
             note(format!("{what}: a file's link {link:?} is not on the own server"));
         }
-        // Teams names the owner on the second line (`personal > <user name>`), never an id
-        let owner = B.0.split('@').next().unwrap_or_default();
-        if let Some(location) = item.locations.iter().find(|location| !location.contains(owner)) {
+        // Teams names the owner on the second line (`personal > <owner>`), never an id
+        let owner = B.1;
+        if let Some(location) = item
+            .locations
+            .iter()
+            .find(|location| **location != format!("personal > {owner}"))
+        {
             note(format!(
                 "{what}: a card's second line says {location:?}, not the name of its owner {owner:?} as Teams does"
             ));
@@ -485,9 +495,19 @@ impl Walk<'_> {
             note(format!("{name}: no card {at} on the screen: {cards:?}"));
             return Ok(None);
         };
-        let menu = self
-            .run
-            .open_menu(self.sandbox, more_at(*card), &format!("qa525-own-{name}-light.png"))?;
+        let shot = format!("qa525-own-{name}-light.png");
+        let mut menu = self.run.open_menu(self.sandbox, more_at(*card), &shot)?;
+        // another change on the screen (the message's hover bar) can join the menu's box: then it is too large for a
+        // menu of four rows, and the menu is opened again once the screen is still
+        if menu.is_some_and(|menu| menu.height() > MENU_MOST.1 || menu.width() > MENU_MOST.0) {
+            step(&format!(
+                "{name}: the menu's box {menu:?} holds more than the menu: again"
+            ));
+            self.run.input.key(keys::ESC)?;
+            self.run.input.move_to(self.run.rest.0, self.run.rest.1)?;
+            thread::sleep(SETTLE);
+            menu = self.run.open_menu(self.sandbox, more_at(*card), &shot)?;
+        }
         if menu.is_none() {
             note(format!("{name}: More options on card {at} opens no menu"));
         }
@@ -499,7 +519,8 @@ impl Walk<'_> {
         let Some(menu) = self.more_menu(at, &format!("more-{}", file.slug))? else {
             return Ok(());
         };
-        let (x, y) = row_at(menu, 1, 3);
+        let (row, rows) = if is_video(file) { (0, 3) } else { (1, 4) };
+        let (x, y) = row_at(menu, row, rows);
         self.run.click(x, y)?;
         self.run.input.move_to(self.run.rest.0, self.run.rest.1)?;
         let target = self.downloads.join(file.name);
@@ -530,7 +551,8 @@ impl Walk<'_> {
         let Some(menu) = self.more_menu(at, "more-copy")? else {
             return Ok(());
         };
-        let copied = self.run.click_copies(self.sandbox, row_at(menu, 2, 3))?;
+        // a document's rows: Open in desktop app, Download, Share, Copy link
+        let copied = self.run.click_copies(self.sandbox, row_at(menu, 3, 4))?;
         if copied != link {
             note(format!(
                 "More options' Copy link on {what} copies {copied:?}, expected {link}"
@@ -546,7 +568,7 @@ impl Walk<'_> {
         let Some(menu) = self.more_menu(at, "more-open")? else {
             return Ok(());
         };
-        let (x, y) = row_at(menu, 0, 3);
+        let (x, y) = row_at(menu, 0, 4);
         let Some(opened) = self.run.click_opens(self.sandbox, x, y)? else {
             note(format!("Open in desktop app on {} opens nothing", file.name));
             return Ok(());
@@ -732,24 +754,31 @@ const fn picture_at(card: Rect) -> (u32, u32) {
     )
 }
 
-/// "More options" (…) at the header's right end.
+/// "More options" (…) at the header's right end: a button of Teams' 27 px.
 const fn more_at(card: Rect) -> (u32, u32) {
-    (card.x1 - 22, card.y0 + HEADER / 2)
+    (card.x1 - 25, card.y0 + HEADER / 2)
 }
 
 /// Share, left of "More options".
 const fn share_at(card: Rect) -> (u32, u32) {
-    (card.x1 - 47, card.y0 + HEADER / 2)
+    (card.x1 - 56, card.y0 + HEADER / 2)
 }
 
-/// Where Share's icon is drawn on a video's card: above the location's line, which can reach under it.
+/// Where the top of Share's icon is drawn on a video's card: above the location's line.
 const fn share_slot(card: Rect) -> Rect {
     Rect {
-        x0: card.x1 - 54,
-        y0: card.y0 + 24,
-        x1: card.x1 - 38,
-        y1: card.y0 + 38,
+        x0: card.x1 - 65,
+        y0: card.y0 + 22,
+        x1: card.x1 - 47,
+        y1: card.y0 + 31,
     }
+}
+
+/// Whether `file` is a video: its card's "More options" has no "Open".
+fn is_video(file: &MadeFile) -> bool {
+    std::path::Path::new(file.name)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
 }
 
 /// The middle of row `row` of `rows` in a menu drawn as `menu`.

@@ -13,8 +13,9 @@
 //! - **A narrow window**: one card in a row, none cut at the right; then wide again.
 //! - **A channel post with files and its thread** beside the posts.
 //! - **The actions**: a click on a name opens the file's link; a click on a video's picture plays it in the card, a
-//!   second click pauses it; Share's "Copy link"; the zip has no Share; "More options": "Open in browser", "Download"
-//!   and "Copy link"; Escape closes a menu.
+//!   second click pauses it; Share's "Copy link"; the zip has no Share; "More options" of a document: "Open in
+//!   browser", "Download", "Share" (its menu's "Copy link") and "Copy link"; of a video: "Download", "Share" and "Copy
+//!   link", no "Open in browser", as Teams on the web has them; Escape closes a menu.
 //! - **Odd shapes**, each beside good entries: a lone surrogate escape, an entry with no `@type`, an entry with no
 //!   SharePoint link, a list encoded twice.
 //!
@@ -90,6 +91,8 @@ const NIRI_CONFIG: &str = "layout {\n    gaps 0\n    default-column-width { prop
 const CARD_WIDTH: u32 = 316;
 const HEADER: u32 = 64;
 const GAP: u32 = 10;
+/// The room a menu beside a menu needs at the screen's right, else it opens on the left.
+const SHARE_MENU_ROOM: u32 = 160;
 /// The thread pane's width beside a channel's posts.
 const THREAD_WIDTH: u32 = 440;
 
@@ -371,6 +374,7 @@ impl Walk<'_> {
         self.play(video)?;
         self.share(video)?;
         self.more(doc)?;
+        self.video_more(video)?;
         self.escape(zip)?;
         Ok(())
     }
@@ -473,10 +477,10 @@ impl Walk<'_> {
         Ok(())
     }
 
-    /// "More options" on the document's card: each of its three items.
+    /// "More options" on the document's card: each of its four items.
     fn more(&mut self, doc: Rect) -> SandboxResult {
         let link = share_url(&DOC);
-        let rows = 3;
+        let rows = 4;
         for (row, what) in [(0, "Open in browser"), (1, "Download")] {
             let Some(menu) = self
                 .run
@@ -503,11 +507,67 @@ impl Walk<'_> {
             note("More options on the document's card opens no menu".to_owned());
             return Ok(());
         };
-        let copied = self.run.click_copies(self.sandbox, row_at(menu, 2, rows))?;
+        let copied = self.run.click_copies(self.sandbox, row_at(menu, 3, rows))?;
         if copied != link {
             note(format!("More options' Copy link copies {copied:?}, expected {link}"));
         }
-        step("More options: Open in browser, Download and Copy link");
+        self.more_share(doc, rows, 2, &link, "the document")?;
+        step("More options: Open in browser, Download, Share and Copy link");
+        Ok(())
+    }
+
+    /// "More options" on a video's card: Download, Share and Copy link, no "Open in browser".
+    fn video_more(&mut self, video: Rect) -> SandboxResult {
+        let link = share_url(&CLIP_A);
+        let rows = 3;
+        let Some(menu) = self
+            .run
+            .open_menu(self.sandbox, more_at(video), "qa525-video-more-light.png")?
+        else {
+            note("More options on a video's card opens no menu".to_owned());
+            return Ok(());
+        };
+        if menu.height() > 4 * 36 {
+            note(format!(
+                "More options on a video's card has more than three rows: {menu:?}"
+            ));
+        }
+        let (x, y) = row_at(menu, 0, rows);
+        let opened = self.run.click_opens(self.sandbox, x, y)?;
+        if opened != format!("{link}?download=1") {
+            note(format!("a video's More options' first row (Download) opens {opened}"));
+        }
+        self.more_share(video, rows, 1, &link, "a video")?;
+        step("a video's More options: Download, Share and Copy link");
+        Ok(())
+    }
+
+    /// "More options" → "Share" (row `row` of `rows`) on `card`: its menu beside it (on the right, or on the left
+    /// when the screen has no room), whose one row "Copy link" copies `link`.
+    fn more_share(&mut self, card: Rect, rows: u32, row: u32, link: &str, what: &str) -> SandboxResult {
+        let Some(menu) = self
+            .run
+            .open_menu(self.sandbox, more_at(card), "qa525-more-share-light.png")?
+        else {
+            note(format!("More options on {what}'s card opens no menu"));
+            return Ok(());
+        };
+        let (x, y) = row_at(menu, row, rows);
+        self.run.click(x, y)?;
+        thread::sleep(SETTLE);
+        self.run.shot(self.sandbox, "qa525-more-share-open-light.png")?;
+        // the Share menu's row is level with Share, its middle about 50 px from the menu's edge
+        let beside = if menu.x1 + SHARE_MENU_ROOM < SCREEN.0 {
+            menu.x1 + 50
+        } else {
+            menu.x0 - 50
+        };
+        let copied = self.run.click_copies(self.sandbox, (beside, y))?;
+        if copied != link {
+            note(format!(
+                "More options' Share → Copy link on {what} copies {copied:?}, expected {link}"
+            ));
+        }
         Ok(())
     }
 
@@ -549,23 +609,23 @@ const fn picture_at(card: Rect) -> (u32, u32) {
     )
 }
 
-/// "More options" (…) at the header's right end.
+/// "More options" (…) at the header's right end: a button of Teams' 27 px.
 const fn more_at(card: Rect) -> (u32, u32) {
-    (card.x1 - 22, card.y0 + HEADER / 2)
+    (card.x1 - 25, card.y0 + HEADER / 2)
 }
 
 /// Share, left of "More options".
 const fn share_at(card: Rect) -> (u32, u32) {
-    (card.x1 - 47, card.y0 + HEADER / 2)
+    (card.x1 - 56, card.y0 + HEADER / 2)
 }
 
-/// Where Share's icon is drawn on a video's card: above the location's line, which can reach under it.
+/// Where the top of Share's icon is drawn on a video's card: above the location's line.
 const fn share_slot(card: Rect) -> Rect {
     Rect {
-        x0: card.x1 - 54,
-        y0: card.y0 + 24,
-        x1: card.x1 - 38,
-        y1: card.y0 + 38,
+        x0: card.x1 - 65,
+        y0: card.y0 + 22,
+        x1: card.x1 - 47,
+        y1: card.y0 + 31,
     }
 }
 
