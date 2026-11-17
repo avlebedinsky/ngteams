@@ -10,16 +10,20 @@ use serde_json::json;
 use teams_core::Action;
 use teams_proto::{InvokeAnswer, InvokeKind};
 use teams_ui::bots_flag::BotsFlag;
-use teams_ui::chat_view::{ChatView, ChatViewEvent};
+use teams_ui::chat_view::{ChatView, ChatViewEvent, MessageAction};
 
-use super::common::{LAB_B, Rig};
+use super::common::{LAB_A, LAB_B, Rig};
 use super::{AB, NOON, chat_window, draw, message, rig_with, trace};
 
 const FINDER: &str = "00000000-0000-4000-8000-00000000e001";
 const ID: &str = "701";
 
 fn apps_rig(flag: bool) -> Rig {
-    let rig = rig_with(vec![message(ID, LAB_B, "<p>A made-up order</p>", NOON)]);
+    apps_rig_with(flag, vec![message(ID, LAB_B, "<p>A made-up order</p>", NOON)])
+}
+
+fn apps_rig_with(flag: bool, messages: Vec<teams_store::Message>) -> Rig {
+    let rig = rig_with(messages);
     rig.cx.update(|cx| cx.set_global(BotsFlag(flag)));
     *rig.core.extension_apps.lock().unwrap() =
         teams_proto::extension_apps(teams_mock::extension_apps_answer().to_string().as_bytes());
@@ -255,4 +259,68 @@ fn without_the_flag_or_in_read_only_mode_there_is_no_app() {
     cx.update(|window, cx| compose.update(cx, |compose, cx| compose.toggle_apps(window, cx)));
     assert!(!found(cx, "apps-flyout"));
     assert!(cx.update(|_, cx| view.read(cx).message_app_actions().is_empty()));
+}
+
+/// A made-up result card, as a dialog puts it into the box.
+fn made_up_card() -> teams_proto::chat::AppCard {
+    teams_proto::chat::AppCard::new(
+        FINDER.to_owned(),
+        "Made-up Finder".to_owned(),
+        None,
+        "application/vnd.microsoft.card.adaptive".to_owned(),
+        json!({"type": "AdaptiveCard", "body": [{"type": "TextBlock", "text": "Made up"}]}),
+    )
+}
+
+#[test]
+fn an_edit_waits_for_the_boxs_cards_and_never_carries_one() {
+    const MINE: &str = "702";
+    let rig = apps_rig_with(
+        true,
+        vec![
+            message(ID, LAB_B, "<p>A made-up order</p>", NOON),
+            message(MINE, LAB_A, "<p>Mine</p>", NOON + 1_000),
+        ],
+    );
+    let (view, cx) = window(&rig);
+    let compose = cx.update(|_, cx| view.read(cx).compose().clone());
+    let editing = |cx: &mut VisualTestContext| {
+        cx.update(|_, cx| matches!(compose.read(cx).mode(), teams_ui::compose::Mode::Edit { .. }))
+    };
+    // a card in the box: no edit starts, from the menu or from Up
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.add_app_card(made_up_card(), window, cx)));
+    cx.update(|window, cx| view.update(cx, |view, cx| view.act(MessageAction::Edit, MINE, window, cx)));
+    cx.run_until_parked();
+    assert!(!editing(cx));
+    assert!(cx.update(|_, cx| compose.read(cx).problem().is_some()));
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.focus(window, cx)));
+    cx.simulate_keystrokes("up");
+    cx.run_until_parked();
+    assert!(!editing(cx));
+    // the card sent, an edit starts; Actions and apps doesn't open while it runs
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.send(window, cx)));
+    cx.run_until_parked();
+    cx.update(|window, cx| view.update(cx, |view, cx| view.act(MessageAction::Edit, MINE, window, cx)));
+    cx.run_until_parked();
+    assert!(editing(cx));
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.toggle_apps(window, cx)));
+    assert!(!found(cx, "apps-flyout"));
+    // a card that comes in during the edit (a dialog's result) stays out of it, and in the box after it
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.add_app_card(made_up_card(), window, cx)));
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.send(window, cx)));
+    cx.run_until_parked();
+    let edits: Vec<usize> = rig
+        .core
+        .actions
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|action| match action {
+            Action::Edit { text, .. } => Some(text.cards().len()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(edits, [0]);
+    assert!(!editing(cx));
+    assert_eq!(cx.update(|_, cx| compose.read(cx).app_cards().len()), 1);
 }

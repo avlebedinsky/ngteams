@@ -277,6 +277,34 @@ impl ChannelView {
         cx.notify();
     }
 
+    /// An app dialog's result card goes into the box that writes to `conversation`: the posts' box for the channel, a
+    /// post's thread's box for its chain (the thread opens, as a reply's box takes it). `false` when `conversation` is
+    /// not this channel's.
+    pub fn add_app_card(
+        &mut self,
+        conversation: &str,
+        card: teams_proto::chat::AppCard,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let view = if conversation == self.channel {
+            self.posts.clone()
+        } else {
+            match teams_proto::reply_chain(conversation) {
+                Some((channel, post)) if channel == self.channel => {
+                    self.open_thread(post.to_owned(), window, cx);
+                    match &self.thread {
+                        Some(thread) => thread.view.clone(),
+                        None => return false,
+                    }
+                }
+                _ => return false,
+            }
+        };
+        view.update(cx, |view, cx| view.add_app_card(card, window, cx));
+        true
+    }
+
     /// Closes the thread beside the posts; its box's draft is kept for the thread's next opening.
     pub fn close_thread(&mut self, cx: &mut Context<Self>) {
         if let Some(post) = self.put_thread_away(cx) {

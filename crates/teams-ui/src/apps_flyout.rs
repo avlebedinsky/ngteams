@@ -32,7 +32,7 @@ use teams_core::bots::BotAsk;
 use teams_proto::chat::AppCard;
 use teams_proto::{CommandContext, ExtensionApp, ExtensionCommand, InvokeAnswer, InvokeKind};
 
-use crate::app_dialog::{DialogApp, DialogSeed, Opened, app_card_of};
+use crate::app_dialog::{DialogApp, DialogSeed, Opened, SIGN_IN, app_card_of};
 use crate::bot_card::{NOT_REACHED, Target};
 use crate::bridge::Core;
 use crate::icons::{Glyph, icon_button, selected_by};
@@ -56,8 +56,6 @@ pub const NO_APPS: &str = "Apps you add that work in messages show here.";
 pub const NO_MATCH: &str = "No apps match your search.";
 /// What a search with no result says.
 pub const NO_RESULTS: &str = "No results.";
-/// A search's sign-in request.
-pub const SIGN_IN: &str = "Sign-in needed. Open Teams on the web to sign in to the app.";
 
 /// What the flyout tells its compose box.
 #[derive(Clone, Debug, PartialEq, Eq)]

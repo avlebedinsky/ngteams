@@ -168,7 +168,7 @@ impl ChatView {
 
     /// What a click on button `action` of card `card` of `message` does (a button of the card itself, not of a card a
     /// `ShowCard` opened), when it asks the bot: the card shown (the bot's, when it put one in the place), its answers
-    /// checked, then the bot asked. A button that doesn't ask the bot (read-only mode, a dialog) does nothing here.
+    /// checked, then the bot asked. A button that doesn't ask the bot (read-only mode) does nothing here.
     pub fn press_card_action(&mut self, message: &str, card: usize, action: usize, cx: &mut Context<Self>) {
         let Some(item) = self.message_items().find(|item| item.id == message).cloned() else {
             return;
@@ -183,7 +183,7 @@ impl ChatView {
             return;
         };
         let reaches = bot.read(cx).target().is_some();
-        if !crate::bot_card::asks(reaches, self.core.read_only(), pressed) {
+        if !crate::bot_card::asks(reaches, self.core.read_only()) {
             return;
         }
         let mut inputs = Vec::new();

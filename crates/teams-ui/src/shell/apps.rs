@@ -73,7 +73,9 @@ impl Shell {
         self.show_team_dialog(&dialog, window, cx);
     }
 
-    /// An app dialog's result card goes into the compose box of `conversation`, when that chat is shown.
+    /// An app dialog's result card goes into the box that writes to `conversation`: the chat's, or in a channel the
+    /// posts' box or the post's thread's ([`ChannelView::add_app_card`]); when no box shown writes there, a toast says
+    /// that the card was not kept.
     pub(super) fn app_card_to_compose(
         &mut self,
         conversation: &str,
@@ -81,11 +83,22 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.main != Main::Chat(conversation.to_owned()) {
-            return;
-        }
-        if let Some(chat) = &self.chat {
-            chat.update(cx, |chat, cx| chat.add_app_card(card, window, cx));
+        let taken = match &self.main {
+            Main::Chat(chat) if chat == conversation => match &self.chat {
+                Some(view) => {
+                    view.update(cx, |view, cx| view.add_app_card(card, window, cx));
+                    true
+                }
+                None => false,
+            },
+            Main::Channel(_) => self
+                .channel
+                .as_ref()
+                .is_some_and(|(view, _)| view.update(cx, |view, cx| view.add_app_card(conversation, card, window, cx))),
+            _ => false,
+        };
+        if !taken {
+            self.show_toast(crate::app_dialog::NO_BOX, cx);
         }
     }
 

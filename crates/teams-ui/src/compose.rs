@@ -33,8 +33,11 @@
 //!
 //! - **The box** is drawn as Teams' compose box: the editor on a raised, rounded surface with a hairline border
 //!   ([`BOX_HEIGHT`] at least), Teams' accent line in the brand colour along its foot while it has the focus, and its
-//!   controls inside it on the right: Format, Emoji, Attach, Loop and Actions and apps (the last two shown disabled,
-//!   saying the app doesn't have them yet), Correct, Translate and its language, a thin divider, then Send. Its
+//!   controls inside it on the right: Format, Emoji, Attach, Loop (shown disabled, saying the app doesn't have it yet),
+//!   Actions and apps (disabled the same way, unless `NGTEAMS_BOTS=1` is set and the account's cloud serves apps: then
+//!   it opens its flyout, [`apps`]), Correct, Translate and its language, a thin divider, then Send. The box can hold
+//!   apps' cards (a message extension's result), drawn over the tools, each with a close mark, and sent with the
+//!   message. Its
 //!   placeholder stays on one line, cut short with an ellipsis; a narrow box (a thread's pane) shows the language as
 //!   a caret alone, naming it in its tooltip. A box too narrow for its text beside its tools (a call's Chat pane) is
 //!   stacked, as Teams' is: the text on top, the tools and Send on a row under it, and the tools that do not fit in
@@ -1237,6 +1240,9 @@ impl Compose {
         if !self.attachments.is_empty() {
             return self.show_problem("Send or remove your attachments before editing a message.", cx);
         }
+        if !self.apps.cards.is_empty() {
+            return self.show_problem("Send or remove your cards before editing a message.", cx);
+        }
         self.trace.record(
             &TraceLine::new("compose", "editing")
                 .conversation(&self.conversation)
@@ -1323,6 +1329,12 @@ impl Compose {
             Ok(None) => return,
             Err(error) => return self.show_problem(format!("This message can't be sent: {error}"), cx),
         };
+        // an edit carries no files and no cards: they wait in the box for the next message
+        let cards = if matches!(self.mode, Mode::Edit { .. }) {
+            Vec::new()
+        } else {
+            self.apps.cards.clone()
+        };
         let built = built
             .with_files(
                 self.attachments
@@ -1333,12 +1345,12 @@ impl Compose {
                     })
                     .collect(),
             )
-            .with_cards(self.apps.cards.clone());
+            .with_cards(cards.clone());
         let from = Draft {
             doc,
             mode: self.mode.clone(),
             attachments: self.attachments.clone(),
-            cards: self.apps.cards.clone(),
+            cards,
         };
         // what is sent is what the box holds: a correction or translation of it is over
         self.forget_correction();
@@ -1445,7 +1457,7 @@ impl Compose {
             self.apps.cards.retain(|card| !from.cards.contains(card));
             cx.notify();
         } else {
-            self.clear(window, cx);
+            self.clear_sent(edit_of.is_some(), window, cx);
         }
         // a post's original is kept by the row it went out as
         let post = sent.filter(|_| edit_of.is_none());
@@ -1556,6 +1568,18 @@ impl Compose {
             self.set_expanded(false, cx);
         }
         cx.notify();
+    }
+
+    /// Empties the box after a send; an edit took no cards, so a card that came into the box meanwhile (an app
+    /// dialog's result) stays for the next message.
+    fn clear_sent(&mut self, edit: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let kept = if edit {
+            std::mem::take(&mut self.apps.cards)
+        } else {
+            Vec::new()
+        };
+        self.clear(window, cx);
+        self.apps.cards = kept;
     }
 
     /// What the box holds changed: traced without the text, so a test driving the keyboard can tell when the app has
@@ -1821,7 +1845,11 @@ impl Compose {
         if self.picker.is_some() {
             self.step_picker(-1, cx);
             cx.stop_propagation();
-        } else if self.mode == Mode::New && self.editor.read(cx).is_empty() && self.attachments.is_empty() {
+        } else if self.mode == Mode::New
+            && self.editor.read(cx).is_empty()
+            && self.attachments.is_empty()
+            && self.apps.cards.is_empty()
+        {
             cx.emit(ComposeEvent::EditLast);
             cx.stop_propagation();
         }

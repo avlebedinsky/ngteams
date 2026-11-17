@@ -577,11 +577,10 @@ pub fn post_message<T>(core: &Arc<dyn Core>, conversation: &str, text: &str, cx:
     .detach();
 }
 
-/// Whether a button that sends (`action`) asks the bot: the bot is known (`reaches`) and the app isn't `read_only`
-/// (a `task/fetch` button asks for its dialog). Else it opens the message in Teams on the web.
+/// Whether a button that sends asks the bot: the bot is known (`reaches`) and the app isn't `read_only` (a
+/// `task/fetch` button asks for its dialog). Else it opens the message in Teams on the web.
 #[must_use]
-pub fn asks(reaches: bool, read_only: bool, action: &BotAction) -> bool {
-    let _ = action;
+pub fn asks(reaches: bool, read_only: bool) -> bool {
     reaches && !read_only
 }
 

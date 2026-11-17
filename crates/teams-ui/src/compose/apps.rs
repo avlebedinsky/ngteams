@@ -34,13 +34,14 @@ pub(super) struct Apps {
 
 impl Compose {
     /// Whether Actions and apps opens its flyout: the bots are shown, the account's cloud serves apps, and the box
-    /// writes a chat's messages.
+    /// writes a chat's messages, not an edit.
     pub(super) fn offers_apps(&self, cx: &App) -> bool {
         crate::bots_flag::bots_on(cx)
             && self.core.capabilities().apps
             && !self.core.read_only()
             && self.read_only.is_none()
             && self.writes == Writes::Chat
+            && !matches!(self.mode, super::Mode::Edit { .. })
     }
 
     pub(super) fn apps_button(&self, cx: &mut Context<Self>) -> AnyElement {

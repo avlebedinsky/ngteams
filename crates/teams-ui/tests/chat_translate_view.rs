@@ -511,3 +511,38 @@ fn a_chat_being_translated_spins_its_button_and_says_translating_on_each_message
     assert!(header_cx.debug_bounds("chat-translate-busy").is_none());
     assert!(header_cx.debug_bounds("chat-translate").is_some());
 }
+
+#[test]
+fn a_translated_send_keeps_the_apps_cards_of_the_box() {
+    let rig = Rig::start();
+    let dir = tempfile::tempdir().unwrap();
+    let fake = tool(dir.path(), "claude", FAKE_CLAUDE);
+    rig.cx
+        .update(|cx| cx.set_global(Tools::with(vec![(Backend::Claude, fake)])));
+    let (view, cx) = translated_chat(&rig);
+    let compose = cx.update(|_, cx| view.read(cx).compose().clone());
+    let card = teams_proto::chat::AppCard::new(
+        "00000000-0000-4000-8000-00000000e001".to_owned(),
+        "Made-up Finder".to_owned(),
+        None,
+        "application/vnd.microsoft.card.adaptive".to_owned(),
+        serde_json::json!({"type": "AdaptiveCard", "body": [{"type": "TextBlock", "text": "Made up"}]}),
+    );
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.add_app_card(card, window, cx)));
+    send(&view, cx, "Hallo");
+    until(cx, |_| !sent_texts(&rig).is_empty());
+    assert_eq!(sent_texts(&rig), ["EN Hallo"]);
+    let cards: Vec<usize> = rig
+        .core
+        .actions
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|action| match action {
+            Action::Send { text, .. } => Some(text.cards().len()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cards, [1], "the card goes with the translated text");
+    assert!(cx.update(|_, cx| compose.read(cx).app_cards().is_empty()));
+}

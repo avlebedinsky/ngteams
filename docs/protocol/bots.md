@@ -175,7 +175,7 @@ flag (`NGTEAMS_BOTS=1`), only a build run with it asks a bot (`teams_ui::bot_car
 - a `task/fetch` button asks the bot for its dialog (`task/fetch`) and opens it (`teams_ui::app_dialog`): a card
   across the dialog, its Submit a `task/submit`; a message extension's action command opens the same dialog, its Submit
   a `composeExtension/submitAction`. The dialog's answer closes it (done), takes its place (a next dialog), goes into the
-  compose box (a result's card), or shows (a message, an error); `signin` opens its page in the browser;
+  compose box (a result's card; in a channel the reply box of the post's thread, which opens), or shows (a message, an error); `signin` opens its page in the browser;
 - the bot's app id is the bot's own id until the engine knows each bot's app.
 
 Without the flag, or in read-only mode, a card's bot buttons open the message in Teams on the web, as before.

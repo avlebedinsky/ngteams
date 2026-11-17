@@ -8,8 +8,9 @@
 //!   ([`crate::bot_card`]); its Submit sends the answers to the command (`composeExtension/submitAction`) or to the
 //!   button (`task/submit`), once.
 //! - **The answer**: nothing (the dialog closes), a next dialog (it takes this one's place), a result (its card goes
-//!   into the compose box, as Teams puts it there, and the dialog closes), a message (the dialog says it), or an error
-//!   (said under the card, the dialog stays).
+//!   into the compose box, as Teams puts it there, and the dialog closes: in a channel the box of the post's thread,
+//!   which opens, and a toast when no box shown writes there), a message (the dialog says it), or an error (said under
+//!   the card, the dialog stays).
 //! - **A web page**: a dialog that is a web page (`taskInfo.url`, or an answer with `url`) needs Teams' JavaScript
 //!   host, which this app doesn't have (no web view: AGENTS.md's design invariants), so the dialog says the app opens
 //!   in Teams on the web and offers that link.
@@ -54,6 +55,8 @@ pub const NOTHING: &str = "The app sent nothing to show here.";
 pub const UNREAD: &str = "The app answered in a way this app can't show.";
 /// What a sign-in request says.
 pub const SIGN_IN: &str = "Sign-in needed. Open Teams on the web to sign in to the app.";
+/// What the toast says when a result's card has no box to go into: the chat or channel it is for is not shown.
+pub const NO_BOX: &str = "The app's card can't go into a message here.";
 /// A dialog's width when the app gives none, px: Teams' "medium".
 const DEFAULT_WIDTH: f32 = 600.0;
 
@@ -258,10 +261,10 @@ impl AppDialog {
                 let made = CardBot::new(Arc::clone(&self.core), self.message(), Some(self.seed.target.clone()))
                     .in_dialog(self.submit_to());
                 let bot = cx.new(|_| made);
-                let answers = cx.subscribe(&bot, |this, _, event: &CardBotEvent, cx| {
-                    if let CardBotEvent::Answered(answer) = event {
-                        this.answered(answer.clone(), cx);
-                    }
+                // a `task/fetch` button on the dialog's card opens its next dialog in this one's place
+                let answers = cx.subscribe(&bot, |this, _, event: &CardBotEvent, cx| match event {
+                    CardBotEvent::Answered(answer) => this.answered(answer.clone(), cx),
+                    CardBotEvent::Dialog { dialog, .. } => this.show(dialog.clone(), cx),
                 });
                 cx.observe(&bot, |_, _, cx| cx.notify()).detach();
                 Stage::Card {

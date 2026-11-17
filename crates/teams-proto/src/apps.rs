@@ -30,16 +30,8 @@ impl UserApps {
             return Vec::new();
         };
         let value = answer.get("value").unwrap_or(&answer);
-        let entitlements: Vec<&Value> = value
-            .get("userEntitlements")
-            .and_then(Value::as_object)
-            .into_iter()
-            .flat_map(serde_json::Map::values)
-            .filter_map(Value::as_array)
-            .flatten()
-            .collect();
         let definitions = value.get("definitions");
-        listed(entitlements, &["Installed", "PreConsented"], |id| {
+        listed(entitlement_values(value), &["Installed", "PreConsented"], |id| {
             definitions.and_then(|definitions| definitions.get(id))
         })
     }
@@ -127,8 +119,8 @@ impl Read for ChatApps {
     }
 }
 
-/// The account's entitlements in an answer's `value` (`userEntitlements`), each its state and app id, in order.
-pub(crate) fn entitlements_in(value: &Value) -> Vec<(&str, &str)> {
+/// The account's entitlements in an answer's `value` (`userEntitlements`), each as it is, in order.
+fn entitlement_values(value: &Value) -> Vec<&Value> {
     value
         .get("userEntitlements")
         .and_then(Value::as_object)
@@ -136,6 +128,13 @@ pub(crate) fn entitlements_in(value: &Value) -> Vec<(&str, &str)> {
         .flat_map(serde_json::Map::values)
         .filter_map(Value::as_array)
         .flatten()
+        .collect()
+}
+
+/// The account's entitlements in an answer's `value` (`userEntitlements`), each its state and app id, in order.
+pub(crate) fn entitlements_in(value: &Value) -> Vec<(&str, &str)> {
+    entitlement_values(value)
+        .into_iter()
         .filter_map(|entitlement| Some((entitlement.get("state")?.as_str()?, entitlement.get("id")?.as_str()?)))
         .collect()
 }

@@ -48,9 +48,9 @@ use gpui_component::button::Button;
 use gpui_component::{Disableable as _, Selectable as _, Sizable as _};
 use teams_proto::LinkPreviewPicture;
 use teams_proto::chat::card::{
-    self, Action, ActionKind, BotAction, Card, CardApp, CardMessage, Column, ColumnSet, Container, ContainerStyle,
-    DateFormat, Element, Frame, HAlign, Image, ImageSize, Input, Kind, Media, RichTextBlock, Spacing, Table, TextBlock,
-    TextColor, TextLook, TextPart, TextSize, TextWeight, VAlign, Width,
+    self, Action, ActionKind, Card, CardApp, CardMessage, Column, ColumnSet, Container, ContainerStyle, DateFormat,
+    Element, Frame, HAlign, Image, ImageSize, Input, Kind, Media, RichTextBlock, Spacing, Table, TextBlock, TextColor,
+    TextLook, TextPart, TextSize, TextWeight, VAlign, Width,
 };
 use teams_proto::chat::parse_html;
 
@@ -377,8 +377,8 @@ struct BotDraw<'a> {
 
 impl BotDraw<'_> {
     /// A button that sends asks the bot (else it opens in Teams on the web).
-    fn asks(&self, action: &BotAction) -> bool {
-        bot_card::asks(self.shown.reaches, self.read_only, action)
+    fn asks(&self) -> bool {
+        bot_card::asks(self.shown.reaches, self.read_only)
     }
 }
 
@@ -1349,7 +1349,7 @@ fn action_button(draw: &Draw<'_>, key: &str, action: &Action, set: &[String]) ->
 /// Whether `action` asks the card's bot (with the bot state, not read-only, a button that sends; see the module docs).
 fn asks_bot(draw: &Draw<'_>, action: &Action) -> bool {
     match (&action.kind, draw.bot) {
-        (ActionKind::Submit(sent), Some(bot)) => bot.asks(sent),
+        (ActionKind::Submit(_), Some(bot)) => bot.asks(),
         _ => false,
     }
 }
