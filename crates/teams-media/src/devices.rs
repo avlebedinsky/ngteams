@@ -177,7 +177,7 @@ pub trait AudioSource: Send {
     fn next_frame(&mut self, timeout: Duration) -> Result<Option<AudioFrame>, DeviceError>;
 }
 
-/// Where audio goes: takes a 10 ms frame and returns at once (a full queue drops its oldest audio).
+/// Where audio goes: takes a 10 ms frame and returns at once (a full queue drops audio rather than block).
 pub trait AudioSink: Send {
     /// Queues `frame` to be played.
     ///

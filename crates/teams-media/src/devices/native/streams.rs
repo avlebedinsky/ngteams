@@ -356,7 +356,8 @@ impl AudioSink for Speaker {
 /// How late the call's playout may hand over a frame and still play in time. libwebrtc's 10 ms playout timer and the
 /// threads between it and the device make frames come in bursts. Each frame plays this long after it comes.
 const PLAYOUT_MARGIN: gst::ClockTime = gst::ClockTime::from_mseconds(50);
-/// The audio the speaker's input holds before it drops new frames: 200 ms of 48 kHz mono `f32`.
+/// The audio the speaker's input holds before it drops new frames: 200 ms of 48 kHz mono `f32`. A device stall
+/// longer than this keeps only the audio from the stall's start: at most this much old audio, then the newer frames.
 const SPEAKER_BACKLOG: u64 = 38_400;
 /// The audio the device's own buffer holds, in microseconds: a sink reports it as its latency (`osxaudiosink`'s
 /// default is 200 ms), and each frame plays that much later.
