@@ -354,6 +354,11 @@ libsqlite3-sys = { version = "0.38.2", features = ["bundled"] }
 redis = { version = "1.8.1", default-features = false, features = ["connection-manager", "tokio-comp", "tokio-rustls-comp"] }
 # a workflow webhook's rate limit within one node (GCRA, keyed by workflow); Redis counts it across nodes
 governor = { version = "0.10.4", default-features = false, features = ["std", "quanta"] }
+# a bot's Markdown text as the chat service's HTML, and that HTML cleaned to what a message may carry
+pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
+ammonia = "4.2.5"
+# the networks a bot's endpoint may be on (`bots.allowed_networks`)
+ipnet = { version = "2.12.2", features = ["serde"] }
 # its files: the local file system, memory or S3
 object_store = { version = "0.14.2", default-features = false, features = ["aws", "fs"] }
 # a file download's `Range` header, parsed and checked against the file's size (tower-http's own parser)

@@ -60,6 +60,8 @@ pub struct App {
     pub redis: Option<crate::fanout::keyspace::Shared>,
     /// The keys activities to bots are signed with.
     pub bot_keys: crate::apps::keys::BotKeys,
+    /// What sends activities to bots, through the address guard.
+    pub(crate) outbound: crate::outbound::Outbound,
 }
 
 /// Why a node can't start.
@@ -75,6 +77,8 @@ pub enum StartError {
     Storage(#[from] StorageError),
     #[error("the link preview client can't be built: {0}")]
     Previews(String),
+    #[error("the bot connector's client can't be built: {0}")]
+    Outbound(String),
 }
 
 /// How long a retired key is kept: as long as the longest-lived thing it signed, an access token, a bot's token or a
@@ -87,6 +91,16 @@ fn key_retention(config: &Config) -> Duration {
         .max(Duration::from_secs(config.media.link_lifetime));
     // Allow two missed maintenance ticks before other nodes reload their signer.
     longest + 3 * MAINTENANCE + Duration::from_secs(crate::auth::tokens::LEEWAY)
+}
+
+/// What sends to bots, through the address guard `bots.*` sets.
+fn outbound(config: &Config) -> Result<crate::outbound::Outbound, StartError> {
+    let guard = crate::outbound::Guard {
+        allow_http: config.bots.allow_http_endpoints,
+        networks: config.bots.allowed_networks.clone(),
+    };
+    crate::outbound::Outbound::new(guard, Duration::from_secs(config.bots.send_timeout))
+        .map_err(|error| StartError::Outbound(error.to_string()))
 }
 
 impl App {
@@ -159,6 +173,7 @@ impl App {
         )?);
         let fetcher =
             crate::media::Fetcher::new(&config.media).map_err(|error| StartError::Previews(error.to_string()))?;
+        let outbound = outbound(&config)?;
         let app = Arc::new(Self {
             config,
             db,
@@ -176,6 +191,7 @@ impl App {
             workflow_limit,
             redis: shared,
             bot_keys,
+            outbound,
         });
         Ok(app)
     }
@@ -217,6 +233,8 @@ pub fn router(app: Arc<App>) -> Router {
         .layer(TraceLayer::new_for_http())
         // after the trace: a webhook's link carries its secret in the query, which that trace would log
         .merge(crate::workflows::hook::router(&app.config))
+        // after the trace too: an unsigned bot's service URL carries its credential
+        .merge(crate::bots::router(&app.config))
         .layer(axum::middleware::from_fn(crate::serve::drain_unread_body))
         .with_state(app)
 }
@@ -278,6 +296,7 @@ async fn purge(app: &App) {
         tracing::warn!(%error, "expired refresh tokens weren't dropped");
     }
     purge_registrations(app).await;
+    crate::bots::purge(app).await;
 }
 
 async fn purge_registrations(app: &App) {

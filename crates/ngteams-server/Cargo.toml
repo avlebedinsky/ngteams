@@ -12,6 +12,7 @@ name = "ngteams-server"
 path = "src/main.rs"
 
 [dependencies]
+ammonia.workspace = true
 argon2.workspace = true
 async-trait.workspace = true
 aws-lc-rs.workspace = true
@@ -35,6 +36,7 @@ hyper.workspace = true
 hyper-util.workspace = true
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
 indexmap.workspace = true
+ipnet.workspace = true
 # `use_pem`: an RSA key in PKCS#8, as aws-lc-rs makes it, is read only from PEM (the bot signing keys)
 jsonwebtoken = { workspace = true, features = ["use_pem"] }
 libsqlite3-sys.workspace = true
@@ -42,6 +44,7 @@ mime_guess.workspace = true
 object_store.workspace = true
 opus.workspace = true
 percent-encoding.workspace = true
+pulldown-cmark.workspace = true
 redis.workspace = true
 reqwest.workspace = true
 rrule.workspace = true

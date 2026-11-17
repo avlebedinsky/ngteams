@@ -13,7 +13,7 @@ mod credentials;
 pub mod keys;
 mod manifest;
 pub mod repo;
-mod schema;
+pub(crate) mod schema;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -83,6 +83,15 @@ pub struct BotsConfig {
     pub allow_unsigned: bool,
     /// Whether a bot's endpoint may be plain `http` (development only).
     pub allow_http_endpoints: bool,
+    /// The networks a bot's endpoint may resolve into besides the public internet: private, loopback or link-local
+    /// ranges where self-hosted bots live. A cloud metadata address is never reached ([`crate::outbound`]).
+    pub allowed_networks: Vec<ipnet::IpNet>,
+    /// Seconds before each new attempt of an activity a bot didn't take; one attempt more than there are entries.
+    pub retry_delays: Vec<u64>,
+    /// Seconds a node holds an activity it sends before another node may take it over.
+    pub delivery_lease: u64,
+    /// Seconds a request to a bot may take, from connecting to the end of its answer.
+    pub send_timeout: u64,
 }
 
 impl Default for BotsConfig {
@@ -96,6 +105,10 @@ impl Default for BotsConfig {
             key_rotation: 30 * 86_400,
             allow_unsigned: false,
             allow_http_endpoints: false,
+            allowed_networks: Vec::new(),
+            retry_delays: vec![15, 45],
+            delivery_lease: 30,
+            send_timeout: 10,
         }
     }
 }
@@ -134,6 +147,8 @@ impl BotsConfig {
             && self.token_lifetime > 0
             && self.activity_token_lifetime > 0
             && self.key_rotation > 0
+            && self.send_timeout > 0
+            && self.delivery_lease > self.send_timeout
     }
 }
 

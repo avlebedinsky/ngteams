@@ -279,6 +279,14 @@ impl Issuer {
         self.keys.verify(token, &self.validation(audience)).await
     }
 
+    /// The claims of an app's own token for `audience` (a bot's, `crate::apps`), which name no account.
+    ///
+    /// # Errors
+    /// [`Invalid`]: not ours, not for `audience`, or expired.
+    pub async fn verify_app<T: serde::de::DeserializeOwned>(&self, token: &str, audience: &str) -> Result<T, Invalid> {
+        self.keys.verify(token, &self.validation(audience)).await
+    }
+
     /// The claims of a skypetoken.
     ///
     /// # Errors

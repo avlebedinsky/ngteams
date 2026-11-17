@@ -49,6 +49,8 @@ pub(super) struct Posted {
     pub inserted: bool,
     pub readers: Vec<String>,
     pub told: Vec<Told>,
+    /// It put an activity in the bots' outbox: the senders are woken after the commit.
+    pub queued: bool,
 }
 
 /// Whether `$draft`'s owner may post it as `$poster`: a member is in its thread, an app's thread is there.
@@ -113,6 +115,7 @@ pub(super) async fn insert_by(db: &Db, draft: &Message, base: &str, poster: Post
                         inserted: false,
                         readers: Vec::new(),
                         told: Vec::new(),
+                        queued: false,
                     }));
                 }
             }
@@ -149,11 +152,17 @@ pub(super) async fn insert_by(db: &Db, draft: &Message, base: &str, poster: Post
             };
             let drafts = scene.of_post(&row, &body, &thread);
             let told = activity::put!(conn, at, base, &scene, &body, drafts);
+            let event = crate::bots::activity::Event::Message {
+                id: row.id,
+                body: &body,
+            };
+            let queued = crate::bots::outbox::enqueue!(conn, &row.chat_id, &row.owner_id, event, version);
             Ok(Some(Posted {
                 readers: scene.readers(row.id),
                 row,
                 inserted: true,
                 told,
+                queued,
             }))
         })
         .await)
@@ -273,6 +282,8 @@ pub(super) struct Changed {
     pub row: Message,
     pub readers: Vec<String>,
     pub told: Vec<Told>,
+    /// It put an activity in the bots' outbox.
+    pub queued: bool,
 }
 
 /// What a change means for the activity of the message's people.
@@ -360,10 +371,20 @@ where
             told.extend(activity::put!(conn, at, change.base, &scene, &body, plan.drafts));
             let reword = |item: &mut Value, at: i64| activity::reworded(item, &body, at);
             told.extend(activity::amend!(conn, at, plan.reworded, reword));
+            let event = match change.effect {
+                Effect::Edited => Some(crate::bots::activity::Event::Edited { id, body: &body }),
+                Effect::Deleted => Some(crate::bots::activity::Event::Deleted { id }),
+                _ => None,
+            };
+            let queued = match event {
+                Some(event) => crate::bots::outbox::enqueue!(conn, chat, actor, event, version),
+                None => false,
+            };
             Ok(Updated::Message(Changed {
                 readers: scene.readers(row.id),
                 row,
                 told,
+                queued,
             }))
         })
         .await)

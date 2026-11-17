@@ -154,6 +154,10 @@ takes a double underscore: `NGTEAMS_SERVER_TLS__CERT`, `NGTEAMS_SERVER_TOKENS__A
 | `bots.key_rotation` | `2592000` | seconds a bot signing key signs before a new one replaces it (30 days) |
 | `bots.allow_unsigned` | `false` | whether a bot may be registered with `auth_mode: "unsigned"` (no authentication either way: development or a private network) |
 | `bots.allow_http_endpoints` | `false` | whether a bot's endpoint may be plain `http` (development only) |
+| `bots.allowed_networks` | `[]` | networks (CIDR) a bot's endpoint may resolve into besides public addresses: private, loopback or link-local ranges of self-hosted bots; a cloud metadata address is never reached |
+| `bots.retry_delays` | `[15, 45]` | seconds before each new attempt of an activity a bot didn't take; one attempt more than there are entries |
+| `bots.delivery_lease` | `30` | seconds a node holds an activity it sends before another node may take it over; longer than `bots.send_timeout` |
+| `bots.send_timeout` | `10` | seconds a send to a bot may take, from connecting to the end of its answer |
 | `[[rooms]]` | none | the meeting rooms the room finder lists, each `name`, `address` (its mailbox) and optionally `list` (its building), `capacity`, `floor`, `street`, `audio_device`, `video_device`, `display_device`, `wheelchair` |
 
 ## Operations
@@ -646,8 +650,9 @@ paging of the lists (a list is whole, without `nextLink`).
 ## Apps and bots
 
 The server becomes a Bot Connector for bots built with the Bot Framework, Teams or Microsoft 365 Agents SDKs. It
-registers apps and bots now and gives each bot its credentials and the keys to check the server with; delivery of
-activities to bots, the connector routes a bot answers on, invokes and installs are not served yet.
+registers apps and bots, gives each bot its credentials and the keys to check the server with, delivers chat events
+to bots as activities and serves the connector routes a bot answers on (1:1 bot chats). Invokes, installs, group
+chats and channels are not served yet.
 
 **A bot is a principal in chats**: a `users` row of kind `app` with the bot's id, MRI `28:<id>`, no password and no
 sign-in. No people read finds it: not the admin's account list or account changes, not a sign-in, not a profile
@@ -706,6 +711,67 @@ A bot gets the server's token with MSAL's client-credentials request, unchanged:
   tenant. Wrong secrets count per bot as password attempts do (`login.max_failures` in `login.window`, across nodes
   with Redis); after that a wrong secret gets 429 `temporarily_unavailable` with `Retry-After` until the window ends.
   The right secret is never held off (a bot's id is public), and it clears the count.
+
+### Bot chats and delivery
+
+**A bot chat** is the 1:1 chat `19:<a>_<b>@unq.gbl.spaces` of a person and a bot (the two ids in order), as Teams
+names it. There is no create call: a person's first message to that id makes the chat when the bot's app is enabled
+and the person may use it (`everyone`, or listed in `users`); otherwise the post is 404 as for any unknown chat. A
+bot makes the same chat with `POST v3/conversations` under the same rule. In the chat's members and thread reads the
+bot is `28:<id>`.
+
+**To a bot.** In a 1:1 chat the bot gets each message (`message`), edit (`messageUpdate`, `channelData.eventType`
+`editMessage`), delete (`messageDelete`, `softDeleteMessage`) and typing (`typing`) of the person; in a group chat only
+a message that mentions it. An activity is the `msteams` channel's: `channelId: "msteams"`, `serviceUrl`, `from`
+`{"id": "29:<account id>", "name", "aadObjectId"}`, `recipient` `{"id": "28:<bot id>", "name"}`, `conversation`
+`{"id", "conversationType": "personal", "isGroup": false, "tenantId"}`, `channelData.tenant.id`, `timestamp`,
+`localTimestamp`, `locale`. A message's `id` is the chat service's message id; its `text` is the message's plain text,
+with its HTML beside it as a `text/html` attachment. No account's token is ever in an activity.
+
+Each activity is a row of the outbox (`bot_deliveries`), written in the chat write's own transaction. Every API node
+sends rows: it takes a row's lease (`bots.delivery_lease` seconds) with a compare-and-set update, so one node sends it
+at a time, and a row waits while an older one of the same bot and chat is pending. A write wakes every node's sender
+through the fan-out (`bots:wake`); a two-second poll covers a lost wake-up. A send that the bot doesn't answer with
+2xx in `bots.send_timeout` seconds is tried again after each of `bots.retry_delays` (by default 15 s and 45 s: three
+attempts in about a minute), then the row is `failed`; typing is tried once. A bot may get an activity twice (after a
+lease runs out), as with Bot Framework; its id is the same each time. After 20 failed sends in a row a bot gets
+nothing for a minute (`bot_health`). Sent and failed rows go after a day.
+
+**The address guard.** A bot's endpoint is set by an administrator, and the server checks every send: `https` only
+(`http` with `bots.allow_http_endpoints`), no user info, no redirects followed, no proxy, the answer read up to
+256 KiB. The connection goes only to addresses the guard's own resolver passed, so a name can't answer one way for the
+check and another for the connection. Public addresses pass; a private, loopback, link-local, shared or otherwise
+reserved one passes only when it is in `bots.allowed_networks` (CIDR, for a self-hosted bot on a private network);
+a cloud metadata address (`169.254.169.254`, `fd00:ec2::254`, `100.100.100.200`) never. A refused address fails the
+row at once.
+
+**Signed and unsigned.** A signed bot's activity carries the server's RS256 token (above); the bot answers with its own
+token at `serviceUrl` `<bots.service_url>` (`<origin>/bot/` by default). An unsigned bot (`auth_mode` `unsigned`,
+with `bots.allow_unsigned`) gets no token and sends none: its own `serviceUrl` is
+`<bots.service_url>u/<bot id>.<credential>/`, the credential derived from its secret, so a new secret makes a new
+one. Its endpoint takes anyone's posts, so use it for development or on a private network.
+
+### The connector routes
+
+Under the `serviceUrl` (`/bot/…`, or an unsigned bot's `/bot/u/<bot id>.<credential>/…`). A doubled slash and any
+letter case in the fixed segments are taken, as the SDKs join URLs differently. A signed bot sends
+`Authorization: Bearer <its token>`; a person's token, an unsigned bot's or no token is 401. A bot of a disabled app
+is 403.
+
+| Request | Does | Answers |
+|---|---|---|
+| `POST v3/conversations/{id}/activities`, `…/activities/{replyToId}` | a `message` as the bot: `text` in `textFormat` `markdown` (the default; turned into HTML with pulldown-cmark), `plain` or `xml`, cleaned with ammonia (no scripts, styles, handlers or pictures; links `https`, `http`, `mailto`); card attachments (Adaptive, hero, thumbnail, up to 10, with `suggestedActions`) as one `RichText/Media_Card` message after the text. A `typing` activity is the bot typing | 200 `{"id"}` (the last message's) |
+| `PUT v3/conversations/{id}/activities/{activityId}` | the bot's own message, its text or cards now the activity's | 200 `{"id"}` |
+| `DELETE v3/conversations/{id}/activities/{activityId}` | the bot's own message, soft-deleted | 200 |
+| `GET v3/conversations/{id}/members`, `…/activities/{activityId}/members` | the chat's people as `TeamsChannelAccount` (`id` `29:<id>`, `name`, `aadObjectId`, `objectId`, `givenName`, `surname`, `email`, `userPrincipalName`, `tenantId`, `userRole`) | 200 list |
+| `GET v3/conversations/{id}/pagedmembers` | the same | 200 `{"members"}` |
+| `GET v3/conversations/{id}/members/{member}` | one, by `29:<id>`, `8:orgid:<id>`, id or address | 200 account |
+| `POST v3/conversations` | the bot's 1:1 chat with one person (`members[0].id` `29:<id>` or `8:orgid:<id>`, or `aadObjectId`) who may use its app, with `activity` posted in it when given | 201 `{"id", "activityId", "serviceUrl"}` |
+| `v3/batch/…`, `v3/teams/…`, `v1/meetings/…`, `…/history` | not served | 501 |
+
+A bot acts only in a chat it is in (403) and changes only its own messages (403). Refusals take the Bot Framework's
+`{"error": {"code", "message"}}`: 400 `BadArgument` (not an activity, no text or card, an attachment that isn't a card
+the client draws, a group conversation), 401 `Unauthorized`, 403 `Forbidden`, 404 `NotFound`.
 
 ### The keys a bot checks activities with
 

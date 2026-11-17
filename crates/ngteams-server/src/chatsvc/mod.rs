@@ -187,6 +187,11 @@ pub(crate) fn now() -> i64 {
     wire::now()
 }
 
+/// A time of the chat service's clock as its messages write it.
+pub(crate) fn iso(at: i64) -> String {
+    wire::iso(at)
+}
+
 pub(crate) fn decode_properties(body: Option<String>) -> Result<serde_json::Map<String, serde_json::Value>, DbError> {
     property_repo::decode(body)
 }

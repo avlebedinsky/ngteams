@@ -36,13 +36,13 @@ use crate::db::{DbError, users};
 pub(crate) const POST_ACTION: &str = "Post_card_in_a_chat_or_channel";
 const PREFIX: &str = "/workflows/automations/direct/workflows";
 const ADAPTIVE: &str = "application/vnd.microsoft.card.adaptive";
-const CARD_KINDS: [&str; 3] = [
+pub(crate) const CARD_KINDS: [&str; 3] = [
     ADAPTIVE,
     "application/vnd.microsoft.card.hero",
     "application/vnd.microsoft.card.thumbnail",
 ];
 /// The most cards one post may carry.
-const MAX_CARDS: usize = 10;
+pub(crate) const MAX_CARDS: usize = 10;
 /// How deep a card's containers may nest: deeper, the client's renderer leaves them out.
 const MAX_DEPTH: usize = 16;
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -238,7 +238,7 @@ fn messages(body: &[u8]) -> Option<Vec<Message>> {
 }
 
 /// Whether the client's card renderer takes `content` as a card of `kind`.
-fn card(kind: &str, content: &Value) -> bool {
+pub(crate) fn card(kind: &str, content: &Value) -> bool {
     if kind != ADAPTIVE {
         return content.is_object();
     }
@@ -305,8 +305,12 @@ fn actions(actions: Option<&Value>, depth: usize) -> bool {
 
 /// A card message's content, as the chat service carries a bot's: a `SWIFT.1` object whose text is a fallback and
 /// whose `Swift` holds the base64 JSON of the card's activity.
-fn card_content(card: &Value, origin: &str) -> String {
-    let activity = json!({"type": "message/card", "attachments": [card]});
+pub(crate) fn card_content(card: &Value, origin: &str) -> String {
+    activity_content(&json!({"type": "message/card", "attachments": [card]}), origin)
+}
+
+/// A card message's content for a whole card activity (`message/card`, its attachments and suggested actions).
+pub(crate) fn activity_content(activity: &Value, origin: &str) -> String {
     let encoded = STANDARD.encode(activity.to_string());
     format!(
         "<URIObject type=\"SWIFT.1\"><Title>Card</Title><Description>Card - access it on {}.</Description>\

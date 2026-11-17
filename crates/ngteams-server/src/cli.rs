@@ -356,6 +356,8 @@ async fn serve_api(
     crate::admin::setup::announce(app).await;
     tracing::info!(address = %listener.local_addr()?, origin = %app.config.origin(), tls = tls.is_some(), "serving");
     let sweeper = tokio::spawn(crate::calling::keep_sweeping(std::sync::Arc::clone(app)));
+    let delivering =
+        (app.config.apps.enabled).then(|| tokio::spawn(crate::bots::keep_delivering(std::sync::Arc::clone(app))));
     let db = app.db.clone();
     let indexing = tokio::spawn(async move {
         match crate::search::backfill(&db).await {
@@ -370,6 +372,9 @@ async fn serve_api(
         .await;
     sweeper.abort();
     indexing.abort();
+    if let Some(delivering) = delivering {
+        delivering.abort();
+    }
     Ok(served?)
 }
 

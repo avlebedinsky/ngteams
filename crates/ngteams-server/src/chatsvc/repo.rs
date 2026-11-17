@@ -30,6 +30,35 @@ impl Chat {
 pub(crate) struct Member {
     pub user_id: String,
     pub joined_at: i64,
+    /// An app's bot (`28:<id>`), not a person.
+    #[diesel(select_expression = is_app())]
+    #[diesel(select_expression_type = IsApp)]
+    pub app: bool,
+}
+
+impl Member {
+    pub(crate) fn mri(&self) -> String {
+        if self.app {
+            format!("28:{}", self.user_id)
+        } else {
+            format!("8:orgid:{}", self.user_id)
+        }
+    }
+}
+
+type IsApp = diesel::dsl::exists<
+    diesel::dsl::Filter<
+        diesel::dsl::Filter<users::table, diesel::dsl::Eq<users::id, chat_members::user_id>>,
+        diesel::dsl::Eq<users::kind, &'static str>,
+    >,
+>;
+
+fn is_app() -> IsApp {
+    diesel::dsl::exists(
+        users::table
+            .filter(users::id.eq(chat_members::user_id))
+            .filter(users::kind.eq(crate::db::users::APP)),
+    )
 }
 
 macro_rules! advance {

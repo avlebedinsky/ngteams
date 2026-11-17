@@ -29,13 +29,13 @@ use teams_store::{OutboxState, Store};
 
 use crate::support::{TestServer, backends};
 
-type ChatClient = Client<HttpTransport<Session<MemorySecretStore>>>;
+pub(crate) type ChatClient = Client<HttpTransport<Session<MemorySecretStore>>>;
 
-async fn transport(server: &TestServer, upn: &str, id: &str) -> HttpTransport<Session<MemorySecretStore>> {
+pub(crate) async fn transport(server: &TestServer, upn: &str, id: &str) -> HttpTransport<Session<MemorySecretStore>> {
     transport_with(Arc::new(server.session(upn).await), server, id)
 }
 
-fn transport_with(
+pub(crate) fn transport_with(
     session: Arc<Session<MemorySecretStore>>,
     server: &TestServer,
     id: &str,
@@ -51,11 +51,11 @@ fn transport_with(
     .for_account(Mri::new(format!("8:orgid:{id}")))
 }
 
-async fn client(server: &TestServer, upn: &str, id: &str) -> ChatClient {
+pub(crate) async fn client(server: &TestServer, upn: &str, id: &str) -> ChatClient {
     Client::new(transport(server, upn, id).await)
 }
 
-async fn engine(server: &TestServer, upn: &str, id: &str, dir: &std::path::Path) -> EngineHandle {
+pub(crate) async fn engine(server: &TestServer, upn: &str, id: &str, dir: &std::path::Path) -> EngineHandle {
     let session = Arc::new(server.session(upn).await);
     let client = Arc::new(Client::new(transport_with(Arc::clone(&session), server, id)));
     let transport = Arc::new(transport_with(session, server, id));

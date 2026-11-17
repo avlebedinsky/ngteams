@@ -14,7 +14,7 @@ pub(super) fn base(app: &App) -> String {
 }
 
 pub(super) fn member(app: &App, member: &Member, ranges: bool) -> Value {
-    let mri = format!("8:orgid:{}", member.user_id);
+    let mri = member.mri();
     let mut value = json!({
         "capabilities": ["kickMember"], "cid": "0", "hidden": false, "id": mri,
         "isFollowing": false, "linkedMri": "", "role": "Admin", "type": "ThreadMember",

@@ -20,7 +20,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub(crate) use fetch::Fetcher;
+pub(crate) use fetch::{Fetcher, is_public};
 pub(crate) use thumbs::{decode, decoding};
 
 use axum::http::header::WWW_AUTHENTICATE;

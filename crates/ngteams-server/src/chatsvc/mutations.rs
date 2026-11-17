@@ -64,6 +64,9 @@ pub(super) async fn edit(
     })
     .await?;
     let changed = updated(changed)?;
+    if changed.queued {
+        crate::bots::wake(&app).await;
+    }
     events::tell(
         &app,
         "MessageUpdate",
@@ -100,6 +103,7 @@ pub(super) fn updated(result: message_repo::Updated) -> Result<message_repo::Cha
             row,
             readers: Vec::new(),
             told: Vec::new(),
+            queued: false,
         }),
     }
 }
@@ -140,6 +144,9 @@ pub(super) async fn delete(
     })
     .await?;
     let changed = updated(result)?;
+    if changed.queued {
+        crate::bots::wake(&app).await;
+    }
     let resource = changed.row.value();
     // before the event: a fan-out that hangs past the request's deadline would leave the pictures charged
     crate::media::release(&app, &caller.id, &shown.into_inner().unwrap_or_default()).await;

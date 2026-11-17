@@ -29,7 +29,7 @@ pub(super) async fn post(
     match chat {
         streams::NOTES => streams::ensure(&app.db, chat, &caller.id).await?,
         streams::FEED | streams::MENTIONS | streams::CALL_LOG => return Err(Error::Denied),
-        _ => {}
+        _ => crate::bots::open_chat(&app, chat, &caller.id).await?,
     }
     let (found, _) = member_of(&app, &caller, chat).await?;
     let Json(body) = body.map_err(|_| Error::BadRequest)?;
@@ -56,6 +56,9 @@ pub(super) async fn post(
         .await?
         .ok_or(Error::Denied)?;
     let row = &posted.row;
+    if posted.queued {
+        crate::bots::wake(&app).await;
+    }
     if posted.inserted {
         events::tell(&app, "NewMessage", &row.value()?, &posted.readers, &posted.told).await;
     }
@@ -265,5 +268,6 @@ async fn typing(app: &App, caller: &Caller, chat: &str, stored: &str, body: &Val
         "properties": {"importance": "", "subject": ""},
     });
     events::others(app, caller, &people, "NewMessage", &resource).await;
+    crate::bots::typing(app, stored, &caller.id, at).await;
     Ok((StatusCode::CREATED, Json(json!({"OriginalArrivalTime": at}))).into_response())
 }

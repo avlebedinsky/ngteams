@@ -193,7 +193,7 @@ async fn body(answer: &mut reqwest::Response, limit: u64, cut: bool) -> Result<V
 /// Whether `address` is on the public internet: not loopback, private, link-local (the cloud metadata address
 /// among them), shared, reserved, documentation, multicast or unspecified, in either family, nor an IPv6 form that
 /// carries such an IPv4 address.
-pub(super) fn is_public(address: IpAddr) -> bool {
+pub(crate) fn is_public(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(address) => is_public_v4(address),
         IpAddr::V6(address) => is_public_v6(address),

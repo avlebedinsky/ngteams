@@ -29,7 +29,7 @@ pub(super) async fn tell(app: &App, kind: &str, resource: &Value, readers: &[Str
     }
 }
 
-async fn send(app: &App, users: impl Iterator<Item = &str>, kind: &str, resource: &Value) {
+pub(super) async fn send(app: &App, users: impl Iterator<Item = &str>, kind: &str, resource: &Value) {
     let payload = json!({"resourceType": kind, "resource": resource}).to_string();
     for user in users {
         if app

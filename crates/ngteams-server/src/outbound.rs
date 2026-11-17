@@ -1,0 +1,313 @@
+//! Requests the server makes to an address an administrator set: a bot's messaging endpoint. The address guard
+//! (server-side request forgery) holds for every one:
+//!
+//! - `https` only, unless `bots.allow_http_endpoints`; no user info;
+//! - public addresses only, unless an address is in `bots.allowed_networks` (a self-hosted bot on a private network);
+//!   a cloud metadata address is never reached, whatever the list says;
+//! - the connection goes only to the addresses the guard's own resolver passed, so a name can't answer one way for a
+//!   check and another for the connection (DNS rebinding); an address written in the URL is checked the same way;
+//! - no redirects, no proxy, a deadline for the whole exchange and a cap on the answer's body.
+
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
+use std::time::Duration;
+
+use bytes::Bytes;
+use ipnet::IpNet;
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
+use url::{Host, Url};
+
+/// The most of an answer's body read.
+pub const MAX_ANSWER: usize = 256 * 1024;
+/// How long connecting may take.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Why a request wasn't made or had no answer.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum OutboundError {
+    #[error("the address isn't one the server sends to")]
+    Url,
+    #[error("the address is on a network the server doesn't reach")]
+    Refused,
+    #[error("the request timed out")]
+    Timeout,
+    #[error("the answer is bigger than the server reads")]
+    TooLarge,
+    #[error("the request failed")]
+    Failed,
+}
+
+/// Which addresses may be reached.
+#[derive(Clone, Debug, Default)]
+pub struct Guard {
+    pub allow_http: bool,
+    pub networks: Vec<IpNet>,
+}
+
+impl Guard {
+    /// Whether the server may connect to `address`.
+    #[must_use]
+    pub fn allows(&self, address: IpAddr) -> bool {
+        let address = canonical(address);
+        if is_metadata(address) {
+            return false;
+        }
+        crate::media::is_public(address) || self.networks.iter().any(|network| network.contains(&address))
+    }
+
+    /// Refuses `url` unless its scheme and form may be sent to and an address written in it is allowed.
+    ///
+    /// # Errors
+    /// [`OutboundError::Url`] or [`OutboundError::Refused`].
+    pub fn check(&self, url: &Url) -> Result<(), OutboundError> {
+        let scheme = url.scheme() == "https" || (self.allow_http && url.scheme() == "http");
+        if !scheme || !url.username().is_empty() || url.password().is_some() {
+            return Err(OutboundError::Url);
+        }
+        let literal = match url.host().ok_or(OutboundError::Url)? {
+            Host::Ipv4(address) => Some(IpAddr::V4(address)),
+            Host::Ipv6(address) => Some(IpAddr::V6(address)),
+            Host::Domain(_) => None,
+        };
+        match literal {
+            Some(address) if !self.allows(address) => Err(OutboundError::Refused),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// An IPv4 address an IPv6 form carries (mapped or compatible), as itself.
+fn canonical(address: IpAddr) -> IpAddr {
+    match address {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(address, IpAddr::V4),
+        IpAddr::V4(_) => address,
+    }
+}
+
+/// The cloud providers' instance metadata services.
+fn is_metadata(address: IpAddr) -> bool {
+    const AWS_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254);
+    matches!(address, IpAddr::V4(v4) if v4 == Ipv4Addr::new(169, 254, 169, 254) || v4 == Ipv4Addr::new(100, 100, 100, 200))
+        || address == IpAddr::V6(AWS_V6)
+}
+
+struct Guarded(Guard);
+
+impl Resolve for Guarded {
+    fn resolve(&self, name: Name) -> Resolving {
+        let guard = self.0.clone();
+        Box::pin(async move {
+            let found = tokio::net::lookup_host((name.as_str(), 0)).await?;
+            let addresses: Vec<SocketAddr> = found.filter(|address| guard.allows(address.ip())).collect();
+            if addresses.is_empty() {
+                return Err(Box::new(OutboundError::Refused) as Box<dyn std::error::Error + Send + Sync>);
+            }
+            Ok(Box::new(addresses.into_iter()) as Addrs)
+        })
+    }
+}
+
+/// The client for requests to bots.
+#[derive(Clone, Debug)]
+pub struct Outbound {
+    client: reqwest::Client,
+    guard: Arc<Guard>,
+    deadline: Duration,
+}
+
+/// An answer: its status and at most [`MAX_ANSWER`] bytes of its body.
+#[derive(Debug)]
+pub struct Answer {
+    pub status: u16,
+    pub body: Bytes,
+}
+
+impl Outbound {
+    /// # Errors
+    /// The HTTP client can't be built.
+    pub fn new(guard: Guard, deadline: Duration) -> Result<Self, reqwest::Error> {
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .connect_timeout(CONNECT_TIMEOUT.min(deadline))
+            .dns_resolver(Arc::new(Guarded(guard.clone())))
+            .user_agent("ngteams-server bot connector")
+            .build()?;
+        Ok(Self {
+            client,
+            guard: Arc::new(guard),
+            deadline,
+        })
+    }
+
+    /// Posts `body` as JSON to `url`, with `bearer` when given.
+    ///
+    /// # Errors
+    /// See [`OutboundError`].
+    pub async fn post_json(&self, url: &str, bearer: Option<&str>, body: Vec<u8>) -> Result<Answer, OutboundError> {
+        let url = Url::parse(url).map_err(|_| OutboundError::Url)?;
+        self.guard.check(&url)?;
+        let mut request = self
+            .client
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json; charset=utf-8")
+            .body(body);
+        if let Some(bearer) = bearer {
+            request = request.bearer_auth(bearer);
+        }
+        let exchange = async {
+            let mut answer = request.send().await.map_err(|error| refusal(&error))?;
+            let status = answer.status().as_u16();
+            let mut body = Vec::new();
+            while let Some(chunk) = answer.chunk().await.map_err(|_| OutboundError::Failed)? {
+                if body.len() + chunk.len() > MAX_ANSWER {
+                    return Err(OutboundError::TooLarge);
+                }
+                body.extend_from_slice(&chunk);
+            }
+            Ok(Answer {
+                status,
+                body: body.into(),
+            })
+        };
+        tokio::time::timeout(self.deadline, exchange)
+            .await
+            .map_err(|_| OutboundError::Timeout)?
+    }
+}
+
+/// What a failed request was: refused by the guard's resolver, or another failure.
+fn refusal(error: &reqwest::Error) -> OutboundError {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(cause) = source {
+        if cause.downcast_ref::<OutboundError>() == Some(&OutboundError::Refused) {
+            return OutboundError::Refused;
+        }
+        source = cause.source();
+    }
+    if error.is_timeout() {
+        OutboundError::Timeout
+    } else {
+        OutboundError::Failed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn guard(networks: &[&str]) -> Guard {
+        Guard {
+            allow_http: true,
+            networks: networks.iter().map(|network| network.parse().unwrap()).collect(),
+        }
+    }
+
+    #[test]
+    fn private_loopback_and_link_local_addresses_pass_only_when_listed_and_metadata_never() {
+        let closed = guard(&[]);
+        let open = guard(&[
+            "10.0.0.0/8",
+            "127.0.0.0/8",
+            "169.254.0.0/16",
+            "fd00::/8",
+            "100.64.0.0/10",
+        ]);
+        for address in [
+            "10.1.2.3",
+            "127.0.0.1",
+            "169.254.10.1",
+            "fd00::1",
+            "::ffff:127.0.0.1",
+            "100.100.1.1",
+        ] {
+            let address: IpAddr = address.parse().unwrap();
+            assert!(!closed.allows(address), "{address}");
+            assert!(open.allows(address), "{address}");
+        }
+        for address in [
+            "169.254.169.254",
+            "::ffff:169.254.169.254",
+            "fd00:ec2::254",
+            "100.100.100.200",
+        ] {
+            let address: IpAddr = address.parse().unwrap();
+            assert!(!open.allows(address), "{address}");
+        }
+        for address in [
+            "192.168.1.1",
+            "172.16.0.1",
+            "0.0.0.0",
+            "::",
+            "::1",
+            "224.0.0.1",
+            "fe80::1",
+        ] {
+            assert!(!closed.allows(address.parse().unwrap()), "{address}");
+        }
+        assert!(closed.allows("93.184.216.34".parse().unwrap()));
+        assert!(closed.allows("2606:4700::1111".parse().unwrap()));
+    }
+
+    #[test]
+    fn a_url_is_checked_for_its_scheme_credentials_and_written_address() {
+        let https = Guard::default();
+        let check = |guard: &Guard, url: &str| guard.check(&Url::parse(url).unwrap());
+        assert_eq!(check(&https, "http://bot.example.test/"), Err(OutboundError::Url));
+        assert_eq!(
+            check(&https, "https://user:pw@bot.example.test/"),
+            Err(OutboundError::Url)
+        );
+        assert_eq!(check(&https, "ftp://bot.example.test/"), Err(OutboundError::Url));
+        assert_eq!(check(&https, "https://127.0.0.1/"), Err(OutboundError::Refused));
+        assert_eq!(check(&https, "https://[::ffff:10.0.0.1]/"), Err(OutboundError::Refused));
+        assert_eq!(check(&https, "https://[fd00:ec2::254]/"), Err(OutboundError::Refused));
+        assert_eq!(check(&https, "https://bot.example.test/api/messages"), Ok(()));
+        assert_eq!(check(&guard(&["127.0.0.0/8"]), "http://127.0.0.1:3978/"), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn a_name_that_resolves_only_to_refused_addresses_is_never_connected() {
+        let outbound = Outbound::new(Guard::default(), Duration::from_secs(5)).unwrap();
+        let refused = outbound
+            .post_json("https://localhost:9/api/messages", None, b"{}".to_vec())
+            .await;
+        assert_eq!(refused.unwrap_err(), OutboundError::Refused);
+    }
+
+    #[tokio::test]
+    async fn redirects_are_not_followed_and_long_answers_are_cut_off() {
+        use axum::Router;
+        use axum::http::StatusCode;
+        use axum::routing::post;
+        let router = Router::new()
+            .route(
+                "/redirect",
+                post(|| async {
+                    (
+                        StatusCode::TEMPORARY_REDIRECT,
+                        [("location", "http://169.254.169.254/")],
+                    )
+                }),
+            )
+            .route("/large", post(|| async { vec![b'x'; MAX_ANSWER + 1] }))
+            .route(
+                "/slow",
+                post(|| async { tokio::time::sleep(Duration::from_secs(5)).await }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let outbound = Outbound::new(guard(&["127.0.0.0/8"]), Duration::from_millis(500)).unwrap();
+        let answer = outbound
+            .post_json(&format!("{origin}/redirect"), Some("t"), b"{}".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(answer.status, 307);
+        let large = outbound.post_json(&format!("{origin}/large"), None, Vec::new()).await;
+        assert_eq!(large.unwrap_err(), OutboundError::TooLarge);
+        let slow = outbound.post_json(&format!("{origin}/slow"), None, Vec::new()).await;
+        assert_eq!(slow.unwrap_err(), OutboundError::Timeout);
+        task.abort();
+    }
+}
