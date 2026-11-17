@@ -25,6 +25,10 @@
 //!    server", typed): each account's requests go to its own services alone (the app's request log, and what the
 //!    mock received), and Settings offer Manage users under the administrator `srv-a` alone.
 //!
+//! With `NGTS_QA_DEPLOYED_ORIGIN` (and `NGTS_QA_DEPLOYED_CA`, its certificate authority) the test deploys nothing:
+//! `srv-a` and `srv-b` (made beforehand on that server with `user add` and the tests' password) run steps 1 to 4 on
+//! the server at that origin, such as a Compose deployment behind its reverse proxy.
+//!
 //! Screenshots under `target/ui-shots/own-server-nodes-*.png`. Without weston 15, niri or `dbus-daemon`, the server
 //! binary (`NGTEAMS_QA_SERVER_BIN`, else beside the test's target directory), Postgres and Redis
 //! (`NGTEAMS_SERVER_PG_URL`, `NGTEAMS_SERVER_REDIS_URL`) or coturn (`NGTS_TEST_COTURN`, `NGTS_TEST_COTURN_SECRET`) it
@@ -115,7 +119,16 @@ fn skip(why: &str) -> SandboxResult {
     Ok(())
 }
 
+/// The origin of a server deployed beforehand, for [`deployed`].
+const DEPLOYED_ORIGIN_ENV: &str = "NGTS_QA_DEPLOYED_ORIGIN";
+/// Its certificate authority (PEM), an account's `ca_file`.
+const DEPLOYED_CA_ENV: &str = "NGTS_QA_DEPLOYED_CA";
+
 fn parent() -> SandboxResult {
+    if let Ok(origin) = std::env::var(DEPLOYED_ORIGIN_ENV) {
+        let ca_file = std::env::var(DEPLOYED_CA_ENV).map_err(|_| format!("{DEPLOYED_CA_ENV} isn't set"))?;
+        return deployed(&origin, Path::new(&ca_file));
+    }
     let needs = match Needs::from_env() {
         Ok(needs) => needs,
         Err(why) => return skip(&why),
@@ -135,6 +148,47 @@ fn parent() -> SandboxResult {
     nodes.stop(&runtime)?;
     outcome?;
     say("ngteams own server nodes window: ok");
+    Ok(())
+}
+
+/// Steps 1 to 4 on the server deployed at `origin`.
+fn deployed(origin: &str, ca_file: &Path) -> SandboxResult {
+    let start = |who: &Who| Instance::start_at(who, origin, None, "app");
+    let Some(mut a) = start(&A)? else {
+        return Ok(());
+    };
+    let mut b = start(&B)?.ok_or("no second sandbox")?;
+    let outcome = deployed_steps(origin, ca_file, &mut a, &mut b).map_err(|error| {
+        format!(
+            "{error}\n--- srv-a: {}\n--- srv-b: {}\n--- the sandboxes:{}{}",
+            a.running.fail(&"killed"),
+            b.running.fail(&"killed"),
+            a.sandbox.logs(),
+            b.sandbox.logs()
+        )
+    });
+    outcome?;
+    a.quit()?;
+    b.quit()?;
+    say("ngteams on the deployed server: ok");
+    Ok(())
+}
+
+fn deployed_steps(origin: &str, ca_file: &Path, a: &mut Instance, b: &mut Instance) -> SandboxResult {
+    for instance in [&mut *a, &mut *b] {
+        instance.sign_in(origin, ca_file)?;
+        instance.shot("signed-in")?;
+    }
+    say(&format!(
+        "step 1 passed: srv-a {} and srv-b {} signed in at {origin}",
+        a.mri, b.mri
+    ));
+    let chat = chat_both_ways(a, b)?;
+    say("step 2 passed");
+    reaction_edit_presence(a, b, &chat)?;
+    say("step 3 passed");
+    picture_and_file(a, b, &chat)?;
+    say("step 4 passed");
     Ok(())
 }
 

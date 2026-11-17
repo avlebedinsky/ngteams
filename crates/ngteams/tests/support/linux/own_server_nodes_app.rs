@@ -235,6 +235,12 @@ impl Instance {
     /// [`Instance::start`] with the child in `mode`: `app` (its first sign-in screen up) or `mixed` (the mixed
     /// scene's window up, its control socket served).
     pub fn start_mode(who: &Who, nodes: &Nodes, mode: &str) -> SandboxResult<Option<Self>> {
+        Self::start_at(who, &nodes.origin, Some(nodes), mode)
+    }
+
+    /// [`Instance::start_mode`] on the server at `origin`: pinned to its node when `nodes` deploys it, else as a
+    /// deployment's own front (its reverse proxy) sends it.
+    pub fn start_at(who: &Who, origin: &str, nodes: Option<&Nodes>, mode: &str) -> SandboxResult<Option<Self>> {
         let options = SandboxOptions {
             niri_extra: NIRI_FULL_WINDOW,
             ..SandboxOptions::default()
@@ -262,7 +268,7 @@ impl Instance {
                 (TRACE_FD_ENV, &fd),
                 (DIR_ENV, &dir_text),
                 (CTL_ENV, &socket_text),
-                (ORIGIN_ENV, &nodes.origin),
+                (ORIGIN_ENV, origin),
                 (TONE_ENV, &tone),
                 (LOG_ENV, &log),
             ],
@@ -270,7 +276,9 @@ impl Instance {
         )?;
         drop(writer);
         let mut running = Running::new(child)?;
-        nodes.pin(running.pid(), who.node, who.name);
+        if let Some(nodes) = nodes {
+            nodes.pin(running.pid(), who.node, who.name);
+        }
         let ready = if mode == "app" { "prompt-ready" } else { "ready" };
         running
             .line_where(STARTUP, |line| line == ready)
