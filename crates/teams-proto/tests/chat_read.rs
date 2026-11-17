@@ -1944,3 +1944,72 @@ async fn refuse_own_chat_base(
         "{link}"
     );
 }
+
+/// The labels of the recipients the "To" line names.
+fn shown_labels(details: &teams_proto::chat::EmailDetails) -> Vec<&str> {
+    details.shown_recipients().iter().map(|user| user.label()).collect()
+}
+
+#[test]
+fn a_post_that_came_by_email_has_its_subject_and_its_email_details() -> TestResult {
+    use teams_proto::chat::EmailUser;
+    let email = message(&fixture("email-post.json")?["read_back"])?;
+    assert_eq!(
+        email.subject().as_deref(),
+        Some("Made-up alert: memory use - test cluster")
+    );
+    let details = email.email_details().ok_or("the post's email details")?;
+    let alerts = EmailUser {
+        name: None,
+        smtp: Some("alerts-noreply@example.com".to_owned()),
+    };
+    assert_eq!(details.from.as_ref(), Some(&alerts));
+    assert_eq!(details.sender.as_ref(), Some(&alerts));
+    assert_eq!(alerts.label(), "alerts-noreply@example.com");
+    assert_eq!(shown_labels(&details), ["made-up-channel.example@example.com"]);
+    assert_eq!(details.more_recipients(), 0);
+    assert!(
+        details
+            .email_link
+            .as_deref()
+            .is_some_and(|link| link.ends_with("Made-up alert resolved.eml"))
+    );
+    // a plain post has no subject and no email
+    let plain = message(&fixture("link-preview.json")?["read_back"])?;
+    assert_eq!(plain.subject(), None);
+    assert_eq!(plain.email_details(), None);
+    Ok(())
+}
+
+#[test]
+fn an_email_s_to_line_names_three_at_most_and_counts_the_others() -> TestResult {
+    use teams_proto::chat::EmailDetails;
+    let many = json!({
+        "to": [{"name": "Ann", "smtp": "ann@example.com"}, {"smtp": "bo@example.com"}, {"name": " "}],
+        "cc": [{"smtp": "cy@example.com"}, {"smtp": "di@example.com"}],
+        "totalRecipients": 9,
+        "emailLink": "https://made-up.example.com/original.eml"
+    });
+    let details = EmailDetails::of(Some(&many)).ok_or("an object reads too")?;
+    assert_eq!(shown_labels(&details), ["Ann", "bo@example.com", "cy@example.com"]);
+    assert_eq!(details.more_recipients(), 6);
+    assert_eq!(details.email_link, None, "a link off SharePoint is not opened");
+    // without totalRecipients, the lists are counted
+    let text = json!(r#"{"to":[{"smtp":"a@example.com"}],"cc":[{"smtp":"b@example.com"}]}"#);
+    let counted = EmailDetails::of(Some(&text)).ok_or("a JSON string of an object")?;
+    assert_eq!(counted.total_recipients, 2);
+    assert_eq!(counted.from, None);
+    Ok(())
+}
+
+#[test]
+fn what_is_not_an_email_object_is_no_email_and_only_file_links_are_opened() {
+    use teams_proto::chat::{EmailDetails, is_email_link};
+    assert_eq!(EmailDetails::of(Some(&json!("not json"))), None);
+    assert_eq!(EmailDetails::of(Some(&json!([1]))), None);
+    assert_eq!(EmailDetails::of(None), None);
+    assert!(is_email_link("https://contoso.sharepoint.com/sites/A/x.eml"));
+    assert!(is_email_link("https://teams.own.example.com/sp/files/x.eml"));
+    assert!(!is_email_link("http://contoso.sharepoint.com/x.eml"));
+    assert!(!is_email_link("not a link"));
+}

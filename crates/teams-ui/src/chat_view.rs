@@ -155,12 +155,14 @@ use crate::{presence, presence_badge};
 mod bot_chat;
 mod bots;
 pub mod channel;
+mod email;
 mod events;
 pub mod reactors;
 mod saved;
 
 use channel::{ChannelLooks, THREAD_EVENT};
 pub use channel::{MeetingCall, MeetingCard, Place, Replies};
+pub use email::{EmailPost, REPLY_IN_THREAD, VIA_EMAIL, VIEW_ORIGINAL_EMAIL, open_original};
 use events::Expiry;
 pub use events::UNVERIFIED;
 
@@ -598,6 +600,10 @@ pub struct MessageItem {
     pub files: Arc<Vec<SharedFile>>,
     /// The previews of the links it carries (`crate::link_preview::previews_of`), each drawn as its card under its text.
     pub links: Arc<Vec<LinkPreview>>,
+    /// A channel post's subject (`properties.subject`), drawn bold over its text ([`email`]).
+    pub subject: Option<SharedString>,
+    /// The email a channel post came from (`properties.emaildetails`), drawn as Teams' email post ([`email`]).
+    pub email: Option<Box<EmailPost>>,
     /// The app cards its links got (`properties.cards`, [`ShownCards::of_properties`]), drawn under its text as Teams
     /// draws a YouTube link's card.
     pub app_cards: Option<ShownCards>,
@@ -848,7 +854,10 @@ pub fn day_of<Tz: TimeZone>(ms: i64, tz: &Tz) -> Option<NaiveDate> {
 /// Whether `item` continues the group of `before`: the same sender, within [`GROUP_MS`], neither an event.
 fn continues(before: &MessageItem, item: &MessageItem) -> bool {
     let events = before.body.is_system() || item.body.is_system();
+    // each email is a post of its own, with its own header and "To" line
+    let emails = before.email.is_some() || item.email.is_some();
     !events
+        && !emails
         && before.sender.is_some()
         && before.sender == item.sender
         && (0..=GROUP_MS).contains(&(item.arrival_time - before.arrival_time))
@@ -2642,6 +2651,17 @@ impl ChatView {
                 originals.push(sender);
             }
         }
+        // an email post's "Reply in thread" shows the account's own face
+        if self.place == Place::Channel
+            && messages.iter().any(|message| {
+                message
+                    .properties
+                    .as_deref()
+                    .is_some_and(|text| text.contains("\"emaildetails\""))
+            })
+        {
+            originals.push(self.core.me().to_owned());
+        }
         self.messages = messages;
         originals.extend(
             self.reactions
@@ -3014,7 +3034,12 @@ impl ChatView {
         } else {
             (Arc::default(), Arc::default(), None, UnshownParts::default())
         };
+        let (subject, email) = self.post_parts(message, &body);
         let (sender_name, named) = self.sender_of(message);
+        let sender_name = match &email {
+            Some(_) => format!("{sender_name} {VIA_EMAIL}"),
+            None => sender_name,
+        };
         let picture = message
             .sender
             .as_deref()
@@ -3055,6 +3080,8 @@ impl ChatView {
             outbox: notes.get(&message.id).cloned().unwrap_or_default(),
             files,
             links,
+            subject,
+            email,
             app_cards,
             unshown,
             writes: if self.core.read_only() {
@@ -3073,6 +3100,25 @@ impl ChatView {
             replies: None,
             translation,
         })
+    }
+
+    /// A channel post's subject and the email it came from ([`email`]); none in a chat, or for what isn't a text.
+    fn post_parts(&self, message: &Message, body: &Body) -> (Option<SharedString>, Option<Box<EmailPost>>) {
+        if !self.place.in_channel() || !matches!(body, Body::Text(_)) {
+            return (None, None);
+        }
+        let Some(properties) = message
+            .properties
+            .as_deref()
+            .and_then(|text| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(text).ok())
+        else {
+            return (None, None);
+        };
+        (
+            teams_proto::chat::subject(&properties).map(SharedString::from),
+            teams_proto::chat::EmailDetails::of_properties(&properties)
+                .map(|details| Box::new(EmailPost::of(&details))),
+        )
     }
 
     /// Where a forwarded message came from, as its card's header shows it ([`ForwardOrigin::of`]).
@@ -3580,6 +3626,11 @@ impl ChatView {
         if !item.header {
             return column;
         }
+        if item.email.is_some() {
+            return column
+                .pt(rems(HEADER_REMS))
+                .child(email::mail_avatar(&item.id, palette));
+        }
         let badge = item
             .sender
             .as_deref()
@@ -3676,8 +3727,20 @@ impl ChatView {
         let header = item
             .header
             .then(|| header_line(item, (palette, cycle), mark.take(), cards));
+        let to = item
+            .email
+            .as_ref()
+            .and_then(|post| post.to.as_ref())
+            .filter(|_| item.header)
+            .map(|to| email::to_line(&item.id, to, palette));
+        // an email post's reactions and rows are in its card, as Teams draws them
+        let (foot, footer) = match &item.email {
+            Some(post) => (Some(self.email_foot(item, post, palette, cx)), None),
+            None => (None, footer_line(item, mark, &self.reactors, palette, cx)),
+        };
         column
             .children(header)
+            .children(to)
             .child(bubble_line(
                 item,
                 InChat {
@@ -3691,13 +3754,14 @@ impl ChatView {
                     root: self.place.in_channel().then(|| self.root_of(&item.id)),
                     meeting: Self::meeting_view(item, palette, cx),
                     bots: self.core.capabilities().apps,
+                    foot,
                 },
                 highlighted,
                 palette,
                 bar,
                 forward,
             ))
-            .children(footer_line(item, mark, &self.reactors, palette, cx))
+            .children(footer)
             .children(item.replies.as_ref().map(|replies| {
                 let post = item.id.clone();
                 let open: forwarded::OnOpen = Box::new(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
@@ -3712,6 +3776,58 @@ impl ChatView {
                     .map(|note| note_line(note, palette, cx))
                     .collect::<Vec<_>>(),
             )
+    }
+
+    /// The foot of an email post's card: its reactions with "Add reaction", "View original email" and, in the
+    /// channel's list, "Reply in thread" with the account's face.
+    fn email_foot(&self, item: &MessageItem, post: &EmailPost, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let reactions = item
+            .reactions
+            .iter()
+            .map(|reaction| reaction_pill(item, reaction, &self.reactors, palette, cx))
+            .collect::<Vec<_>>();
+        let add = item
+            .actions()
+            .contains(&MessageAction::React)
+            .then(|| add_reaction_pill(item, palette, cx));
+        let source = match &item.body {
+            Body::Text(text) => text.0.source.as_ref(),
+            _ => None,
+        };
+        let original = post
+            .link
+            .as_deref()
+            .map(|link| email::original_row(&item.id, link, source, palette));
+        let reply = (item.thread == Threaded::Post).then(|| {
+            let me = self.shown(self.core.me());
+            let name = me.and_then(|me| me.name.clone()).unwrap_or_default();
+            let face = Face {
+                named: me.is_some_and(|me| me.name.is_some()),
+                picture: me.and_then(|me| me.picture.clone()),
+            };
+            let post = item.id.clone();
+            let open: forwarded::OnOpen = Box::new(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
+                cx.stop_propagation();
+                cx.emit(ChatViewEvent::OpenThread { post: post.clone() });
+            }));
+            email::reply_row(&item.id, (&name, &face), palette, open)
+        });
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .pt_2()
+                    .pb_2()
+                    .flex()
+                    .gap_1()
+                    .items_center()
+                    .children(reactions)
+                    .children(add),
+            )
+            .children(original)
+            .children(reply)
+            .into_any_element()
     }
 
     /// A channel meeting's card, its organizer's Edit telling [`ChatViewEvent::EditMeeting`]; `None` for any other
@@ -4972,6 +5088,8 @@ struct InChat<'a> {
     meeting: Option<AnyElement>,
     /// Whether the account's cloud serves bot invokes: a card's button that sends to the bot is drawn only then.
     bots: bool,
+    /// An email post's foot, drawn at the bottom of its card ([`ChatView::email_foot`]).
+    foot: Option<AnyElement>,
 }
 
 impl InChat<'_> {
@@ -5076,6 +5194,10 @@ fn bubble(
         _ => (None, None),
     };
     let content = bubble_content(item, &mut chat, &id, palette, forward);
+    let subject = item
+        .subject
+        .as_ref()
+        .map(|subject| email::subject_line(&item.id, subject, palette));
     // as wide as Teams draws a link's app card, however short the text over it
     let app_cards = item.app_cards.clone().map(|cards| {
         div()
@@ -5112,8 +5234,11 @@ fn bubble(
     };
     // the account's own keep Teams' margin on their left; someone else's reach the mark's column
     let bubble = if item.own { bubble.max_w(relative(0.8)) } else { bubble };
+    // an email post is a card as wide as the list, its rows across it
+    let bubble = if item.email.is_some() { bubble.flex_1() } else { bubble };
     bubble
         .children(notice)
+        .children(subject)
         .child(content)
         .children(links)
         .children(app_cards)
@@ -5130,6 +5255,7 @@ fn bubble(
                 ))
                 .into_any_element()
         }))
+        .children(chat.foot.take())
         .children(chat.ring.take())
         // last, so it is drawn over the bubble
         .children(bar)
@@ -5188,23 +5314,8 @@ fn footer_line(
         .iter()
         .map(|reaction| reaction_pill(item, reaction, reactors, palette, cx))
         .collect::<Vec<_>>();
-    let add = (!item.reactions.is_empty() && item.actions().contains(&MessageAction::React)).then(|| {
-        let message = item.id.clone();
-        pill(ElementId::Name(format!("reactions-add-{}", item.id).into()), palette)
-            .debug_selector(|| "reactions-add".to_owned())
-            .border_color(rgb(palette.border))
-            .tooltip(|window, cx| Tooltip::new("Add reaction").build(window, cx))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.act(MessageAction::React, &message, window, cx);
-                this.open_more(window, cx);
-            }))
-            .child(
-                Glyph::REACT
-                    .icon()
-                    .size(px(CHIP_EMOJI - 2.0))
-                    .text_color(rgb(palette.muted_foreground)),
-            )
-    });
+    let add = (!item.reactions.is_empty() && item.actions().contains(&MessageAction::React))
+        .then(|| add_reaction_pill(item, palette, cx));
     let line = div().flex().gap_1().items_center().px(px(BUBBLE_INSET));
     // over the bubble's bottom edge, drawn after it
     let line = if item.reactions.is_empty() {
@@ -5219,6 +5330,25 @@ fn footer_line(
             .children(add)
             .into_any_element(),
     )
+}
+
+/// "Add reaction", which opens the reactions on the message.
+fn add_reaction_pill(item: &MessageItem, palette: Palette, cx: &mut Context<ChatView>) -> gpui::Stateful<gpui::Div> {
+    let message = item.id.clone();
+    pill(ElementId::Name(format!("reactions-add-{}", item.id).into()), palette)
+        .debug_selector(|| "reactions-add".to_owned())
+        .border_color(rgb(palette.border))
+        .tooltip(|window, cx| Tooltip::new("Add reaction").build(window, cx))
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.act(MessageAction::React, &message, window, cx);
+            this.open_more(window, cx);
+        }))
+        .child(
+            Glyph::REACT
+                .icon()
+                .size(px(CHIP_EMOJI - 2.0))
+                .text_color(rgb(palette.muted_foreground)),
+        )
 }
 
 /// A reaction's pill.

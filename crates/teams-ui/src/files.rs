@@ -519,6 +519,12 @@ fn new_folder_in(folder: &Path) -> std::io::Result<PathBuf> {
 }
 
 impl OwnFile {
+    /// The file at `link` (its sharing link), saved as `name`, read through the engine of `source`.
+    #[must_use]
+    pub fn new(link: String, name: String, source: PictureSource) -> Self {
+        Self { link, name, source }
+    }
+
     /// Open in desktop app: saved in a new folder (see [`new_folder_in`]) in a folder of the user's alone (the
     /// runtime one, else the temporary one, or [`OpenedFilesFolder`]; the downloads folder when it can't be had),
     /// then opened in the system's app for it.

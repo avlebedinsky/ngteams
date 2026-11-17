@@ -19,6 +19,7 @@
 pub mod card;
 mod code;
 mod compose;
+mod email;
 mod event;
 mod files;
 mod html;
@@ -29,6 +30,7 @@ mod read;
 
 pub use code::{CODE_BLOCK_ITEMTYPE, Code, CodeRun, Token, language_of};
 pub use compose::{ComposeError, MessageText};
+pub use email::{EmailDetails, EmailUser, SHOWN_RECIPIENTS, is_email_link, subject};
 pub use event::{
     CALL_MEDIA_PREFIX, CallEnd, CallStart, ChatEvent, ChatPolicy, MeetingTimes, Member, Members, Recording,
     RecordingContents, RecordingItem, RecordingStatus, Removed, TopicUpdate, Transcript, chat_event, is_call_media,

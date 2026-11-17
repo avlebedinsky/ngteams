@@ -575,6 +575,18 @@ impl Message {
         PolicyViolation::of(self.properties.get("policyViolation"))
     }
 
+    /// `properties.subject`: a channel post's subject ([`crate::chat::subject`]).
+    #[must_use]
+    pub fn subject(&self) -> Option<String> {
+        crate::chat::subject(&self.properties)
+    }
+
+    /// `properties.emaildetails`: the email a channel post came from ([`crate::chat::EmailDetails::of`]).
+    #[must_use]
+    pub fn email_details(&self) -> Option<crate::chat::EmailDetails> {
+        crate::chat::EmailDetails::of_properties(&self.properties)
+    }
+
     /// `properties.links`, a JSON string of a list: the previews of the links the message carries ([`link_previews`]),
     /// each entry read only in the shape `docs/protocol/chat.md` records ("Link previews"); any other is left out.
     #[must_use]

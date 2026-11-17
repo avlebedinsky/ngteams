@@ -32,7 +32,7 @@ use fixture::{Running, Sandbox, SandboxResult, sandbox_or_skip};
 const CHILD: &str = "TEAMS_UI_CHANNEL_WINDOW_TEST";
 const TEAM: &str = "19:synthetic-team@thread.tacv2";
 const CHANNEL: &str = "19:synthetic-channel@thread.tacv2";
-const SURFACES: [&str; 9] = [
+const SURFACES: [&str; 10] = [
     "menu",
     "notifications",
     "edit",
@@ -42,7 +42,52 @@ const SURFACES: [&str; 9] = [
     "archive",
     "delete",
     "new-section",
+    "email-post",
 ];
+/// A post that came by email (the synthetic fixture `tests/fixtures/chatsvc/email-post.json`) and a plain post.
+fn email_posts() -> Vec<teams_store::Message> {
+    let fixture: serde_json::Value = serde_json::from_str(
+        &include_str!("../../../../../tests/fixtures/chatsvc/email-post.json")
+            .replace("<guid:c>", "00000000-0000-4000-8000-00000000000c")
+            .replace("<region>", "amer"),
+    )
+    .unwrap_or_default();
+    let read_back = &fixture["read_back"];
+    let post = |id: &str, sender: &str, name: &str, content: &str, at: i64| teams_store::Message {
+        conversation_id: CHANNEL.to_owned(),
+        id: id.to_owned(),
+        version: 1,
+        client_message_id: None,
+        sender: Some(sender.to_owned()),
+        sender_name: Some(name.to_owned()),
+        message_type: "RichText/Html".to_owned(),
+        content: content.to_owned(),
+        properties: None,
+        arrival_time: at,
+        compose_time: Some(at),
+        edit_time: None,
+        delete_time: None,
+    };
+    let now = chrono::Utc::now().timestamp_millis();
+    let email = teams_store::Message {
+        properties: Some(read_back["properties"].to_string()),
+        ..post(
+            &(now - 60_000).to_string(),
+            "8:orgid:00000000-0000-4000-8000-00000000000c",
+            read_back["imdisplayname"].as_str().unwrap_or_default(),
+            read_back["content"].as_str().unwrap_or_default(),
+            now - 60_000,
+        )
+    };
+    let plain = post(
+        &(now - 3_600_000).to_string(),
+        LAB_B,
+        "Sam Rivera",
+        "<p>The release notes are ready for review.</p>",
+        now - 3_600_000,
+    );
+    vec![email, plain]
+}
 fn say(text: &str) {
     let mut out = io::stdout().lock();
     let _ = writeln!(out, "{text}");
@@ -183,6 +228,14 @@ fn open(theme: &'static str, surface: String, cx: &mut App) -> gpui::Result<()> 
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) =
         vec![member(LAB_A, "Alex Morgan", true), member(LAB_B, "Sam Rivera", false)];
+    core.messages
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(CHANNEL.to_owned(), email_posts());
+    core.names
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(LAB_A.to_owned(), "Alex Morgan".to_owned());
     let (events, received) = mpsc::unbounded_channel();
     let models = Models::new(cx);
     let source = FakeEvents {
@@ -215,7 +268,9 @@ fn open(theme: &'static str, surface: String, cx: &mut App) -> gpui::Result<()> 
         .ok_or_else(|| std::io::Error::other("missing channel test shell"))?;
     window.update(cx, |_, window, _| {
         after_frames(window, 30, move |window, cx| {
-            if surface == "menu" {
+            if surface == "email-post" {
+                shell.update(cx, |shell, cx| shell.open_channel_id(CHANNEL.to_owned(), window, cx));
+            } else if surface == "menu" {
                 let teams = shell.read(cx).teams().clone();
                 teams.update(cx, |teams, cx| teams.open_channel_menu(CHANNEL, window, cx));
             } else {

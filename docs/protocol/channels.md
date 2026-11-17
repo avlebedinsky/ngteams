@@ -93,6 +93,27 @@ changed from <old> to <new>." when the system did it) and "<name> changed the ch
 client reads a channel from the chat service, which holds them, and draws none of them (`channel_view`); it has no
 info pane.
 
+## A post that came by email
+
+An email sent to a channel's address arrives as a channel post on the chat service. The web client's reader
+(its message resolvers, read in a stored bundle, 2026-11-17) takes these keys of the post's `properties`:
+
+- `subject`: the post's subject, as text. The web client draws it bold over the text of any post that has one.
+- `emaildetails`: a JSON string of an object. A post with it is an email post (`EmailPostMessage`). Its keys:
+  `from` and `sender` (each `{name, smtp}`), `to` and `cc` (lists of them), `emailLink` and `totalRecipients`.
+  The reader keeps the first 3 recipients, the `to` list first, then `cc`. Without `totalRecipients`, it counts
+  `to` and `cc`.
+- The sender's name is "<name> via email" (`tmp_message_via_email`).
+- "View original email" shows only when `emailLink` is present. A click asks the files service to redeem the link
+  (`redeemFile`, a download link of the SharePoint file), then downloads the file (`downloadFile`). The file is the
+  original `.eml` in the team's SharePoint.
+
+No received email post was captured. The fixture `tests/fixtures/chatsvc/email-post.json` is synthetic and follows
+the reader's shape. The native client reads both keys in `teams_proto::chat` (`subject`, `EmailDetails`). It opens
+the email link only when the link is an `https` link on a SharePoint host, or on an own server's file service. A
+SharePoint link opens in the browser with `download=1`, so the browser downloads the file. An own server's file is
+saved through the account's engine.
+
 ## What the native client reads
 
 - **The teams**: `GET <CSA base>/api/v3/teams/users/me` with the web client's query exactly, the account's

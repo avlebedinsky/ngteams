@@ -1,0 +1,26 @@
+{
+  "_synthetic": "Made up, in the shape that the web client's reader of a chat service message takes for a channel post that came by email: properties.subject is the subject as text, and properties.emaildetails is a JSON string of an object with from and sender ({name, smtp}), to and cc (lists of them), emailLink (the original .eml file in the team's SharePoint) and totalRecipients. No received email post was captured: the other keys are a channel post's (channel-messages.json), and the from of such a post was not seen, so <guid:c> stands in. Every name, address, link and line here is made up. See docs/protocol/channels.md, A post that came by email.",
+  "read_back": {
+    "sequenceId": 7,
+    "conversationid": "19:channel0002@thread.tacv2",
+    "conversationLink": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/conversations/19:channel0002@thread.tacv2;messageid=1760000500000",
+    "contenttype": "Text",
+    "type": "Message",
+    "amsreferences": [],
+    "id": "1760000500000",
+    "clientmessageid": "7777777777777777777",
+    "version": "1760000500000",
+    "messagetype": "RichText/Html",
+    "content": "<div><p>Made-up Cloud</p><p>Your made-up alert was resolved</p><p>==========</p><p>...</p></div>",
+    "from": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/contacts/8:orgid:<guid:c>",
+    "imdisplayname": "alerts-noreply@example.com",
+    "composetime": "2025-10-09T10:00:00.0000000Z",
+    "originalarrivaltime": "2025-10-09T10:00:00.0000000Z",
+    "properties": {
+      "subject": "Made-up alert: memory use - test cluster",
+      "emaildetails": "{\"from\":{\"name\":\"\",\"smtp\":\"alerts-noreply@example.com\"},\"sender\":{\"name\":\"\",\"smtp\":\"alerts-noreply@example.com\"},\"to\":[{\"name\":\"\",\"smtp\":\"made-up-channel.example@example.com\"}],\"cc\":[],\"emailLink\":\"https://contoso.sharepoint.com/sites/MadeUpTeam/Shared Documents/General/EmailMessages_10_2025/Made-up alert resolved.eml\",\"totalRecipients\":1}",
+      "files": "[]",
+      "links": "[]"
+    }
+  }
+}

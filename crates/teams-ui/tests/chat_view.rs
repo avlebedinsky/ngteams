@@ -379,6 +379,8 @@ fn row(id: &str, sender: &str, at: i64) -> MessageItem {
         outbox: Vec::new(),
         files: Arc::default(),
         links: Arc::default(),
+        subject: None,
+        email: None,
         app_cards: None,
         unshown: UnshownParts::default(),
         writes: ChatWrites::Taken,

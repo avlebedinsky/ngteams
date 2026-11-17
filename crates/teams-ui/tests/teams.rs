@@ -494,6 +494,112 @@ fn a_posts_replies_summary_opens_its_thread_too() {
     assert_nothing_written(&rig);
 }
 
+/// The synthetic fixture's email post, from c, as the store keeps it.
+fn email_post(id: &str) -> Message {
+    let fixture: serde_json::Value = serde_json::from_str(
+        &include_str!("../../../tests/fixtures/chatsvc/email-post.json")
+            .replace("<guid:c>", &LAB_C["8:orgid:".len()..])
+            .replace("<region>", "amer"),
+    )
+    .unwrap();
+    let read_back = &fixture["read_back"];
+    Message {
+        sender_name: read_back["imdisplayname"].as_str().map(str::to_owned),
+        properties: Some(read_back["properties"].to_string()),
+        ..message(id, LAB_C, read_back["content"].as_str().unwrap())
+    }
+}
+
+const EMAIL: &str = "1760000500000";
+
+/// The channel opened with the email post beside a plain post.
+fn email_channel(rig: &Rig) -> (Entity<Shell>, &'static mut VisualTestContext) {
+    *rig.core.teams.lock().unwrap() = Some(teams());
+    let messages = vec![email_post(EMAIL), message(POST, LAB_B, "<p>first post</p>")];
+    rig.core.messages.lock().unwrap().insert(CHANNEL.to_owned(), messages);
+    let (shell, cx) = shell_window(rig, Arc::new(ViewTrace::off()));
+    click(cx, "channel-row-1");
+    (shell, cx)
+}
+
+#[test]
+fn a_post_that_came_by_email_shows_its_subject_its_sender_via_email_and_its_to_line() {
+    let rig = rig();
+    let (shell, cx) = email_channel(&rig);
+    let view = posts(&shell, cx);
+    let [plain, email] = rows(&view, cx).try_into().expect("two posts");
+    assert_eq!(
+        email.subject.as_deref(),
+        Some("Made-up alert: memory use - test cluster")
+    );
+    assert_eq!(email.sender_name, "alerts-noreply@example.com via email");
+    let post = email.email.as_ref().expect("an email post");
+    assert_eq!(post.to.as_deref(), Some("To: made-up-channel.example@example.com"));
+    assert!(
+        post.link
+            .as_deref()
+            .is_some_and(|link| link.ends_with("Made-up alert resolved.eml"))
+    );
+    // a plain post is drawn as it was
+    assert_eq!((plain.subject, plain.email), (None, None));
+    assert_eq!(plain.sender_name, "Carried Name");
+    for selector in [
+        format!("email-icon-{EMAIL}"),
+        format!("email-to-{EMAIL}"),
+        format!("post-subject-{EMAIL}"),
+        format!("email-original-{EMAIL}"),
+        format!("email-reply-{EMAIL}"),
+        format!("avatar-{POST}"),
+    ] {
+        assert!(bounds(cx, &selector).is_some(), "{selector} is drawn");
+    }
+    for selector in [
+        format!("avatar-{EMAIL}"),
+        format!("email-icon-{POST}"),
+        format!("post-subject-{POST}"),
+        format!("email-original-{POST}"),
+        format!("email-reply-{POST}"),
+    ] {
+        assert!(bounds(cx, &selector).is_none(), "{selector} is not drawn");
+    }
+    assert_nothing_written(&rig);
+}
+
+#[test]
+fn an_email_post_s_card_ends_with_view_original_email_and_reply_in_thread() {
+    let rig = rig();
+    let (shell, cx) = email_channel(&rig);
+    // the subject over the text, the rows under it, in the post's card
+    let card = bounds(cx, &format!("bubble-{EMAIL}")).unwrap();
+    let subject = bounds(cx, &format!("post-subject-{EMAIL}")).unwrap();
+    let original = bounds(cx, &format!("email-original-{EMAIL}")).unwrap();
+    let reply = bounds(cx, &format!("email-reply-{EMAIL}")).unwrap();
+    assert!(
+        card.top() <= subject.top() && subject.bottom() <= original.top(),
+        "{subject:?} {original:?}"
+    );
+    assert!(
+        original.bottom() <= reply.top() && reply.bottom() <= card.bottom(),
+        "{reply:?} {card:?}"
+    );
+    // View original email downloads the .eml file in the browser, as Teams' download does
+    click(cx, &format!("email-original-{EMAIL}"));
+    let opened = cx.opened_url().expect("a link opened");
+    assert!(
+        opened.starts_with("https://contoso.sharepoint.com/sites/MadeUpTeam/"),
+        "{opened}"
+    );
+    assert!(opened.ends_with("resolved.eml?download=1"), "{opened}");
+    // Reply in thread opens the post's thread
+    click(cx, &format!("email-reply-{EMAIL}"));
+    let (opened, thread_view) = thread(&shell, cx).expect("the thread opens");
+    assert_eq!(opened, EMAIL);
+    // in its thread the post keeps its subject and its email
+    let [top] = rows(&thread_view, cx).try_into().expect("the post alone");
+    assert!(top.subject.is_some() && top.email.is_some());
+    assert_nothing_written(&rig);
+}
+
 /// Sends what `view`'s box holds, as Enter in it does.
 fn send_box(view: &Entity<ChatView>, cx: &mut VisualTestContext) {
     let compose = cx.update(|_, cx| view.read(cx).compose().clone());
