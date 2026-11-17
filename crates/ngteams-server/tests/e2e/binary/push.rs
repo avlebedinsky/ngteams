@@ -578,15 +578,15 @@ async fn a_token_refresh_on_a_long_connection_keeps_the_push() {
     }
 }
 
-/// Since `mark` the client was pushed none of `ids`, shows none of them and never connected again.
-async fn nothing_reached(b: &User, mark: usize, chat: &str, ids: &[String]) {
+/// Since `mark` the client was pushed none of `ids` and shows none of them, and since `out` it never connected again.
+async fn nothing_reached(b: &User, mark: usize, out: usize, chat: &str, ids: &[String]) {
     let log: Vec<String> = b.log[mark..].iter().map(brief).collect();
     for id in ids {
         assert_eq!(b.pushes(mark, chat, id, MessageChange::New), 0, "{log:?}");
         assert!(b.engine().message(chat, id).await.unwrap().is_none(), "{log:?}");
     }
     assert_eq!(
-        b.count(mark, |event| matches!(event, Event::Connected { .. })),
+        b.count(out, |event| matches!(event, Event::Connected { .. })),
         0,
         "{log:?}"
     );
@@ -653,18 +653,20 @@ async fn the_command_signs_the_client_out(
     rig.first.cli(command, input);
     let returned = tokio::time::Instant::now();
     let just_after = a.send(chat, "revoked, posted just after").await;
-    // long before its token's renewal (20 s) would have ended the socket
-    b.since(mark, "the service's disconnect", |event| {
-        matches!(event, Event::Disconnected { down: Down::ServiceDisconnect(Some(reason)), .. }
+    // long before its token's renewal (20 s) would have ended the socket. The events before it can hold a renewal's
+    // reconnect from before the command, as the test reads them only now.
+    let out = b
+        .since(mark, "the service's disconnect", |event| {
+            matches!(event, Event::Disconnected { down: Down::ServiceDisconnect(Some(reason)), .. }
             if reason == "unauthorized")
-    })
-    .await;
+        })
+        .await;
     assert!(returned.elapsed() < Duration::from_secs(5), "{:?}", returned.elapsed());
     // its tokens can't be renewed: the client's session is signed out, as the app then shows it
     b.until_signed_out().await;
     let unseen = a.send(chat, "revoked, never shown").await;
     b.settle().await;
-    nothing_reached(b, mark, chat, &[just_after, unseen]).await;
+    nothing_reached(b, mark, out, chat, &[just_after, unseen]).await;
 }
 
 /// The operator's `command` on b's account while b's client is connected: the service ends b's push at once, and
@@ -776,7 +778,7 @@ async fn an_account_disabled_while_redis_is_stopped_gets_no_push_when_redis_is_b
     let later = a.send(&group, "outage, posted later").await;
     c.pushed(live, &group, &later, MessageChange::New).await;
     b.settle().await;
-    nothing_reached(&b, out, &group, &[after, later]).await;
+    nothing_reached(&b, out, out, &group, &[after, later]).await;
 
     rig.first.cli(&["user", "enable", "b@own.test"], "");
     the_push_is_back_after_a_new_sign_in(&rig, &mut a, &mut b, &group, PASSWORD).await;
