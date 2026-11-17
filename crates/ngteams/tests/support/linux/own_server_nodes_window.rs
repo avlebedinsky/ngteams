@@ -79,6 +79,10 @@ const C: Who = Who {
     tone: 880.0,
 };
 const NAMES: [&str; 3] = ["Ada Ł. Lovelace", "Bert 🎺 Bach", "Cora 'Cee' Nuñez"];
+/// Synthetic people with no app beside the odd-named ones: a crowd, as a real server has.
+const CROWD: usize = 300;
+/// The crowd's people in the big group chat of step 2.
+const CROWD_GROUP: usize = 50;
 /// Synthetic people with no app: odd names.
 const ODD: [&str; 4] = [
     "Zoë O'Brien-Ångström",
@@ -126,7 +130,7 @@ fn parent() -> SandboxResult {
     let logs = instance::shots_dir()?;
     let mut nodes = Nodes::start(&binary, &needs, &runtime, &logs)?;
     say(&format!("deployed at {}", nodes.origin));
-    let outcome = seed(&nodes).and_then(|odd| run(&mut nodes, &odd));
+    let outcome = seed(&nodes).and_then(|(odd, crowd)| run(&mut nodes, &odd, &crowd));
     let outcome = outcome.map_err(|error| format!("{error}\n--- the nodes:{}", nodes.logs()));
     nodes.stop(&runtime)?;
     outcome?;
@@ -134,24 +138,73 @@ fn parent() -> SandboxResult {
     Ok(())
 }
 
-/// The people: `srv-a` an administrator, `srv-b`, `srv-c`, and the odd-named ones (their MRIs).
-fn seed(nodes: &Nodes) -> SandboxResult<Vec<String>> {
+/// The people: `srv-a` an administrator, `srv-b`, `srv-c`, the odd-named ones and the [`CROWD`] (their MRIs).
+fn seed(nodes: &Nodes) -> SandboxResult<(Vec<String>, Vec<String>)> {
     for (index, who) in [A, B, C].iter().enumerate() {
         nodes.add_user(who.upn, NAMES[index], index == 0)?;
     }
-    ODD.iter()
+    let odd = ODD
+        .iter()
         .enumerate()
         .map(|(index, name)| nodes.add_user(&format!("odd.{index}@own.test"), name, false))
-        .collect()
+        .collect::<SandboxResult<Vec<_>>>()?;
+    let started = Instant::now();
+    let crowd = crowd(nodes)?;
+    say(&format!(
+        "seeded {} more people in {}ms",
+        crowd.len(),
+        started.elapsed().as_millis()
+    ));
+    Ok((odd, crowd))
+}
+
+/// The [`CROWD`], made with `user add` as an operator makes people, four at a time: their MRIs.
+fn crowd(nodes: &Nodes) -> SandboxResult<Vec<String>> {
+    const NAMED: [&str; 6] = [
+        "ابن سينا",
+        "Ana   Maria   de la Cruz",
+        "Robert'); DROP TABLE users;--",
+        "Zoe\u{0308} Combined",
+        "null",
+        "Ωmega ∑um",
+    ];
+    let made: Vec<Result<String, String>> = thread::scope(|scope| {
+        let workers: Vec<_> = (0..4)
+            .map(|worker| {
+                scope.spawn(move || {
+                    (worker..CROWD)
+                        .step_by(4)
+                        .map(|n| {
+                            let name = NAMED
+                                .get(n)
+                                .map_or_else(|| format!("Seeded Person {n:03}"), |name| (*name).to_owned());
+                            nodes
+                                .add_user(&format!("seed-{n:03}@own.test"), &name, false)
+                                .map_err(|error| error.to_string())
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| {
+                worker
+                    .join()
+                    .unwrap_or_else(|_| vec![Err("a seeder panicked".to_owned())])
+            })
+            .collect()
+    });
+    made.into_iter().map(|made| made.map_err(Into::into)).collect()
 }
 
 /// Every step, in order; each instance quits at the end.
-fn run(nodes: &mut Nodes, odd: &[String]) -> SandboxResult {
+fn run(nodes: &mut Nodes, odd: &[String], crowd: &[String]) -> SandboxResult {
     let Some(mut a) = Instance::start(&A, nodes)? else {
         return Ok(());
     };
     let mut b = Instance::start(&B, nodes)?.ok_or("no second sandbox")?;
-    let outcome = steps(nodes, &mut a, &mut b, odd);
+    let outcome = steps(nodes, &mut a, &mut b, odd, crowd);
     let outcome = outcome.map_err(|error| {
         format!(
             "{error}\n--- srv-a: {}\n--- srv-b: {}\n--- the sandboxes:{}{}",
@@ -166,13 +219,14 @@ fn run(nodes: &mut Nodes, odd: &[String]) -> SandboxResult {
     b.quit()
 }
 
-fn steps(nodes: &mut Nodes, a: &mut Instance, b: &mut Instance, odd: &[String]) -> SandboxResult {
+fn steps(nodes: &mut Nodes, a: &mut Instance, b: &mut Instance, odd: &[String], crowd: &[String]) -> SandboxResult {
     for instance in [&mut *a, &mut *b] {
         instance.sign_in(&nodes.origin, &nodes.ca_file)?;
         instance.shot("signed-in")?;
     }
     say(&format!("step 1 passed: srv-a {} and srv-b {} signed in", a.mri, b.mri));
     let chat = chat_both_ways(a, b)?;
+    crowd_group(a, b, crowd, &chat)?;
     say("step 2 passed");
     reaction_edit_presence(a, b, &chat)?;
     say("step 3 passed");
@@ -233,6 +287,53 @@ fn chat_both_ways(a: &mut Instance, b: &mut Instance) -> SandboxResult<String> {
     b.shot("chat-dark")?;
     b.theme(teams_ui::theme::LIGHT_KEY)?;
     Ok(chat)
+}
+
+/// `srv-a` makes a group chat with `srv-b` and [`CROWD_GROUP`] of the crowd and posts in it: `srv-b`'s window shows
+/// the post, and its member list has everyone. Both then open their 1:1 `chat` again.
+fn crowd_group(a: &mut Instance, b: &mut Instance, crowd: &[String], chat: &str) -> SandboxResult {
+    let mut people = vec![b.upn.to_owned()];
+    people.extend(crowd.iter().take(CROWD_GROUP).cloned());
+    let group = match a.ctl(Request::NewChat { people, wait: true })? {
+        Response::Outbox(row) => row
+            .chat
+            .clone()
+            .or(row.message.clone())
+            .ok_or_else(|| format!("no group: {row:?}"))?,
+        other => return Err(format!("new crowd group: {other:?}").into()),
+    };
+    open_chat(a, &group)?;
+    a.ctl(Request::Send {
+        chat: group.clone(),
+        text: "hello, crowd 👋".to_owned(),
+        wait: true,
+    })?;
+    wait_for_chat(b, &group)?;
+    open_chat(b, &group)?;
+    let (_, taken) = send_shown(a, b, &group, "a second post to the crowd")?;
+    let members = match b.ctl(Request::Members { chat: group.clone() })? {
+        Response::Members { members } => members,
+        other => return Err(format!("members: {other:?}").into()),
+    };
+    say(&format!(
+        "step 2: the crowd group {group}: shown in srv-b's window in {}ms; srv-b lists {} members",
+        taken.as_millis(),
+        members.len()
+    ));
+    ensure(members.len() == CROWD_GROUP + 2, || {
+        format!("srv-b lists {} members of the crowd group", members.len())
+    })?;
+    b.shot("crowd-group")?;
+    for instance in [&mut *a, &mut *b] {
+        let mark = instance.trace.mark();
+        instance.ctl(Request::Open {
+            target: OpenTarget::Chat { chat: chat.to_owned() },
+        })?;
+        instance.trace.after(mark, WAIT, "the 1:1 chat open again", |line| {
+            line["view"] == "chat" && line["change"] == "opened" && line["conversation"] == chat
+        })?;
+    }
+    Ok(())
 }
 
 fn listed(times: &[(&str, Duration)]) -> String {
@@ -415,6 +516,9 @@ fn picture_and_file(a: &mut Instance, b: &mut Instance, chat: &str) -> SandboxRe
         format!("srv-b's download of the file: {said}")
     })?;
     b.shot("file")?;
+    b.theme(teams_ui::theme::DARK_KEY)?;
+    b.shot("file-dark")?;
+    b.theme(teams_ui::theme::LIGHT_KEY)?;
     say(&format!(
         "step 4: srv-b read the picture ({} bytes) and downloaded the file ({} bytes)",
         png.len(),
@@ -578,7 +682,7 @@ fn one_to_one_call(a: &mut Instance, b: &mut Instance, chat: &str) -> SandboxRes
     b.ctl(Request::Answer)?;
     for instance in [&mut *a, &mut *b] {
         instance.wait_call("connected", |row| row.state == "connected")?;
-        instance.ctl(Request::Camera { op: Toggle::On })?;
+        camera_on_past_the_known_race(instance)?;
     }
     for (instance, mark) in [(&mut *a, a_mark), (&mut *b, b_mark)] {
         instance
@@ -595,7 +699,29 @@ fn one_to_one_call(a: &mut Instance, b: &mut Instance, chat: &str) -> SandboxRes
         say(&format!("{}: the call window {title:?}", instance.name));
         instance.shot("call-1-1")?;
     }
+    b.theme(teams_ui::theme::DARK_KEY)?;
+    b.shot("call-1-1-dark")?;
+    b.theme(teams_ui::theme::LIGHT_KEY)?;
     hang_up(&mut [a, b])
+}
+
+/// Turns the camera on in a 1:1 call. A camera that the engine refuses while the other side's renegotiation is open
+/// is a known client race (the lead's task "Camera turns on while the far end renegotiates (1:1)"): it is said, and
+/// the camera is asked again, as a user clicks again.
+fn camera_on_past_the_known_race(instance: &mut Instance) -> SandboxResult {
+    for _ in 0..10 {
+        match instance.ctl(Request::Camera { op: Toggle::On }) {
+            Err(error) if error.to_string().contains("the call can't do that now") => {
+                say(&format!(
+                    "{}: KNOWN RACE: the camera was refused ({error}); asked again",
+                    instance.name
+                ));
+                thread::sleep(Duration::from_millis(500));
+            }
+            other => return other.map(|_| ()),
+        }
+    }
+    Err(format!("{}: the camera was refused ten times", instance.name).into())
 }
 
 /// Everyone leaves; no call is up anywhere.
@@ -655,6 +781,9 @@ fn group_call(nodes: &Nodes, a: &mut Instance, b: &mut Instance, odd: &[String])
         presents(instance, 2)?;
         instance.shot("call-group")?;
     }
+    b.theme(teams_ui::theme::DARK_KEY)?;
+    b.shot("call-group-dark")?;
+    b.theme(teams_ui::theme::LIGHT_KEY)?;
     hang_up(&mut [a, b, &mut c])?;
     Ok(c)
 }

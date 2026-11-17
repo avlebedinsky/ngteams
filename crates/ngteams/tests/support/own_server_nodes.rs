@@ -418,18 +418,41 @@ fn storage(s3: Option<&str>, dir: &Path) -> TestResult<(String, String)> {
     let bucket = s3.path().trim_matches('/').to_owned();
     let host = s3.host_str().ok_or("no S3 host")?;
     let endpoint = format!("{}://{host}:{}", s3.scheme(), s3.port().ok_or("no S3 port")?);
+    let secret = s3.password().ok_or("no S3 secret")?;
+    make_bucket(&endpoint, s3.username(), secret, &bucket)?;
     let mut options = "[storage_options]\n".to_owned();
     for (key, value) in [
         ("aws_endpoint", endpoint.as_str()),
         ("aws_region", "us-east-1"),
         ("aws_access_key_id", s3.username()),
-        ("aws_secret_access_key", s3.password().ok_or("no S3 secret")?),
+        ("aws_secret_access_key", secret),
         ("aws_allow_http", "true"),
         ("aws_virtual_hosted_style_request", "false"),
     ] {
         writeln!(options, "{key} = {value:?}")?;
     }
     Ok((format!("s3://{bucket}/ui-{}", unique()), options))
+}
+
+/// Makes `bucket` on the S3 service at `endpoint` unless it is there, as the server's own suite does: a signed `PUT`
+/// of the bucket (`curl --aws-sigv4`).
+fn make_bucket(endpoint: &str, key: &str, secret: &str, bucket: &str) -> TestResult {
+    let answer = Command::new("curl")
+        .args(["-sS", "-o", "/dev/null", "-w", "%{http_code}", "-X", "PUT"])
+        .args(["--aws-sigv4", "aws:amz:us-east-1:s3", "--user"])
+        .arg(format!("{key}:{secret}"))
+        .arg(format!("{endpoint}/{bucket}"))
+        .stdin(Stdio::null())
+        .output()?;
+    let code = String::from_utf8_lossy(&answer.stdout).into_owned();
+    if matches!(code.as_str(), "200" | "409") {
+        return Ok(());
+    }
+    Err(format!(
+        "the bucket {bucket}: HTTP {code} {}",
+        String::from_utf8_lossy(&answer.stderr)
+    )
+    .into())
 }
 
 /// The process each pinned connection's node is chosen by, and where each one's connections went.
