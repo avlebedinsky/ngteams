@@ -7,6 +7,7 @@ use gst::subclass::prelude::*;
 use super::*;
 
 mod formats;
+mod jitter;
 
 mod synthetic {
     use super::*;
@@ -33,6 +34,9 @@ mod synthetic {
             };
             if let Some(element) = formatted {
                 return element.map_err(|e| gst::loggable_error!(gst::CAT_RUST, "{e}"));
+            }
+            if label.starts_with(super::jitter::PACED) {
+                return Ok(super::jitter::speaker(&label));
             }
             let element = match label.as_str() {
                 "microphone-a" => gst::ElementFactory::make("audiotestsrc")

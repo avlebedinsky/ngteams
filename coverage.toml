@@ -222,14 +222,19 @@ sha256 = "299a4bec8ffeef7583f8f289c3a772674efa8e650c434944165afbb04061a4d5"
 reason = "Windows-only system picker and Windows Graphics Capture adapter; its ignored hardware contract has no fixture window or runner yet, so nothing automated exercises it (docs/backlog/windows-screen-picker-contract.md); absent from Linux compilation"
 
 [unmapped_sources."crates/teams-media/src/devices/native/tests.rs"]
-sha256 = "28d3b962ef75a2a0632de3d8bf99544d4fe14f28832e4c8aa46b6767b66a415d"
+sha256 = "999591817136e2492136990f7b5c6eb9aab5c9b8e1ad00a45a2e693899ecc3d4"
 reason = "unit-test module included only by native.rs cfg(test); omitted by cargo-llvm-cov's test-file filter"
 context = { "crates/teams-media/src/devices/native.rs" = "151b703df64f634e37c4e40a26156af122e321cef79789b28b58076bfd9f2694" }
 
 [unmapped_sources."crates/teams-media/src/devices/native/tests/formats.rs"]
 sha256 = "b658fcde5c87bf3d58695c8af57ad6f14eb556730e4cfd2b1d555f66c74a06f8"
 reason = "unit-test module (the device formats of the native speaker and microphone) included only by native/tests.rs; omitted by cargo-llvm-cov's test-file filter"
-context = { "crates/teams-media/src/devices/native/tests.rs" = "28d3b962ef75a2a0632de3d8bf99544d4fe14f28832e4c8aa46b6767b66a415d" }
+context = { "crates/teams-media/src/devices/native/tests.rs" = "999591817136e2492136990f7b5c6eb9aab5c9b8e1ad00a45a2e693899ecc3d4" }
+
+[unmapped_sources."crates/teams-media/src/devices/native/tests/jitter.rs"]
+sha256 = "e9dd790936b9fe031d326c596b86d8e43e3e518f9bf7efe8da1468d81e1b8b79"
+reason = "unit-test module (the native speaker under a call's delivery jitter, on a paced test device) included only by native/tests.rs; omitted by cargo-llvm-cov's test-file filter"
+context = { "crates/teams-media/src/devices/native/tests.rs" = "999591817136e2492136990f7b5c6eb9aab5c9b8e1ad00a45a2e693899ecc3d4" }
 
 [unmapped_sources."crates/teams-media/src/devices/native/streams/playback_tests.rs"]
 sha256 = "3851d227b41fe22f517e7bc5ad7503612f114848cfdece9b7b41a7f70a1a0086"

@@ -78,6 +78,8 @@ burn-onnx.workspace = true
 [dev-dependencies]
 # this crate's own tests run against the loopback TURN server; device tests select sandbox reach explicitly
 teams-media = { workspace = true, features = ["test-support"] }
+# the speaker tests' paced audio device: an audio sink of our own that plays in real time and records
+gstreamer-audio.workspace = true
 tempfile.workspace = true
 
 [lints]

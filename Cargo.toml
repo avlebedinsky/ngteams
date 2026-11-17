@@ -152,6 +152,7 @@ ego-tree = "0.11.0"
 # the system's, linked dynamically); its bytes from an appsrc the engine feeds, its frames and sound to appsinks
 gstreamer = "0.25.2"
 gstreamer-app = "0.25.2"
+gstreamer-audio = "0.25.2"
 # the system random source: PKCE verifiers and OAuth state
 getrandom = "0.4.3"
 # GPUI as agterm-rs takes it: the crates.io `gpui-pre` snapshot, pinned exactly so agterm-rs's patches apply as they
