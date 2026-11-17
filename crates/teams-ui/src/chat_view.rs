@@ -3797,7 +3797,7 @@ impl ChatView {
         let original = post
             .link
             .as_deref()
-            .map(|link| email::original_row(&item.id, link, source, palette));
+            .map(|link| email::original_row(&item.id, link, source, palette, cx));
         let reply = (item.thread == Threaded::Post).then(|| {
             let me = self.shown(self.core.me());
             let name = me.and_then(|me| me.name.clone()).unwrap_or_default();

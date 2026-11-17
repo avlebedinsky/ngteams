@@ -4,9 +4,10 @@
 //!   text. `properties.emaildetails` is a JSON string of an object: `from` and `sender` (each `{name, smtp}`), `to`
 //!   and `cc` (lists of them), `emailLink` (the address of the original `.eml` file in the team's SharePoint) and
 //!   `totalRecipients`. A post with `emaildetails` is an email post.
-//! - **What is kept**: a recipient with an address or a name; the email link only when it is an `https` link on a
-//!   SharePoint host, or on an own server's file service (`/sp/`). The web client shows at most
-//!   [`SHOWN_RECIPIENTS`] recipients, the `to` list first, and counts the others.
+//! - **What is kept**: a recipient with an address or a name; the whole email link, at most `MAX_LINK` bytes, only
+//!   when it is an `https` link on a SharePoint host, or one in the shape of an own server's file link (`/sp/`). The
+//!   account's engine refuses a link that is not on its own server (`FileDownload::of_in`). The web client shows at
+//!   most [`SHOWN_RECIPIENTS`] recipients, the `to` list first, and counts the others.
 
 use serde_json::{Map, Value};
 use url::Url;
@@ -86,7 +87,12 @@ impl EmailDetails {
             sender: object.get("sender").and_then(EmailUser::of),
             to,
             cc,
-            email_link: text(object.get("emailLink")).filter(|link| is_email_link(link)),
+            email_link: object
+                .get("emailLink")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|link| is_email_link(link))
+                .map(str::to_owned),
             total_recipients,
         })
     }
@@ -117,17 +123,20 @@ pub fn subject(properties: &Map<String, Value>) -> Option<String> {
     text(properties.get("subject"))
 }
 
-/// Whether `link` is an original email's link that this client may open: an `https` link on a SharePoint host, or a
-/// link to an own server's file service.
+/// Whether `link` is an original email's link that this client may open: an `https` link on a SharePoint host, or an
+/// `https` link to an own server's file service (`/sp/`), at most `MAX_LINK` bytes. Which server's it is, the
+/// account's engine decides: this crate does not know the account.
 #[must_use]
 pub fn is_email_link(link: &str) -> bool {
-    if crate::chat::is_file_link(link) {
-        return true;
-    }
-    Url::parse(link)
-        .ok()
-        .and_then(|url| crate::Cloud::own(&url.origin().ascii_serialization()).ok())
-        .is_some_and(|cloud| crate::chat::is_file_link_in(&cloud, link))
+    crate::chat::is_file_link(link)
+        || (link.len() <= super::files::MAX_LINK
+            && Url::parse(link).is_ok_and(|url| {
+                url.scheme() == "https"
+                    && url.host_str().is_some()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.path().starts_with("/sp/")
+            }))
 }
 
 fn text(value: Option<&Value>) -> Option<String> {

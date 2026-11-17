@@ -7,7 +7,7 @@
 //!   ends with its reactions, "View original email" and, in the channel's list, "Reply in thread".
 //! - **"View original email"** gets the original `.eml` file, as Teams' download does: a SharePoint file opens in the
 //!   browser with `download=1` (the browser downloads it), an own server's file is saved through its account's engine
-//!   ([`crate::files::OwnFile`]).
+//!   ([`crate::files::OwnFile`]); a line under the row tells how far that download got, or why it failed.
 
 use gpui::{
     AnyElement, App, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
@@ -133,8 +133,17 @@ fn card_row(selector: String, lead: AnyElement, words: &'static str, palette: Pa
 }
 
 /// "View original email", which gets the original email (`link`); `source` is the engine an own server's file is read
-/// through.
-pub(super) fn original_row(id: &str, link: &str, source: Option<&PictureSource>, palette: Palette) -> AnyElement {
+/// through. Under it, a line tells how far that download got, as under a file's card.
+pub(super) fn original_row(
+    id: &str,
+    link: &str,
+    source: Option<&PictureSource>,
+    palette: Palette,
+    cx: &App,
+) -> AnyElement {
+    let status = (!teams_proto::chat::is_file_link(link))
+        .then(|| crate::files::download_line(link, &file_name(link), &format!("email-download-{id}"), palette, cx))
+        .flatten();
     let (link, source) = (link.to_owned(), source.cloned());
     let open: OnOpen = Box::new(move |_, _, cx| {
         cx.stop_propagation();
@@ -145,13 +154,14 @@ pub(super) fn original_row(id: &str, link: &str, source: Option<&PictureSource>,
         .size(px(16.0))
         .text_color(rgb(palette.muted_foreground))
         .into_any_element();
-    card_row(
+    let row = card_row(
         format!("email-original-{id}"),
         glyph,
         VIEW_ORIGINAL_EMAIL,
         palette,
         open,
-    )
+    );
+    div().flex().flex_col().child(row).children(status).into_any_element()
 }
 
 /// "Reply in thread" with the account's face, which opens the post's thread (`open`).

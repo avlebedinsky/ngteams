@@ -29,7 +29,7 @@ const MAX_NAME: usize = 400;
 const MAX_PREVIEW_SIDE: u64 = 100_000;
 
 /// The longest link kept, in bytes; an entry with only longer ones isn't read.
-const MAX_LINK: usize = 4096;
+pub(super) const MAX_LINK: usize = 4096;
 
 /// What kind of file it is, by its extension: what its icon shows and whether it is drawn with a picture of it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

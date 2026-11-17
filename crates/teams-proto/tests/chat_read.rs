@@ -2010,6 +2010,26 @@ fn what_is_not_an_email_object_is_no_email_and_only_file_links_are_opened() {
     assert_eq!(EmailDetails::of(None), None);
     assert!(is_email_link("https://contoso.sharepoint.com/sites/A/x.eml"));
     assert!(is_email_link("https://teams.own.example.com/sp/files/x.eml"));
+    assert!(
+        !is_email_link("https://teams.own.example.com/files/x.eml"),
+        "off the file service"
+    );
+    assert!(!is_email_link("http://teams.own.example.com/sp/files/x.eml"));
+    assert!(!is_email_link("https://user@teams.own.example.com/sp/files/x.eml"));
     assert!(!is_email_link("http://contoso.sharepoint.com/x.eml"));
     assert!(!is_email_link("not a link"));
+}
+
+#[test]
+fn a_long_email_link_is_kept_whole_or_dropped() {
+    use teams_proto::chat::EmailDetails;
+    let link_of = |len: usize| {
+        let base = "https://contoso.sharepoint.com/sites/A/";
+        format!("{base}{}.eml", "a".repeat(len - base.len() - 4))
+    };
+    let long = link_of(2000);
+    let kept = EmailDetails::of(Some(&json!({ "emailLink": format!(" {long} ") })));
+    assert_eq!(kept.and_then(|details| details.email_link), Some(long));
+    let too_long = EmailDetails::of(Some(&json!({ "emailLink": link_of(4097) })));
+    assert_eq!(too_long.and_then(|details| details.email_link), None);
 }

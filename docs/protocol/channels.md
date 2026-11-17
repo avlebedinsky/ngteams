@@ -109,10 +109,11 @@ An email sent to a channel's address arrives as a channel post on the chat servi
   original `.eml` in the team's SharePoint.
 
 No received email post was captured. The fixture `tests/fixtures/chatsvc/email-post.json` is synthetic and follows
-the reader's shape. The native client reads both keys in `teams_proto::chat` (`subject`, `EmailDetails`). It opens
-the email link only when the link is an `https` link on a SharePoint host, or on an own server's file service. A
-SharePoint link opens in the browser with `download=1`, so the browser downloads the file. An own server's file is
-saved through the account's engine.
+the reader's shape. The native client reads both keys in `teams_proto::chat` (`subject`, `EmailDetails`). It keeps
+the whole email link, at most 4096 bytes, only when the link is an `https` link on a SharePoint host, or an `https`
+link to a file service path (`/sp/`). A SharePoint link opens in the browser with `download=1`, so the browser
+downloads the file. Another link is saved through the account's engine, which refuses a link that is not on its own
+server's file service. A line under the row shows the progress of that download, and its failure.
 
 ## What the native client reads
 

@@ -600,6 +600,48 @@ fn an_email_post_s_card_ends_with_view_original_email_and_reply_in_thread() {
     assert_nothing_written(&rig);
 }
 
+#[test]
+fn view_original_email_on_an_own_server_saves_it_through_the_engine_and_tells_how_it_went() {
+    const OWN_EML: &str = "https://chat.example:8443/sp/channels/General/Made-up%20alert.eml";
+    let rig = rig();
+    *rig.core.teams.lock().unwrap() = Some(teams());
+    let mut email = email_post(EMAIL);
+    email.properties = email.properties.map(|properties| {
+        properties.replace(
+            "https://contoso.sharepoint.com/sites/MadeUpTeam/Shared Documents/General/EmailMessages_10_2025/Made-up alert resolved.eml",
+            OWN_EML,
+        )
+    });
+    rig.core
+        .messages
+        .lock()
+        .unwrap()
+        .insert(CHANNEL.to_owned(), vec![email]);
+    let (_shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    click(cx, "channel-row-1");
+    let chosen = tempfile::tempdir().unwrap();
+    let target = chosen.path().join("Made-up alert.eml");
+    let download = |cx: &mut VisualTestContext| {
+        click(cx, &format!("email-original-{EMAIL}"));
+        let target = target.clone();
+        cx.simulate_new_path_selection(move |_| Some(target));
+        cx.run_until_parked();
+    };
+    // the engine refuses it: the row says so, and no browser opens
+    download(cx);
+    assert!(bounds(cx, &format!("email-download-{EMAIL} failed")).is_some());
+    assert_eq!(cx.opened_url(), None);
+    rig.core
+        .file_bytes
+        .lock()
+        .unwrap()
+        .insert(OWN_EML.to_owned(), b"made-up email".to_vec());
+    download(cx);
+    assert!(bounds(cx, &format!("email-download-{EMAIL} saved")).is_some());
+    assert_eq!(std::fs::read(&target).unwrap(), b"made-up email");
+    assert_nothing_written(&rig);
+}
+
 /// Sends what `view`'s box holds, as Enter in it does.
 fn send_box(view: &Entity<ChatView>, cx: &mut VisualTestContext) {
     let compose = cx.update(|_, cx| view.read(cx).compose().clone());

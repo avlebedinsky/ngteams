@@ -392,32 +392,12 @@ impl FileCard {
     /// How far the own server's file's download got, as a line under its card; none without one this run.
     fn status(&self, cx: &App) -> Option<AnyElement> {
         let own = self.own()?;
-        let download = download_of(&own.link, cx)?;
-        let download = download.read(cx);
-        let name = &own.name;
-        let (state, words) = match download.progress() {
-            Progress::Running { .. } => (
-                "running",
-                match download.progress().fraction() {
-                    Some(fraction) => format!("Downloading {name}… {:.0}%", fraction * 100.0),
-                    None => format!("Downloading {name}…"),
-                },
-            ),
-            Progress::Saved if download.then() == Then::Open => ("saved", format!("Opened {name}")),
-            Progress::Saved => ("saved", format!("Saved to {}", download.target().display())),
-            Progress::Failed(Failure::Cancelled) => return None,
-            Progress::Failed(failure) => ("failed", format!("Couldn't download {name}. {}", failed_words(failure))),
-        };
-        let selector = format!("file-download-{} {state}", self.id);
-        Some(
-            div()
-                .debug_selector(move || selector.clone())
-                .px_3()
-                .pb_2()
-                .text_xs()
-                .text_color(rgb(self.palette.muted_foreground))
-                .child(words)
-                .into_any_element(),
+        download_line(
+            &own.link,
+            &own.name,
+            &format!("file-download-{}", self.id),
+            self.palette,
+            cx,
         )
     }
 
@@ -487,6 +467,37 @@ fn failed_words(failure: &Failure) -> String {
         Failure::Refused => "You may no longer have access to the file.".to_owned(),
         other => other.words(),
     }
+}
+
+/// How far the last download this run of the own server's file at `link` (saved as `name`) got, as a line; none
+/// without one, or after it was cancelled. Its selector is `<selector> <state>`.
+pub(crate) fn download_line(link: &str, name: &str, selector: &str, palette: Palette, cx: &App) -> Option<AnyElement> {
+    let download = download_of(link, cx)?;
+    let download = download.read(cx);
+    let (state, words) = match download.progress() {
+        Progress::Running { .. } => (
+            "running",
+            match download.progress().fraction() {
+                Some(fraction) => format!("Downloading {name}… {:.0}%", fraction * 100.0),
+                None => format!("Downloading {name}…"),
+            },
+        ),
+        Progress::Saved if download.then() == Then::Open => ("saved", format!("Opened {name}")),
+        Progress::Saved => ("saved", format!("Saved to {}", download.target().display())),
+        Progress::Failed(Failure::Cancelled) => return None,
+        Progress::Failed(failure) => ("failed", format!("Couldn't download {name}. {}", failed_words(failure))),
+    };
+    let selector = format!("{selector} {state}");
+    Some(
+        div()
+            .debug_selector(move || selector.clone())
+            .px_3()
+            .pb_2()
+            .text_xs()
+            .text_color(rgb(palette.muted_foreground))
+            .child(words)
+            .into_any_element(),
+    )
 }
 
 /// An own server's file, read through its account's engine (see the module docs).
