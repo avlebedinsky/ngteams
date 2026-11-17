@@ -152,8 +152,8 @@ fn healthy(pipeline: &gst::Pipeline) -> Result<(), DeviceError> {
             match message.view() {
                 gst::MessageView::Error(failure) => return Err(error(failure.error())),
                 gst::MessageView::Eos(_) => return Err(DeviceError::Closed),
-                // A sink that opens its device after PLAYING (the speaker: `async` off) reports its latency late.
-                // Without this, the pipeline plays each buffer with no latency: every buffer comes late, its start cut.
+                // A sink that opens (or reopens) its device while playing reports its latency late. Without this,
+                // the pipeline plays each buffer with no latency: every buffer comes late, its start cut.
                 gst::MessageView::Latency(_) => pipeline.recalculate_latency().map_err(error)?,
                 _ => (),
             }
@@ -358,8 +358,11 @@ impl AudioSink for Speaker {
 const PLAYOUT_MARGIN: gst::ClockTime = gst::ClockTime::from_mseconds(50);
 /// The audio the speaker's input holds before it drops the oldest: 200 ms of 48 kHz mono `f32`.
 const SPEAKER_BACKLOG: u64 = 38_400;
-/// How long an audio sink may take to open its device and report its latency.
-const OPEN_WAIT: gst::ClockTime = gst::ClockTime::from_seconds(1);
+/// The audio the device's own buffer holds, in microseconds: a sink reports it as its latency (`osxaudiosink`'s
+/// default is 200 ms), and each frame plays that much later.
+const DEVICE_BUFFER_US: i64 = 40_000;
+/// How long an audio sink may take to open its device.
+const OPEN_WAIT: Duration = Duration::from_secs(1);
 
 pub(super) fn speaker(devices: WindowsDevices) -> Result<Box<dyn AudioSink>, DeviceError> {
     let frames: Queue<AudioFrame> = Queue::new(20);
@@ -385,17 +388,20 @@ pub(super) fn speaker(devices: WindowsDevices) -> Result<Box<dyn AudioSink>, Dev
     Ok(Box::new(Speaker { frames, _pump: pump }))
 }
 
-/// The speaker's pipeline into `sink`, playing, its device open, and the source the call's frames go into. Each frame
-/// is stamped when it comes and plays [`PLAYOUT_MARGIN`] later.
+/// The speaker's pipeline into `sink`, playing on the device's own clock, and the source the call's frames go into.
+/// Each frame is stamped with that clock when it comes and plays [`PLAYOUT_MARGIN`] later.
 fn playback(sink: &gst::Element) -> Result<(Running, AppSrc), DeviceError> {
     // A live call has no preroll before its first received frame. Waiting for it here delays opening the
     // speaker (and therefore ringing or answering) until the state wait expires.
     sink.set_property("async", false);
+    if sink.has_property_with_type("buffer-time", i64::static_type()) {
+        sink.set_property("buffer-time", DEVICE_BUFFER_US);
+    }
     // Not WASAPI2's `low-latency`: it leaves the sink about 5 ms, and frames of a call come later than that.
     let margin = i64::try_from(PLAYOUT_MARGIN.nseconds()).map_err(error)?;
     let source = AppSrc::builder()
         .caps(&audio_caps())
-        .is_live(true)
+        .is_live(false)
         .format(gst::Format::Time)
         .do_timestamp(true)
         .block(false)
@@ -406,43 +412,54 @@ fn playback(sink: &gst::Element) -> Result<(Running, AppSrc), DeviceError> {
     source.set_property_from_str("leaky-type", "downstream");
     let convert = element("audioconvert")?;
     let resample = element("audioresample")?;
-    let pipeline = playing(&[source.upcast_ref(), &convert, &resample, sink])?;
-    prime(&pipeline.0, &source, sink)?;
-    Ok((pipeline, source))
+    let elements = [source.upcast_ref(), &convert, &resample, sink];
+    let running = Running(gst::Pipeline::new());
+    running.0.add_many(elements).map_err(error)?;
+    gst::Element::link_many(elements).map_err(error)?;
+    running.0.set_state(gst::State::Paused).map_err(error)?;
+    open(&source, sink)?;
+    source.set_is_live(true);
+    running.0.set_state(gst::State::Playing).map_err(error)?;
+    let (state, _, _) = running.0.state(gst::ClockTime::from_seconds(5));
+    state.map_err(error)?;
+    Ok((running, source))
 }
 
-/// Opens the device with a frame of silence. An audio sink opens its device on its first data and only then reports
-/// its latency. Until the pipeline takes that latency, every frame plays late with its start cut.
-fn prime(pipeline: &gst::Pipeline, source: &AppSrc, sink: &gst::Element) -> Result<(), DeviceError> {
-    push(source, &AudioFrame::silence())?;
-    let audio_sink = gst::glib::Type::from_name("GstAudioBaseSink").is_some_and(|audio| sink.type_().is_a(audio));
-    let Some(bus) = pipeline.bus().filter(|_| audio_sink) else {
-        return Ok(());
-    };
-    // A sink with `async` off also posts a LATENCY message when it goes to PAUSED, before its device opens. Thus a
-    // LATENCY message only tells when to ask again: the device is open when the sink itself can give its latency.
-    let deadline = std::time::Instant::now() + Duration::from_nanos(OPEN_WAIT.nseconds());
-    while !sink.query(&mut gst::query::Latency::new()) {
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
-        let wait = gst::ClockTime::try_from(left).map_err(error)?;
-        let message = bus.timed_pop_filtered(wait, &[gst::MessageType::Latency, gst::MessageType::Error]);
-        match message.as_ref().map(|message| message.view()) {
-            Some(gst::MessageView::Error(failure)) => return Err(error(failure.error())),
-            Some(_) => (),
-            // Not open in time: `healthy` takes the latency when the sink reports it.
-            None => return Ok(()),
-        }
+/// Opens the device with a frame of silence before the pipeline plays. An audio sink opens its device on its first
+/// data, and only an open sink gives its clock and latency. Playing on the system clock instead slaves the sink to it:
+/// each stall of the device's thread then puts the call's frames further ahead of the device, and the sink plays
+/// silence until its skew correction catches up, seconds later. The source is not live until then: a live source
+/// holds its data until the pipeline plays.
+fn open(source: &AppSrc, sink: &gst::Element) -> Result<(), DeviceError> {
+    // stamped: before the pipeline plays there is no clock to stamp it with
+    let mut silence = buffer(&AudioFrame::silence());
+    if let Some(silence) = silence.get_mut() {
+        silence.set_pts(gst::ClockTime::ZERO);
     }
-    pipeline.recalculate_latency().map_err(error)
+    source.push_buffer(silence).map_err(error)?;
+    let audio_sink = gst::glib::Type::from_name("GstAudioBaseSink").is_some_and(|audio| sink.type_().is_a(audio));
+    let deadline = std::time::Instant::now() + OPEN_WAIT;
+    while audio_sink && sink.provide_clock().is_none() {
+        if std::time::Instant::now() >= deadline {
+            log::warn!("the speaker's device did not open in {OPEN_WAIT:?}: it plays on the system clock");
+            break;
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+    Ok(())
 }
 
 fn push(source: &AppSrc, frame: &AudioFrame) -> Result<(), DeviceError> {
+    source.push_buffer(buffer(frame)).map(drop).map_err(error)
+}
+
+fn buffer(frame: &AudioFrame) -> gst::Buffer {
     let bytes: Vec<u8> = frame.samples().iter().flat_map(|s| s.to_le_bytes()).collect();
     let mut buffer = gst::Buffer::from_mut_slice(bytes);
     if let Some(buffer) = buffer.get_mut() {
         buffer.set_duration(gst::ClockTime::from_mseconds(10));
     }
-    source.push_buffer(buffer).map(drop).map_err(error)
+    buffer
 }
 
 #[cfg(test)]
@@ -469,8 +486,8 @@ mod tests {
         assert!(matches!(healthy(&pipeline), Err(DeviceError::Closed)));
     }
 
-    /// ALSA's `null` device is an audio sink that needs no sound card. Its LATENCY message from the change to PAUSED
-    /// comes before its device opens, so it must not end the wait for the device.
+    /// ALSA's `null` device is an audio sink that needs no sound card. The pipeline plays on its clock, with its
+    /// latency.
     #[test]
     fn the_speaker_plays_with_the_latency_of_its_open_device() {
         use gstreamer_app::gst_base::prelude::*;
@@ -479,7 +496,8 @@ mod tests {
             eprintln!("skipped: GStreamer has no alsasink here");
             return;
         };
-        let (_pipeline, _source) = playback(&sink).unwrap();
+        let (pipeline, _source) = playback(&sink).unwrap();
+        assert_eq!(pipeline.0.clock(), sink.provide_clock(), "not on the device's clock");
         let mut query = gst::query::Latency::new();
         assert!(sink.query(&mut query), "the device is not open");
         let (_, device, _) = query.result();
