@@ -56,7 +56,7 @@ pub enum AdminError {
 
 impl From<diesel::result::Error> for AdminError {
     fn from(error: diesel::result::Error) -> Self {
-        Self::Db(DbError::Query(error))
+        Self::Db(DbError::from(error))
     }
 }
 

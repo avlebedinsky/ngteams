@@ -183,6 +183,33 @@ pub enum CliError {
     Input(#[source] std::io::Error),
     #[error("can't write the output: {0}")]
     Output(#[source] std::io::Error),
+    #[error("another process holds the SQLite write lock on {file}: waited {} s for it", .waited.as_secs())]
+    Locked { file: String, waited: std::time::Duration },
+}
+
+impl CliError {
+    /// A database lock that another process held past the wait, with the SQLite file of `database_url` named; any
+    /// other error as it is.
+    fn on_database(self, database_url: &str) -> Self {
+        let Some(file) = database_url.strip_prefix("sqlite://") else {
+            return self;
+        };
+        // a statement's busy error that reached here not as `Locked` waited the statement wait
+        let waited =
+            std::iter::successors(Some(&self as &dyn std::error::Error), |error| error.source()).find_map(|error| {
+                match error.downcast_ref::<diesel::result::Error>() {
+                    Some(error) if crate::db::busy(error) => Some(crate::db::Locked::statement().waited),
+                    _ => error.downcast_ref::<crate::db::Locked>().map(|locked| locked.waited),
+                }
+            });
+        match waited {
+            Some(waited) => Self::Locked {
+                file: file.to_owned(),
+                waited,
+            },
+            None => self,
+        }
+    }
 }
 
 /// Runs the command line on the process's arguments, standard input and output.
@@ -247,7 +274,8 @@ pub async fn run(
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<(), CliError> {
     let config = Config::load(cli.config.as_deref())?;
-    match cli.command {
+    let database_url = config.database_url.clone();
+    let ran = match cli.command {
         Command::Serve { role } => serve(config, role, shutdown).await,
         Command::Migrate => {
             crate::db::Db::connect(&config.database_url, 1).await?;
@@ -275,7 +303,8 @@ pub async fn run(
             )
             .map_err(CliError::Output)
         }
-    }
+    };
+    ran.map_err(|error| error.on_database(&database_url))
 }
 
 /// How long a stopping node waits for store clears still running: a store out of reach gives up within it.

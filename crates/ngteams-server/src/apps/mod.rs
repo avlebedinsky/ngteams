@@ -199,7 +199,7 @@ pub enum AppError {
 
 impl From<diesel::result::Error> for AppError {
     fn from(error: diesel::result::Error) -> Self {
-        Self::Db(DbError::Query(error))
+        Self::Db(DbError::from(error))
     }
 }
 
