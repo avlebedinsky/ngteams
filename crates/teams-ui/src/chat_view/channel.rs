@@ -335,7 +335,7 @@ pub(super) fn meeting_card(
 
 /// A running channel meeting's post, as Teams' card draws it: the meeting's tile, its title over when it started
 /// (`started`, a time of day), and Join (`join`; none in the read-only mode; below them when the card is narrow). Its
-/// test selectors are `channel-meeting-call-<id>` and `channel-meeting-join-<id>`.
+/// test selectors are `channel-meeting-call-<id>`, `channel-meeting-title-<id>` and `channel-meeting-join-<id>`.
 pub(super) fn meeting_call_card(
     id: &str,
     call: &MeetingCall,
@@ -344,7 +344,7 @@ pub(super) fn meeting_call_card(
     join: Option<OnOpen>,
 ) -> AnyElement {
     let tile = div()
-        .size(px(32.0))
+        .size(px(MEETING_CALL_TILE))
         .flex_none()
         .rounded_md()
         .flex()
@@ -363,9 +363,10 @@ pub(super) fn meeting_call_card(
                 .on_click(join),
         )
     });
-    let id = id.to_owned();
+    let card_selector = format!("channel-meeting-call-{id}");
+    let title_selector = format!("channel-meeting-title-{id}");
     div()
-        .debug_selector(move || format!("channel-meeting-call-{id}"))
+        .debug_selector(move || card_selector)
         .w_full()
         .max_w(px(MEETING_CALL_WIDTH))
         .px_4()
@@ -380,26 +381,39 @@ pub(super) fn meeting_call_card(
         .border_color(rgb(palette.border))
         .bg(rgb(palette.surface))
         .shadow_sm()
-        .child(tile)
+        // The tile and the text wrap as one: Join goes on a line below them when the line cannot keep
+        // MEETING_CALL_TEXT for the text beside Join, and then they take the whole line.
         .child(
             div()
-                .flex_1()
-                .min_w(px(MEETING_CALL_TEXT))
+                .flex_grow_1()
+                .flex_shrink(1.0)
+                .flex_basis(px(MEETING_CALL_TILE + MEETING_CALL_GAP + MEETING_CALL_TEXT))
+                .min_w(px(0.0))
                 .flex()
-                .flex_col()
+                .items_center()
+                .gap(px(MEETING_CALL_GAP))
+                .child(tile)
                 .child(
                     div()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(rgb(palette.foreground))
-                        .truncate()
-                        .child(call.title.clone()),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(palette.muted_foreground))
-                        .truncate()
-                        .child(format!("Started {started}")),
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .debug_selector(move || title_selector)
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(rgb(palette.foreground))
+                                .truncate()
+                                .child(call.title.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(palette.muted_foreground))
+                                .truncate()
+                                .child(format!("Started {started}")),
+                        ),
                 ),
         )
         .children(join.map(|join| div().flex_none().child(join)))
@@ -408,8 +422,13 @@ pub(super) fn meeting_call_card(
 
 /// The widest a running meeting's card is drawn, px.
 const MEETING_CALL_WIDTH: f32 = 680.0;
-/// The narrowest a running meeting's title and time are drawn, px: in a narrower card, Join goes on a line below them.
-const MEETING_CALL_TEXT: f32 = 64.0;
+/// The narrowest a running meeting's title and time are drawn beside Join, px: about 22 characters of the title. In a
+/// narrower card, Join goes on a line below them, as in Teams' card in a narrow pane.
+const MEETING_CALL_TEXT: f32 = 176.0;
+/// The size of a running meeting's tile on its card, px.
+const MEETING_CALL_TILE: f32 = 32.0;
+/// The gap between the tile and the text of a running meeting's card, px.
+const MEETING_CALL_GAP: f32 = 12.0;
 
 /// A meeting card's "<team> > <channel>": the team's tile, its name, a chevron and the channel's.
 fn place_line(team: &SharedString, channel: &SharedString, palette: Palette) -> gpui::Div {

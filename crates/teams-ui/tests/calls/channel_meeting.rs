@@ -245,3 +245,48 @@ fn of_two_meetings_that_run_in_a_channel_each_posts_join_goes_into_its_own() {
         "the older meeting's post names it, not the newer meeting of the channel"
     );
 }
+
+/// Where the card of [`POST`] draws itself, its title and its Join, in a window `width` px wide.
+fn card_at(width: f32) -> [gpui::Bounds<gpui::Pixels>; 3] {
+    let rig = calling();
+    channel_holds(&rig, vec![call_event(POST, "callStarted", None)]);
+    let (trace, _) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let _windows = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(800.0)));
+    click(cx, "channel-row-1");
+    assert!(drawn(cx, &format!("channel-meeting-call-{POST}")));
+    ["call", "title", "join"]
+        .map(|part| format!("channel-meeting-{part}-{POST}"))
+        .map(|selector| cx.debug_bounds(Box::leak(selector.into_boxed_str())).expect("drawn"))
+}
+
+/// The width that keeps 20 characters or more of a meeting's title readable, px.
+const READABLE_TITLE: f32 = 160.0;
+/// The card's padding on each side, px.
+const CARD_PADDING: f32 = 16.0;
+
+#[test]
+fn a_meeting_cards_join_goes_below_the_title_before_the_title_is_cut_to_a_few_letters() {
+    for width in (480_u16..=1280).step_by(40) {
+        let [card, title, join] = card_at(f32::from(width));
+        if join.top() < title.bottom() {
+            assert!(
+                title.size.width >= gpui::px(READABLE_TITLE),
+                "at {width} px Join is beside a title of 20 characters or more: {title:?} {join:?}"
+            );
+        } else {
+            assert!(
+                title.right() >= card.right() - gpui::px(CARD_PADDING + 1.0),
+                "at {width} px Join is below and the title takes its whole line: {card:?} {title:?}"
+            );
+        }
+        if width >= 1280 {
+            assert!(
+                join.left() >= title.right(),
+                "a wide window keeps Join on the title's right"
+            );
+        }
+    }
+}

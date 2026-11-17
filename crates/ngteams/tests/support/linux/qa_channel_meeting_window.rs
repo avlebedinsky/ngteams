@@ -745,23 +745,35 @@ fn link(conversation: &str) -> String {
 
 // --- finding a button on the screen ---
 
-/// The middle of the first brand-filled button within `columns` and `rows` of `image`: rows whose rightmost run of
-/// brand pixels (gaps of 12 px or less, for the button's icon and label) is at least `wide` px wide and at least half
-/// brand, at least 16 such rows together. A smaller brand tile beside the button on the same rows is not part of the run.
-fn brand_button(
+/// A pixel of the brand fill (a button's or a meeting tile's).
+fn brand(pixel: image::Rgb<u8>) -> bool {
+    let [r, g, b] = pixel.0.map(i32::from);
+    b >= 150 && b - r >= 60 && b - g >= 60
+}
+
+/// The middle of the first brand-filled button within `columns` and `rows` of `image` ([`brand_box`]).
+fn brand_button(image: &RgbImage, columns: (u32, u32), rows: (u32, u32), wide: usize) -> Option<(i32, i32)> {
+    let (first, last, top, bottom) = brand_box(image, columns, rows, wide)?;
+    Some((
+        i32::try_from(first.midpoint(last)).ok()?,
+        i32::try_from(top.midpoint(bottom)).ok()?,
+    ))
+}
+
+/// The box (left, right, top, bottom) of the first brand-filled button within `columns` and `rows` of `image`: rows
+/// whose rightmost run of brand pixels (gaps of 12 px or less, for the button's icon and label) is at least `wide` px
+/// wide and at least half brand, at least 16 such rows together. A smaller brand tile beside the button on the same
+/// rows is not part of the run.
+fn brand_box(
     image: &RgbImage,
     (left, right): (u32, u32),
     (top, bottom): (u32, u32),
     wide: usize,
-) -> Option<(i32, i32)> {
-    let brand = |pixel: &image::Rgb<u8>| {
-        let [r, g, b] = pixel.0.map(i32::from);
-        b >= 150 && b - r >= 60 && b - g >= 60
-    };
+) -> Option<(u32, u32, u32, u32)> {
     let mut run: Vec<(u32, u32, u32)> = Vec::new();
     for y in top..image.height().min(bottom) {
         let xs: Vec<u32> = (left..right.min(image.width()))
-            .filter(|x| brand(image.get_pixel(*x, y)))
+            .filter(|x| brand(*image.get_pixel(*x, y)))
             .collect();
         let mut segments: Vec<(u32, u32, usize)> = Vec::new();
         for x in xs {
@@ -787,12 +799,9 @@ fn brand_button(
     if run.len() < 16 {
         return None;
     }
-    let (top, first, last) = run[0];
-    let bottom = run[run.len() - 1].0;
-    Some((
-        i32::try_from(first.midpoint(last)).ok()?,
-        i32::try_from(top.midpoint(bottom)).ok()?,
-    ))
+    let first = run.iter().map(|row| row.1).min()?;
+    let last = run.iter().map(|row| row.2).max()?;
+    Some((first, last, run[0].0, run[run.len() - 1].0))
 }
 
 /// The channel header's Join: the brand-filled button at the right of the header.
@@ -942,13 +951,50 @@ fn untitled_meeting(user: &mut User<'_>) -> SandboxResult {
     user.hang_up()
 }
 
-/// The running meeting's card in a narrow window: Join under the text (shots at 640, 560 and 480 px).
+/// The width that keeps 20 characters or more of a meeting's title readable, px.
+const READABLE_TITLE: u32 = 160;
+/// The gap between the card's tile, its text and its Join, px.
+const CARD_GAP: u32 = 12;
+
+/// The running meeting's card in a narrow window: at 640 and 560 px, Join is beside the title only when the title
+/// keeps [`READABLE_TITLE`], else Join is below the tile and the title has the whole line (shots at 640, 560 and 480 px).
 fn narrow_card(user: &mut User<'_>) -> SandboxResult {
     let meeting = user.meetings.running.clone().ok_or("no running meeting")?;
     user.open_channel()?;
     user.until("the card", |state| {
         post_of(state, &meeting.post).is_some_and(|item| item["kind"] == "meeting-call")
     })?;
+    for width in [640, 560] {
+        user.resize_focused(width)?;
+        user.park()?;
+        thread::sleep(SETTLE);
+        let screen = user.screen()?;
+        // the posts start right of the chat list
+        let (first, last, top, bottom) = brand_box(
+            &screen,
+            (300, screen.width()),
+            (110, screen.height().saturating_sub(70)),
+            44,
+        )
+        .ok_or_else(|| format!("no Join on the post at {width} px"))?;
+        let middle = top.midpoint(bottom);
+        let tile_beside = (300..first).rev().find(|x| brand(*screen.get_pixel(*x, middle)));
+        say(&format!(
+            "  {width} px: Join at x {first}..{last}, y {top}..{bottom}; the tile's right on its row: {tile_beside:?}"
+        ));
+        if let Some(tile) = tile_beside {
+            let text = first.saturating_sub(tile + 1 + 2 * CARD_GAP);
+            ensure(text >= READABLE_TITLE, || {
+                format!("at {width} px Join is beside a title of {text} px, less than 20 characters")
+            })?;
+        } else {
+            let tile_above = (top.saturating_sub(64)..top).any(|y| brand(*screen.get_pixel(first + 16, y)));
+            ensure(tile_above, || {
+                format!("at {width} px Join is not beside the tile and the tile is not above it")
+            })?;
+        }
+    }
+    user.resize_focused(i32::try_from(SCREEN.0)?)?;
     user.shots("untitled-post-narrow", &[640, 560, 480])
 }
 
