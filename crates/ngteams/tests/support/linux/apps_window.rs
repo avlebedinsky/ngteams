@@ -222,6 +222,13 @@ impl<'a> Qa<'a> {
         running
             .line_where(STARTUP, |line| line == "ready")
             .map_err(|error| running.fail(&format!("no ready line: {error:?}")))?;
+        // the frames drawn are not yet a window on screen: niri shows it once its first buffer comes, and a click
+        // before that goes to no window
+        if focused_window(sandbox).is_none() {
+            wait_until(WAIT, || focused_window(sandbox))
+                .ok_or_else(|| running.fail(&"niri never showed the window"))?;
+            say("the window was not on screen at ready: the clicks waited for niri to show it");
+        }
         Ok(Qa {
             sandbox,
             running,
@@ -366,8 +373,9 @@ impl<'a> Qa<'a> {
     /// The store shown with no search and no dialog, as the rail's Store opens it.
     fn plain_store(&mut self) -> SandboxResult<Value> {
         self.act("close")?;
-        self.act("search ")?;
+        // the store first: a search needs it open, so a flow before that left it closed fails only itself
         self.act("store")?;
+        self.act("search ")?;
         self.state_until("the store, read", |state| {
             state["main"] == "Apps" && state["store"]["view"] == "Store" && state["store"]["loaded"] == true
         })
@@ -391,6 +399,12 @@ pub(super) fn strings(value: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The id of the window niri shows focused: the app's, once niri shows it.
+fn focused_window(sandbox: &Sandbox) -> Option<u64> {
+    let windows: Value = serde_json::from_str(&sandbox.niri_msg(&["-j", "windows"]).ok()?).ok()?;
+    windows.as_array()?.iter().find(|window| window["is_focused"] == true)?["id"].as_u64()
+}
+
 pub(super) fn ensure(holds: bool, what: impl FnOnce() -> String) -> SandboxResult {
     if holds { Ok(()) } else { Err(what().into()) }
 }
@@ -403,9 +417,17 @@ fn holds(list: &Value, id: &str) -> bool {
 
 fn rail_opens_the_store(qa: &mut Qa<'_>) -> SandboxResult {
     qa.click(RAIL_STORE)?;
-    let state = qa.state_until("the store from the rail, read", |state| {
-        state["main"] == "Apps" && state["store"]["loaded"] == true
-    })?;
+    let state = qa
+        .state_until("the store from the rail, read", |state| {
+            state["main"] == "Apps" && state["store"]["loaded"] == true
+        })
+        .map_err(|error| {
+            let windows = qa
+                .sandbox
+                .niri_msg(&["-j", "windows"])
+                .unwrap_or_else(|error| error.to_string());
+            format!("{error}; niri's windows: {windows}")
+        })?;
     let store = &state["store"];
     ensure(strings(&store["org"]) == [HELPER], || {
         format!("the org's apps: {store}")
@@ -1082,7 +1104,17 @@ pub(super) fn answer(desktop: Entity<teams_ui::Desktop>, probe: Option<Probe>, a
 /// The answer to a question about the window.
 fn reply_to(verb: &str, rest: &str, shell: &Entity<Shell>, window: &mut Window, cx: &mut App) -> Value {
     match verb {
-        "state" => state_of(shell, cx),
+        "state" => {
+            let mut state = state_of(shell, cx);
+            // what the window saw of the pointer, so a click that went nowhere says where it went
+            let pointer = window.mouse_position();
+            state["window"] = json!({
+                "active": window.is_window_active(),
+                "hovered": window.is_window_hovered(),
+                "pointer": [f32::from(pointer.x), f32::from(pointer.y)],
+            });
+            state
+        }
         "theme" => {
             let key = if rest == "dark" {
                 teams_ui::theme::DARK_KEY
