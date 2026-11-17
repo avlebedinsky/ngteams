@@ -2,7 +2,7 @@
 
 mod history;
 mod properties;
-mod support;
+pub(super) mod support;
 
 use teams_core::engine::Action;
 use teams_proto::chat::{ChatReads, MessageText};

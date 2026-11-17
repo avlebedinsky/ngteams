@@ -139,6 +139,11 @@ name = "qa_new_chat_kept_window"
 harness = false
 
 [[test]]
+# QA of task 236: chat in the app's window on a SQLite own server while the operator runs commands, in the UI sandbox
+name = "qa_sqlite_busy_window"
+harness = false
+
+[[test]]
 # QA of task 224: a bot's cards, inputs and buttons in the app's window over the mock, in the UI sandbox
 name = "qa_bot_cards_window"
 harness = false
