@@ -3582,8 +3582,9 @@ impl ChatView {
         let row = if item.body.is_system() {
             row.flex_col().child(self.system_row(item, palette, cx))
         } else {
-            // someone else's message beside their avatar's column, Teams' way; the account's own to the right
-            let avatar = (!item.own).then(|| self.avatar_column(item, palette, cx));
+            // someone else's message beside their avatar's column, Teams' way; the account's own to the right; an
+            // email post's card over the avatar's column, its icon inside it
+            let avatar = (!item.own && item.email.is_none()).then(|| self.avatar_column(item, palette, cx));
             row.children(avatar)
                 .child(self.message_column(item, highlighted, palette, cx))
         };
@@ -3625,11 +3626,6 @@ impl ChatView {
         let column = div().w(px(AVATAR)).flex_none().mr(px(AVATAR_GAP));
         if !item.header {
             return column;
-        }
-        if item.email.is_some() {
-            return column
-                .pt(rems(HEADER_REMS))
-                .child(email::mail_avatar(&item.id, palette));
         }
         let badge = item
             .sender
@@ -3724,23 +3720,24 @@ impl ChatView {
         // Teams' translation mark stands beside the time, or under the bubble when there is no header to hold it
         let mut mark = translation_mark(item, palette, cx);
         let cards = &self.models.cards;
-        let header = item
-            .header
-            .then(|| header_line(item, (palette, cycle), mark.take(), cards));
-        let to = item
-            .email
-            .as_ref()
-            .and_then(|post| post.to.as_ref())
-            .filter(|_| item.header)
-            .map(|to| email::to_line(&item.id, to, palette));
-        // an email post's reactions and rows are in its card, as Teams draws them
+        // an email post's header, reactions and rows are in its card, as Teams draws them
+        let (head, header) = match &item.email {
+            Some(post) => (
+                item.header.then(|| email_head(item, post, cycle, mark.take(), palette)),
+                None,
+            ),
+            None => (
+                None,
+                item.header
+                    .then(|| header_line(item, (palette, cycle), mark.take(), cards)),
+            ),
+        };
         let (foot, footer) = match &item.email {
             Some(post) => (Some(self.email_foot(item, post, palette, cx)), None),
             None => (None, footer_line(item, mark, &self.reactors, palette, cx)),
         };
         column
             .children(header)
-            .children(to)
             .child(bubble_line(
                 item,
                 InChat {
@@ -3754,6 +3751,7 @@ impl ChatView {
                     root: self.place.in_channel().then(|| self.root_of(&item.id)),
                     meeting: Self::meeting_view(item, palette, cx),
                     bots: self.core.capabilities().apps,
+                    head,
                     foot,
                 },
                 highlighted,
@@ -4900,6 +4898,28 @@ fn header_line(
         .into_any_element()
 }
 
+/// The top of an email post's card ([`email::head`]): its sender with its time and marks, its "To:" line.
+fn email_head(
+    item: &MessageItem,
+    post: &EmailPost,
+    cycle: HourCycle,
+    mark: Option<AnyElement>,
+    palette: Palette,
+) -> AnyElement {
+    let time = clock::message_time(item.arrival_time, &Local::now(), cycle);
+    let edited = item.edited.then(|| edited_mark().into_any_element());
+    email::head(
+        &item.id,
+        email::Head {
+            sender: item.sender_name.clone(),
+            time: time.into(),
+            to: post.to.clone(),
+            marks: edited.into_iter().chain(mark).collect(),
+        },
+        palette,
+    )
+}
+
 /// How faded a message's text is while its translation comes.
 const WAITING_OPACITY: f32 = 0.6;
 /// What a message waiting for its translation says beside its time.
@@ -5088,6 +5108,8 @@ struct InChat<'a> {
     meeting: Option<AnyElement>,
     /// Whether the account's cloud serves bot invokes: a card's button that sends to the bot is drawn only then.
     bots: bool,
+    /// An email post's top, drawn at the top of its card ([`email_head`]).
+    head: Option<AnyElement>,
     /// An email post's foot, drawn at the bottom of its card ([`ChatView::email_foot`]).
     foot: Option<AnyElement>,
 }
@@ -5237,6 +5259,7 @@ fn bubble(
     // an email post is a card as wide as the list, its rows across it
     let bubble = if item.email.is_some() { bubble.flex_1() } else { bubble };
     bubble
+        .children(chat.head.take())
         .children(notice)
         .children(subject)
         .child(content)

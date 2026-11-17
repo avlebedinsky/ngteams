@@ -2,9 +2,10 @@
 //! (`teams_proto::chat::EmailDetails`, `docs/protocol/channels.md`, "A post that came by email"):
 //!
 //! - **A subject** (`properties.subject`) is drawn bold over the post's text.
-//! - **An email post** has the mail icon in place of the sender's avatar, "<sender> via email" beside its time, a
-//!   "To:" line under them (at most [`teams_proto::chat::SHOWN_RECIPIENTS`] recipients, then "+N"), and its card
-//!   ends with its reactions, "View original email" and, in the channel's list, "Reply in thread".
+//! - **An email post** is a card as wide as the post's row (over the avatar's column). Its top holds the filled mail
+//!   icon beside "<sender> via email" with its time and, under them, a "To:" line (at most
+//!   [`teams_proto::chat::SHOWN_RECIPIENTS`] recipients, then "+N"); a long sender is cut short, so its time always
+//!   shows. The card ends with its reactions, "View original email" and, in the channel's list, "Reply in thread".
 //! - **"View original email"** gets the original `.eml` file, as Teams' download does: a SharePoint file opens in the
 //!   browser with `download=1` (the browser downloads it), an own server's file is saved through its account's engine
 //!   ([`crate::files::OwnFile`]); a line under the row tells how far that download got, or why it failed.
@@ -30,8 +31,8 @@ pub const VIEW_ORIGINAL_EMAIL: &str = "View original email";
 /// The row that opens the post's thread.
 pub const REPLY_IN_THREAD: &str = "Reply in thread";
 
-/// The size of the mail icon in the avatar's place.
-const MAIL_ICON: f32 = 28.0;
+/// The size of the mail icon at an email post's top, px: an avatar's.
+const MAIL_ICON: f32 = super::AVATAR;
 
 /// What an email post shows besides a post's text.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,29 +67,90 @@ impl EmailPost {
     }
 }
 
-/// The mail icon that stands in the sender's avatar's place.
-pub(super) fn mail_avatar(id: &str, palette: Palette) -> AnyElement {
-    let id = id.to_owned();
-    div()
-        .debug_selector(move || format!("email-icon-{id}"))
-        .size(px(super::AVATAR))
+/// What an email post's top shows besides the mail icon.
+pub(super) struct Head {
+    /// "<sender> via email".
+    pub sender: SharedString,
+    /// When it came, as the post's time reads.
+    pub time: SharedString,
+    /// The "To:" line.
+    pub to: Option<SharedString>,
+    /// Marks after the time: "Edited", the translation's.
+    pub marks: Vec<AnyElement>,
+}
+
+/// The top of an email post's card: the filled mail icon beside the sender with its time, the "To:" line under them.
+pub(super) fn head(id: &str, head: Head, palette: Palette) -> AnyElement {
+    let selector = |name: &str| {
+        let selector = format!("email-{name}-{id}");
+        move || selector
+    };
+    let icon = div()
+        .debug_selector(selector("icon"))
+        .flex_none()
+        .size(px(MAIL_ICON))
         .flex()
         .items_center()
         .justify_center()
-        .child(Glyph::MAIL.icon().size(px(MAIL_ICON)).text_color(rgb(palette.brand)))
-        .into_any_element()
-}
-
-/// The "To:" line under an email post's name and time.
-pub(super) fn to_line(id: &str, to: &SharedString, palette: Palette) -> AnyElement {
-    let id = id.to_owned();
-    div()
-        .debug_selector(move || format!("email-to-{id}"))
-        .pb_1()
+        .child(
+            Glyph::MAIL_FILLED
+                .icon()
+                .size(px(MAIL_ICON))
+                .text_color(rgb(palette.brand)),
+        );
+    let sender = div()
+        .debug_selector(selector("sender"))
+        .min_w_0()
+        .truncate()
+        .text_color(rgb(palette.foreground))
+        .child(head.sender);
+    let time = div()
+        .debug_selector(selector("time"))
+        .flex_none()
         .text_xs()
         .text_color(rgb(palette.muted_foreground))
-        .truncate()
-        .child(to.clone())
+        .child(head.time);
+    let marks = div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_2()
+        .text_xs()
+        .text_color(rgb(palette.muted_foreground))
+        .children(head.marks);
+    let to = head.to.map(|to| {
+        div()
+            .debug_selector(selector("to"))
+            .text_xs()
+            .text_color(rgb(palette.foreground))
+            .truncate()
+            .child(to)
+    });
+    let lines = div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .min_w_0()
+                .child(sender)
+                .child(time)
+                .child(marks),
+        )
+        .children(to);
+    div()
+        .debug_selector(selector("head"))
+        .pt_2()
+        .pb_3()
+        .flex()
+        .items_center()
+        .gap_4()
+        .child(icon)
+        .child(lines)
         .into_any_element()
 }
 
@@ -105,14 +167,20 @@ pub(super) fn subject_line(id: &str, subject: &SharedString, palette: Palette) -
         .into_any_element()
 }
 
-/// One of the rows at the foot of an email post's card: a hairline over it, its glyph and its words.
-fn card_row(selector: String, lead: AnyElement, words: &'static str, palette: Palette, open: OnOpen) -> AnyElement {
+/// One of the rows at the foot of an email post's card: a hairline over it, its glyph and its words in `color`.
+fn card_row(
+    selector: String,
+    lead: AnyElement,
+    (words, color): (&'static str, u32),
+    palette: Palette,
+    open: OnOpen,
+) -> AnyElement {
     div()
         .id(SharedString::from(selector.clone()))
         .debug_selector(move || selector.clone())
         .mx(px(-super::BUBBLE_INSET))
         .px(px(super::BUBBLE_INSET))
-        .py_2()
+        .py_3()
         .flex()
         .items_center()
         .gap_2()
@@ -124,9 +192,8 @@ fn card_row(selector: String, lead: AnyElement, words: &'static str, palette: Pa
         .child(lead)
         .child(
             div()
-                .text_sm()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(rgb(palette.muted_foreground))
+                .text_color(rgb(color))
                 .child(words),
         )
         .into_any_element()
@@ -149,15 +216,16 @@ pub(super) fn original_row(
         cx.stop_propagation();
         open_original(&link, source.as_ref(), cx);
     });
-    let glyph = Glyph::MAIL
+    // as Teams draws it: the filled mail and the words in the text's colour, brighter than "Reply in thread"
+    let glyph = Glyph::MAIL_FILLED
         .icon()
-        .size(px(16.0))
-        .text_color(rgb(palette.muted_foreground))
+        .size(px(18.0))
+        .text_color(rgb(palette.foreground))
         .into_any_element();
     let row = card_row(
         format!("email-original-{id}"),
         glyph,
-        VIEW_ORIGINAL_EMAIL,
+        (VIEW_ORIGINAL_EMAIL, palette.foreground),
         palette,
         open,
     );
@@ -171,7 +239,13 @@ pub(super) fn reply_row(id: &str, me: (&SharedString, &Face), palette: Palette, 
         .avatar(name, gpui_component::Size::XSmall)
         .size(px(20.0))
         .into_any_element();
-    card_row(format!("email-reply-{id}"), avatar, REPLY_IN_THREAD, palette, open)
+    card_row(
+        format!("email-reply-{id}"),
+        avatar,
+        (REPLY_IN_THREAD, palette.muted_foreground),
+        palette,
+        open,
+    )
 }
 
 /// Gets the original email at `link`: a SharePoint file through the browser's download, an own server's through its

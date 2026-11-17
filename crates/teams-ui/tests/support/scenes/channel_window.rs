@@ -44,7 +44,8 @@ const SURFACES: [&str; 10] = [
     "new-section",
     "email-post",
 ];
-/// A post that came by email (the synthetic fixture `tests/fixtures/chatsvc/email-post.json`) and a plain post.
+/// A post that came by email (the synthetic fixture `tests/fixtures/chatsvc/email-post.json`), a plain post and a
+/// plain post with a table.
 fn email_posts() -> Vec<teams_store::Message> {
     let fixture: serde_json::Value = serde_json::from_str(
         &include_str!("../../../../../tests/fixtures/chatsvc/email-post.json")
@@ -86,7 +87,16 @@ fn email_posts() -> Vec<teams_store::Message> {
         "<p>The release notes are ready for review.</p>",
         now - 3_600_000,
     );
-    vec![email, plain]
+    // a plain post with a table and a blank line, drawn by the same rich text as an email's body
+    let table = post(
+        &(now - 1_800_000).to_string(),
+        LAB_B,
+        "Sam Rivera",
+        "<p>Status of the made-up release:</p><br><table><tr><th>Area</th><th>State</th></tr>\
+         <tr><td>Notes</td><td>Ready</td></tr><tr><td>Build</td><td>Waiting</td></tr></table>",
+        now - 1_800_000,
+    );
+    vec![email, table, plain]
 }
 fn say(text: &str) {
     let mut out = io::stdout().lock();

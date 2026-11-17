@@ -30,6 +30,8 @@ impl Glyph {
     pub const WARNING: Self = Self(include_bytes!("../assets/icons/triangle-alert.svg"));
     pub const STAR: Self = Self(include_bytes!("../assets/icons/star.svg"));
     pub const MAIL: Self = Self(include_bytes!("../assets/icons/mail.svg"));
+    /// A filled envelope, its flap cut out (our own drawing, not Lucide's): an email post's mark, as Teams' filled mail.
+    pub const MAIL_FILLED: Self = Self(include_bytes!("../assets/icons/mail-filled.svg"));
     pub const BELL: Self = Self(include_bytes!("../assets/icons/bell.svg"));
     pub const BOT: Self = Self(include_bytes!("../assets/icons/bot.svg"));
     pub const BUG: Self = Self(include_bytes!("../assets/icons/bug.svg"));

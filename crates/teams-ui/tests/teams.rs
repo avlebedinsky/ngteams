@@ -601,6 +601,57 @@ fn an_email_post_s_card_ends_with_view_original_email_and_reply_in_thread() {
 }
 
 #[test]
+fn an_email_post_s_card_spans_the_avatar_column_and_holds_its_icon_sender_and_to_line_at_its_top() {
+    let rig = rig();
+    let (_shell, cx) = email_channel(&rig);
+    cx.simulate_resize(gpui::size(gpui::px(1280.0), gpui::px(800.0)));
+    let card = bounds(cx, &format!("bubble-{EMAIL}")).unwrap();
+    let inside = |part: gpui::Bounds<gpui::Pixels>| {
+        card.left() <= part.left() && part.right() <= card.right() && card.top() <= part.top()
+    };
+    let icon = bounds(cx, &format!("email-icon-{EMAIL}")).unwrap();
+    let sender = bounds(cx, &format!("email-sender-{EMAIL}")).unwrap();
+    let time = bounds(cx, &format!("email-time-{EMAIL}")).unwrap();
+    let to = bounds(cx, &format!("email-to-{EMAIL}")).unwrap();
+    let subject = bounds(cx, &format!("post-subject-{EMAIL}")).unwrap();
+    for (part, at) in [("icon", icon), ("sender", sender), ("time", time), ("to", to)] {
+        assert!(inside(at), "the {part} {at:?} is in the card {card:?}");
+        assert!(
+            at.bottom() <= subject.top(),
+            "the {part} {at:?} is over the subject {subject:?}"
+        );
+    }
+    // the icon left of the sender and the To line, the sender over the To line, the time after the sender
+    assert!(icon.right() <= sender.left() && icon.right() <= to.left());
+    assert!(sender.bottom() <= to.top() && sender.right() <= time.left());
+    // the card starts where a person's avatar does, as Teams draws an email post
+    let avatar = bounds(cx, &format!("avatar-{POST}")).unwrap();
+    assert!(card.left() <= avatar.left(), "{card:?} {avatar:?}");
+}
+
+#[test]
+fn an_email_post_s_long_sender_is_cut_short_and_its_time_always_shows() {
+    let rig = rig();
+    let (_shell, cx) = email_channel(&rig);
+    cx.simulate_resize(gpui::size(gpui::px(1280.0), gpui::px(800.0)));
+    let wide = bounds(cx, &format!("email-sender-{EMAIL}")).unwrap();
+    // as narrow as the posts get beside an open thread
+    cx.simulate_resize(gpui::size(gpui::px(760.0), gpui::px(800.0)));
+    let card = bounds(cx, &format!("bubble-{EMAIL}")).unwrap();
+    let sender = bounds(cx, &format!("email-sender-{EMAIL}")).unwrap();
+    let time = bounds(cx, &format!("email-time-{EMAIL}")).unwrap();
+    assert!(
+        sender.size.width < wide.size.width,
+        "the sender is cut short: {sender:?} {wide:?}"
+    );
+    assert!(sender.right() <= time.left(), "{sender:?} {time:?}");
+    assert!(
+        time.right() <= card.right(),
+        "the time {time:?} is in the card {card:?}"
+    );
+}
+
+#[test]
 fn view_original_email_on_an_own_server_saves_it_through_the_engine_and_tells_how_it_went() {
     const OWN_EML: &str = "https://chat.example:8443/sp/channels/General/Made-up%20alert.eml";
     let rig = rig();
