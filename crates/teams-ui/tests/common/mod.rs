@@ -201,6 +201,8 @@ pub struct FakeCore {
     pub app_listing: Mutex<teams_core::AppListing>,
     pub user_apps: Mutex<Vec<teams_proto::StoreApp>>,
     pub chat_apps: Mutex<Vec<teams_proto::StoreApp>>,
+    /// The account's apps with a message extension, as `Core::message_extensions` answers them.
+    pub extension_apps: Mutex<Vec<teams_proto::ExtensionApp>>,
     /// The bots' apps, by the bot's bare id in lower case: `Core::bot_app` and `Core::known_bot_app` answer from it.
     pub bot_apps: Mutex<HashMap<String, teams_proto::StoreApp>>,
     /// How many next `Core::bot_app` asks fail: each is answered `None`, as the engine answers a read that failed.
@@ -709,6 +711,10 @@ impl Core for FakeCore {
 
     fn chat_apps(&self, _chat: String) -> Reply<Vec<teams_proto::StoreApp>> {
         Reply::ready(Ok(locked(&self.chat_apps).clone()))
+    }
+
+    fn message_extensions(&self) -> Reply<Vec<teams_proto::ExtensionApp>> {
+        Reply::ready(Ok(locked(&self.extension_apps).clone()))
     }
 
     fn bot_app(&self, bot: String) -> Reply<Option<teams_proto::StoreApp>> {

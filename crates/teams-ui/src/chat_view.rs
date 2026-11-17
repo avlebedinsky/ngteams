@@ -152,6 +152,7 @@ use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::{presence, presence_badge};
 
+mod app_actions;
 mod bot_chat;
 mod bots;
 pub mod channel;
@@ -409,6 +410,13 @@ pub enum ChatViewEvent {
     },
     /// "More actions" → "Create workflows" on a message: the Workflows dialog for it.
     CreateWorkflows(crate::workflow_run::MessageRef),
+    /// An app's dialog opens over the window ([`crate::app_dialog`]): an action command from the compose box's Actions
+    /// and apps or a message's "More actions", or a card's `task/fetch` button.
+    AppDialog(Box<crate::app_dialog::DialogSeed>),
+    /// Actions and apps' "Get more apps": the store opens.
+    ShowStore,
+    /// An app the account hasn't added was chosen in a message's "More actions": its details open, to add it.
+    AppDetails(Box<teams_proto::StoreApp>),
     /// A recap card's View recap, Transcript or thumbnail: the chat's Recap tab, at the card's recording (its sharing
     /// link) when the meeting was recorded, showing `open`. A call transcribed alone names its transcript's item's
     /// sharing link as `recording`, and `transcribed` is the part it stands for, shown when the recap's read lists none
@@ -1451,6 +1459,8 @@ impl ChatView {
         });
         let compose_events = cx.subscribe_in(compose, window, |this: &mut Self, _, event, window, cx| match event {
             ComposeEvent::EditLast => this.edit_last(window, cx),
+            ComposeEvent::AppDialog(seed) => cx.emit(ChatViewEvent::AppDialog(seed.clone())),
+            ComposeEvent::ShowStore => cx.emit(ChatViewEvent::ShowStore),
             ComposeEvent::Sent | ComposeEvent::Start(_) => {}
         });
         let activation = cx.observe_window_activation(window, |this: &mut Self, window, cx| {
@@ -2209,6 +2219,9 @@ impl ChatView {
         self.more_actions = None;
         if self.options.is_some() && !self.core.read_only() && self.core.capabilities().workflows {
             self.read_workflows(cx);
+        }
+        if self.options.is_some() {
+            self.read_app_actions(cx);
         }
         cx.notify();
     }
@@ -4131,9 +4144,15 @@ impl ChatView {
         } else {
             Vec::new()
         };
-        let more = offers_workflows.then(|| self.more_actions_list(&message, &workflows, palette, cx));
+        // apps' actions on a message that takes the account's writes, beside the workflows or alone
+        let offers_apps = !actions.is_empty() && !self.message_app_actions().is_empty();
+        let more = (offers_workflows || offers_apps)
+            .then(|| self.more_actions_list(&message, &workflows, offers_workflows, palette, cx));
         if offers_workflows {
             entries.extend(self.workflow_entries(&message, &workflows, palette, cx));
+        } else if offers_apps {
+            entries.push(crate::workflow_run::menu::separator(palette));
+            entries.push(self.more_actions_entry(&message, palette, cx));
         }
         let menu = div()
             .id("message-menu")
@@ -4205,14 +4224,20 @@ impl ChatView {
                 let _ = view.update(cx, |this, cx| this.run_workflow(flow_ref.clone(), &message, cx));
             }));
         }
-        let view = cx.entity().downgrade();
         // one hairline between the groups when there are no workflows to list
         if !workflows.is_empty() {
             entries.push(menu::separator(palette));
         }
+        entries.push(self.more_actions_entry(message, palette, cx));
+        entries
+    }
+
+    /// "More actions", which opens and closes its list beside the menu.
+    fn more_actions_entry(&self, message: &str, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let view = cx.entity().downgrade();
         let open = self.more_actions.as_deref() == Some(message);
         let shown = message.to_owned();
-        entries.push(menu::more_actions_row(open, palette, move |_, _, cx| {
+        crate::workflow_run::menu::more_actions_row(open, palette, move |_, _, cx| {
             let _ = view.update(cx, |this, cx| {
                 this.more_actions = if this.more_actions.is_some() {
                     None
@@ -4221,15 +4246,16 @@ impl ChatView {
                 };
                 cx.notify();
             });
-        }));
-        entries
+        })
     }
 
-    /// "More actions"' list beside the menu, while it is open: the other workflows, then "Create workflows".
+    /// "More actions"' list beside the menu, while it is open: the other workflows, the apps' actions, then "Create
+    /// workflows" (where the account's cloud serves `workflows`).
     fn more_actions_list(
         &self,
         message: &str,
         workflows: &[crate::workflow_dialog::FlowRef],
+        offers_workflows: bool,
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
@@ -4248,7 +4274,13 @@ impl ChatView {
                 let _ = view.update(cx, |this, cx| this.run_workflow(flow_ref.clone(), &message, cx));
             }));
         }
-        if !rest.is_empty() {
+        let apps = self.app_action_rows(message, palette, cx);
+        let listed = !rest.is_empty() || !apps.is_empty();
+        list = list.children(apps);
+        if !offers_workflows {
+            return Some(list.into_any_element());
+        }
+        if listed {
             list = list.child(menu::separator(palette));
         }
         let (view, message) = (cx.entity().downgrade(), message.to_owned());

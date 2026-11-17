@@ -67,6 +67,11 @@ pub enum ChannelViewEvent {
     },
     /// "More actions" → "Create workflows" on a post or a reply: the Workflows dialog for it.
     CreateWorkflows(crate::workflow_run::MessageRef),
+    /// An app's dialog opens over the window ([`crate::app_dialog`]): a post's or a reply's "More actions", or a
+    /// card's `task/fetch` button.
+    AppDialog(Box<crate::app_dialog::DialogSeed>),
+    /// An app the account hasn't added was chosen in "More actions": its details open, to add it.
+    AppDetails(Box<teams_proto::StoreApp>),
 }
 
 /// A post's thread, open beside the posts.
@@ -154,7 +159,12 @@ impl ChannelView {
                 message: message.clone(),
             }),
             ChatViewEvent::CreateWorkflows(message) => cx.emit(ChannelViewEvent::CreateWorkflows(message.clone())),
-            ChatViewEvent::Action { .. } | ChatViewEvent::OpenRecap { .. } | ChatViewEvent::OpenSavedTranscript(_) => {}
+            ChatViewEvent::AppDialog(seed) => cx.emit(ChannelViewEvent::AppDialog(seed.clone())),
+            ChatViewEvent::AppDetails(store) => cx.emit(ChannelViewEvent::AppDetails(store.clone())),
+            ChatViewEvent::Action { .. }
+            | ChatViewEvent::OpenRecap { .. }
+            | ChatViewEvent::OpenSavedTranscript(_)
+            | ChatViewEvent::ShowStore => {}
         })
     }
 

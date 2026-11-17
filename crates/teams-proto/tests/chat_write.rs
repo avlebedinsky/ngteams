@@ -1163,3 +1163,45 @@ fn only_a_picture_sent_for_the_message_is_in_its_text() {
     }
     assert!(teams_proto::sent_picture("../x", (1, 1)).is_none());
 }
+
+// --- an app's card ---
+
+fn app_card() -> teams_proto::chat::AppCard {
+    teams_proto::chat::AppCard::new(
+        "00000000-0000-4000-8000-0000000000a0".to_owned(),
+        "Made-up Finder".to_owned(),
+        Some("https://example.invalid/finder.png".to_owned()),
+        "application/vnd.microsoft.card.adaptive".to_owned(),
+        json!({"type": "AdaptiveCard", "body": [{"type": "TextBlock", "text": "A made-up result"}]}),
+    )
+}
+
+#[test]
+fn an_app_card_goes_after_the_text_and_in_the_cards_property() {
+    let card = app_card();
+    assert!(card.client_id.starts_with("app-preview-card-"));
+    let text = plain("Look").with_cards(vec![card.clone()]);
+    assert!(text.html().starts_with("<p>Look</p>"));
+    assert!(text.html().ends_with(&format!(
+        "\n<span itemid=\"{}\" itemscope=\"\" itemtype=\"http://schema.skype.com/InputExtension\"><span \
+         itemprop=\"cardId\"></span></span>",
+        card.client_id
+    )));
+    let entries: Value = serde_json::from_str(&text.cards_property()).unwrap();
+    assert_eq!(entries[0]["appId"], "00000000-0000-4000-8000-0000000000a0");
+    assert_eq!(entries[0]["appName"], "Made-up Finder");
+    assert_eq!(entries[0]["cardClientId"], card.client_id.as_str());
+    assert_eq!(entries[0]["content"]["body"][0]["text"], "A made-up result");
+    // the cards are read back as a link's app card is
+    let read = teams_proto::chat::card::message_cards(Some(&json!(text.cards_property()))).unwrap();
+    assert_eq!(read.cards.len(), 1);
+    // given again, the cards take the old ones' place
+    let again = text.clone().with_cards(Vec::new());
+    assert_eq!(again.html(), plain("Look").html());
+    assert_eq!(again.cards_property(), "[]");
+    // stored and read back (the outbox), the same text and card
+    let stored = serde_json::to_string(&text).unwrap();
+    let back: MessageText = serde_json::from_str(&stored).unwrap();
+    assert_eq!(back, text);
+    assert_eq!(plain("Look").cards_property(), "[]");
+}

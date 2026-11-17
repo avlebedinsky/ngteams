@@ -25,6 +25,38 @@ pub fn bot_answer(name: &str) -> Option<Value> {
     serde_json::from_str::<Value>(ANSWERS).ok()?.get(name).cloned()
 }
 
+/// The made-up apps with message extensions of `tests/fixtures/bots/extension-apps.json`.
+const EXTENSION_APPS: &str = include_str!("../../../tests/fixtures/bots/extension-apps.json");
+
+/// The made-up apps with message extensions (`tests/fixtures/bots/extension-apps.json`): each app's definition and
+/// its entitlement's state there, in order, for [`crate::ChatServiceMock::add_app`] and
+/// [`crate::ChatServiceMock::install_app`].
+#[must_use]
+pub fn extension_apps() -> Vec<(Value, String)> {
+    let Ok(fixture) = serde_json::from_str::<Value>(EXTENSION_APPS) else {
+        return Vec::new();
+    };
+    let value = &fixture["value"];
+    value["userEntitlements"]
+        .as_object()
+        .into_iter()
+        .flat_map(serde_json::Map::values)
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(|entitlement| {
+            let id = entitlement.get("id")?.as_str()?;
+            let state = entitlement.get("state")?.as_str()?.to_owned();
+            Some((value["definitions"].get(id)?.clone(), state))
+        })
+        .collect()
+}
+
+/// The answer of `tests/fixtures/bots/extension-apps.json` as a whole, as the middle tier gives the account's apps.
+#[must_use]
+pub fn extension_apps_answer() -> Value {
+    serde_json::from_str(EXTENSION_APPS).unwrap_or(Value::Null)
+}
+
 /// How a scripted bot answers one invoke name.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BotReply {
@@ -182,10 +214,17 @@ mod tests {
             "taskMessage",
             "card",
             "error",
+            "selected",
+            "webDialog",
+            "submitDialog",
         ] {
             assert!(bot_answer(name).is_some(), "{name}");
         }
         assert!(bot_answer("nothing").is_none());
+        let apps = extension_apps();
+        assert_eq!(apps.len(), 4);
+        assert_eq!(apps[3].1, "Featured");
+        assert!(extension_apps_answer()["value"]["definitions"].is_object());
         let reply = BotReply::status(502).posting("Text", "x");
         assert_eq!(reply.status, 502);
         assert_eq!(reply.post, Some(("Text".to_owned(), "x".to_owned())));

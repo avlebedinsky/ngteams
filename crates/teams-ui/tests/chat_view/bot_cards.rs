@@ -13,7 +13,7 @@ use teams_proto::bot::TaskDialog;
 use teams_proto::{InvokeAnswer, InvokeKind};
 use teams_store::Message;
 use teams_ui::bots_flag::BotsFlag;
-use teams_ui::chat_view::ChatView;
+use teams_ui::chat_view::{ChatView, ChatViewEvent};
 
 use super::common::{LAB_A, Rig};
 use super::{AB, NOON, chat_window, draw, message, rig_with, trace};
@@ -800,26 +800,64 @@ fn the_error_marks_of_one_card_stay_when_another_card_sends() {
 }
 
 #[test]
-fn a_sign_in_button_opens_its_page_and_a_dialog_button_teams_on_the_web() {
+fn a_sign_in_button_opens_its_page_and_a_dialog_button_asks_for_its_dialog() {
     let card = json!({
         "type": "AdaptiveCard",
         "body": [{"type": "TextBlock", "text": "Connect"}],
         "actions": [
             {"type": "Action.Submit", "title": "Sign in",
              "data": {"msteams": {"type": "signin", "value": "https://example.invalid/sign-in"}}},
-            {"type": "Action.Submit", "title": "Details", "data": {"msteams": {"type": "task/fetch"}}}
+            {"type": "Action.Submit", "title": "Details", "data": {"msteams": {"type": "task/fetch"}, "item": 7}}
         ]
     });
     let rig = bots_rig(vec![card_message(ID, &card)]);
-    let (_view, cx) = tall_window(&rig);
+    let dialog = TaskDialog {
+        title: Some("Details".to_owned()),
+        card: Some(json!({"type": "AdaptiveCard", "body": [{"type": "TextBlock", "text": "More"}]})),
+        url: None,
+        width: None,
+        height: None,
+    };
+    rig.core
+        .bot_answers
+        .lock()
+        .unwrap()
+        .push_back(Ok(InvokeAnswer::Dialog(dialog.clone())));
+    let (view, cx) = tall_window(&rig);
+    let told: std::rc::Rc<std::cell::RefCell<Vec<ChatViewEvent>>> = std::rc::Rc::default();
+    let kept = std::rc::Rc::clone(&told);
+    cx.update(|_, cx| {
+        cx.subscribe(&view, move |_, event: &ChatViewEvent, _| {
+            kept.borrow_mut().push(event.clone())
+        })
+        .detach();
+    });
     click(cx, &format!("card-{ID}-c0a0"));
     assert_eq!(cx.opened_url().as_deref(), Some("https://example.invalid/sign-in"));
     click(cx, &format!("card-{ID}-c0a1"));
+    cx.run_until_parked();
+    let asks = rig.core.bot_asks.lock().unwrap().clone();
+    let [ask] = asks.as_slice() else {
+        panic!("one ask: {asks:?}");
+    };
+    let InvokeKind::TaskFetch(fetched) = &ask.kind else {
+        panic!("a task/fetch: {ask:?}");
+    };
+    assert_eq!(fetched.message.as_deref(), Some(ID));
+    assert_eq!(fetched.data["item"], 7);
+    // the dialog opens over the window, from the card's message
+    let told = told.borrow();
+    let Some(ChatViewEvent::AppDialog(seed)) = told.last() else {
+        panic!("a dialog: {told:?}");
+    };
     assert_eq!(
-        cx.opened_url(),
-        Some(teams_proto::workflow::MessageRun::link_to(AB, ID, None))
+        seed.opened,
+        teams_ui::app_dialog::Opened::Task {
+            dialog,
+            message: Some(ID.to_owned())
+        }
     );
-    assert!(rig.core.bot_asks.lock().unwrap().is_empty());
+    assert_eq!(seed.target.bot.as_str(), BOT);
 }
 
 /// A made-up label of about 150 characters, longer than a card is wide.

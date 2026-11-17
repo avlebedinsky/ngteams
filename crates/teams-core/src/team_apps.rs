@@ -53,6 +53,10 @@ pub(crate) enum TeamAppsAsk {
     UserApps {
         reply: Responder<Vec<StoreApp>>,
     },
+    /// The account's apps with a message extension, and the store's offers that have one.
+    MessageExtensions {
+        reply: Responder<Vec<teams_proto::ExtensionApp>>,
+    },
     ChatApps {
         chat: String,
         reply: Responder<Vec<StoreApp>>,
@@ -170,6 +174,10 @@ impl<C: Credentials + 'static> AppReads<C> {
                 let bots = Arc::clone(&self.bots);
                 self.spawn_read(reply, async move |client| user_apps(client, &bots).await);
             }
+            TeamAppsAsk::MessageExtensions { reply } => {
+                let bots = Arc::clone(&self.bots);
+                self.spawn_read(reply, async move |client| message_extensions(client, &bots).await);
+            }
             TeamAppsAsk::ChatApps { chat, reply } => {
                 let bots = Arc::clone(&self.bots);
                 self.spawn_read(reply, async move |client| chat_apps(client, &bots, chat).await);
@@ -241,6 +249,19 @@ async fn user_apps<C: Credentials + 'static>(
     };
     bots.keep(&UserApps::defined(&body));
     UserApps::read_answer(&body)
+}
+
+/// The account's apps with a message extension, read as the account's apps are, every app the answer defines kept in
+/// `bots`.
+async fn message_extensions<C: Credentials + 'static>(
+    client: &teams_proto::Client<teams_proto::HttpTransport<C>>,
+    bots: &BotIndex,
+) -> Vec<teams_proto::ExtensionApp> {
+    let Some(body) = send_body(client, &UserApps).await else {
+        return Vec::new();
+    };
+    bots.keep(&UserApps::defined(&body));
+    teams_proto::extension_apps(&body)
 }
 
 /// The apps added to `chat`, kept in `bots`.

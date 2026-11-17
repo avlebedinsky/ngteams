@@ -58,7 +58,11 @@ mod team_read;
 mod thumbnail;
 pub mod transcript;
 pub use attachment::{DriveSite, DriveWrite, MAX_ATTACHMENT_SIZE, OwnDrive, UploadedFile, direct_file_grants};
-pub use bot::{BotInvoke, CardInvoke, CommandContext, InvokeAnswer, InvokeKind};
+pub use bot::{
+    BotInvoke, CardInvoke, CommandContext, ComposeCommand, DialogSize, InvokeAnswer, InvokeKind, TaskDialog,
+};
+mod extensions;
+pub use extensions::{CommandParameter, ExtensionApp, ExtensionCommand, TaskInfo, extension_apps};
 mod urlp;
 pub mod workflow;
 mod write;

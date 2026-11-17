@@ -207,6 +207,8 @@ pub struct CardsElement {
     /// Whether a button that sends to the bot is drawn: not where the account's cloud serves no bot invokes.
     submits: bool,
     bot: Option<BotHook>,
+    /// Drawn as an app's dialog's body: across it, with no surface of its own.
+    bare: bool,
 }
 
 impl CardsElement {
@@ -223,7 +225,16 @@ impl CardsElement {
             in_teams: None,
             submits: true,
             bot: None,
+            bare: false,
         }
+    }
+
+    /// Drawn as an app's dialog's body ([`crate::app_dialog`]): across the dialog, with no border, shadow or padding
+    /// of its own.
+    #[must_use]
+    pub fn bare(mut self, bare: bool) -> Self {
+        self.bare = bare;
+        self
     }
 
     /// The message's bot state: its inputs drawn, its buttons asking the bot.
@@ -311,6 +322,7 @@ impl RenderOnce for CardsElement {
             on_state: self.on_state.as_ref(),
             in_teams: self.in_teams.as_deref(),
             submits: self.submits,
+            bare: self.bare,
             base: &base,
             bot: bot.as_ref(),
             at: 0,
@@ -349,6 +361,7 @@ struct Draw<'a> {
     on_state: Option<&'a OnState>,
     in_teams: Option<&'a str>,
     submits: bool,
+    bare: bool,
     base: &'a HashMap<String, bool>,
     bot: Option<&'a BotDraw<'a>>,
     at: usize,
@@ -446,6 +459,17 @@ fn card_surface(draw: &Draw<'_>, at: usize, shown: &Card, cx: &mut App) -> AnyEl
         .map(|line| answer_line(draw, &path, line));
     // a card that asks for answers is as wide as a card is, as Teams draws a form
     let form = draw.bot.is_some() && !draw.inputs.is_empty();
+    if draw.bare {
+        return div()
+            .debug_selector(move || selector)
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(card_body(draw, &path, shown, cx))
+            .children(line.map(|line| div().w_full().child(line)))
+            .into_any_element();
+    }
     let surface = div()
         .debug_selector(move || selector)
         .w_full()

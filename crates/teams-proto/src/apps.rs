@@ -127,6 +127,19 @@ impl Read for ChatApps {
     }
 }
 
+/// The account's entitlements in an answer's `value` (`userEntitlements`), each its state and app id, in order.
+pub(crate) fn entitlements_in(value: &Value) -> Vec<(&str, &str)> {
+    value
+        .get("userEntitlements")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(serde_json::Map::values)
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(|entitlement| Some((entitlement.get("state")?.as_str()?, entitlement.get("id")?.as_str()?)))
+        .collect()
+}
+
 /// The apps among `entitlements` in one of `states`, each with the definition `definition` finds for its id, by name;
 /// one without a readable definition is left out.
 fn listed<'a>(
@@ -289,7 +302,7 @@ impl AppDefinition {
         self.field(key).and_then(Value::as_str).filter(|text| !text.is_empty())
     }
 
-    fn listed(&self, key: &str) -> impl Iterator<Item = &Value> {
+    pub(crate) fn listed(&self, key: &str) -> impl Iterator<Item = &Value> {
         self.field(key).and_then(Value::as_array).into_iter().flatten()
     }
 

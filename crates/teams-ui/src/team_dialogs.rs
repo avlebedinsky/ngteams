@@ -87,6 +87,11 @@ pub enum TeamDialogEvent {
     OpenChat(String),
     /// "Get more apps": the store opens.
     ShowStore,
+    /// An app's dialog gave a result: its card goes into the compose box of `conversation`, as Teams puts it there.
+    AppCard {
+        conversation: String,
+        card: Box<teams_proto::chat::AppCard>,
+    },
 }
 
 /// Whether `text` holds a link, as the bundle tells it for a team's name and description.

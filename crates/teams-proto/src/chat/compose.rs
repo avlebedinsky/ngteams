@@ -21,6 +21,10 @@
 //!   host, `itemid` its object) as the web client writes a pasted picture, its object in the post's `amsreferences`
 //!   ([`MessageText::pictures`]); any other image is refused.
 //!
+//! - an app's card (a message extension's result, `docs/protocol/chat.md`, "App cards") as the web client sends a
+//!   link's app card: after the text, a span of itemtype `InputExtension` naming the card's client id, and the card in
+//!   `properties.cards` ([`MessageText::with_cards`], [`AppCard`]); a message with none sends `cards` `[]` as before.
+//!
 //! Every mentioned MRI is exposed by [`MessageText::participants`]; a quote adds nobody
 //! (the quoted message is the chat's own), nor does a mention of everyone in a group chat, named by the chat's id
 //! ([`MessageText::everyone`]: it reaches the chat's members, and a write sends it only to that chat).
@@ -91,6 +95,8 @@ pub enum ComposeError {
 pub struct MessageText {
     origin: Option<String>,
     files: Vec<crate::UploadedFile>,
+    /// The apps' cards after the text, and how long `html` is without their spans; boxed, as most messages have none.
+    cards: Option<Box<(Vec<AppCard>, usize)>>,
     text: RichText,
     mentioned: BTreeMap<String, Mri>,
     /// The app of each bot it mentions, by the bot's MRI.
@@ -183,6 +189,7 @@ impl MessageText {
         Ok(Self {
             origin: cloud.origin().map(ToString::to_string),
             files: Vec::new(),
+            cards: None,
             text,
             mentioned: table,
             bots,
@@ -209,7 +216,8 @@ impl MessageText {
         if !cloud.is_microsoft() {
             pictures_on(cloud, &mut text.nodes);
         }
-        Self::build(cloud, text, self.mentioned, &self.bots).map(|text| text.with_files(self.files))
+        let cards = self.cards.map(|cards| cards.0).unwrap_or_default();
+        Self::build(cloud, text, self.mentioned, &self.bots).map(|text| text.with_files(self.files).with_cards(cards))
     }
 
     /// Plain text as one paragraph, no mention.
@@ -234,6 +242,40 @@ impl MessageText {
     #[must_use]
     pub fn files(&self) -> &[crate::UploadedFile] {
         &self.files
+    }
+
+    /// The text with `cards` after it, in place of any it had: each a span after the text and an entry of
+    /// `properties.cards` (see the module docs).
+    #[must_use]
+    pub fn with_cards(mut self, cards: Vec<AppCard>) -> Self {
+        if let Some(old) = self.cards.take() {
+            self.html.truncate(old.1);
+        }
+        if cards.is_empty() {
+            return self;
+        }
+        let text_html = self.html.len();
+        for card in &cards {
+            self.html.push_str("\n<span itemid=\"");
+            self.html.push_str(&escape(&card.client_id));
+            self.html.push_str("\" itemscope=\"\" itemtype=\"");
+            self.html.push_str(INPUT_EXTENSION);
+            self.html.push_str("\"><span itemprop=\"cardId\"></span></span>");
+        }
+        self.cards = Some(Box::new((cards, text_html)));
+        self
+    }
+
+    /// The apps' cards it carries.
+    #[must_use]
+    pub fn cards(&self) -> &[AppCard] {
+        self.cards.as_ref().map_or(&[], |cards| cards.0.as_slice())
+    }
+
+    /// `properties.cards` as sent: a JSON string of the cards' entries, `[]` with none.
+    #[must_use]
+    pub fn cards_property(&self) -> String {
+        Value::Array(self.cards().iter().map(AppCard::entry).collect()).to_string()
     }
 
     #[must_use]
@@ -310,6 +352,8 @@ struct Stored {
     origin: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     files: Vec<crate::UploadedFile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    cards: Vec<AppCard>,
     text: RichText,
     mentioned: BTreeMap<String, String>,
     /// The app of each bot mentioned, by the bot's MRI.
@@ -339,7 +383,7 @@ impl TryFrom<Stored> for MessageText {
                 .map(|(item_id, mri)| (item_id, Mri::new(mri))),
             &bots,
         )
-        .map(|text| text.with_files(stored.files))
+        .map(|text| text.with_files(stored.files).with_cards(stored.cards))
     }
 }
 
@@ -348,6 +392,7 @@ impl From<MessageText> for Stored {
         Self {
             origin: text.origin,
             files: text.files,
+            cards: text.cards.map(|cards| cards.0).unwrap_or_default(),
             text: text.text,
             mentioned: text
                 .mentioned
@@ -360,6 +405,72 @@ impl From<MessageText> for Stored {
                 .map(|(bot, app)| (bot.as_str().to_owned(), app))
                 .collect(),
         }
+    }
+}
+
+/// The itemtype of an app card's span in `content`.
+const INPUT_EXTENSION: &str = "http://schema.skype.com/InputExtension";
+
+/// An app's card a message carries (`properties.cards`, `docs/protocol/chat.md`, "App cards"): the app, the card, and
+/// the client id its span in `content` names. Seen for a link's card; a message extension's result goes the same way
+/// (unseen).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppCard {
+    pub app_id: String,
+    pub app_name: String,
+    pub app_icon: Option<String>,
+    /// The card's `contentType` (an Adaptive Card, a hero or a thumbnail card).
+    pub content_type: String,
+    pub content: Value,
+    /// `app-preview-card-<hex>`, made once ([`AppCard::new`]), so a resend names the same card.
+    pub client_id: String,
+}
+
+impl AppCard {
+    /// The card `content` of type `content_type` from the app `app_id` named `app_name`, with a client id of its own.
+    #[must_use]
+    pub fn new(
+        app_id: String,
+        app_name: String,
+        app_icon: Option<String>,
+        content_type: String,
+        content: Value,
+    ) -> Self {
+        let mut bytes = [0_u8; 16];
+        if getrandom::fill(&mut bytes).is_err() {
+            bytes = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_nanos())
+                .to_le_bytes();
+        }
+        let hex: String = bytes
+            .iter()
+            .flat_map(|byte| [byte >> 4, byte & 0x0f])
+            .filter_map(|nibble| char::from_digit(u32::from(nibble), 16))
+            .collect();
+        Self {
+            app_id,
+            app_name,
+            app_icon,
+            content_type,
+            content,
+            client_id: format!("app-preview-card-{hex}"),
+        }
+    }
+
+    /// Its entry in `properties.cards`.
+    fn entry(&self) -> Value {
+        let mut entry = json!({
+            "appId": self.app_id,
+            "appName": self.app_name,
+            "cardClientId": self.client_id,
+            "contentType": self.content_type,
+            "content": self.content,
+        });
+        if let (Some(icon), Some(object)) = (&self.app_icon, entry.as_object_mut()) {
+            object.insert("appIcon".to_owned(), json!(icon));
+        }
+        entry
     }
 }
 

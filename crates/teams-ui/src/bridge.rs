@@ -492,6 +492,10 @@ pub trait Core: Send + Sync + 'static {
     fn chat_apps(&self, _chat: String) -> Reply<Vec<StoreApp>> {
         Reply::ready(Ok(Vec::new()))
     }
+    /// The account's apps with a message extension, then the store's offers that have one. A fake core has none.
+    fn message_extensions(&self) -> Reply<Vec<teams_proto::ExtensionApp>> {
+        Reply::ready(Ok(Vec::new()))
+    }
     /// The app of a bot (`28:<id>`), as the engine finds it (its bot index). A fake core knows no bot's.
     fn bot_app(&self, _bot: String) -> Reply<Option<StoreApp>> {
         Reply::ready(Ok(None))
@@ -793,6 +797,10 @@ impl Core for EngineRequests {
 
     fn chat_apps(&self, chat: String) -> Reply<Vec<StoreApp>> {
         EngineRequests::chat_apps(self, chat)
+    }
+
+    fn message_extensions(&self) -> Reply<Vec<teams_proto::ExtensionApp>> {
+        EngineRequests::message_extensions(self)
     }
 
     fn bot_app(&self, bot: String) -> Reply<Option<StoreApp>> {

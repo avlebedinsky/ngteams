@@ -404,7 +404,7 @@ pub struct ComposeCommand {
 }
 
 /// A dialog an app opens (`task` `continue`).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TaskDialog {
     pub title: Option<String>,
     /// Its Adaptive Card (an attachment's `content`).
@@ -425,7 +425,7 @@ pub enum DialogSize {
 }
 
 impl DialogSize {
-    fn of(value: Option<&Value>) -> Option<Self> {
+    pub(crate) fn of(value: Option<&Value>) -> Option<Self> {
         match value? {
             Value::Number(number) => number.as_u64().and_then(|px| u32::try_from(px).ok()).map(Self::Pixels),
             Value::String(word) => match word.to_ascii_lowercase().as_str() {

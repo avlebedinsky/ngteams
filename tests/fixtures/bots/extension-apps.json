@@ -1,0 +1,82 @@
+{
+  "_synthetic": "Made up, in the shape of the middle tier's answer to POST beta/users/apps/aggregatedEntitlements?appbarview=userpinned (docs/protocol/apps.md) with apps that have message extensions (inputExtensions, docs/protocol/bots.md, 'Message extensions'), every value made up: ids are made-up GUIDs, the links example.invalid. The shapes of inputExtensions (botId, fetchCommands, commands with id, type, context, title, description, parameters, initialRun, fetchTask, taskInfo) follow the lab's catalogue reads of 2026-11-14; no name, link or id of a real app is used.",
+  "value": {
+    "userEntitlements": {
+      "00000000-0000-4000-8000-00000000000a": [
+        {"id": "00000000-0000-4000-8000-00000000e001", "state": "Installed"},
+        {"id": "00000000-0000-4000-8000-00000000e002", "state": "InstalledAndPermanent"},
+        {"id": "00000000-0000-4000-8000-00000000e003", "state": "Installed"},
+        {"id": "00000000-0000-4000-8000-00000000e004", "state": "Featured"}
+      ]
+    },
+    "definitions": {
+      "00000000-0000-4000-8000-00000000e001": {
+        "id": "00000000-0000-4000-8000-00000000e001",
+        "name": "Made-up Finder",
+        "developerName": "Made-up Apps",
+        "shortDescription": "Find made-up records and share them in a chat.",
+        "largeImageUrl": "https://example.invalid/finder.png",
+        "accentColor": "#4F6BED",
+        "bots": [{"id": "00000000-0000-4000-8000-00000000eb01", "scopes": ["Personal", "Team", "GroupChat"]}],
+        "inputExtensions": [{
+          "botId": "00000000-0000-4000-8000-00000000eb01",
+          "scopes": ["Personal", "Team", "GroupChat"],
+          "commands": [
+            {"id": "findRecords", "context": ["Compose", "Commandbox"], "initialRun": true, "title": "Find records",
+             "description": "Search the made-up records",
+             "parameters": [{"name": "keyword", "title": "Keyword", "description": "Search by name or number", "isRequired": false}]},
+            {"id": "newRecord", "type": "Action", "context": ["Compose", "Message"], "fetchTask": true, "title": "New record",
+             "description": "Make a record from a form"}
+          ],
+          "messageHandlers": [],
+          "type": "botBased"
+        }]
+      },
+      "00000000-0000-4000-8000-00000000e002": {
+        "id": "00000000-0000-4000-8000-00000000e002",
+        "name": "Made-up Praise",
+        "developerName": "Made-up Apps",
+        "shortDescription": "Thank people with a made-up badge.",
+        "accentColor": "#6264A7",
+        "inputExtensions": [{
+          "botId": "00000000-0000-4000-8000-00000000eb02",
+          "commands": [
+            {"id": "sendPraise", "type": "Action", "context": ["Compose", "Commandbox"], "title": "Send praise to people",
+             "taskInfo": {"title": "Send praise to people", "width": "600", "height": "532", "url": "https://example.invalid/praise"}}
+          ],
+          "type": "botBased"
+        }]
+      },
+      "00000000-0000-4000-8000-00000000e003": {
+        "id": "00000000-0000-4000-8000-00000000e003",
+        "name": "Made-up Tasks",
+        "developerName": "Made-up Apps",
+        "shortDescription": "Make a task from a message.",
+        "accentColor": "#038387",
+        "inputExtensions": [{
+          "botId": "00000000-0000-4000-8000-00000000eb03",
+          "fetchCommands": true,
+          "commands": [
+            {"id": "taskFromMessage", "type": "Action", "context": ["Message"], "fetchTask": true, "title": "Create task",
+             "description": "Make a task from this message"}
+          ],
+          "type": "botBased"
+        }]
+      },
+      "00000000-0000-4000-8000-00000000e004": {
+        "id": "00000000-0000-4000-8000-00000000e004",
+        "name": "Made-up Tickets",
+        "developerName": "Made-up Apps",
+        "shortDescription": "File a made-up ticket.",
+        "accentColor": "#0078D4",
+        "inputExtensions": [{
+          "botId": "00000000-0000-4000-8000-00000000eb04",
+          "commands": [
+            {"id": "fileTicket", "type": "Action", "context": ["Message", "Compose"], "fetchTask": true, "title": "File a ticket"}
+          ],
+          "type": "botBased"
+        }]
+      }
+    }
+  }
+}

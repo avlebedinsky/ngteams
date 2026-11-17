@@ -766,7 +766,7 @@ fn properties(text: &MessageText) -> Map<String, Value> {
         ("importance", json!("")),
         ("subject", json!("")),
         ("title", json!("")),
-        ("cards", json!("[]")),
+        ("cards", json!(text.cards_property())),
         ("links", json!("[]")),
         ("mentions", json!(text.mentions_property())),
         ("onbehalfof", Value::Null),

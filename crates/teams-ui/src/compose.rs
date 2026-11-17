@@ -66,6 +66,7 @@
 //! What the box does is traced (`compose opened` when the box is made, `sent`, `replying`, `editing`, `cancelled`, and
 //! `changed` each time what it holds changes), never its text.
 
+mod apps;
 pub mod attachments;
 mod correction;
 mod draft_translation;
@@ -605,6 +606,10 @@ pub enum Writes {
 /// What the box tells its chat view.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ComposeEvent {
+    /// Actions and apps' action command chosen: its dialog opens over the window ([`crate::app_dialog`]).
+    AppDialog(Box<crate::app_dialog::DialogSeed>),
+    /// Actions and apps' "Get more apps": the store opens.
+    ShowStore,
     /// Up in an empty box: the account's last message is to be edited.
     EditLast,
     /// A message went to the outbox (a post, a reply or an edit).
@@ -630,6 +635,7 @@ struct Draft {
     doc: Doc,
     mode: Mode,
     attachments: Vec<attachments::Attachment>,
+    cards: Vec<teams_proto::chat::AppCard>,
 }
 
 /// Where the answer of a request on its way goes: the box that holds what it is for now, and what the answer needs
@@ -674,6 +680,8 @@ pub struct Compose {
     expanded: bool,
     mode: Mode,
     attachments: Vec<attachments::Attachment>,
+    /// Actions and apps and the apps' cards the message carries ([`apps`]).
+    apps: apps::Apps,
     next_attachment: u64,
     /// Kept across navigation until the engine has queued or refused the file send.
     sending_files: usize,
@@ -799,20 +807,7 @@ impl Compose {
             EditorEvent::Focus | EditorEvent::Blur => cx.notify(),
             // moving the cursor changes no text: an `@` the cursor left closes the picker
             EditorEvent::Moved => this.revalidate_picker(cx),
-            EditorEvent::Changed => {
-                // what the box holds changed: traced without the text, so a test driving the keyboard can tell
-                // when the app has taken in what it typed
-                this.trace
-                    .record(&TraceLine::new("compose", "changed").conversation(&this.conversation));
-                this.correction_follows_draft(cx);
-                this.draft_translation_follows_draft(cx);
-                this.learn_bots(cx);
-                this.refresh_picker(cx);
-                this.fit_pictures(cx);
-                this.typed(window, cx);
-                // the send button follows whether there is anything to send
-                cx.notify();
-            }
+            EditorEvent::Changed => this.changed(window, cx),
             EditorEvent::Submit => this.send(window, cx),
             EditorEvent::Picture(id) => this.send_picture(*id, cx),
             EditorEvent::Files(paths) => this.pasted_files(paths, window, cx),
@@ -853,6 +848,7 @@ impl Compose {
             expanded: false,
             mode: Mode::New,
             attachments: Vec::new(),
+            apps: apps::Apps::default(),
             next_attachment: 0,
             sending_files: 0,
             routes: Routes::default(),
@@ -1051,6 +1047,7 @@ impl Compose {
     fn holds_draft(&self, cx: &App) -> bool {
         !self.editor.read(cx).is_empty()
             || !self.attachments.is_empty()
+            || !self.apps.cards.is_empty()
             || self.sending_files > 0
             || matches!(self.mode, Mode::Reply(_))
     }
@@ -1060,6 +1057,7 @@ impl Compose {
         !self.editor.read(cx).is_empty()
             || self.mode != Mode::New
             || !self.attachments.is_empty()
+            || !self.apps.cards.is_empty()
             || self.sending_files > 0
     }
 
@@ -1318,26 +1316,29 @@ impl Compose {
         let editor = self.editor.read(cx);
         let built = match message_of_with(&doc, &quotes, &|id| editor.picture_node(id), &self.bots) {
             Ok(Some(built)) => built,
-            Ok(None) if !self.attachments.is_empty() => match empty_file_text() {
+            Ok(None) if !self.attachments.is_empty() || !self.apps.cards.is_empty() => match empty_file_text() {
                 Ok(text) => text,
                 Err(error) => return self.show_problem(format!("This message can't be sent: {error}"), cx),
             },
             Ok(None) => return,
             Err(error) => return self.show_problem(format!("This message can't be sent: {error}"), cx),
         };
-        let built = built.with_files(
-            self.attachments
-                .iter()
-                .filter_map(|file| match &file.state {
-                    attachments::AttachmentState::Ready(uploaded) => Some(uploaded.clone()),
-                    _ => None,
-                })
-                .collect(),
-        );
+        let built = built
+            .with_files(
+                self.attachments
+                    .iter()
+                    .filter_map(|file| match &file.state {
+                        attachments::AttachmentState::Ready(uploaded) => Some(uploaded.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+            )
+            .with_cards(self.apps.cards.clone());
         let from = Draft {
             doc,
             mode: self.mode.clone(),
             attachments: self.attachments.clone(),
+            cards: self.apps.cards.clone(),
         };
         // what is sent is what the box holds: a correction or translation of it is over
         self.forget_correction();
@@ -1441,6 +1442,7 @@ impl Compose {
             }
             let sent_files = paths(&from.attachments);
             self.attachments.retain(|file| !sent_files.contains(&file.path));
+            self.apps.cards.retain(|card| !from.cards.contains(card));
             cx.notify();
         } else {
             self.clear(window, cx);
@@ -1497,10 +1499,13 @@ impl Compose {
         // files attached since stay beside the text given back (a translated send's text left the box once it went),
         // but never beside an edit, which carries no files
         let edit_beside_files = matches!(draft.mode, Mode::Edit { .. }) && !self.attachments.is_empty();
+        if self.apps.cards.is_empty() {
+            self.apps.cards = std::mem::take(&mut draft.cards);
+        }
         if draft.attachments.is_empty()
             && (!self.editor.read(cx).is_empty() || self.mode != Mode::New || edit_beside_files)
         {
-            return;
+            return cx.notify();
         }
         let held = !self.editor.read(cx).is_empty();
         if let Some(pictures) = moved {
@@ -1544,11 +1549,27 @@ impl Compose {
         self.forget_untranslated();
         self.mode = Mode::New;
         self.attachments.clear();
+        self.apps.cards.clear();
         self.picker = None;
         self.problem = None;
         if self.expanded {
             self.set_expanded(false, cx);
         }
+        cx.notify();
+    }
+
+    /// What the box holds changed: traced without the text, so a test driving the keyboard can tell when the app has
+    /// taken in what it typed; what follows the draft follows it, and the send button whether there is anything to
+    /// send.
+    fn changed(&mut self, window: &Window, cx: &mut Context<Self>) {
+        self.trace
+            .record(&TraceLine::new("compose", "changed").conversation(&self.conversation));
+        self.correction_follows_draft(cx);
+        self.draft_translation_follows_draft(cx);
+        self.learn_bots(cx);
+        self.refresh_picker(cx);
+        self.fit_pictures(cx);
+        self.typed(window, cx);
         cx.notify();
     }
 
@@ -1895,7 +1916,7 @@ impl Compose {
     /// send; once it holds something, a round button lit in the brand gradient that pops in, a button to the keyboard
     /// and to assistive tools as the kit's is.
     fn send_button(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let empty = (self.editor.read(cx).is_blank() && self.attachments.is_empty())
+        let empty = (self.editor.read(cx).is_blank() && self.attachments.is_empty() && self.apps.cards.is_empty())
             || !self.files_ready()
             || !self.editor.read(cx).pictures_ready();
         let tip = match (matches!(self.mode, Mode::Edit { .. }), self.expanded) {
@@ -2028,6 +2049,7 @@ impl Compose {
             )
             .into_any_element(),
             fit::Tool::Loop => unavailable("compose-loop", Glyph::REPEAT, NO_LOOP),
+            fit::Tool::Apps if self.offers_apps(cx) => self.apps_button(cx),
             fit::Tool::Apps => unavailable("compose-apps", Glyph::PLUS, NO_APPS),
             fit::Tool::Correct => self.correct_button(cx),
             fit::Tool::Translate => self.translate_buttons(narrow, cx),
@@ -2111,7 +2133,7 @@ impl Compose {
         let send_to =
             (self.writes == Writes::Thread && !matches!(self.mode, Mode::Edit { .. })).then(|| send_to_line(palette));
         let fit = self.fit();
-        if self.expanded || !self.attachments.is_empty() || fit.stacked {
+        if self.expanded || !self.attachments.is_empty() || !self.apps.cards.is_empty() || fit.stacked {
             return surface
                 .flex()
                 .flex_col()
@@ -2122,7 +2144,7 @@ impl Compose {
                 .children(send_to)
                 .children(self.expanded.then(|| self.format_bar.clone()))
                 .child(div().px_1().pt_1().child(self.editor.clone()))
-                .children(self.attachment_cards(palette, cx))
+                .children(self.box_cards(palette, cx))
                 .child(div().flex().justify_end().child(self.toolbar(palette, &fit, cx)))
                 .child(measured(&self.box_at))
                 .children(accent)
@@ -2366,6 +2388,7 @@ impl Render for Compose {
             .pb_4()
             .child(keyed)
             .children(self.emoji_overlay(cx))
+            .children(self.apps_overlay())
             .into_any_element()
     }
 }

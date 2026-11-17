@@ -40,6 +40,8 @@ pub(super) struct HeldCards {
     pub(super) states: HashMap<String, CardState>,
     /// Each card message's bot state, made as it is first drawn; none while the bots aren't shown.
     bots: Option<RefCell<HashMap<String, HeldBot>>>,
+    /// The apps' message actions "More actions" lists ([`super::app_actions`]).
+    pub(super) app_actions: super::app_actions::AppActions,
 }
 
 /// A card message's bot state, and the cards it was made for.
@@ -55,6 +57,7 @@ impl HeldCards {
         Self {
             states: HashMap::new(),
             bots: crate::bots_flag::bots_on(cx).then(RefCell::default),
+            app_actions: super::app_actions::AppActions::default(),
         }
     }
 
@@ -72,7 +75,7 @@ impl ChatView {
     }
 
     /// Where a message's bot is asked and its user's answers go: a channel's post's chain, else the view's own place.
-    fn bot_conversation(&self, message: &str) -> String {
+    pub(super) fn bot_conversation(&self, message: &str) -> String {
         match &self.place {
             Place::Channel => teams_proto::reply_chain_id(&self.conversation, self.root_of(message))
                 .unwrap_or_else(|| self.conversation.clone()),
@@ -110,6 +113,8 @@ impl ChatView {
             let id = item.id.clone();
             cx.new(|_| CardBot::new(core, id, target))
         };
+        // a `task/fetch` button's dialog opens over the window
+        self.follow_card_dialogs(&bot, &item.id, item.sender_name.to_string(), cx);
         // what its bot answered shows at once
         cx.observe(&bot, |_, _, cx| cx.notify()).detach();
         bots.borrow_mut().insert(

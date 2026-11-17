@@ -2141,6 +2141,9 @@ impl Shell {
                     }
                     TeamDialogEvent::OpenChat(chat) => this.open_chat(chat.clone(), window, cx),
                     TeamDialogEvent::ShowStore => this.open_apps(window, cx),
+                    TeamDialogEvent::AppCard { conversation, card } => {
+                        this.app_card_to_compose(conversation, card.as_ref().clone(), window, cx);
+                    }
                     TeamDialogEvent::Gone { team, words } => {
                         this.show_toast(words, cx);
                         if this.main == Main::ManageTeam(team.clone()) {
@@ -2610,6 +2613,9 @@ impl Shell {
                 open,
             } => this.open_recap(recording.clone(), transcribed.clone(), *open, window, cx),
             ChatViewEvent::OpenSavedTranscript(id) => this.open_saved_transcript(*id, window, cx),
+            ChatViewEvent::AppDialog(seed) => this.open_app_dialog(seed.as_ref().clone(), window, cx),
+            ChatViewEvent::ShowStore => this.open_apps(window, cx),
+            ChatViewEvent::AppDetails(store) => this.open_app_details(store.as_ref().clone(), window, cx),
             // a chat has no channel's thread or meeting card
             ChatViewEvent::Action { .. }
             | ChatViewEvent::OpenThread { .. }
@@ -2641,6 +2647,8 @@ impl Shell {
                 this.run_workflow(flow.clone(), message.clone(), window, cx);
             }
             ChannelViewEvent::CreateWorkflows(message) => this.open_message_workflows(message.clone(), window, cx),
+            ChannelViewEvent::AppDialog(seed) => this.open_app_dialog(seed.as_ref().clone(), window, cx),
+            ChannelViewEvent::AppDetails(store) => this.open_app_details(store.as_ref().clone(), window, cx),
         })
     }
 

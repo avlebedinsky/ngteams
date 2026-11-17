@@ -30,6 +30,8 @@ mod bot_cards;
 mod cards;
 #[path = "chat_view/files.rs"]
 mod files;
+#[path = "chat_view/message_extensions.rs"]
+mod message_extensions;
 // forwarded messages, in their card
 #[path = "chat_view/forward.rs"]
 mod forward;

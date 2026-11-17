@@ -635,6 +635,10 @@ and its Trouter delivery (fixture `app-card.json` is written from it, with made-
   only changes the surfaces.
 - **Other sites**: a Vimeo link got no app card. It got an ordinary link preview (`previewenabled: true`, the
   `urlp/v1/url/image/Thumbnail` picture, [Link previews](#link-previews)).
+- **A message extension's card** (behind `NGTEAMS_BOTS=1`): the native client sends a card chosen from an app's
+  search or dialog in the same form (`teams_proto::chat::AppCard`, `MessageText::with_cards`): the span after the
+  text, `\n` before it as the read-back has it, and the entry in `properties.cards`; a message without one sends `[]`
+  as before. Unseen for a message extension: `docs/protocol/bots.md`, "Message extensions".
 - **The native client** reads `properties.cards` with `teams_proto::chat::card::message_cards`: an entry whose card it
   draws is not content it can't show; any other entry still is. The video's picture is YouTube's `hqdefault.jpg` of
   the video, which exists for every video. The client reads it through the async gateway's thumbnail, as a card's

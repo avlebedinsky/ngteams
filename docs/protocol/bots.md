@@ -98,6 +98,42 @@ dialog card (`task` `continue`) that asks to add it, its `Action.Submit` `data` 
 <middle tier>/beta/chats/<chat>/apps/entitlements`) and sends the `submitAction` again with that data, answered 200
 with an empty body. The app then posts its card as the user ("<name> via <app>"), with `properties.onbehalfof`.
 
+## Message extensions
+
+Seen in the lab's catalogue reads (lab account a, 2026-11-14) and in browser Teams' compose box and message menu:
+
+- **Where the commands come from**: an app's definition in the account's apps (`POST beta/users/apps/aggregatedEntitlements`,
+  `docs/protocol/apps.md`) lists them under `inputExtensions` (a manifest's `composeExtensions`): per extension its
+  bot (`botId`), `fetchCommands` (the app gives its commands at run time, `composeExtension/fetchCommands`) and
+  `commands`. A command has an `id`, a `type` (`Action`; none is a search), `context` (`Compose`, `Commandbox`,
+  `Message`; none or an empty list is the compose box and the command box, as the manifest schema's default says), a
+  `title` and a `description`, a search's `parameters` (`name`, `title`, `description`, `isRequired`, `value`) and
+  `initialRun`, and for an action either `fetchTask` (its dialog is the app's answer to `fetchTask`) or a static
+  `taskInfo` (`title`, `width`, `height`, `url`: in every app seen, a web page).
+- **The compose box's "+"** (Actions and apps): a flyout with "Search for apps", Teams' own actions (Schedule message,
+  Set delivery options, Schedule meeting, Record video clip), a hairline, the account's apps whose commands run in the
+  compose box (`Installed`, `InstalledAndPermanent`: Clipchamp, Workflows, Approvals, Power BI, Praise, Updates in the
+  lab), and "Get more apps". An app chosen opens its dialog, titled with the app's picture, name and the command's
+  title ("Praise · Send praise to people"); those apps' dialogs were all web pages.
+- **A message's "More actions"**: Teams' own (Share to Outlook, Translate, Immersive Reader), then the commands that run
+  on a message, each with its app's picture: the account's (Create Planner task) upright, the store's offers
+  (`Featured`: Azure Boards, Jira, Polly) in italics; then "Create workflows".
+- **A search command** (unseen): a search field under the app's name, the results of `composeExtension/query` as a
+  list (each its `preview`: a thumbnail or hero card's `title`, `text` and picture), run at once with no words when
+  `initialRun`. A result chosen goes into the compose box as its card; a preview whose `tap` is an `invoke` first asks
+  the app for the card (`composeExtension/selectItem`).
+- **A card chosen into the compose box** is sent as a link's app card is (`chat.md`, "App cards"): a span of itemtype
+  `InputExtension` after the text and the card in `properties.cards` (`appId`, `appName`, `appIcon`, `cardClientId`,
+  `contentType`, `content`). Unseen for a message extension's result; a message with only a card sends no text before
+  the span (own design).
+
+The native client (`NGTEAMS_BOTS=1`): `teams_proto::ExtensionApp` and `ExtensionCommand` read the definitions;
+`teams_ui::apps_flyout` is the "+" (it lists no Teams action: this app has none of them for a chat),
+`teams_ui::app_dialog` the dialog, and a chat's "More actions" lists the commands after the workflows (an app not
+added opens its details, where it is added). A dialog that is a web page needs Teams' JavaScript host, which the native
+client doesn't have, so the dialog says the app opens in Teams on the web and offers that link. Synthetic apps:
+`tests/fixtures/bots/extension-apps.json`.
+
 ## The answers
 
 The chat service answers with the bot's status and body. Seen: HTTP 200 with
@@ -136,8 +172,10 @@ flag (`NGTEAMS_BOTS=1`), only a build run with it asks a bot (`teams_ui::bot_car
   on the web (sign-in cards and the apps' dialogs come later);
 - a card's `refresh` runs by itself (`trigger` `automatic`) once for each version of the message's cards while the
   chat is open when its `userIds` name the account (its MRI or its object id), and by hand from the message's "More options" → "Refresh card" (`manual`);
-- a `task/fetch` button opens the message in Teams on the web until the apps' dialogs are built; `signin` opens its
-  page in the browser;
+- a `task/fetch` button asks the bot for its dialog (`task/fetch`) and opens it (`teams_ui::app_dialog`): a card
+  across the dialog, its Submit a `task/submit`; a message extension's action command opens the same dialog, its Submit
+  a `composeExtension/submitAction`. The dialog's answer closes it (done), takes its place (a next dialog), goes into the
+  compose box (a result's card), or shows (a message, an error); `signin` opens its page in the browser;
 - the bot's app id is the bot's own id until the engine knows each bot's app.
 
 Without the flag, or in read-only mode, a card's bot buttons open the message in Teams on the web, as before.

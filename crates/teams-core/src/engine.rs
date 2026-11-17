@@ -1631,6 +1631,12 @@ impl EngineRequests {
         self.ask(|reply| Request::TeamApps(Box::new(TeamAppsAsk::UserApps { reply })))
     }
 
+    /// The account's apps with a message extension (the compose box's "Actions and apps", a message's "More actions"),
+    /// then the store's offers that have one, read now.
+    pub fn message_extensions(&self) -> Reply<Vec<teams_proto::ExtensionApp>> {
+        self.ask(|reply| Request::TeamApps(Box::new(TeamAppsAsk::MessageExtensions { reply })))
+    }
+
     /// The apps added to `chat`, by name, read now.
     pub fn chat_apps(&self, chat: impl Into<String>) -> Reply<Vec<StoreApp>> {
         let chat = chat.into();

@@ -29,7 +29,7 @@ mod policy;
 mod read;
 
 pub use code::{CODE_BLOCK_ITEMTYPE, Code, CodeRun, Token, language_of};
-pub use compose::{ComposeError, MessageText};
+pub use compose::{AppCard, ComposeError, MessageText};
 pub use email::{EmailDetails, EmailUser, SHOWN_RECIPIENTS, is_email_link, subject};
 pub use event::{
     CALL_MEDIA_PREFIX, CallEnd, CallStart, ChatEvent, ChatPolicy, MeetingTimes, Member, Members, Recording,

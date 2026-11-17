@@ -68,6 +68,11 @@ fn engine(mock: &ChatServiceMock, cloud: &Cloud, read_only: bool) -> Engine {
             HttpTransport::for_cloud_with_mock_origin(Arc::clone(&tokens), base.as_str(), cloud.clone(), &origin)
                 .unwrap()
                 .for_account(Mri::new(LAB_A));
+        let transport = if cloud.is_microsoft() {
+            transport.with_middle_tier(teams_mock::MIDDLE_TIER_BASE).unwrap()
+        } else {
+            transport
+        };
         if read_only { transport.read_only() } else { transport }
     };
     let dir = tempfile::tempdir().unwrap();
@@ -352,4 +357,43 @@ async fn an_own_server_account_sends_no_token_in_the_body() {
         "no Microsoft token is even asked for"
     );
     a.handle.shutdown();
+}
+
+#[tokio::test]
+async fn the_accounts_apps_with_message_extensions_come_with_their_commands() {
+    let mock = ChatServiceMock::start().await.unwrap();
+    for (definition, state) in teams_mock::extension_apps() {
+        let id = definition["id"].as_str().unwrap().to_owned();
+        mock.add_app(definition);
+        if state != "Featured" {
+            mock.install_app(teams_mock::AppPlace::Personal, &id);
+        }
+    }
+    let a = engine(&mock, &Cloud::Microsoft, false);
+
+    let apps = a.handle.message_extensions().await.unwrap();
+
+    let names: Vec<_> = apps.iter().map(|app| (app.name().to_owned(), app.installed)).collect();
+    assert_eq!(
+        names,
+        [
+            ("Made-up Finder".to_owned(), true),
+            ("Made-up Praise".to_owned(), true),
+            ("Made-up Tasks".to_owned(), true)
+        ]
+    );
+    let compose = apps[0].commands_in(CommandContext::Compose);
+    assert_eq!(compose.len(), 2);
+    assert!(!compose[0].action && compose[0].initial_run);
+    assert_eq!(compose[0].bot.as_str(), "28:00000000-0000-4000-8000-00000000eb01");
+    assert!(apps[2].commands_in(CommandContext::Compose).is_empty());
+    assert_eq!(apps[2].commands_in(CommandContext::Message).len(), 1);
+    assert!(apps[2].fetches_commands().is_some());
+    // the read brings the bots' apps along, as every read of the account's apps does
+    let found = a
+        .handle
+        .bot_app("28:00000000-0000-4000-8000-00000000eb01")
+        .await
+        .unwrap();
+    assert_eq!(found.map(|app| app.app.name), Some("Made-up Finder".to_owned()));
 }

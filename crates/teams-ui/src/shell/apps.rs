@@ -58,6 +58,37 @@ impl Shell {
         cx.notify();
     }
 
+    /// An app's dialog over the window ([`crate::app_dialog`]), when the account offers apps and writes.
+    pub fn open_app_dialog(
+        &mut self,
+        seed: crate::app_dialog::DialogSeed,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !apps_offered(self.core.as_ref(), cx) || self.core.read_only() {
+            return;
+        }
+        let core = Arc::clone(&self.core);
+        let dialog = cx.new(|cx| crate::app_dialog::AppDialog::new(core, seed, window, cx));
+        self.show_team_dialog(&dialog, window, cx);
+    }
+
+    /// An app dialog's result card goes into the compose box of `conversation`, when that chat is shown.
+    pub(super) fn app_card_to_compose(
+        &mut self,
+        conversation: &str,
+        card: teams_proto::chat::AppCard,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.main != Main::Chat(conversation.to_owned()) {
+            return;
+        }
+        if let Some(chat) = &self.chat {
+            chat.update(cx, |chat, cx| chat.add_app_card(card, window, cx));
+        }
+    }
+
     /// The store, once it was opened.
     #[must_use]
     pub fn apps(&self) -> Option<&Entity<AppsPage>> {
