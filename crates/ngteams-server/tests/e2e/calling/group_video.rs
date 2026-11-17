@@ -96,6 +96,13 @@ async fn stopped(engine: &Engine, line: usize, what: &str, told: Instant) {
     assert!(seen.frames <= shown + 2, "{label}, then came again: {seen:?}");
 }
 
+/// When `engine` showed a view of `call` that is `wanted`. Wait for each engine at the same time: a view that waits in
+/// the queue while the test waits for another engine would give a later time.
+async fn told(engine: &mut Engine, call: CallId, wanted: impl Fn(&CallView) -> bool) -> Instant {
+    engine.view(call, wanted).await;
+    Instant::now()
+}
+
 /// Turns `engine`'s camera in `call` on or off.
 async fn camera(engine: &Engine, call: CallId, on: bool) {
     engine.call(CallAction::Camera { call, on }).await;
@@ -122,14 +129,9 @@ async fn three_clients_see_each_others_video_on_the_lines_they_asked_for() {
         ];
         // a's camera off: the others are told, and its line shows nothing more
         camera(&a, calls[0], false).await;
-        let mut told = Vec::new();
-        for (engine, call) in [(&mut b, calls[1]), (&mut c, calls[2])] {
-            engine
-                .view(call, |view| party(view, &a_mri).is_some_and(|party| !party.video_on))
-                .await;
-            told.push(Instant::now());
-        }
-        for ((engine, line), told) in [(&b, lines[0]), (&c, lines[1])].into_iter().zip(told) {
+        let camera_off = |view: &CallView| party(view, &a_mri).is_some_and(|party| !party.video_on);
+        let (b_told, c_told) = tokio::join!(told(&mut b, calls[1], camera_off), told(&mut c, calls[2], camera_off));
+        for (engine, line, told) in [(&b, lines[0], b_told), (&c, lines[1], c_told)] {
             stopped(engine, line, "a's camera", told).await;
         }
         hang_up_all(&mut [&mut a, &mut b, &mut c], &calls).await;
@@ -204,14 +206,9 @@ async fn a_shared_screen_reaches_the_others_until_it_stops() {
             on: false,
         })
         .await;
-        let mut told = Vec::new();
-        for (engine, call) in [(&mut a, calls[0]), (&mut c, calls[2])] {
-            engine
-                .view(call, |view| party(view, &sharer).is_some_and(|party| !party.sharing))
-                .await;
-            told.push(Instant::now());
-        }
-        for (engine, told) in [&a, &c].into_iter().zip(told) {
+        let unshared = |view: &CallView| party(view, &sharer).is_some_and(|party| !party.sharing);
+        let (a_told, c_told) = tokio::join!(told(&mut a, calls[0], unshared), told(&mut c, calls[2], unshared));
+        for (engine, told) in [(&a, a_told), (&c, c_told)] {
             stopped(engine, SHARING_LINE, "b's screen", told).await;
         }
         hang_up_all(&mut [&mut a, &mut b, &mut c], &calls).await;
