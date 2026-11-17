@@ -1593,6 +1593,9 @@ the 1:1 chat and its history stay its two people's.
   account commands reach the nodes in the same namespace. The names are built in one place,
   `fanout::keyspace` (`Keyspace::key`, and `Shared`, the only way to a node's Redis connection): new code that keeps
   anything in Redis names it there, never with a bare key.
+- To upgrade from a version without the namespaced keys, restart all nodes together. In a rolling upgrade, the old
+  and the new nodes use different names, so pushes and replays between them are lost until all nodes run the new
+  version.
 - A Trouter socket lives on one node. Its node subscribes to the account's `push:<mri>` and `trouter:<mri>` (control:
   a registration taken, a socket's claim to its endpoint, an event the journal didn't keep, a disconnect) topics. A
   kept event is appended to the account's journal before it is published, so the node that is woken reads it there,
