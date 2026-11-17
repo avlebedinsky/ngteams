@@ -189,7 +189,8 @@ where
 
     /// A share switch that waited while the media of `call` was set up again ([`Self::share_waits`]), once the new
     /// session answered: a screen goes out on the new session's sharing line as a group call's does, or with a
-    /// renegotiation of its own on a 1:1 session. A stop has nothing to do: the new session shares nothing.
+    /// renegotiation of its own on a 1:1 session. A stop has nothing to do: the new session shares nothing, and
+    /// [`Self::rebuilt`] told the screen the old session shared as stopped.
     pub(super) fn share_after_rebuild(&mut self, call: CallId, wait: media::ShareWait) {
         let media::ShareWait::Start(screen) = wait else {
             return;

@@ -9,8 +9,12 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::support::{A_TONE, Account, B_TONE, HeldCamera, Lab, PEER_TONE, renegotiated_one_at_a_time, wait_until};
+use crate::support::{
+    A_TONE, Account, B_TONE, HeldCamera, Lab, PEER_TONE, actual_callback, renegotiated_one_at_a_time, wait_until,
+};
 use teams_core::{CallAction, CallId, CallStatus, End, Event};
+use teams_media::sdp::NgcSdp;
+use teams_mock::mixer::MixerPeer;
 use teams_mock::{AB_CHAT, ABC_CHAT, LAB_A, LAB_B, LAB_C};
 
 /// Frames of a shared screen a side must have shown.
@@ -376,33 +380,48 @@ struct HeldCall {
     lab: Lab,
     a: Account,
     b: Account,
+    /// a's call.
     call: CallId,
+    /// b's call.
     answered: CallId,
     asked: Option<Receiver<()>>,
     release: Sender<()>,
 }
 
 impl HeldCall {
+    /// a calls b, b answers.
     async fn start() -> Self {
+        Self::placed(true).await
+    }
+
+    /// b calls a, a answers: a's answer hands out the callback where a's call takes the service's offers.
+    async fn answered_by_a() -> Self {
+        Self::placed(false).await
+    }
+
+    /// The 1:1 call between a, whose camera is held, and b: placed by a (`by_a`) or by b.
+    async fn placed(by_a: bool) -> Self {
         let lab = Lab::start().await;
         let (devices, asked, release) = HeldCamera::new();
         let mut a = lab.account_with_devices(devices).await;
         let mut b = lab.account(LAB_B, B_TONE).await;
-        let call = a
+        let (placing, answering) = if by_a { (&mut a, &mut b) } else { (&mut b, &mut a) };
+        let placed = placing
             .handle
             .requests()
             .call(CallAction::Call { chat: AB_CHAT.into() })
             .await
             .unwrap();
-        let incoming = b.incoming().await;
-        let answered = b
+        let incoming = answering.incoming().await;
+        let answered = answering
             .handle
             .requests()
             .call(CallAction::Answer { call: incoming.call })
             .await
             .unwrap();
-        a.status(call, &CallStatus::Connected).await;
-        b.status(answered, &CallStatus::Connected).await;
+        placing.status(placed, &CallStatus::Connected).await;
+        answering.status(answered, &CallStatus::Connected).await;
+        let (call, answered) = if by_a { (placed, answered) } else { (answered, placed) };
         Self {
             lab,
             a,
@@ -539,5 +558,104 @@ async fn a_share_started_and_stopped_while_a_renegotiation_is_open_shares_nothin
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(renegotiated_one_at_a_time(&held.lab, LAB_A), 1);
     assert_eq!(held.b.video.share.counts().indexed, 0, "b was shown no screen");
+    held.hang_up().await;
+}
+
+/// The service's new mixer session for a's call, a mixer of its own offering it (`newOffer`, `fromMixer`) while a's
+/// held camera keeps a renegotiation open: the offer waits until the camera opens (`on`) and its renegotiation
+/// settled, then a's call sets its media up again and answers it, and the mixer takes that answer. The mixer, kept for
+/// the rest of the test, and the `callModalities` of a's answer.
+async fn new_session(
+    held: &HeldCall,
+    on: tokio::task::JoinHandle<Result<CallId, teams_core::EngineError>>,
+) -> (MixerPeer, Vec<String>) {
+    let mixer = MixerPeer::start_at(held.lab.relay, 80_000, PEER_TONE).unwrap();
+    let offer = mixer.offer().unwrap();
+    let callback = actual_callback(&held.lab, "/callAcceptance/links/mediaRenegotiation").await;
+    let call_id = held.lab.last_call();
+    let answer_path = format!("/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/negotiations/{call_id}/1/t/9/answer");
+    held.lab
+        .mock
+        .answer_next("POST", &answer_path, 200, &serde_json::json!({}))
+        .await;
+    let negotiation = serde_json::json!({"mediaNegotiation":{
+        "mediaContent":{"blob":offer.as_str(),"contentType":offer.content_type(),"newOffer":true,"fromMixer":true},
+        "links":{"mediaAnswer":format!("https://api.flightproxy.teams.microsoft.com{answer_path}?i=10-0-0-1")}
+    }});
+    let _ = held.lab.trouter.deliver_call(LAB_A, &callback, &negotiation);
+    held.release(on).await;
+    held.lab.wait_attempts(&answer_path, 1).await;
+    let answer = held
+        .lab
+        .mock
+        .received_requests()
+        .await
+        .into_iter()
+        .find_map(|request| {
+            if request.url.path() != answer_path {
+                return None;
+            }
+            let body: Value = serde_json::from_slice(&request.body).ok()?;
+            body.get("mediaAnswer").cloned()
+        })
+        .expect("a answered the new session");
+    let content = &answer["mediaContent"];
+    let sdp = NgcSdp::new(
+        content["contentType"].as_str().unwrap(),
+        content["blob"].as_str().unwrap(),
+    )
+    .unwrap();
+    mixer.accept_answer(&sdp).unwrap();
+    let modalities = answer["callModalities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|modality| modality.as_str().map(str::to_owned))
+        .collect();
+    (mixer, modalities)
+}
+
+/// Share picked while the call's camera renegotiation is open, and the service sets the call's media up again
+/// meanwhile: the share that waited is not lost with the old session, it goes out on the new session's sharing line,
+/// described `sendonly` as a group call's share is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_share_waiting_while_the_media_is_set_up_again_goes_on_the_new_session() {
+    let mut held = HeldCall::answered_by_a().await;
+    let call = held.call;
+    let on = held.camera_held_on().await;
+    assert_eq!(held.act(CallAction::Share { call, on: true }).await.unwrap(), call);
+    let (_mixer, answered) = new_session(&held, on).await;
+    assert!(
+        !answered.iter().any(|modality| modality == "ScreenSharer"),
+        "{answered:?}"
+    );
+
+    assert!(share_told(&mut held.a, call, true).await, "a shares on the new session");
+    shares_described(&held.lab, "sendonly").await;
+    held.hang_up().await;
+}
+
+/// Stop sharing while the call's camera renegotiation is open, and the service sets the call's media up again
+/// meanwhile: the new session shares nothing, so a is told it no longer shares and its answer names no
+/// `ScreenSharer`. Share then goes again, on the new session's sharing line.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_waiting_while_the_media_is_set_up_again_ends_the_share() {
+    let mut held = HeldCall::answered_by_a().await;
+    let call = held.call;
+    assert_eq!(held.act(CallAction::Share { call, on: true }).await.unwrap(), call);
+    assert!(share_told(&mut held.a, call, true).await, "a shares");
+    held.renegotiated(1).await;
+
+    let on = held.camera_held_on().await;
+    assert_eq!(held.act(CallAction::Share { call, on: false }).await.unwrap(), call);
+    let (_mixer, answered) = new_session(&held, on).await;
+    assert!(!share_told(&mut held.a, call, true).await, "a no longer shares");
+    assert!(
+        !answered.iter().any(|modality| modality == "ScreenSharer"),
+        "{answered:?}"
+    );
+
+    assert_eq!(held.act(CallAction::Share { call, on: true }).await.unwrap(), call);
+    assert!(share_told(&mut held.a, call, true).await, "a shares again");
     held.hang_up().await;
 }

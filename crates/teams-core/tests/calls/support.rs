@@ -661,3 +661,28 @@ pub fn renegotiated_one_at_a_time(lab: &Lab, mri: &str) -> usize {
     }
     count
 }
+
+/// The trouter path of the callback the first request that names one at `pointer` handed out (where a delivery to
+/// that account goes).
+pub async fn actual_callback(lab: &Lab, pointer: &str) -> String {
+    let url = lab
+        .mock
+        .received_requests()
+        .await
+        .iter()
+        .find_map(|request| {
+            serde_json::from_slice::<serde_json::Value>(&request.body)
+                .ok()?
+                .pointer(pointer)?
+                .as_str()
+                .map(str::to_owned)
+        })
+        .expect("the native call supplied its callback");
+    url.split_once("/v4/f/")
+        .unwrap()
+        .1
+        .split_once('/')
+        .unwrap()
+        .1
+        .to_owned()
+}

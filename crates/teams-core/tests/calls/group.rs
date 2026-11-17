@@ -16,7 +16,7 @@
 
 use std::time::Duration;
 
-use crate::support::{A_TONE, Account, B_TONE, Lab, PEER_TONE, TALK, heard, wait_until};
+use crate::support::{A_TONE, Account, B_TONE, Lab, PEER_TONE, TALK, actual_callback, heard, wait_until};
 use serde_json::Value;
 use teams_core::{CallAction, CallActionError, CallError, CallId, CallStatus, CallView, End, EngineError, Event};
 use teams_mock::{ABC_CHAT, LAB_A, LAB_B, LAB_C, TIMED_OUT};
@@ -365,28 +365,6 @@ async fn a_group_call_without_video_shows_nobody_on_a_line_and_nobody_speaking()
     assert!(mix > 0.25, "a heard its mixer's tone at {mix:.3}");
 }
 
-async fn actual_callback(lab: &Lab, pointer: &str) -> String {
-    let url = lab
-        .mock
-        .received_requests()
-        .await
-        .iter()
-        .find_map(|request| {
-            serde_json::from_slice::<Value>(&request.body)
-                .ok()?
-                .pointer(pointer)?
-                .as_str()
-                .map(str::to_owned)
-        })
-        .expect("the native call supplied its callback");
-    url.split_once("/v4/f/")
-        .unwrap()
-        .1
-        .split_once('/')
-        .unwrap()
-        .1
-        .to_owned()
-}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_admitted_group_call_reports_lobby_transitions_and_cleans_up_failed_replacement_media() {
     let lab = Lab::start_group_video().await;

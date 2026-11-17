@@ -254,7 +254,10 @@ A 1:1 call's video in the native client (M3 Task 18), as the web client's camera
   again, or the far end's waiting for our answer) is not refused, as in Teams: the camera's new state is kept, and
   once the open one settled the camera turns and its line is offered. Share (once the screen is picked) and Stop
   sharing during an open renegotiation are kept the same way. When a camera switch and a share both wait, they go in
-  turn, the camera first, each offer once the one before settled. The later switch of each sets how it ends. A renegotiation of the far end's delivered while ours is being made or waits for
+  turn, the camera first, each offer once the one before settled. The later switch of each sets how it ends. When the
+  service sets the call's media up again for a new mixer session meanwhile, a waiting Share goes out on the new
+  session's sharing line, as a group call's share does; the new session shares nothing else, so a screen shared on the
+  old one is told stopped. A renegotiation of the far end's delivered while ours is being made or waits for
   its answer is held until ours settles: after our answer is applied it is answered; when ours is then turned away
   (the controller took the far end's first, as when both cameras went on together) ours gives way to it, and so it
   does to one delivered while ours waits to go again: the far end's is answered with our camera's line only
