@@ -216,28 +216,38 @@ fn is_public_v4(address: Ipv4Addr) -> bool {
         || (a == 198 && (18..20).contains(&b)))
 }
 
-fn is_public_v6(address: Ipv6Addr) -> bool {
-    let segments = address.segments();
-    let embedded = |high: u16, low: u16| {
-        let [a, b] = high.to_be_bytes();
-        let [c, d] = low.to_be_bytes();
-        is_public_v4(Ipv4Addr::new(a, b, c, d))
+/// The IPv4 address an IPv6 form carries: IPv4-mapped, IPv4-compatible, NAT64 (the well-known `64:ff9b::/96` and a
+/// /96 in the local-use `64:ff9b:1::/48`) or 6to4.
+pub(crate) fn embedded_v4(address: Ipv6Addr) -> Option<Ipv4Addr> {
+    let ([0, 0, 0, 0, 0, 0xffff | 0, high, low]
+    | [0x64, 0xff9b, 0, 0, 0, 0, high, low]
+    | [0x64, 0xff9b, 1, _, _, _, high, low]
+    | [0x2002, high, low, ..]) = address.segments()
+    else {
+        return None;
     };
-    match segments {
-        // IPv4-mapped and IPv4-compatible
-        [0, 0, 0, 0, 0, 0xffff | 0, high, low] => {
-            !address.is_unspecified() && !address.is_loopback() && embedded(high, low)
-        }
-        // NAT64 and 6to4
-        [0x64, 0xff9b, 0, 0, 0, 0, high, low] | [0x2002, high, low, ..] => embedded(high, low),
-        [first, second, ..] => {
-            !(address.is_multicast()
-                || (first & 0xfe00) == 0xfc00
-                || (first & 0xffc0) == 0xfe80
-                || (first == 0x2001 && second == 0x0db8)
-                || first == 0x0100)
-        }
+    let [a, b] = high.to_be_bytes();
+    let [c, d] = low.to_be_bytes();
+    Some(Ipv4Addr::new(a, b, c, d))
+}
+
+fn is_public_v6(address: Ipv6Addr) -> bool {
+    let [first, second, third, ..] = address.segments();
+    if address.is_unspecified() || address.is_loopback() {
+        return false;
     }
+    // the local-use NAT64 prefix isn't global (RFC 8215), whatever it carries
+    if [first, second, third] == [0x64, 0xff9b, 1] {
+        return false;
+    }
+    if let Some(v4) = embedded_v4(address) {
+        return is_public_v4(v4);
+    }
+    !(address.is_multicast()
+        || (first & 0xfe00) == 0xfc00
+        || (first & 0xffc0) == 0xfe80
+        || (first == 0x2001 && second == 0x0db8)
+        || first == 0x0100)
 }
 
 #[cfg(test)]
@@ -373,6 +383,8 @@ mod tests {
             "::ffff:10.0.0.1",
             "::127.0.0.1",
             "64:ff9b::a00:1",
+            "64:ff9b:1::808:808",
+            "64:ff9b:1:2:3:4:a00:1",
             "2002:7f00:1::1",
             "2002:c0a8:101::1",
             "fc00::1",

@@ -4,9 +4,8 @@
 //! time; a lease that runs out (its node died) lets another take it. Rows go out oldest first per bot and
 //! conversation: a row waits while an older one of its line is pending.
 
-use diesel::dsl::sql;
+use diesel::dsl::{exists, not};
 use diesel::prelude::*;
-use diesel::sql_types::{BigInt, Bool};
 use diesel_async::RunQueryDsl;
 
 use super::schema::{bot_deliveries, bot_health};
@@ -173,8 +172,29 @@ pub(crate) async fn claim(db: &Db, node: &str, lease: i64, limit: i64) -> Result
         .filter(bot_deliveries::state.eq(PENDING))
         .filter(bot_deliveries::due_at.le(now))
         .filter(bot_deliveries::locked_until.lt(now))
-        .filter(sql::<Bool>(HEAD_OF_LINE))
-        .filter(sql::<Bool>(NOT_PAUSED).bind::<BigInt, _>(now).sql(")"))
+        // no older row of its line (bot and conversation) is still to be sent
+        .filter(not(exists(
+            older
+                .filter(older.field(bot_deliveries::bot_id).eq(bot_deliveries::bot_id))
+                .filter(
+                    older
+                        .field(bot_deliveries::conversation_id)
+                        .eq(bot_deliveries::conversation_id)
+                )
+                .filter(older.field(bot_deliveries::state).eq(PENDING))
+                .filter(
+                    older.field(bot_deliveries::seq).lt(bot_deliveries::seq).or(older
+                        .field(bot_deliveries::seq)
+                        .eq(bot_deliveries::seq)
+                        .and(older.field(bot_deliveries::id).lt(bot_deliveries::id))),
+                ),
+        )))
+        // its bot isn't paused
+        .filter(not(exists(
+            bot_health::table
+                .filter(bot_health::bot_id.eq(bot_deliveries::bot_id))
+                .filter(bot_health::paused_until.gt(now)),
+        )))
         .order((bot_deliveries::seq, bot_deliveries::id))
         .limit(limit * 4)
         .select(Delivery::as_select())
@@ -194,14 +214,7 @@ pub(crate) async fn claim(db: &Db, node: &str, lease: i64, limit: i64) -> Result
     Ok(claimed)
 }
 
-/// No older row of the row's line is still to be sent.
-const HEAD_OF_LINE: &str = "NOT EXISTS (SELECT 1 FROM bot_deliveries older \
-    WHERE older.bot_id = bot_deliveries.bot_id AND older.conversation_id = bot_deliveries.conversation_id \
-    AND older.state = 'pending' \
-    AND (older.seq < bot_deliveries.seq OR (older.seq = bot_deliveries.seq AND older.id < bot_deliveries.id)))";
-/// The row's bot isn't paused at the time bound after it.
-const NOT_PAUSED: &str = "NOT EXISTS (SELECT 1 FROM bot_health \
-    WHERE bot_health.bot_id = bot_deliveries.bot_id AND bot_health.paused_until > ";
+diesel::alias!(bot_deliveries as older: Older);
 
 /// Takes row `id`'s lease for `node` unless another node holds it; whether it did.
 async fn take(db: &Db, node: &str, id: &str, now: i64, lease: i64) -> Result<bool, DbError> {
@@ -343,10 +356,83 @@ pub(crate) async fn purge(db: &Db, before: i64) -> Result<usize, DbError> {
 
 #[cfg(test)]
 mod tests {
+    use diesel_async::SimpleAsyncConnection as _;
     use serde_json::json;
 
     use super::*;
     use crate::bots::activity::Event;
+
+    async fn put(db: &Db, bot: &str, conversation: &str, seq: i64) -> Result<(), DbError> {
+        let row = Delivery::new(bot, conversation, seq, &json!({"type": "message"}), false);
+        with_conn!(db, |conn| diesel::insert_into(bot_deliveries::table)
+            .values(&row)
+            .execute(conn)
+            .await?);
+        Ok(())
+    }
+
+    async fn pause(db: &Db, bot: &str, until: i64) -> Result<(), DbError> {
+        let row = Health {
+            bot_id: bot,
+            failures: 0,
+            paused_until: until,
+            last_error: None,
+            updated_at: 0,
+        };
+        with_conn!(db, |conn| diesel::insert_into(bot_health::table)
+            .values(&row)
+            .on_conflict(bot_health::bot_id)
+            .do_update()
+            .set(&row)
+            .execute(conn)
+            .await?);
+        Ok(())
+    }
+
+    /// The rows `claim` gives, as their bot, conversation and seq.
+    async fn claimed(db: &Db, node: &str, limit: i64) -> Result<Vec<(String, String, i64)>, DbError> {
+        Ok(claim(db, node, 60_000, limit)
+            .await?
+            .into_iter()
+            .map(|row| (row.bot_id, row.conversation_id, row.seq))
+            .collect())
+    }
+
+    #[tokio::test]
+    async fn a_paused_bots_rows_and_rows_behind_an_older_one_are_left_out_of_the_claim() -> Result<(), DbError> {
+        let dir = tempfile::tempdir().map_err(|error| DbError::Pool(error.to_string()))?;
+        let db = Db::connect(&format!("sqlite://{}", dir.path().join("server.sqlite").display()), 1).await?;
+        // the rows' bots aren't registered: this tests only the outbox's own filters
+        with_conn!(db, |conn| conn.batch_execute("PRAGMA foreign_keys = OFF").await?);
+        // more heads of lines of the paused bot than the claim's window of candidates (four times the limit)
+        for seq in 0..20 {
+            put(&db, "paused", &format!("c{seq}"), seq).await?;
+        }
+        put(&db, "live", "first", 100).await?;
+        put(&db, "live", "first", 101).await?;
+        put(&db, "live", "second", 102).await?;
+        pause(&db, "paused", crate::chatsvc::now() + PAUSE).await?;
+        let first = claimed(&db, "a", 2).await?;
+        assert_eq!(
+            first,
+            [
+                ("live".to_owned(), "first".to_owned(), 100),
+                ("live".to_owned(), "second".to_owned(), 102)
+            ]
+        );
+        // the pause ends: the paused bot's rows come out, oldest first; the live bot's 101 waits behind its 100
+        pause(&db, "paused", 0).await?;
+        let second = claimed(&db, "b", 3).await?;
+        assert_eq!(
+            second,
+            [
+                ("paused".to_owned(), "c0".to_owned(), 0),
+                ("paused".to_owned(), "c1".to_owned(), 1),
+                ("paused".to_owned(), "c2".to_owned(), 2)
+            ]
+        );
+        Ok(())
+    }
 
     #[test]
     fn a_group_chat_gives_a_bot_only_the_messages_that_mention_it() {

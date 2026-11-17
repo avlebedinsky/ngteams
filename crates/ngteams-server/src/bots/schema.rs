@@ -27,3 +27,5 @@ diesel::table! {
         updated_at -> BigInt,
     }
 }
+
+diesel::allow_tables_to_appear_in_same_query!(bot_deliveries, bot_health);

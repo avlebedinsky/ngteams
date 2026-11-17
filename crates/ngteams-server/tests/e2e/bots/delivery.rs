@@ -104,6 +104,44 @@ async fn many_rows_waiting_behind_a_dead_bots_retry_dont_hold_up_another_bot() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_bot_that_failed_a_long_run_gets_nothing_during_its_pause_and_another_bot_goes_on() {
+    /// The server's `PAUSE_AFTER`: failed sends in a row after which a bot is paused for a minute.
+    const PAUSE_AFTER: usize = 20;
+    for backend in backends() {
+        // one attempt each: every send to the dead bot fails for good at once
+        let setup = Setup::open_with(backend, |config| config.bots.retry_delays = Vec::new()).await;
+        setup.bot.answer(500);
+        let chat = setup.chat();
+        let mut n = 0;
+        while setup.bot.hits() < PAUSE_AFTER {
+            setup.send(&chat, &format!("failed {n}")).await;
+            setup.bot.next_of_within("message", Duration::from_secs(5)).await;
+            n += 1;
+        }
+        settled(&setup.registry.server, &setup.bot_id, Duration::from_secs(5)).await;
+        // the last failure's run is kept just after its row
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let hits = setup.bot.hits();
+
+        setup.send(&chat, "during the pause").await;
+        let other = TestBot::start().await;
+        let answer = setup.registry.register("Other (synthetic)", &other.url).await;
+        let other_id = answer["id"].as_str().unwrap().to_owned();
+        setup
+            .send(&personal_chat(&setup.ada, &other_id), "to the live bot")
+            .await;
+        let got = other.next_of_within("message", Duration::from_secs(10)).await;
+        assert_eq!(got.activity["text"], "to the live bot");
+        assert!(!setup.bot.gets_within("message", Duration::from_secs(3)).await);
+        assert_eq!(setup.bot.hits(), hits);
+        let rows = deliveries(&setup.registry.server.app.db, &setup.bot_id).await.unwrap();
+        let last = rows.last().unwrap();
+        assert_eq!((last.state.as_str(), last.attempts), ("pending", 0), "{rows:?}");
+        setup.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_chat_with_a_deleted_bot_still_takes_messages() {
     for backend in backends() {
         let setup = Setup::open(backend).await;

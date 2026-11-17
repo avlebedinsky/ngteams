@@ -84,24 +84,12 @@ fn canonical(address: IpAddr) -> IpAddr {
     }
 }
 
-/// The IPv4 address an IPv6 form carries: mapped, compatible, NAT64 or 6to4.
-fn embedded_v4(address: Ipv6Addr) -> Option<Ipv4Addr> {
-    let ([0, 0, 0, 0, 0, 0xffff | 0, high, low] | [0x64, 0xff9b, 0, 0, 0, 0, high, low] | [0x2002, high, low, ..]) =
-        address.segments()
-    else {
-        return None;
-    };
-    let [a, b] = high.to_be_bytes();
-    let [c, d] = low.to_be_bytes();
-    Some(Ipv4Addr::new(a, b, c, d))
-}
-
 /// The cloud providers' instance metadata services, also in any IPv6 form that carries their IPv4 address.
 fn is_metadata(address: IpAddr) -> bool {
     const AWS_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254);
     let v4 = match address {
         IpAddr::V4(v4) => Some(v4),
-        IpAddr::V6(v6) => embedded_v4(v6),
+        IpAddr::V6(v6) => crate::media::embedded_v4(v6),
     };
     v4.is_some_and(|v4| v4 == Ipv4Addr::new(169, 254, 169, 254) || v4 == Ipv4Addr::new(100, 100, 100, 200))
         || address == IpAddr::V6(AWS_V6)
@@ -230,6 +218,7 @@ mod tests {
             "100.64.0.0/10",
             "::/96",
             "64:ff9b::/96",
+            "64:ff9b:1::/48",
             "2002::/16",
         ]);
         for address in [
@@ -249,6 +238,7 @@ mod tests {
             "::ffff:169.254.169.254",
             "::169.254.169.254",
             "64:ff9b::a9fe:a9fe",
+            "64:ff9b:1::a9fe:a9fe",
             "2002:a9fe:a9fe::1",
             "fd00:ec2::254",
             "100.100.100.200",
@@ -265,6 +255,7 @@ mod tests {
             "::1",
             "224.0.0.1",
             "fe80::1",
+            "64:ff9b:1::808:808",
         ] {
             assert!(!closed.allows(address.parse().unwrap()), "{address}");
         }
