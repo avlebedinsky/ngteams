@@ -46,7 +46,9 @@
 //!   main video line (the first one that isn't the sharing line, then the same line for the call's life) and reads
 //!   the others rejected. While our camera is off, the line taken is read as one the far end only sends on (its
 //!   `sendrecv` as `sendonly`, its `recvonly` as `inactive`), so libwebrtc answers that we only receive, and our own
-//!   offer writes that line `recvonly` (the camera's track stays on it, sending nothing). A group call's main and
+//!   offer writes that line `recvonly` (the camera's track stays on it, sending nothing). The far end's line that
+//!   names no stream (its camera off) is read with the stream the far end named last on it, so libwebrtc keeps its
+//!   receive stream for the camera's return (`NgcSession::keep_far_stream`). A group call's main and
 //!   receiving lines are answered both ways, as the web client answers them, whichever way libwebrtc took them; each
 //!   receiving line names a stream of its own, drawn once for the call, on which nothing is ever sent.
 //!
@@ -625,6 +627,9 @@ pub struct NgcSession {
     group_sharing: Option<String>,
     /// A mixer's session: see [`NgcSession::mixer`].
     mixer: Option<MixerSide>,
+    /// The streams (standard `a=ssrc` and `a=ssrc-group` lines) the far end last named on a 1:1 call's main video
+    /// line: see [`NgcSession::keep_far_stream`].
+    far_stream: Vec<String>,
 }
 
 /// Which half of an exchange an SDP is.
@@ -877,6 +882,75 @@ impl NgcSession {
         }
     }
 
+    /// `text` (the far end's offer or answer, read for libwebrtc) with a 1:1 call's main video line naming the far
+    /// end's stream while the far end sends nothing on it. A far end with its camera off names no stream there (the
+    /// web client and we write such a line `recvonly`), and libwebrtc then drops its receive stream. When the camera
+    /// goes on again with the same SSRC, the receive stream libwebrtc makes again never reaches the far end's track,
+    /// so its video would not show again. A stream another line names now is not kept.
+    fn keep_far_stream(&mut self, text: String) -> String {
+        if !matches!(self.video, VideoLines::Main { .. }) {
+            return text;
+        }
+        let Some(local) = self
+            .video_line
+            .as_deref()
+            .and_then(|mid| self.by_remote(mid))
+            .map(|line| format!("a=mid:{}", line.local))
+        else {
+            return text;
+        };
+        let mut sections: Vec<Vec<&str>> = vec![Vec::new()];
+        for line in text.split("\r\n").filter(|line| !line.is_empty()) {
+            if line.starts_with("m=") {
+                sections.push(Vec::new());
+            }
+            if let Some(section) = sections.last_mut() {
+                section.push(line);
+            }
+        }
+        let Some(main) = sections.iter().position(|section| section.contains(&local.as_str())) else {
+            return text;
+        };
+        if sections[main].first().is_some_and(|m| m.split(' ').nth(1) == Some("0")) {
+            return text;
+        }
+        let streams: Vec<String> = sections[main]
+            .iter()
+            .filter(|line| line.starts_with("a=ssrc:") || line.starts_with("a=ssrc-group:"))
+            .map(|line| (*line).to_owned())
+            .collect();
+        if !streams.is_empty() {
+            self.far_stream = streams;
+            return text;
+        }
+        let ssrc = |line: &str| {
+            line.strip_prefix("a=ssrc:")
+                .and_then(|rest| rest.split(' ').next())
+                .map(str::to_owned)
+        };
+        let kept: Vec<String> = self.far_stream.iter().filter_map(|line| ssrc(line)).collect();
+        let named_elsewhere = sections
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != main)
+            .flat_map(|(_, section)| section.iter().filter_map(|line| ssrc(line)))
+            .any(|other| kept.contains(&other));
+        if kept.is_empty() || named_elsewhere {
+            return text;
+        }
+        let far_stream = self.far_stream.iter().map(String::as_str);
+        let mut out: Vec<&str> = Vec::new();
+        for (index, section) in sections.iter().enumerate() {
+            out.extend(section);
+            if index == main {
+                out.extend(far_stream.clone());
+            }
+        }
+        let mut text = out.join("\r\n");
+        text.push_str("\r\n");
+        text
+    }
+
     fn by_local(&self, mid: &str) -> Option<&Line> {
         self.lines.iter().find(|line| line.local == mid)
     }
@@ -1022,7 +1096,7 @@ impl NgcSession {
         let text = read(&parsed, &kept, Role::Answer, |mid| {
             self.by_remote(mid).map(|line| line.local.clone())
         });
-        Ok(SdpAnswer::new(text))
+        Ok(SdpAnswer::new(self.keep_far_stream(text)))
     }
 
     /// An offer we received (the caller's or the mixer's in an invitation, or a renegotiation), for libwebrtc. Lines
@@ -1063,7 +1137,7 @@ impl NgcSession {
         let text = read(&parsed, &kept, Role::Offer, |mid| {
             self.by_remote(mid).map(|line| line.local.clone())
         });
-        Ok(SdpOffer::new(text))
+        Ok(SdpOffer::new(self.keep_far_stream(text)))
     }
 
     /// Our answer (libwebrtc's) to an offer [`NgcSession::read_offer`] read, in Teams' dialect, for the `accept`'s or a

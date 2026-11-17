@@ -205,6 +205,52 @@ async fn native_ends_turn_their_cameras_on_and_each_shows_the_other_s() {
     }
 }
 
+/// a's camera turned on, off and on again: b's answer to the `off` (b's camera off too) takes the line out of use, and
+/// the `on` after it sends a's camera again, so b shows it again, as in Teams.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_camera_turned_off_and_on_again_is_shown_again_at_the_native_far_end() {
+    let lab = Lab::start().await;
+    let mut a = lab.account(LAB_A, A_TONE).await;
+    let mut b = lab.account(LAB_B, B_TONE).await;
+    let call = a
+        .handle
+        .requests()
+        .call(CallAction::Call { chat: AB_CHAT.into() })
+        .await
+        .unwrap();
+    let incoming = b.incoming().await;
+    let answered = b
+        .handle
+        .requests()
+        .call(CallAction::Answer { call: incoming.call })
+        .await
+        .unwrap();
+    a.status(call, &CallStatus::Connected).await;
+    b.status(answered, &CallStatus::Connected).await;
+    let requests = a.handle.requests();
+    let camera = |on| CallAction::Camera { call, on };
+
+    assert_eq!(requests.call(camera(true)).await.unwrap(), call);
+    wait_until(|| b.video.remote.counts().indexed >= FRAMES).await;
+    assert_eq!(requests.call(camera(false)).await.unwrap(), call);
+    wait_until(|| renegotiated_one_at_a_time(&lab, LAB_A) == 2 && acknowledged_last(&lab)).await;
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let stopped = b.video.remote.counts().indexed;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(b.video.remote.counts().indexed, stopped, "a's camera went off at b");
+
+    assert_eq!(requests.call(camera(true)).await.unwrap(), call);
+    wait_until(|| renegotiated_one_at_a_time(&lab, LAB_A) == 3 && acknowledged_last(&lab)).await;
+    wait_until(|| b.video.remote.counts().indexed >= stopped + FRAMES).await;
+
+    requests.call(CallAction::HangUp { call }).await.unwrap();
+    assert_eq!(a.ended(call).await, End::HungUp);
+}
+
+fn acknowledged_last(lab: &Lab) -> bool {
+    lab.sent_by(LAB_A).last().map(String::as_str) == Some("acknowledge")
+}
+
 /// The camera turned off while its own camera-on renegotiation is still open (the camera opening): as in Teams the
 /// switch is taken, not refused, and once the `on` settled the camera goes off with a renegotiation of its own.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

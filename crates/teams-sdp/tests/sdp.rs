@@ -265,3 +265,54 @@ fn video_and_sharing_metadata_keep_their_wire_meaning() -> TestResult {
     assert!(ngc.as_str().contains("a=label:applicationsharing-video"));
     Ok(())
 }
+
+/// A far end that turns its camera off names no stream on the main video line; read for libwebrtc, the line keeps the
+/// stream the far end named last, so libwebrtc keeps its receive stream and shows the camera when it goes on again.
+#[test]
+fn a_far_end_s_camera_off_keeps_its_stream_on_the_main_video_line() -> TestResult {
+    // the browser's offer with its camera on: the main video line sends, and names its stream
+    let browser = relayed_standard("browser_offer")?;
+    let mut parts = sections(&browser);
+    for line in &mut parts[2] {
+        if *line == "a=recvonly" {
+            *line = "a=sendrecv\r\na=ssrc:3000000002 cname:SyntheticCname0\r\na=ssrc:3000000002 msid:synthetic-stream-0 synthetic-stream-2";
+        }
+    }
+    let offer = SdpOffer::new(joined(&parts));
+    let mut far_end = NgcSession::new();
+    let mut ours = NgcSession::new();
+    ours.set_video(VideoLines::Main { sending: false });
+    let main_streams = |text: &str| -> Vec<String> {
+        sections(text)
+            .into_iter()
+            .find(|section| {
+                section
+                    .first()
+                    .is_some_and(|m| m.starts_with("m=video") && !m.contains(" 0 "))
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|line| line.starts_with("a=ssrc") && !line.starts_with("a=ssrc:1 "))
+            .map(str::to_owned)
+            .collect()
+    };
+    far_end.set_video(VideoLines::Main { sending: true });
+    let on = ours.read_offer(&far_end.write_offer(&offer)?)?;
+    let streams = main_streams(on.as_str());
+    assert!(!streams.is_empty(), "the camera's stream: {}", on.as_str());
+
+    far_end.set_video(VideoLines::Main { sending: false });
+    let written = far_end.write_offer(&offer)?;
+    assert!(
+        main_streams(written.as_str()).is_empty(),
+        "the far end names only the placeholder"
+    );
+    let off = ours.read_offer(&written)?;
+    assert_eq!(main_streams(off.as_str()), streams, "{}", off.as_str());
+
+    // a session that never saw the far end's stream adds none
+    let mut fresh = NgcSession::new();
+    fresh.set_video(VideoLines::Main { sending: false });
+    assert!(main_streams(fresh.read_offer(&written)?.as_str()).is_empty());
+    Ok(())
+}
