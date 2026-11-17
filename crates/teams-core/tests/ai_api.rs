@@ -410,8 +410,11 @@ fn a_stop_drops_a_quiet_request_at_once() {
             thread::sleep(Duration::from_millis(300));
             setter.store(true, Ordering::Relaxed);
         });
+        // keep the client (and its runtime) alive past the checks, as `Conversation` does after a stop: a dropped
+        // runtime ends its tasks and so closes the connection also when the stop leaves it open
+        let api = api(ApiKind::OpenAi, &base);
         let started = Instant::now();
-        let asked = api(ApiKind::OpenAi, &base).ask(&question(Some("medium")), TIME, &stop, &mut |_| {});
+        let asked = api.ask(&question(Some("medium")), TIME, &stop, &mut |_| {});
         assert_eq!(asked, Err(ApiError::Cancelled), "head {head:?}");
         assert!(
             started.elapsed() < Duration::from_secs(2),
@@ -423,6 +426,7 @@ fn a_stop_drops_a_quiet_request_at_once() {
             Ok(true),
             "head {head:?}: the connection stays open"
         );
+        drop(api);
     }
 }
 
