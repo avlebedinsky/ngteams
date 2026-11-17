@@ -623,11 +623,16 @@ fn who_may_use_an_app_is_chosen_among_the_servers_people(cx: &mut TestAppContext
         changes[0].contains("everyone: Some(false)") && changes[0].contains(DANA),
         "{changes:?}"
     );
-    // the dialog opened again names the person from the server's accounts
+    // the dialog opened again names the person from the server's accounts, also when a search starts before the
+    // naming is complete: the search does not stop the naming
     opened.keys("escape");
     opened.click_owned(&format!("app-row-{NOTES}"));
-    opened.click("app-dialog-access");
+    opened.with_dialog(|dialog, window, cx| {
+        dialog.go(DialogKind::Access, window, cx);
+        dialog.search_for("nobody", window, cx);
+    });
     assert!(opened.shows("app-dialog-people"));
+    assert!(opened.shows("app-dialog-remove-dana@example.test"));
     opened.click("app-dialog-remove-dana@example.test");
     opened.click("app-dialog-who-everyone");
     opened.click("app-dialog-confirm");
