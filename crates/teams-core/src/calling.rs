@@ -252,7 +252,7 @@ pub enum CallAction {
     LockMeeting { call: CallId, locked: bool },
     /// The call's screen shared (`true`: the user picks it at the desktop's portal, its frames sent on a sharing line
     /// of its own in a 1:1 call, on the mixer's sharing line in a group call or meeting) or no longer, as Teams' Share
-    /// and Stop sharing ([`Event::CallSharing`] tells it as it stands). A call whose media carries no video shares
+    /// and Stop sharing ([`Event::CallSharing`] tells it as it will end). A call whose media carries no video shares
     /// nothing.
     Share { call: CallId, on: bool },
     /// `invitee` added to the call, as Teams' People pane adds someone (seen 2026-11-06): a 1:1 call first gets a new
@@ -1175,6 +1175,7 @@ where
         let share_waits = self.live.as_mut().and_then(|live| live.share_waits.take());
         // the new session shares nothing and shows no share yet: a screen the old one shared or showed ends with it
         let shared = self.live.as_ref().is_some_and(|live| live.shares.own);
+        let told = self.live.as_ref().is_some_and(|live| live.shares.told);
         let shown = self.live.as_ref().is_some_and(|live| live.shares.theirs);
         // who is in the call stays as the roster told it: the roster tells only changes from here
         let participants = self
@@ -1184,6 +1185,7 @@ where
             .unwrap_or_default();
         let mut live = LiveMedia::new(call, prepared);
         live.session.set_muted(muted);
+        live.shares.told = told;
         live.gallery.set_participants(participants);
         live.applied(now);
         let content = if live.is_group() {
@@ -1203,7 +1205,6 @@ where
                 "call {}: sharing its screen false: its media was set up again",
                 call.get()
             );
-            self.emit(Event::CallSharing { call, on: false });
         }
         // the new session's sharing line tells a share it shows again (`show_participants`)
         if shown {
@@ -1226,6 +1227,7 @@ where
         if let Some(wait) = share_waits {
             self.share_after_rebuild(call, wait);
         }
+        self.tell_sharing(call);
         self.show_participants(now);
     }
 

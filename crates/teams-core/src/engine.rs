@@ -503,8 +503,9 @@ pub enum Event {
         call: CallId,
         state: teams_call::MeetingState,
     },
-    /// The account shares its screen in its 1:1 call (`on`) or no longer, as its [`CallAction::Share`] was taken (or,
-    /// not taken, as it stands; the screen ended at the desktop stops it too).
+    /// The account shares its screen in its call (`on`) or no longer, as its [`CallAction::Share`] was taken (or, not
+    /// taken, as it stands; the screen ended at the desktop stops it too). Told at once as the share will end, also
+    /// while a switch waits for an open renegotiation, as Teams' toolbar shows it.
     CallSharing { call: CallId, on: bool },
     /// The far end of the account's 1:1 call shares its screen (`on`: its frames come to the video output's sharing
     /// sink, `teams_media::session::SHARING_LINE`) or no longer.

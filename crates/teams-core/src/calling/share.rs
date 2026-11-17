@@ -6,9 +6,10 @@
 //!   account tells the call's conversation it shares (`screenSharerAttributes`) and renegotiates with `["Audio",
 //!   "ScreenSharer"]`, its offer adding a sharing line that only sends ([`media::share`]). **Stop sharing**
 //!   renegotiates `["Audio"]` with that line rejected ([`media::stop_share`]); so does the screen ending at the
-//!   desktop. [`Event::CallSharing`] tells it as it stands. As in Teams, a share or a stop while a renegotiation is
-//!   open either way is not refused: it waits ([`media::ShareWait`]) and goes once that one settled
-//!   ([`Calling::share_again`]), never two offers at once; the later switch says how the share ends.
+//!   desktop. [`Event::CallSharing`] tells how the share goes once the switches made are done, at once, as Teams'
+//!   toolbar shows it ([`Calling::tell_sharing`]). As in Teams, a share or a stop while a renegotiation is open either
+//!   way is not refused: it waits ([`media::ShareWait`]) and goes once that one settled ([`Calling::share_again`]),
+//!   never two offers at once; the later switch says how the share ends.
 //! - **The far end's share**: its renegotiation adding a sharing line it sends on is answered receiving, with
 //!   `["Audio", "ScreenViewer"]`; its frames go to the video output's sharing sink. [`Event::CallRemoteShare`] tells it
 //!   shown and, once an offer rejects that line, gone.
@@ -56,6 +57,7 @@ where
         if live.share_waits.take().is_some() {
             // the later switch goes back to how the share goes without the waiting one: that one goes no more
             log::info!("call {}: its waiting share switch goes no more", call.get());
+            self.tell_sharing(call);
             let _ = reply.send(Ok(call));
             return;
         }
@@ -75,6 +77,7 @@ where
                 live.shares.turning = Some(false);
                 let step = media::stop_share(live, reply);
                 self.sdp_step(step);
+                self.tell_sharing(call);
             }
             Err(_) if self.calls.renegotiating(call) => {
                 self.share_waits(call, media::ShareWait::Stop);
@@ -136,6 +139,7 @@ where
                 live.shares.turning = Some(true);
                 let step = media::share(live, screen, reply);
                 self.sdp_step(step);
+                self.tell_sharing(call);
             }
             Err(_) if self.calls.renegotiating(call) => {
                 self.share_waits(call, media::ShareWait::Start(screen));
@@ -155,6 +159,20 @@ where
                 "call {}: sharing its screen {on} once its open renegotiation settled",
                 call.get()
             );
+        }
+        self.tell_sharing(call);
+    }
+
+    /// How the account's share in `call` goes once the switches made are done ([`media::LiveMedia::share_goes`]),
+    /// told when it changed: Teams' toolbar shows Stop sharing (or Share) at once, a switch that waits too.
+    pub(super) fn tell_sharing(&mut self, call: CallId) {
+        let Some(live) = self.live.as_mut().filter(|live| live.call == call) else {
+            return;
+        };
+        let on = live.share_goes();
+        if live.shares.told != on {
+            live.shares.told = on;
+            self.emit(Event::CallSharing { call, on });
         }
     }
 
@@ -254,9 +272,9 @@ where
             if live.shares.own != sharing {
                 live.shares.own = sharing;
                 log::info!("call {}: sharing its screen {sharing}", call.get());
-                self.emit(Event::CallSharing { call, on: sharing });
             }
         }
+        self.tell_sharing(call);
         if !offered {
             // no renegotiation went: a switch kept while it was open goes now
             self.offer_owed(call);
@@ -303,8 +321,8 @@ where
         if live.shares.own != sharing {
             live.shares.own = sharing;
             log::info!("call {}: sharing its screen {sharing}", call.get());
-            self.emit(Event::CallSharing { call, on: sharing });
         }
+        self.tell_sharing(call);
         let _ = reply.send(Ok(call));
     }
 

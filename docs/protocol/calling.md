@@ -242,6 +242,11 @@ A 1:1 call's video in the native client (M3 Task 18), as the web client's camera
   header extension (Task 16), so the offer that turns a line we only received on `sendrecv` (our camera on) names its
   SSRCs (and the retransmissions', `ssrc-group:FID`), as libwebrtc writes them; without them the far end could tell
   the stream by nothing.
+- **A far end's camera turned off keeps its stream on our side**: its line comes `recvonly` with only the placeholder
+  stream (`a=x-ssrc-range:1-1`), and the camera turned on again sends with the same SSRC. Read for libwebrtc, a 1:1
+  call's main video line keeps the far end's last SSRCs while it names none. Without them libwebrtc drops its receive
+  stream, and the stream it makes again for the same SSRC never reaches the far end's track: a native run showed only
+  the far end's initials after its camera went off and on.
 - **Every negotiation delivery gets its receipt.** The web client answers the renegotiation, the answer and the
   answer's acknowledgement (delivered at its `mediaAcknowledgement` callback) each with an empty `200` delivery
   response, as it answers an invitation. Native runs without them showed the call controller holding the call: the
@@ -253,7 +258,8 @@ A 1:1 call's video in the native client (M3 Task 18), as the web client's camera
   A 1:1 call's camera switch while a renegotiation is open either way (ours begun, waiting for its answer or to go
   again, or the far end's waiting for our answer) is not refused, as in Teams: the camera's new state is kept, and
   once the open one settled the camera turns and its line is offered. Share (once the screen is picked) and Stop
-  sharing during an open renegotiation are kept the same way. When a camera switch and a share both wait, they go in
+  sharing during an open renegotiation are kept the same way. The toolbar shows each switch at once, as Teams' does:
+  the camera as asked, and Stop sharing (or Share) as the share will end. When a camera switch and a share both wait, they go in
   turn, the camera first, each offer once the one before settled. The later switch of each sets how it ends. When the
   service sets the call's media up again for a new mixer session meanwhile, a waiting Share goes out on the new
   session's sharing line, as a group call's share does; the new session shares nothing else, so a screen shared on the

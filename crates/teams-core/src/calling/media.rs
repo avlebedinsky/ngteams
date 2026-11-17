@@ -615,6 +615,8 @@ pub(super) struct Shares {
     pub(super) theirs: bool,
     /// A 1:1 call's share step of the account's that began and is not done yet: whether it shares.
     pub(super) turning: Option<bool>,
+    /// How the share was last told ([`crate::Event::CallSharing`]): as it goes once the switches made are done.
+    pub(super) told: bool,
 }
 
 /// A 1:1 call's share switch that waits for the open renegotiation to settle.

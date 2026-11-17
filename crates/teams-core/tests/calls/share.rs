@@ -561,6 +561,32 @@ async fn a_share_started_and_stopped_while_a_renegotiation_is_open_shares_nothin
     held.hang_up().await;
 }
 
+/// A share switch that waits for the call's own camera renegotiation is told at once as the share will go, as Teams'
+/// toolbar shows it: Stop sharing in Share's place while the camera still opens, and Share again once a stop drops the
+/// waiting start.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_share_switch_that_waits_is_told_at_once_as_the_share_will_go() {
+    let mut held = HeldCall::start().await;
+    let call = held.call;
+    let on = held.camera_held_on().await;
+    assert_eq!(held.act(CallAction::Share { call, on: true }).await.unwrap(), call);
+    assert!(
+        share_told(&mut held.a, call, true).await,
+        "told sharing while the camera still opens"
+    );
+    assert_eq!(held.act(CallAction::Share { call, on: false }).await.unwrap(), call);
+    assert!(
+        !share_told(&mut held.a, call, true).await,
+        "told not sharing: the waiting start goes no more"
+    );
+    held.release(on).await;
+
+    held.renegotiated(1).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(renegotiated_one_at_a_time(&held.lab, LAB_A), 1);
+    held.hang_up().await;
+}
+
 /// The service's new mixer session for a's call, a mixer of its own offering it (`newOffer`, `fromMixer`) while a's
 /// held camera keeps a renegotiation open: the offer waits until the camera opens (`on`) and its renegotiation
 /// settled, then a's call sets its media up again and answers it, and the mixer takes that answer. The mixer, kept for
