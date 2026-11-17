@@ -141,6 +141,30 @@ class InstallLinux(unittest.TestCase):
         self.assertEqual(accounts.read_text(), "synthetic")
         self.assertTrue(other.is_symlink())
 
+    def test_uninstall_refreshes_the_mime_cache_so_msteams_links_name_no_removed_entry(self) -> None:
+        # a stand-in for update-desktop-database that writes the msteams line of the cache from the entries it finds
+        tools = self.temp / "tools"
+        tools.mkdir()
+        fake = tools / "update-desktop-database"
+        fake.write_text(
+            "#!/bin/sh\n"
+            'dir="$1"\n'
+            '{ echo "[MIME Cache]"; for f in "$dir"/*.desktop; do\n'
+            '  [ -e "$f" ] && grep -q "^MimeType=.*x-scheme-handler/msteams;" "$f" &&\n'
+            '    echo "x-scheme-handler/msteams=$(basename "$f");"\n'
+            'done; } > "$dir/mimeinfo.cache"\n'
+        )
+        fake.chmod(0o755)
+        cache = self.data / "applications/mimeinfo.cache"
+        path = f"{tools}:{os.environ.get('PATH', '/usr/bin:/bin')}"
+        with unittest.mock.patch.dict(os.environ, {"PATH": path}):
+            self.installed(tree(self.temp / "ngteams", "0.1.0.7", "linux-archive") / "install.sh")
+            self.assertIn(f"{APP_ID}.desktop", cache.read_text())
+            result = self.run_script(self.target / "install.sh", "--uninstall")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.data / f"applications/{APP_ID}.desktop").exists())
+        self.assertNotIn(f"{APP_ID}.desktop", cache.read_text())
+
     def test_links_to_another_build_are_replaced_only_on_install_and_kept_on_uninstall(self) -> None:
         source_build = self.home / ".local/lib/ngteams/ngteams"
         source_build.parent.mkdir(parents=True)

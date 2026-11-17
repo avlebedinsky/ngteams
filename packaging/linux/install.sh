@@ -53,12 +53,20 @@ uninstall() {
   else
     rm -f "$entry"
     remove_icons
+    refresh_mime_cache
   fi
   if [[ -d "$target" ]]; then
     release_folder "$target" || die "$target is not an ngteams release, so it was left alone"
     rm -rf "${target:?}"
   fi
   echo "ngteams is removed. Your accounts and data in $share/ngteams and your keyring stay."
+}
+
+# Writes the menu's MIME cache again from the entries there, so msteams: links name only an entry that exists.
+refresh_mime_cache() {
+  if [[ -d "$share/applications" ]] && command -v update-desktop-database > /dev/null 2>&1; then
+    update-desktop-database "$share/applications" > /dev/null 2>&1 || true
+  fi
 }
 
 # Removes the icons that this copy installed (the names its hicolor folder holds).
@@ -110,9 +118,7 @@ install_entries() {
   # the menu entry starts this copy wherever ~/.local/bin is not on the desktop's PATH
   sed "s|^Exec=ngteams |Exec=\"$target/AppRun\" |" "$target/usr/share/applications/$app_id.desktop" \
     > "$share/applications/$app_id.desktop"
-  if command -v update-desktop-database > /dev/null 2>&1; then
-    update-desktop-database "$share/applications" > /dev/null 2>&1 || true
-  fi
+  refresh_mime_cache
 }
 
 [[ "$(id -u)" != 0 ]] || die "run this as your own user, not as root: it installs ngteams for you alone"
