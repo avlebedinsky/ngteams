@@ -36,9 +36,9 @@ const RING: u64 = 12;
 /// Set, the nodes keep the media node's addresses at their defaults (the host's outward address): the run's coturn
 /// must then relay from that address, as a coturn beside a server on one host does (`commands.md` of QA 297).
 const MEDIA_DEFAULTS: &str = "NGTS_TEST_MEDIA_DEFAULTS";
-/// The transport the clients reach the coturn by (`udp`, the default, or `tcp`): `tcp` lets a client in a VM reach it
-/// through an SSH tunnel (QA 422).
-const TURN_TRANSPORT: &str = "NGTS_TEST_TURN_TRANSPORT";
+/// Set, the relay URLs the nodes give out, comma-separated, in place of the run's coturn over UDP: a client in a VM
+/// needs one at its own address (QA 422: libwebrtc on Windows ignores loopback), forwarded to the coturn.
+const TURN_URLS: &str = "NGTS_TEST_TURN_URLS";
 
 const fn tone(hz: f32, amplitude: f32) -> Tone {
     Tone { hz, amplitude }
@@ -101,10 +101,9 @@ fn added_id(line: &str) -> String {
 
 /// The `[calling]` tables of the nodes' configuration: the ring timeout and the run's coturn.
 fn calling(relay: std::net::SocketAddr, secret: &str) -> String {
-    let transport = std::env::var(TURN_TRANSPORT).unwrap_or_else(|_| "udp".to_owned());
-    format!(
-        "[calling]\nring_timeout = {RING}\n[calling.turn]\nsecret = {secret:?}\nurls = [\"turn:{relay}?transport={transport}\"]\n"
-    )
+    let urls = std::env::var(TURN_URLS).unwrap_or_else(|_| format!("turn:{relay}?transport=udp"));
+    let urls: Vec<&str> = urls.split(',').collect();
+    format!("[calling]\nring_timeout = {RING}\n[calling.turn]\nsecret = {secret:?}\nurls = {urls:?}\n")
 }
 
 impl Group {

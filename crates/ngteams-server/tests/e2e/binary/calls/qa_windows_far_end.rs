@@ -1,6 +1,6 @@
 //! QA 422: the far end of a Windows client's calls, for a person who listens to what the client plays. The real
-//! server binary on SQLite and the run's coturn, reached over TCP (`NGTS_TEST_TURN_TRANSPORT=tcp`) so that a client
-//! in a VM can reach both through an SSH tunnel. Three synthetic people answer every call that rings them:
+//! server binary on SQLite and the run's coturn; `NGTS_TEST_TURN_URLS` adds the relay URL a client in a VM reaches
+//! (through an SSH tunnel). Three synthetic people answer every call that rings them:
 //!
 //! - Bert sends a 1 kHz tone at half scale;
 //! - Cora sends silence (in a group call, what the client hears is Bert's tone alone);
