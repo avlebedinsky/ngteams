@@ -108,6 +108,10 @@ reqwest.workspace = true
 ngteams-server.workspace = true
 # a database of the run's own on the run's Postgres, for the two-node deployment (`tests/own_server_nodes_window.rs`)
 diesel-async.workspace = true
+# a test bot's HTTPS endpoint the own server sends activities to (`tests/qa_bot_connector_window.rs`)
+axum.workspace = true
+axum-server.workspace = true
+rustls.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
 # the updates' flow against a local fake release feed (`tests/support/update.rs`)
@@ -151,6 +155,11 @@ harness = false
 [[test]]
 # QA of task 225: bot chats, the bot's About and intro, and bot mentions in the app's window, in the UI sandbox
 name = "qa_bot_chats_window"
+harness = false
+
+[[test]]
+# QA of task 229: an own server's user talks to a bot on the connector routes in the app's window, in the UI sandbox
+name = "qa_bot_connector_window"
 harness = false
 
 [[test]]
