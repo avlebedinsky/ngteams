@@ -350,14 +350,23 @@ fn a_blank_edit_beside_a_card_saves_nothing() {
     let compose = cx.update(|_, cx| view.read(cx).compose().clone());
     cx.update(|window, cx| view.update(cx, |view, cx| view.act(MessageAction::Edit, MINE, window, cx)));
     cx.run_until_parked();
+    assert!(
+        !found(cx, "compose-send-greyed"),
+        "Save is lit while the edit holds text"
+    );
     // a card comes in during the edit, then all the text of the edit is deleted
     cx.update(|window, cx| {
         compose.update(cx, |compose, cx| {
             compose.add_app_card(made_up_card(), window, cx);
             compose.editor().update(cx, teams_ui::compose::Editor::clear);
-            compose.send(window, cx);
         });
     });
+    cx.run_until_parked();
+    assert!(
+        found(cx, "compose-send-greyed"),
+        "the card does not light Save for a blank edit"
+    );
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.send(window, cx)));
     cx.run_until_parked();
     let edits = rig
         .core

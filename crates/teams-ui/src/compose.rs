@@ -1959,11 +1959,15 @@ impl Compose {
             (false, true) => concat!("Send (", ctrl!(), "+Enter)"),
         };
         if empty {
+            // `compose-send-greyed` lets a test tell the greyed button from the lit one
             return selected_by(
                 "compose-send",
-                icon_button("compose-send", Glyph::SEND, tip)
-                    .with_size(Size::Size(px(TOOL)))
-                    .disabled(true),
+                selected_by(
+                    "compose-send-greyed",
+                    icon_button("compose-send", Glyph::SEND, tip)
+                        .with_size(Size::Size(px(TOOL)))
+                        .disabled(true),
+                ),
             )
             .into_any_element();
         }
