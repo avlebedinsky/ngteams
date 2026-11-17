@@ -878,6 +878,31 @@ its shape (two files, made-up names and links). No lab capture holds a received 
   `MessagePicture::of`), reads it as it reads a pasted picture (the account's AMS, its skypetoken), draws it scaled
   down into 360 by 252, and draws the card (with Graph's thumbnail) when the preview can't be had.
 
+### Several files in one message (lab, 2026-11-17)
+
+Lab account a sent one message to b in their 1:1 chat from Teams on the web: a zip and four short videos, no text.
+The fixture `tests/fixtures/chatsvc/files-grid.json` is written synthetic in the shape of b's read.
+
+- **The send**: each file is uploaded to a's "Microsoft Teams Chat Files" folder (`…/drive/root:/Microsoft Teams Chat
+  Files/<name>:/content`, one `PUT` for each file). The compose box shows a card for each file, "Anyone with the link"
+  under its name (the tenant's default link). The page shows the message at once with "Uploading..." on each card
+  that is not uploaded, and posts it only when all uploads are done. A headless run that attaches five files in one
+  pick can leave some uploads open; one file in each pick does not.
+- **The message**: `content` is empty (`""`), `amsreferences` `[]`, `cards` and `links` `"[]"`. `properties.files` has
+  one entry for each file, in the order of the grid, in the shape above, with one more key, `altText` (`null`). b's
+  read added `properties.atp`. a's push frames were a `NewMessage`, then a `MessageUpdate` with the same entries and
+  `atp`.
+- **What Teams draws**: a grid of cards in the message's bubble, two in a row. Each card has a header (the type's
+  icon, the name cut with an ellipsis, and, on a received file's card in the user's Teams, `personal > <owner>`
+  under it), then the picture: a video's frame, or the large icon of its type for the zip. Share is on the video
+  cards only; "More options" is on each card.
+- **Not reproduced**: a message in the user's own chat with a zip and four videos showed only "This message has
+  content that can't be shown here" in the native client. The lab message in the shape above reads in full, so that
+  message had a part that the lab cannot make. The native client now draws each file it can name: a `files` string
+  with a lone surrogate escape (a browser reads it, `serde_json` refuses it) is mended, a list encoded twice or one
+  entry alone is read, an entry with no `@type` or another `…File` type is a file, and a file with no SharePoint
+  link is drawn by its name with no link kept (the message still offers Teams on the web for it).
+
 ## Messages a policy blocked
 
 Seen in the user's own debug log (2026-11-13, a 1:1 message with a `.deb` file, blocked by the tenant's file type

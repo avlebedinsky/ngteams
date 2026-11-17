@@ -1,12 +1,14 @@
-//! The files a message carries, drawn as Teams draws them under the message's text: a card per file, side by side and
-//! wrapping onto the next row when the bubble is narrow.
+//! The files a message carries, drawn as Teams draws them under the message's text: a grid of cards, two in a row at
+//! most ([`COLUMNS`]), one in a row when the bubble is narrow. The grid stays in the message's bubble.
 //!
 //! - **A card** ([`FileCard`]): a header with the file type's icon (in the colour Teams gives that type), the file's
-//!   name on one line, cut with an ellipsis, Share and "More options" (…); under it, for a video the player
-//!   that plays it in the card (`crate::video_player`, its thumbnail standing in until it plays), for another video or
-//!   an image a picture of the file filling the card: its thumbnail, asked of the engine by the file's sharing link
-//!   (`crate::inline::thumbnail`, never a request of the view's own), a tinted box while it is read, and a placeholder
-//!   with the type's icon when there is none. Another kind of file is its header alone.
+//!   name and, under it, where it is kept (`personal > <owner>`), each on one line, cut with an ellipsis; then Share
+//!   (on a video's card only, as Teams has it) and "More options" (…). Under the header, a video's card has the player
+//!   that plays it in the card (`crate::video_player`, its thumbnail standing in until it plays). Any other card has a
+//!   picture of the file that fills the card: for an image or a video, its thumbnail, asked of the engine by the
+//!   file's sharing link (`crate::inline::thumbnail`, never a request of the view's own), a tinted box while it is
+//!   read. A file with no thumbnail (an archive, a document, or a picture that can't be had) shows the large icon of
+//!   its type there, as Teams shows a zip.
 //! - **An image with a preview** (its entry's `filePreview`, a picture of it on AMS) is drawn as Teams draws it: the
 //!   picture alone, no header, at the preview's size scaled down into [`PREVIEW_MAX`] (its aspect ratio kept), with
 //!   rounded corners; "More options" over its corner while the pointer is on it. The picture is asked of the engine as
@@ -48,6 +50,21 @@ pub const CARD_WIDTH: f32 = 316.0;
 
 /// The height of a card's picture: a 16:9 frame of the card's width.
 pub const PICTURE_HEIGHT: f32 = 178.0;
+
+/// The height of a card's header: the icon beside the name and the location.
+pub const HEADER_HEIGHT: f32 = 64.0;
+
+/// The size of the type's icon in a card's header.
+const HEADER_ICON: f32 = 32.0;
+
+/// The size of the type's icon in the picture of a file that has no thumbnail.
+const PICTURE_ICON: f32 = 40.0;
+
+/// The most cards in one row of a message's grid, as Teams draws them.
+pub const COLUMNS: f32 = 2.0;
+
+/// The space between two cards of the grid, across and down.
+pub const GRID_GAP: f32 = 10.0;
 
 /// The box an image's preview is scaled down into (width, height), as Teams draws one in a message.
 pub const PREVIEW_MAX: (f32, f32) = (360.0, 252.0);
@@ -116,10 +133,11 @@ pub fn file_cards(
         div()
             .debug_selector(move || format!("file-cards-{message}"))
             .pt_2()
+            .max_w(px(COLUMNS * CARD_WIDTH + (COLUMNS - 1.0) * GRID_GAP))
             .flex()
             .flex_wrap()
             .items_start()
-            .gap_2()
+            .gap(px(GRID_GAP))
             .children(cards)
             .into_any_element(),
     )
@@ -137,14 +155,14 @@ pub struct FileCard {
 impl RenderOnce for FileCard {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let kind = self.file.kind();
-        if let Some(preview) = self.preview(kind, cx) {
+        if let Some(preview) = self.preview(cx) {
             return preview;
         }
         let picture = match &self.source {
             Some(source) if plays_inline(&self.file) => {
                 Some(player_of(&self.id, &self.file, source, window, cx).into_any_element())
             }
-            _ => kind.has_thumbnail().then(|| self.picture(kind, cx)),
+            _ => Some(self.picture(kind, cx)),
         };
         let id = self.id.clone();
         div()
@@ -167,6 +185,13 @@ impl RenderOnce for FileCard {
     }
 }
 
+/// Whether `file` is drawn as its picture alone ([`FileCard::preview`]) when the picture can be had: an image with a
+/// preview on AMS.
+#[must_use]
+pub fn drawn_as_preview(file: &SharedFile) -> bool {
+    file.kind() == FileKind::Image && file.preview.is_some()
+}
+
 /// The size `natural` is drawn at inside [`PREVIEW_MAX`]: scaled down to fit, its aspect ratio kept, never up.
 #[must_use]
 pub fn preview_size(natural: (u32, u32)) -> (f32, f32) {
@@ -179,8 +204,8 @@ pub fn preview_size(natural: (u32, u32)) -> (f32, f32) {
 impl FileCard {
     /// An image drawn as its preview (see the module docs); `None` when it is drawn as its card: another kind of file,
     /// no preview, no engine to ask, or none to have.
-    fn preview(&self, kind: FileKind, cx: &mut App) -> Option<AnyElement> {
-        let preview = self.file.preview.as_ref().filter(|_| kind == FileKind::Image)?;
+    fn preview(&self, cx: &mut App) -> Option<AnyElement> {
+        let preview = self.file.preview.as_ref().filter(|_| drawn_as_preview(&self.file))?;
         let state = picture(&preview.src, self.source.as_ref()?, cx);
         let given = preview.size;
         let id = self.id.clone();
@@ -271,32 +296,44 @@ impl FileCard {
                 .child(
                     kind_glyph(kind)
                         .icon()
-                        .size(px(24.0))
+                        .size(px(HEADER_ICON))
                         .flex_none()
                         .text_color(rgb(kind_colour(kind))),
                 )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child(name),
-                ),
+                .child(self.title(name)),
             &self.file,
             self.own(),
         );
         div()
-            .h(px(48.0))
+            .h(px(HEADER_HEIGHT))
             .px_3()
             .flex()
             .items_center()
-            .gap_2()
+            .gap_1()
             .child(opens)
-            .children(self.share())
+            .children((kind == FileKind::Video).then(|| self.share()).flatten())
             .children(self.more())
+            .into_any_element()
+    }
+
+    /// The name over where the file is kept, each on one line, cut with an ellipsis.
+    fn title(&self, name: SharedString) -> AnyElement {
+        let line = || div().overflow_hidden().text_ellipsis().whitespace_nowrap();
+        let location = self.file.location.clone().map(|location| {
+            let id = self.id.clone();
+            line()
+                .debug_selector(move || format!("file-location-{id}"))
+                .text_sm()
+                .text_color(rgb(self.palette.muted_foreground))
+                .child(location)
+        });
+        div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .child(line().font_weight(gpui::FontWeight::SEMIBOLD).child(name))
+            .children(location)
             .into_any_element()
     }
 
@@ -401,11 +438,12 @@ impl FileCard {
         )
     }
 
-    /// The picture of the file under its header: its thumbnail, a tinted box while it is read, its placeholder.
+    /// The picture of the file under its header: its thumbnail, a tinted box while it is read, else the large icon of
+    /// its type, which is all that a file with no thumbnail (an archive, a document) shows there.
     fn picture(&self, kind: FileKind, cx: &mut App) -> AnyElement {
         let palette = self.palette;
         let state = match (&self.source, self.file.share_url.as_deref()) {
-            (Some(source), Some(share_url)) => thumbnail(share_url, source, cx),
+            (Some(source), Some(share_url)) if kind.has_thumbnail() => thumbnail(share_url, source, cx),
             _ => PictureState::Missing,
         };
         let id = self.id.clone();
@@ -425,8 +463,8 @@ impl FileCard {
                     .child(
                         kind_glyph(kind)
                             .icon()
-                            .size(px(40.0))
-                            .text_color(rgb(palette.muted_foreground)),
+                            .size(px(PICTURE_ICON))
+                            .text_color(rgb(kind_colour(kind))),
                     )
                     .into_any_element(),
             ),

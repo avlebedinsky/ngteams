@@ -657,7 +657,8 @@ fn a_file_card_or_ams_object_no_capture_showed_is_kept_as_it_came_never_read_as_
     let reply = message(&fixture("reply.json")?["read_back"])?;
     assert_eq!(reply.files(), SharedFiles::default());
     assert_eq!(reply.unshown(), Vec::new());
-    // an entry of a shape no message showed (no `@type`, a link off SharePoint): kept as it came, never a file
+    // an entry of a shape no message showed (no `@type`, a link off SharePoint): kept as it came, its card drawn by
+    // its name alone, none of its links kept
     let entry = r#"[{"fileName":"made-up.txt","objectUrl":"https://example.test/x"}]"#;
     let odd = message(&json!({
         "id": "18",
@@ -668,12 +669,15 @@ fn a_file_card_or_ams_object_no_capture_showed_is_kept_as_it_came_never_read_as_
         "properties": {"files": entry, "cards": [{"made": "up"}], "links": "[]", "mentions": "[]"}
     }))?;
     let unread = json!([{"fileName": "made-up.txt", "objectUrl": "https://example.test/x"}]);
+    let files = odd.files();
+    let drawn: Vec<_> = files
+        .files
+        .iter()
+        .map(|file| (file.name.as_str(), file.open_link()))
+        .collect();
     assert_eq!(
-        odd.files(),
-        SharedFiles {
-            files: Vec::new(),
-            unread: Some(unread.clone()),
-        }
+        (drawn, files.unread),
+        (vec![("made-up.txt", None)], Some(unread.clone()))
     );
     assert_eq!(
         odd.unshown(),
@@ -1515,6 +1519,125 @@ fn a_messages_lines_broken_by_br_and_a_line_feed_read_as_a_browser_sets_them() -
 }
 
 #[test]
+fn a_message_of_five_files_and_no_text_reads_every_file_with_where_it_is_kept() -> TestResult {
+    let message = message(&fixture("files-grid.json")?["read_back"])?;
+    let SharedFiles { files, unread } = message.files();
+    assert_eq!(unread, None, "every entry read");
+    assert_eq!(message.unshown(), Vec::new());
+    let kinds: Vec<FileKind> = files.iter().map(SharedFile::kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            FileKind::Archive,
+            FileKind::Video,
+            FileKind::Video,
+            FileKind::Video,
+            FileKind::Video
+        ]
+    );
+    for file in &files {
+        assert_eq!(file.location.as_deref(), Some("personal > made_up_user_contoso_test"));
+        assert!(file.share_url.is_some() && file.object_url.is_some(), "{file:?}");
+    }
+    Ok(())
+}
+
+/// The five entries of `files-grid.json`, as a list.
+fn grid_entries() -> TestResult<Vec<Value>> {
+    let read = fixture("files-grid.json")?;
+    let files = read["read_back"]["properties"]["files"].as_str().ok_or("files")?;
+    Ok(serde_json::from_str(files)?)
+}
+
+#[test]
+fn a_files_string_with_a_lone_surrogate_escape_is_read_as_a_browser_reads_it() -> TestResult {
+    // a name cut in the middle of an emoji: JavaScript's JSON reader keeps the lone half, `serde_json` refuses it
+    let text = Value::Array(grid_entries()?).to_string().replacen(
+        "made-up-camera-take-1.mp4\"",
+        "made-up-camera-take-1 \\ud83c.mp4\"",
+        2,
+    );
+    assert!(serde_json::from_str::<Value>(&text).is_err(), "serde refuses it");
+    let read = shared_files(Some(&Value::String(text)));
+    assert_eq!(read.unread, None);
+    assert_eq!(read.files.len(), 5);
+    assert_eq!(read.files[1].name, "made-up-camera-take-1 \u{fffd}.mp4");
+    // a pair stays the character it is, an escaped backslash stays text
+    let text = Value::Array(grid_entries()?).to_string().replacen(
+        "made-up-stage-pack.zip\"",
+        "made-up \\ud83c\\udfac \\\\ud83c pack.zip\"",
+        2,
+    );
+    let read = shared_files(Some(&Value::String(text)));
+    assert_eq!(read.files[0].name, "made-up \u{1f3ac} \\ud83c pack.zip");
+    Ok(())
+}
+
+#[test]
+fn a_files_value_of_one_entry_or_encoded_twice_is_read() -> TestResult {
+    let entries = grid_entries()?;
+    let one = shared_files(Some(&Value::String(entries[0].to_string())));
+    assert_eq!((one.files.len(), one.unread), (1, None));
+    let twice = Value::String(Value::String(Value::Array(entries).to_string()).to_string());
+    let read = shared_files(Some(&twice));
+    assert_eq!((read.files.len(), read.unread), (5, None));
+    Ok(())
+}
+
+#[test]
+fn file_entries_of_another_file_type_or_none_are_read() -> TestResult {
+    let mut entries = grid_entries()?;
+    entries[1]["@type"] = json!("http://schema.skype.com/VideoFile");
+    entries[2].as_object_mut().ok_or("entry")?.remove("@type");
+    entries[3]["@type"] = Value::Null;
+    let read = shared_files(Some(&Value::Array(entries.clone())));
+    assert_eq!((read.files.len(), read.unread), (5, None));
+    // a type that names no file is still not one
+    entries[4]["@type"] = json!("http://schema.skype.com/HyperLink");
+    let read = shared_files(Some(&Value::Array(entries.clone())));
+    assert_eq!(read.files.len(), 4);
+    assert_eq!(read.unread, Some(json!([entries[4]])));
+    Ok(())
+}
+
+#[test]
+fn a_file_without_a_sharepoint_link_is_drawn_by_its_name_and_kept_as_unread() -> TestResult {
+    let mut entries = grid_entries()?;
+    let off = "https://files.example.test/made-up-camera-take-2.mp4";
+    for key in ["shareUrl", "fileUrl"] {
+        entries[2]["fileInfo"][key] = json!(off);
+    }
+    entries[2]["objectUrl"] = json!(off);
+    let read = shared_files(Some(&Value::Array(entries.clone())));
+    assert_eq!(read.files.len(), 5, "every card drawn");
+    let linkless = &read.files[2];
+    assert_eq!(linkless.name, "made-up-camera-take-2.mp4");
+    assert_eq!(linkless.kind(), FileKind::Video);
+    assert_eq!(
+        (linkless.share_url.as_deref(), linkless.object_url.as_deref()),
+        (None, None)
+    );
+    assert_eq!(linkless.open_link(), None, "its link is never kept");
+    assert_eq!(
+        read.unread,
+        Some(json!([entries[2]])),
+        "the message still says what it can't show"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_card_beside_five_files_leaves_every_file_read() -> TestResult {
+    let mut read = fixture("files-grid.json")?["read_back"].clone();
+    read["properties"]["cards"] = json!("[{\"made-up\":\"card\"}]");
+    let message = message(&read)?;
+    let SharedFiles { files, unread } = message.files();
+    assert_eq!((files.len(), unread), (5, None));
+    assert!(matches!(message.unshown().as_slice(), [Unshown::Cards(_)]));
+    Ok(())
+}
+
+#[test]
 fn a_received_messages_files_are_read_by_name_type_and_links() -> TestResult {
     let message = files_message()?;
     let SharedFiles { files, unread } = message.files();
@@ -1535,6 +1658,7 @@ fn a_received_messages_files_are_read_by_name_type_and_links() -> TestResult {
                     "{personal}/Documents/Microsoft Teams Chat Files/02-made-up-rehearsal-cut-v3.mp4"
                 )),
                 preview: None,
+                location: Some("personal > made_up_user_contoso_test".to_owned()),
             },
             SharedFile {
                 name: "01-made-up-stage-plan.pdf".to_owned(),
@@ -1547,6 +1671,7 @@ fn a_received_messages_files_are_read_by_name_type_and_links() -> TestResult {
                     "{personal}/Documents/Microsoft Teams Chat Files/01-made-up-stage-plan.pdf"
                 )),
                 preview: None,
+                location: Some("personal > made_up_user_contoso_test".to_owned()),
             },
         ]
     );
@@ -1800,7 +1925,9 @@ fn a_file_entry_off_its_shape_is_kept_as_it_came_beside_the_ones_read() -> TestR
     let mut list = vec![good.clone()];
     list.extend(odd.iter().cloned());
     let files = shared_files(Some(&Value::String(Value::Array(list).to_string())));
-    assert_eq!(files.files.len(), 1);
+    // the one with links off its shape is drawn by its name, none of its links kept
+    assert_eq!(files.files.len(), 2);
+    assert_eq!(files.files[1].open_link(), None);
     assert_eq!(files.unread, Some(Value::Array(odd.to_vec())));
     // a list, not a JSON string of one, reads alike; the extension comes from the name when no type is given
     let mut typeless = good;

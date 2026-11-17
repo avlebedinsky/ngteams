@@ -656,7 +656,7 @@ reason = "unit-test module included only by meeting_alert.rs cfg(test); omitted 
 context = { "crates/teams-ui/src/meeting_alert.rs" = "be5825947b396fe792bc9f0fe9d4f284a47a3156292b503e78dc6374372d41eb" }
 
 [unmapped_sources."crates/teams-proto/src/http/cloud_tests.rs"]
-sha256 = "2d519771578271632c7d831f414372a12e1c4d252d55d32733e4c5d5cab0ed0b"
+sha256 = "ddbea3ab77189948d34689fbb2f2d3ec498ba1823a5c0e37ca8ec8dbb2e78487"
 reason = "unit-test module included only under cfg(test); omitted by cargo-llvm-cov default tests.rs/_tests.rs filename filter; executable parent remains measured"
 context = { "crates/teams-proto/src/http.rs" = "799ea62729160fa5c0f3104397a97849a249f5300e5c727679fd8a7ce792257a" }
 

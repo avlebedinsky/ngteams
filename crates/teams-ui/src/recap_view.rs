@@ -593,6 +593,7 @@ impl RecapView {
             share_url: Some(link.clone()),
             object_url: None,
             preview: None,
+            location: None,
         };
         let source = PictureSource::new(Arc::clone(&self.core));
         let id = format!("recap-{index}");

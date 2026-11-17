@@ -5235,10 +5235,11 @@ fn bubble(
         // the hover bar's anchor
         .relative()
         .min_w_0();
-    // a message drawn bare (only an emoticon or a sticker, `Rendered::bare`) or of files alone has no bubble behind
-    // it, as in Teams
+    // a message drawn bare (only an emoticon or a sticker, `Rendered::bare`) or of image previews alone has no
+    // bubble behind it, as in Teams; a grid of file cards stays in its bubble
+    let previews_alone = files.is_some() && item.files.iter().all(files::drawn_as_preview);
     let bare = item.policy.is_none()
-        && (matches!(&item.body, Body::Text(text) if text.0.bare || (text.0.blocks.is_empty() && files.is_some()))
+        && (matches!(&item.body, Body::Text(text) if text.0.bare || (text.0.blocks.is_empty() && previews_alone))
             // a card (a channel meeting's too) is its own surface
             || matches!(&item.body, Body::Cards(_) | Body::Meeting(_)));
     let notice = item

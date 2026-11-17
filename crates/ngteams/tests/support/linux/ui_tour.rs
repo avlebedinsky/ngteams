@@ -2,22 +2,23 @@
 //! thread): the screenshots a change of the UI is checked by, kept under `target/ui-shots/tour-*.png`.
 //!
 //! The test runs itself again inside the sandbox ([`Sandbox::spawn_with_fds`], only the view trace's pipe passed
-//! through) as the app of lab account a, its engine on the mock chat service and its Trouter (`teams-mock`, through
-//! the `test-support` mock origins, a test roster and log). Once the window is drawn and the chats are listed, the
-//! child walks the views one step at a time (no chat open; the a–b chat with a message selected and its actions
-//! shown; a reply begun; the account menu; every page of the settings, Calls with made-up devices; the appearance
-//! and the chat again in Teams Dark; a message with files, its cards and their thumbnails, in Teams Dark and Light,
-//! its first video played in its card and paused; a message of lines, small pictures and a block of code, in Teams
-//! Dark and Light; a picture opened in the picture viewer, fitted and zoomed; the 12-hour time format and a chat's
-//! times on it; a group chat's presence; the "Chats" section's See more, what it brings and a chat opened from below
-//! the rows shown; New message, its To: line's suggestions, the chat two people already have and a group name, in
-//! Teams Dark and Light; a favourite channel opened from "Favorites", a post's hover bar and its thread beside the posts; forwarded messages; a call's own window, its participants' pane, its Call health, beside the main window
-//! with its in-call strip, and in Teams Dark; a group call with Raise and React, its People pane, its speaker view and
-//! its chat, its organizer's Mute all, People added to the chat and Controls, an attendee's greyed controls and
-//! "You've been muted", in Teams Light and Dark; a person's profile card, compact beside a group chat's and a channel
-//! post's face and full on each of its tabs, in Teams Light and Dark) and says
-//! `shot <name>` after each; the parent screenshots the window and lets it go on. The views are driven from inside
-//! the app, never by screen coordinates.
+//! through) as the app of lab account a, its engine on the mock chat service and its Trouter (`teams-mock`, through the
+//! `test-support` mock origins, a test roster and log). Once the window is drawn and the chats are listed, the child
+//! walks the views one step at a time (no chat open; the a–b chat with a message selected and its actions shown; a
+//! reply begun; the account menu; every page of the settings, Calls with made-up devices; the appearance and the chat
+//! again in Teams Dark; messages with files (text with three, then one, two, and five in a grid), their cards and
+//! thumbnails, in Teams Dark and Light, its first video played in its card and paused; a message of lines, small
+//! pictures and a block of code, in Teams Dark and Light; a picture opened in the picture viewer, fitted and zoomed;
+//! the 12-hour time format and a chat's times on it; a group chat's presence; the "Chats" section's See more, what it
+//! brings and a chat opened from below the rows shown; New message, its To: line's suggestions, the chat two people
+//! already have and a group name, in Teams Dark and Light; a favourite channel opened from "Favorites", a post's hover
+//! bar and its thread beside the posts; forwarded messages; a call's own window, its participants' pane, its Call
+//! health, beside the main window with its in-call strip, and in Teams Dark; a group call with Raise and React, its
+//! People pane, its speaker view and its chat, its organizer's Mute all, People added to the chat and Controls, an
+//! attendee's greyed controls and "You've been muted", in Teams Light and Dark; a person's profile card, compact beside
+//! a group chat's and a channel post's face and full on each of its tabs, in Teams Light and Dark) and says
+//! `shot <name>` after each; the parent screenshots the window and lets it go on. The views are driven from inside the
+//! app, never by screen coordinates.
 //!
 //! Without weston 15, niri or `dbus-daemon` it says so and passes, unless `GPUI_SMOKE_REQUIRE=1`.
 
@@ -189,7 +190,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 314 + 8 + 5 + 15] = [
+const STEPS: [Step; 5 + 320 + 8 + 5 + 15] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -1163,8 +1164,9 @@ const STEPS: [Step; 5 + 314 + 8 + 5 + 15] = [
             });
         });
     }),
-    // c's message with two videos and a document (`seed_files`): its lines, then the files' cards, the videos' with
-    // their thumbnails as Graph and the media host (the mock) gave them, in Teams Dark
+    // c's messages with files (`seed_files`), the newest at the bottom: a grid of five cards, two in a row, the videos'
+    // with their thumbnails as Graph and the media host (the mock) gave them, the zip's and the document's with their
+    // type's icon, in Teams Dark
     ("chat-files-dark", |shell, window, cx| {
         picture_viewer::close(cx);
         shell.update(cx, |shell, cx| shell.open_chat(AC_CHAT.to_owned(), window, cx));
@@ -1175,6 +1177,13 @@ const STEPS: [Step; 5 + 314 + 8 + 5 + 15] = [
     ("chat-video-loading-dark", |_, _, cx| toggle_first_video(cx)),
     ("chat-video-playing-dark", |_, _, _| {}),
     ("chat-video-paused-dark", |_, _, cx| toggle_first_video(cx)),
+    // the a–c chat scrolled to its first message: c's lines with two videos and a document, then a zip alone and two
+    // videos, in Teams Dark
+    ("chat-files-first-dark", |shell, _, cx| show_first_message(shell, cx)),
+    // its second and third: a zip alone, then two videos, each with no text
+    ("chat-files-few-dark", |shell, _, cx| show_message(shell, 1, cx)),
+    // its fourth from its top: the grid of five
+    ("chat-files-grid-dark", |shell, _, cx| show_message(shell, 3, cx)),
     // x's message of text, two small pictures and a block of code (`seed_mixed`), in Teams Dark: the a–x chat opened
     // (at its newest, the forwards), then scrolled to its first message, each picture at its own size in the flow and
     // the code in Teams' code card
@@ -1379,10 +1388,13 @@ const STEPS: [Step; 5 + 314 + 8 + 5 + 15] = [
     }),
     // a click on the reply's quote in Teams Light: the chat at the quoted message, ringed for a moment
     ("chat-quote-jump", |shell, _, cx| go_to_quote(shell, cx)),
-    // the files' cards again, in Teams Light
+    // the files' cards again, in Teams Light: the grid of five, then the first messages
     ("chat-files", |shell, window, cx| {
         shell.update(cx, |shell, cx| shell.open_chat(AC_CHAT.to_owned(), window, cx));
     }),
+    ("chat-files-first", |shell, _, cx| show_first_message(shell, cx)),
+    ("chat-files-few", |shell, _, cx| show_message(shell, 1, cx)),
+    ("chat-files-grid", |shell, _, cx| show_message(shell, 3, cx)),
     // the a–b–c chat: its senders' presence as the view asked the engine and the mock's UPS answered (`seed_group`),
     // b's and c's badges on their avatars
     ("chat-group-presence", |shell, window, cx| {
@@ -4089,6 +4101,28 @@ fn show_first_message(shell: &Entity<Shell>, cx: &mut App) {
     }
 }
 
+/// Scrolls the chat the shell shows to the top of its message `at` (0 the first), when it has one.
+fn show_message(shell: &Entity<Shell>, at: usize, cx: &mut App) {
+    let Some(chat) = shell.read(cx).chat().cloned() else {
+        return;
+    };
+    let item_ix = chat
+        .read(cx)
+        .items()
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| matches!(item, Item::Message(_)))
+        .nth(at)
+        .map(|(ix, _)| ix);
+    if let Some(item_ix) = item_ix {
+        chat.read(cx).list_state().scroll_to(ListOffset {
+            item_ix,
+            offset_in_item: px(0.0),
+        });
+        cx.refresh_windows();
+    }
+}
+
 /// Sets the app's text size to `size` px.
 fn set_font_size(shell: &Entity<Shell>, size: u16, cx: &mut App) {
     let model = shell.read(cx).settings().clone();
@@ -5009,6 +5043,31 @@ const MADE_UP_FILES: [MadeUpFile; 3] = [
     },
 ];
 
+/// More made-up files for the messages of files alone: a zip and two more videos.
+const MORE_MADE_UP_FILES: [MadeUpFile; 3] = [
+    MadeUpFile {
+        name: "made-up-stage-pack.zip",
+        extension: "zip",
+        kind: 'u',
+        share: "MadeUpShareLinkStagePack0005",
+        frame: None,
+    },
+    MadeUpFile {
+        name: "07-made-up-rehearsal-wide-shot.mp4",
+        extension: "mp4",
+        kind: 'v',
+        share: "MadeUpShareLinkWideShot0006",
+        frame: Some(([90, 20, 30], [240, 120, 90])),
+    },
+    MadeUpFile {
+        name: "08-made-up-rehearsal-close-up.mp4",
+        extension: "mp4",
+        kind: 'v',
+        share: "MadeUpShareLinkCloseUp0007",
+        frame: Some(([40, 30, 90], [150, 140, 230])),
+    },
+];
+
 /// A file's entry in `properties.files`, in the shape `tests/fixtures/chatsvc/files.json` has (made up).
 fn file_entry(file: &MadeUpFile, at: usize) -> serde_json::Value {
     let site = "https://contoso-my.sharepoint.com/personal/made_up_user_contoso_test/";
@@ -5039,61 +5098,85 @@ fn share_url(file: &MadeUpFile) -> String {
     )
 }
 
-/// c's message in the a–c chat as the one Teams shows with two videos: lines broken by `<br>` and a line feed each,
-/// then two videos and a document. Graph's thumbnail list and each video's made-up picture are served by the mock (the
-/// picture's link on the media host, as Graph hands one out).
+/// c's messages in the a–c chat, as Teams shows messages with files: lines broken by `<br>` and a line feed each, then
+/// two videos and a document; then, with no text, a zip alone, two videos, and a grid of five (a zip, three videos and a
+/// document). Graph's thumbnail list and each video's made-up picture are served by the mock (the picture's link on the
+/// media host, as Graph hands one out).
 fn seed_files(mock: &ChatServiceMock, runtime: &tokio::runtime::Runtime) -> SandboxResult {
     let html = "<p>Made-up lab note: a first line long enough to wrap across the chat view a couple of times over, \
                 (with a made-up aside)<br>\n<br>\nThe list below:<br>\n1. The first made-up item, which runs on a \
                 little.<br>\n2. The second made-up item.<br>\n3. The third made-up item.\
                 <br>\n<br>\nThe stage plan is attached too</p>";
+    let [first, second, plan] = &MADE_UP_FILES;
+    let [pack, third, fourth] = &MORE_MADE_UP_FILES;
+    for (html, files) in [
+        (html, vec![first, second, plan]),
+        ("", vec![pack]),
+        ("", vec![third, fourth]),
+        ("", vec![pack, first, second, plan, third]),
+    ] {
+        post_files(mock, html, &files)?;
+    }
+    for (at, file) in MADE_UP_FILES.iter().chain(&MORE_MADE_UP_FILES).enumerate() {
+        serve_file(mock, runtime, file, at)?;
+    }
+    Ok(())
+}
+
+/// c's post of `html` in the a–c chat, carrying `files` in `properties.files`.
+fn post_files(mock: &ChatServiceMock, html: &str, files: &[&MadeUpFile]) -> SandboxResult {
     let id = mock.post_as(LAB_C, AC_CHAT, html).ok_or("c's post refused")?;
-    let entries: Vec<serde_json::Value> = (0..)
-        .zip(&MADE_UP_FILES)
-        .map(|(at, file)| file_entry(file, at))
-        .collect();
+    let entries: Vec<serde_json::Value> = (0..).zip(files).map(|(at, file)| file_entry(file, at)).collect();
     let files = serde_json::Value::Array(entries).to_string();
     let client_message_id = (9_000_000_000_000_000_000_u64 + id.parse::<u64>()?).to_string();
     let changed = mock.change_message(AC_CHAT, &client_message_id, |message| {
         message["properties"]["files"] = serde_json::json!(files);
     });
-    if !changed {
-        return Err("c's post isn't in the mock".into());
-    }
-    for (at, file) in MADE_UP_FILES.iter().enumerate() {
-        let Some((dark, light)) = file.frame else { continue };
-        let read = teams_proto::FileThumbnails::of(&share_url(file)).ok_or("a made-up link no read names")?;
-        let token = read.share();
-        let picture = format!("/transform/thumbnail/made-up-{at}");
-        let list = serde_json::json!({"value": [{"id": "0", "large": {
-            "height": 450, "width": 800,
-            "url": format!("https://westus1-mediap.svc.ms{picture}?provider=spo&docid=made-up"),
-        }}]});
-        runtime.block_on(mock.serve_bytes(
-            &format!("/v1.0/shares/{token}/driveItem/thumbnails"),
-            "application/json",
-            list.to_string().into_bytes(),
-        ));
-        let mut png = Vec::new();
-        made_up_frame(dark, light).write_to(&mut io::Cursor::new(&mut png), image::ImageFormat::Png)?;
-        runtime.block_on(mock.serve_bytes(&picture, "image/png", png));
-        // the file's item with its download link on the sharer's site, and the file there, read by ranges
-        let download = "/personal/made_up_user_contoso_test/_layouts/15/download.aspx";
-        let item = serde_json::json!({
-            "id": format!("made-up-item-{at}"),
-            "name": file.name,
-            "size": MADE_UP_VIDEO.len(),
-            "@microsoft.graph.downloadUrl": format!(
-                "https://contoso-my.sharepoint.com{download}?UniqueId=made-up-{at}&tempauth=made-up"
-            ),
-        });
-        runtime.block_on(mock.serve_bytes(
-            &format!("/v1.0/shares/{token}/driveItem"),
-            "application/json",
-            item.to_string().into_bytes(),
-        ));
-        runtime.block_on(mock.serve_ranged(download, "video/mp4", MADE_UP_VIDEO.to_vec()));
-    }
+    changed.then_some(()).ok_or_else(|| "c's post isn't in the mock".into())
+}
+
+/// The mock's thumbnail of `file` (a video's made-up picture) and the file itself, read by ranges; nothing for a file
+/// without a picture. `at` makes its links its own.
+fn serve_file(
+    mock: &ChatServiceMock,
+    runtime: &tokio::runtime::Runtime,
+    file: &MadeUpFile,
+    at: usize,
+) -> SandboxResult {
+    let Some((dark, light)) = file.frame else {
+        return Ok(());
+    };
+    let read = teams_proto::FileThumbnails::of(&share_url(file)).ok_or("a made-up link no read names")?;
+    let token = read.share();
+    let picture = format!("/transform/thumbnail/made-up-{at}");
+    let list = serde_json::json!({"value": [{"id": "0", "large": {
+        "height": 450, "width": 800,
+        "url": format!("https://westus1-mediap.svc.ms{picture}?provider=spo&docid=made-up"),
+    }}]});
+    runtime.block_on(mock.serve_bytes(
+        &format!("/v1.0/shares/{token}/driveItem/thumbnails"),
+        "application/json",
+        list.to_string().into_bytes(),
+    ));
+    let mut png = Vec::new();
+    made_up_frame(dark, light).write_to(&mut io::Cursor::new(&mut png), image::ImageFormat::Png)?;
+    runtime.block_on(mock.serve_bytes(&picture, "image/png", png));
+    // the file's item with its download link on the sharer's site, and the file there, read by ranges
+    let download = "/personal/made_up_user_contoso_test/_layouts/15/download.aspx";
+    let item = serde_json::json!({
+        "id": format!("made-up-item-{at}"),
+        "name": file.name,
+        "size": MADE_UP_VIDEO.len(),
+        "@microsoft.graph.downloadUrl": format!(
+            "https://contoso-my.sharepoint.com{download}?UniqueId=made-up-{at}&tempauth=made-up"
+        ),
+    });
+    runtime.block_on(mock.serve_bytes(
+        &format!("/v1.0/shares/{token}/driveItem"),
+        "application/json",
+        item.to_string().into_bytes(),
+    ));
+    runtime.block_on(mock.serve_ranged(download, "video/mp4", MADE_UP_VIDEO.to_vec()));
     Ok(())
 }
 

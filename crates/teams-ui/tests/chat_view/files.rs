@@ -1,7 +1,7 @@
 //! The files a message carries, drawn as Teams draws them (`teams_ui::files`), on GPUI's test context over the fake
 //! engine: a card per file under the text, side by side and wrapping when the window is narrow; a video's card holding
 //! its player, the video's thumbnail asked of the engine by its sharing link and shown in it until it plays (the
-//! player's black box without one), a document's card its header alone; a click on the name opens the sharing link,
+//! player's black box without one), a document's card the large icon of its type; a click on the name opens the sharing link,
 //! "More options" downloads it or copies the link; nothing about the files is said to be unshown; an image with a
 //! preview is drawn as the picture alone, its card when the preview can't be had. The message is the synthetic fixture
 //! `tests/fixtures/chatsvc/files.json`: every name, link and id is made up.
@@ -18,6 +18,7 @@ use super::common::{LAB_B, Rig};
 use super::{NOON, chat_window, draw, items, message, rig_with, trace};
 
 const FIXTURE: &str = include_str!("../../../../tests/fixtures/chatsvc/files.json");
+const GRID: &str = include_str!("../../../../tests/fixtures/chatsvc/files-grid.json");
 const ID: &str = "301";
 
 /// The fixture's message, from b, as the store keeps it (its `properties` JSON text).
@@ -107,10 +108,9 @@ fn a_messages_files_are_cards_side_by_side_under_its_text() {
     // under the text
     let text = bounds(cx, &format!("bubble-{ID}")).expect("the bubble");
     assert!(video.origin.y > text.origin.y + px(40.0), "{video:?} in {text:?}");
-    assert!(
-        document.size.height < video.size.height,
-        "a document's card is its header alone"
-    );
+    // a document's card has its picture too: the large icon of its type, as Teams draws a zip
+    assert_eq!(document.size.height, video.size.height);
+    assert!(bounds(cx, &format!("file-thumbnail-none-{ID}-1")).is_some());
     // the name stays within its card, cut with an ellipsis rather than widening it
     let name = bounds(cx, &format!("file-name-{ID}-0")).expect("the name");
     assert!(
@@ -138,7 +138,7 @@ fn a_videos_thumbnail_is_asked_of_the_engine_and_shown_in_its_player_and_a_click
         poster.size.width >= video.size.width - px(3.0),
         "{poster:?} in {video:?}"
     );
-    for none in ["video-player", "video-poster", "file-thumbnail", "file-thumbnail-none"] {
+    for none in ["video-player", "video-poster", "file-thumbnail-reading"] {
         assert!(bounds(cx, &format!("{none}-{ID}-1")).is_none(), "{none}");
     }
 
@@ -709,4 +709,107 @@ fn a_file_name_from_a_message_is_never_a_path() {
     assert_eq!(safe_name("../../.bashrc"), "_.._.bashrc");
     assert_eq!(safe_name("a\\b:c\u{7}.txt"), "a_b_c_.txt");
     assert_eq!(safe_name(" .. "), "file");
+}
+
+/// The grid fixture's message (five files and no text), from b, its `properties.files` changed by `change`.
+fn grid_message(change: impl FnOnce(String) -> String) -> Message {
+    let fixture: Value = serde_json::from_str(GRID).unwrap();
+    let read_back = &fixture["read_back"];
+    let mut properties = read_back["properties"].clone();
+    properties["files"] = Value::from(change(properties["files"].as_str().unwrap().to_owned()));
+    let mut stored = message(ID, LAB_B, read_back["content"].as_str().unwrap(), NOON);
+    stored.properties = Some(properties.to_string());
+    stored
+}
+
+fn grid_chat(message: Message) -> (Entity<ChatView>, &'static mut VisualTestContext) {
+    let rig = Box::leak(Box::new(rig_with(vec![message])));
+    let (written_trace, _) = trace();
+    let (view, cx) = chat_window(rig, written_trace);
+    cx.simulate_resize(size(px(1100.0), px(1400.0)));
+    draw(cx);
+    (view, cx)
+}
+
+#[test]
+fn five_files_are_a_grid_of_two_columns_with_where_each_is_kept_and_share_on_the_videos() {
+    let (view, cx) = grid_chat(grid_message(|files| files));
+    let item = items(&view, cx).remove(0);
+    assert_eq!(item.files.len(), 5);
+    assert_eq!(item.unshown, UnshownParts::default());
+    assert!(bounds(cx, &format!("unshown-{ID}")).is_none());
+    let card = |at: usize, cx: &mut VisualTestContext| bounds(cx, &format!("file-card-{ID}-{at}")).expect("a card");
+    let cards: Vec<_> = (0..5).map(|at| card(at, cx)).collect();
+    // two in a row, then the next row under them, the fifth alone under the first
+    assert_eq!(cards[1].origin.y, cards[0].origin.y);
+    assert!(cards[1].origin.x > cards[0].origin.x + cards[0].size.width);
+    for (at, above) in [(2, 0), (3, 1), (4, 2)] {
+        assert_eq!(cards[at].origin.x, cards[above].origin.x, "card {at}");
+        assert!(
+            cards[at].origin.y >= cards[above].origin.y + cards[above].size.height,
+            "card {at}"
+        );
+    }
+    // each card has its picture: the zip's type icon, the videos' players
+    assert!(bounds(cx, &format!("file-thumbnail-none-{ID}-0")).is_some());
+    for at in 1..5 {
+        assert!(bounds(cx, &format!("video-player-{ID}-{at}")).is_some(), "video {at}");
+    }
+    headers_have_location_and_share_on_the_videos(cx);
+}
+
+/// Where each file of the grid is kept, under its name; Share on the videos alone, More options on each.
+fn headers_have_location_and_share_on_the_videos(cx: &mut VisualTestContext) {
+    for at in 0..5 {
+        let location = bounds(cx, &format!("file-location-{ID}-{at}")).expect("the location");
+        let name = bounds(cx, &format!("file-name-{ID}-{at}")).expect("the name");
+        assert!(location.origin.y > name.origin.y, "{location:?} {name:?}");
+        assert!(bounds(cx, &format!("file-more-{ID}-{at}")).is_some());
+        assert_eq!(
+            bounds(cx, &format!("file-share-{ID}-{at}")).is_some(),
+            at > 0,
+            "share {at}"
+        );
+    }
+}
+
+#[test]
+fn five_files_whose_list_serde_refuses_show_their_cards_not_the_fallback() {
+    // a name cut in the middle of an emoji: a lone surrogate escape in the list's JSON, which a browser reads
+    let (view, cx) = grid_chat(grid_message(|files| {
+        files.replacen("made-up-camera-take-1.mp4\"", "made-up-camera-take-1 \\ud83c.mp4\"", 2)
+    }));
+    let item = items(&view, cx).remove(0);
+    assert_eq!(item.files.len(), 5, "every file read");
+    assert_eq!(item.unshown, UnshownParts::default(), "nothing said unshown");
+    assert!(bounds(cx, &format!("unshown-{ID}")).is_none(), "no fallback line");
+    for at in 0..5 {
+        assert!(bounds(cx, &format!("file-card-{ID}-{at}")).is_some(), "card {at}");
+    }
+}
+
+#[test]
+fn a_file_without_a_sharepoint_link_is_a_card_without_actions_beside_the_good_ones() {
+    let off = "https://files.example.test/made-up-camera-take-2.mp4";
+    let (view, cx) = grid_chat(grid_message(|files| {
+        let mut entries: Value = serde_json::from_str(&files).unwrap();
+        for key in ["shareUrl", "fileUrl"] {
+            entries[2]["fileInfo"][key] = Value::from(off);
+        }
+        entries[2]["objectUrl"] = Value::from(off);
+        entries.to_string()
+    }));
+    let item = items(&view, cx).remove(0);
+    assert_eq!(item.files.len(), 5);
+    assert!(item.unshown.files, "the message still says what it can't show");
+    assert!(bounds(cx, &format!("unshown-{ID}")).is_some());
+    for at in 0..5 {
+        assert!(bounds(cx, &format!("file-card-{ID}-{at}")).is_some(), "card {at}");
+    }
+    // its card names it, with nothing to open, share or download, and no player
+    assert!(bounds(cx, &format!("file-name-{ID}-2")).is_some());
+    for none in ["file-more", "file-share", "video-player"] {
+        assert!(bounds(cx, &format!("{none}-{ID}-2")).is_none(), "{none}");
+    }
+    assert!(bounds(cx, &format!("file-thumbnail-none-{ID}-2")).is_some());
 }

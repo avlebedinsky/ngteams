@@ -442,8 +442,11 @@ fn a_view_that_knows_no_account_reads_an_own_servers_file_on_that_server() {
         "sharepointIds":{"listItemUniqueId":"00000000-0000-4000-8000-000000000001"}});
     let file = UploadedFile::from_upload(&site, &serde_json::to_vec(&upload).unwrap()).unwrap();
     let files = serde_json::json!([file.entry()]);
-    // Microsoft's reading leaves it unread; the view's reads it on the server its links name
-    assert!(shared_files(Some(&files)).files.is_empty());
+    // Microsoft's reading draws it with none of its links and keeps it unread; the view's reads it on the server its
+    // links name
+    let microsoft = shared_files(Some(&files));
+    assert!(microsoft.files.iter().all(|file| file.open_link().is_none()));
+    assert!(microsoft.unread.is_some());
     let read = shared_files_any(Some(&files));
     assert_eq!(read.unread, None);
     assert_eq!(
@@ -561,7 +564,9 @@ fn own_file_classification_keeps_only_unread_entries_cards_and_ams_unshown() {
         message.properties.insert("cards".into(), cards.clone());
         message.ams_references = Some(vec![json!("synthetic-object")]);
         let read = message.files_in(&cloud);
-        assert_eq!(read.files.len(), 1);
+        // the foreign one is drawn by its name, its link never kept
+        assert_eq!(read.files.len(), 2);
+        assert_eq!(read.files[1].open_link(), None);
         assert_eq!(read.unread, Some(json!([foreign.clone()])));
         assert_eq!(
             unshown_parts_in(&cloud, &message.properties),
