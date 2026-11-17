@@ -169,6 +169,11 @@ name = "qa_channel_meeting_window"
 harness = false
 
 [[test]]
+# QA of task 523: a channel post that came by email in the app's window over the mock
+name = "qa_email_post_window"
+harness = false
+
+[[test]]
 name = "deferred_devices_window"
 harness = false
 
