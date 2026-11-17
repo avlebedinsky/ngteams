@@ -1718,6 +1718,8 @@ fn a_received_messages_files_are_read_by_name_type_and_links() -> TestResult {
     );
     assert_eq!(message.unshown(), Vec::new(), "every file read: nothing unshown");
     let (video, pdf) = (&files[0], &files[1]);
+    // a Microsoft site names its owner itself: no own server's account to name
+    assert_eq!(video.site_owner(), None);
     assert_eq!((video.kind(), pdf.kind()), (FileKind::Video, FileKind::Pdf));
     assert!(video.kind().has_thumbnail() && !pdf.kind().has_thumbnail());
     // a click opens the sharing link; Download is the same link with `download=1`
@@ -2248,4 +2250,30 @@ fn a_long_email_link_is_kept_whole_or_dropped() {
     assert_eq!(kept.and_then(|details| details.email_link), Some(long));
     let too_long = EmailDetails::of(Some(&json!({ "emailLink": link_of(4097) })));
     assert_eq!(too_long.and_then(|details| details.email_link), None);
+}
+
+#[test]
+fn an_own_servers_drive_names_its_owners_account() {
+    let file = |link: &str| SharedFile {
+        name: "made-up plan.pdf".to_owned(),
+        extension: "pdf".to_owned(),
+        share_url: Some(link.to_owned()),
+        object_url: None,
+        preview: None,
+        location: None,
+    };
+    let own =
+        file("https://chat.example:8443/sp/personal/0000000000004000800000000000000B/Documents/made-up%20plan.pdf");
+    assert_eq!(
+        own.site_owner().as_deref(),
+        Some("8:orgid:00000000-0000-4000-8000-00000000000b")
+    );
+    // not an account's id: a short one, a name, another path
+    for link in [
+        "https://chat.example:8443/sp/personal/00000000000040008000/Documents/a.pdf",
+        "https://chat.example:8443/sp/personal/made_up_user_contoso_test/Documents/a.pdf",
+        "https://chat.example:8443/personal/0000000000004000800000000000000b/Documents/a.pdf",
+    ] {
+        assert_eq!(file(link).site_owner(), None, "{link}");
+    }
 }

@@ -1,8 +1,9 @@
 //! A video a message carries, played in its card as Teams plays one (`crate::files` draws the card's header): a black
-//! box of the card's width holding the video's picture, with a seek bar and the controls over its bottom.
+//! box of the card's width at 16:9 holding the video's picture, with a seek bar and the controls over its bottom.
 //!
-//! - **Before it plays**: the file's thumbnail (Graph's, as the card shows it, `crate::inline::thumbnail`) with the
-//!   controls over it. Play, a click on the picture or Space starts it: a [`Player`] (`teams-media`) on a thread of its
+//! - **Before it plays**: the file's thumbnail alone (Graph's, as the card shows it, `crate::inline::thumbnail`), as
+//!   Teams shows it; a video with none (an own server's) shows the large video icon on the picture's shade
+//!   (`crate::files::no_picture`), never a black box. A click on the picture or Space starts it: a [`Player`] (`teams-media`) on a thread of its
 //!   own, streaming the file from the engine ([`Core::file_stream`](crate::bridge::Core::file_stream), through
 //!   the card's [`PictureSource`]: no view builds a request), played by `GStreamer`, each frame shown here through
 //!   GPUI's external surface, its sound on the speaker of the devices the app gave ([`set_playback`]).
@@ -10,8 +11,10 @@
 //!   it while the pointer is on it), the time (`0:10 / 1:52`), "More options" (open in the browser, download, copy
 //!   link), full screen (the video over the whole window, the window full screen; Esc or the button leaves it) and
 //!   "Open in browser" (Stream's player, where Teams pops the video out). The seek bar seeks
-//!   where it is clicked or dragged to, its tooltip the time. While it plays the controls show only while the pointer
-//!   is on the video; paused, always. Space plays or pauses, Left and Right go 10 s back or forward, M mutes.
+//!   where it is clicked or dragged to, its tooltip the time. In a card the controls show only while the pointer is on
+//!   the video (or its seek bar is dragged, or a menu of it is open), whether it plays or not, as in Teams; a recap's
+//!   player shows them while it doesn't play too. Space plays or pauses, Left and Right go 10 s back or forward, M
+//!   mutes.
 //! - **Its states**: loading and buffering show a spinner over the picture; a video that can't be played here (a
 //!   format no installed `GStreamer` plugin plays, a file the account can't read, the network) says so and offers the
 //!   browser.
@@ -56,9 +59,10 @@ use teams_media::player::{
 };
 use teams_proto::chat::{FileKind, SharedFile};
 
-use crate::files::{COPY_LINK, DOWNLOAD, OPEN_IN_BROWSER, PICTURE_HEIGHT};
+use crate::files::{self, COPY_LINK, DOWNLOAD, OPEN_IN_BROWSER, PICTURE_RATIO};
 use crate::icons::{Glyph, selected_by};
 use crate::inline::{PictureSource, PictureState, thumbnail};
+use crate::theme;
 use crate::video::Picture;
 
 mod captions;
@@ -350,7 +354,7 @@ pub struct VideoPlayer {
     bar: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The seek bar's place while it is dragged, as a fraction.
     dragging: Option<f32>,
-    /// It fills its box's width at 16:9 (a recap's player), not a card's fixed height.
+    /// A recap's player: its controls show while it doesn't play, and its bar has the recap's buttons.
     fill: bool,
     /// Where to go once the file opened: asked before the player had a place to seek in.
     pending_seek: Option<Duration>,
@@ -428,7 +432,7 @@ impl VideoPlayer {
         }
     }
 
-    /// The player of a recap: it fills its box's width at 16:9 rather than a card's height.
+    /// The player of a recap: its controls show while it doesn't play, and its bar has the recap's buttons.
     #[must_use]
     pub fn filling(mut self) -> Self {
         self.fill = true;
@@ -833,13 +837,13 @@ impl Render for VideoPlayer {
             )
             .with_priority(100)
         });
-        let shaped = div().debug_selector(move || format!("video-player-{id}")).w_full();
-        let shaped = if self.fill {
-            shaped.aspect_ratio(16.0 / 9.0)
-        } else {
-            shaped.h(px(PICTURE_HEIGHT))
-        };
-        shaped.child(inline).children(overlay)
+        // 16:9 of its box's width, in a card as narrow as it gets too
+        div()
+            .debug_selector(move || format!("video-player-{id}"))
+            .w_full()
+            .aspect_ratio(PICTURE_RATIO)
+            .child(inline)
+            .children(overlay)
     }
 }
 
@@ -891,7 +895,8 @@ impl VideoPlayer {
             .into_any_element()
     }
 
-    /// The video's frame fitted into the box, else the file's thumbnail, else black.
+    /// The video's frame fitted into the box, else the file's thumbnail, else in a card the picture's shade (with the
+    /// large video icon when there is no thumbnail to wait for), else black.
     fn picture(&mut self, cx: &mut App) -> AnyElement {
         if let Some((frame, (width, height))) = self.frame() {
             return canvas(
@@ -919,7 +924,21 @@ impl VideoPlayer {
                     .child(img(image).size_full().object_fit(ObjectFit::Contain))
                     .into_any_element()
             }
-            PictureState::Reading | PictureState::Missing => div().size_full().into_any_element(),
+            // a recording's player stays black, as Teams' Recap player is
+            _ if self.recording.is_some() => div().size_full().into_any_element(),
+            PictureState::Reading => div()
+                .size_full()
+                .bg(gpui::rgb(files::picture_colour(theme::current(cx))))
+                .into_any_element(),
+            PictureState::Missing => {
+                let id = self.id.clone();
+                div()
+                    .debug_selector(move || format!("video-no-thumbnail-{id}"))
+                    .size_full()
+                    .bg(gpui::rgb(files::picture_colour(theme::current(cx))))
+                    .child(files::no_picture(FileKind::Video, &format!("video-icon-{}", self.id)))
+                    .into_any_element()
+            }
         }
     }
 
@@ -984,12 +1003,17 @@ impl VideoPlayer {
             .into_any_element()
     }
 
-    /// The seek bar and the buttons over the box's bottom, on a shade.
+    /// The seek bar and the buttons over the box's bottom, on a shade: while the pointer is on the video, or always
+    /// while they are used (see the module docs). Its test selector says which: `video-controls-<id> shown` or
+    /// `video-controls-<id> on-hover`.
     fn controls(&mut self, group: &SharedString, cx: &mut Context<Self>) -> AnyElement {
-        let always = !self.playing() || self.dragging.is_some() || self.menu.is_some();
+        let always = (self.fill && !self.playing()) || self.dragging.is_some() || self.menu.is_some();
         let bar = self.seek_bar(cx);
         let buttons = self.buttons(cx);
+        let id = self.id.clone();
+        let shown = if always { "shown" } else { "on-hover" };
         div()
+            .debug_selector(move || format!("video-controls-{id} {shown}"))
             .absolute()
             .left_0()
             .right_0()

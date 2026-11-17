@@ -1172,8 +1172,8 @@ const STEPS: [Step; 5 + 320 + 8 + 5 + 15] = [
         shell.update(cx, |shell, cx| shell.open_chat(AC_CHAT.to_owned(), window, cx));
     }),
     // the first video played in its card, its bytes from the mock's download link (`seed_files`): loading, then
-    // playing (its controls hidden while the pointer is elsewhere), then paused (or played to its end), its frame and
-    // its controls with the seek bar part way
+    // playing, then paused (or played to its end), its frame alone: as in Teams, the controls show only while the
+    // pointer is on the video
     ("chat-video-loading-dark", |_, _, cx| toggle_first_video(cx)),
     ("chat-video-playing-dark", |_, _, _| {}),
     ("chat-video-paused-dark", |_, _, cx| toggle_first_video(cx)),

@@ -2862,6 +2862,31 @@ impl ChatView {
         }
     }
 
+    /// `files` with each own server's site owner ([`SharedFile::site_owner`]) named in its location as the view
+    /// names people (`personal > <name>`, as Teams names a site's owner), not by the account's id; a file whose owner
+    /// the view can't name keeps its location.
+    fn owners_named(&self, mut files: Vec<SharedFile>, message: &Message) -> Vec<SharedFile> {
+        for file in &mut files {
+            let Some(owner) = file.site_owner() else {
+                continue;
+            };
+            let name = if message.sender.as_deref() == Some(owner.as_str()) {
+                let (name, named) = self.sender_of(message);
+                named.then_some(name)
+            } else {
+                self.shown(&owner)
+                    .and_then(|shown| shown.name.as_ref())
+                    .map(ToString::to_string)
+            };
+            if let (Some(name), Some(location)) = (name, file.location.as_mut())
+                && let Some((site, _)) = location.rsplit_once(" > ")
+            {
+                *location = format!("{site} > {name}");
+            }
+        }
+        files
+    }
+
     /// A text message's rich text, parsed and laid out once per id and version: the cache is asked before anything
     /// is parsed.
     fn rendered(&mut self, message: &Message) -> Arc<Rendered> {
@@ -3026,7 +3051,7 @@ impl ChatView {
         let body = self.body(message)?;
         let (files, links, app_cards, unshown) = if matches!(body, Body::Text(_)) {
             (
-                Arc::new(files_of(message)),
+                Arc::new(self.owners_named(files_of(message), message)),
                 Arc::new(link_preview::previews_of(message.properties.as_deref())),
                 ShownCards::of_properties(message.properties.as_deref()),
                 unshown_of(message),

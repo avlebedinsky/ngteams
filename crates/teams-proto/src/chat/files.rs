@@ -19,7 +19,8 @@
 //!   ([`SharedFiles::unread`]): a view says the message has content it can't show, never a guess at it, and still
 //!   draws the files it read.
 //! - **Location**: the card's second line is the path of the file's site (`personal > <owner>`, [`location_of`]).
-//!   Teams' card for a received file shows it under the name.
+//!   Teams' card for a received file shows it under the name. An own server's site names its owner by the account's
+//!   id ([`SharedFile::site_owner`]); the view puts the owner's name in its place.
 
 use serde_json::{Map, Value};
 use url::Url;
@@ -126,6 +127,30 @@ impl SharedFile {
         let mut url = Url::parse(self.share_url.as_deref()?).ok()?;
         url.query_pairs_mut().append_pair("download", "1");
         Some(url.into())
+    }
+
+    /// The MRI of the account whose drive on an own server keeps it (`8:orgid:<id>`), when its sharing link (else its
+    /// own) is in such a drive: `/sp/personal/<id without dashes>/…`. Its [`location`](Self::location) names that
+    /// account by the id, which a view replaces with the account's name, as Teams names a site's owner.
+    #[must_use]
+    pub fn site_owner(&self) -> Option<String> {
+        let link = Url::parse(self.open_link()?).ok()?;
+        let mut parts = link.path_segments()?;
+        let (Some("sp"), Some("personal"), Some(user)) = (parts.next(), parts.next(), parts.next()) else {
+            return None;
+        };
+        let hex = user.to_ascii_lowercase();
+        if hex.len() != 32 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        Some(format!(
+            "8:orgid:{}-{}-{}-{}-{}",
+            &hex[..8],
+            &hex[8..12],
+            &hex[12..16],
+            &hex[16..20],
+            &hex[20..]
+        ))
     }
 }
 

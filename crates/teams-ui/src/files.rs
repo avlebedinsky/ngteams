@@ -1,40 +1,47 @@
 //! The files a message carries, drawn as Teams draws them under the message's text: a grid of cards, two in a row at
 //! most ([`COLUMNS`]), one in a row when the bubble is narrow. The grid stays in the message's bubble.
 //!
-//! - **A card** ([`FileCard`]): a header with the file type's icon (in the colour Teams gives that type), the file's
-//!   name and, under it, where it is kept (`personal > <owner>`), each on one line, cut with an ellipsis; then Share
-//!   (on a video's card only, as Teams has it) and "More options" (…). Under the header, a video's card has the player
-//!   that plays it in the card (`crate::video_player`, its thumbnail standing in until it plays). Any other card has a
-//!   picture of the file that fills the card: for an image or a video, its thumbnail, asked of the engine by the
-//!   file's sharing link (`crate::inline::thumbnail`, never a request of the view's own), a tinted box while it is
-//!   read. A file with no thumbnail (an archive, a document, or a picture that can't be had) shows the large icon of
-//!   its type there, as Teams shows a zip.
+//! - **A card** ([`FileCard`]): a header with the file type's icon (Teams' own for a video, a play mark in a white
+//!   box, and for a zip, a yellow folder: [`kind_icon`]; another type's in the colour Teams gives that type), the
+//!   file's name and, under it, where it is kept (`personal > <owner>`), each on one line, cut with an ellipsis; then
+//!   Share (on a video's card only, as Teams has it) and "More options" (…), buttons of Teams' size. Under the header,
+//!   a 16:9 picture of the card's width, also in a narrow card: a video's card has the player that plays it in the card
+//!   (`crate::video_player`, its thumbnail alone standing in until it plays). Any other card has a picture of the file:
+//!   for an image, its thumbnail, asked of the engine by the file's sharing link (`crate::inline::thumbnail`, never a
+//!   request of the view's own). A file with no thumbnail (an archive, a document, or a picture that can't be had)
+//!   shows the large icon of its type there, as Teams shows a zip. The header and the picture have Teams' shades
+//!   ([`header_colour`], [`picture_colour`]).
 //! - **An image with a preview** (its entry's `filePreview`, a picture of it on AMS) is drawn as Teams draws it: the
 //!   picture alone, no header, at the preview's size scaled down into [`PREVIEW_MAX`] (its aspect ratio kept), with
 //!   rounded corners; "More options" over its corner while the pointer is on it. The picture is asked of the engine as
 //!   a message's picture is (`crate::inline::picture`); a tinted box of its size stands in while it is read, and the
 //!   card is drawn when there is none.
 //! - **A click** on the name or the picture opens the file the way the web client does, at its sharing link in the
-//!   browser (GPUI's `open_url`); "More options" offers "Open in browser", "Download" (the sharing link with
-//!   `download=1`: the browser downloads it) and "Copy link". Share offers the file's link to copy, the way to share it
-//!   that reaches nobody by itself (sharing it with people from the app would be a contacting write it doesn't make).
+//!   browser (GPUI's `open_url`); "More options" offers what Teams on the web offers: "Open in browser" (not on a
+//!   video's card), "Download" (the sharing link with `download=1`: the browser downloads it), "Share" and "Copy link".
+//!   Share (the video card's button, and the item) offers the file's link to copy, the way to share it that reaches
+//!   nobody by itself; Teams' "Share this file" dialog, which posts the file to a chat or a channel, is not here yet.
+//!   Teams' "Favorite" (the file in the user's OneDrive favorites) is not offered: the app has no favorite files.
 //! - **An own server's file** ([`OwnFile`]) is read through its account's engine, never in a browser: the server has
 //!   no page that shows a file, and a browser holds no token for it. A click and "Open in desktop app" save it in a
-//!   new folder in a folder of the user's alone and open it in the system's app for it (its `file://` link);
+//!   new folder in a folder of the user's alone and open it in the system's app for it (its `file://` link; not on a
+//!   video's card, as Teams has no "Open in browser" there);
 //!   "Download" saves it where the user chooses (the downloads folder without a chooser)
 //!   (`crate::recording_download`). Each runs to its end, also when the other one starts while it runs. A line under
 //!   the card tells how far the last one got.
 //! - Colours come from the palette but for the file types' own, fixed in every theme as Teams' file icons are.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
 use gpui::{
-    AnyElement, App, ClipboardItem, Global, InteractiveElement as _, IntoElement, ObjectFit, ParentElement as _,
-    RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _, Window, div, img, px,
-    rgb,
+    AnyElement, App, ClipboardItem, Global, Image, ImageFormat, InteractiveElement as _, IntoElement, ObjectFit,
+    ParentElement as _, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _,
+    Window, div, img, px, rgb,
 };
 use gpui_component::Sizable as _;
-use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_component::button::Button;
+use gpui_component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_component::tooltip::Tooltip;
 use teams_proto::chat::{FileKind, SharedFile};
 
@@ -42,17 +49,27 @@ use crate::icons::{Glyph, icon_button, selected_by};
 use crate::inline::{PictureSource, PictureState, picture, thumbnail};
 use crate::recording_download::{self, Failure, Progress, Then, download_of};
 use crate::rich_text::tint;
-use crate::theme::Palette;
+use crate::theme::{self, Palette};
 use crate::video_player::{player_of, plays_inline};
 
 /// A card's width, as Teams draws one.
 pub const CARD_WIDTH: f32 = 316.0;
 
-/// The height of a card's picture: a 16:9 frame of the card's width.
-pub const PICTURE_HEIGHT: f32 = 178.0;
+/// A card's picture's width over its height, whatever the card's width: Teams' 16:9.
+pub const PICTURE_RATIO: f32 = 16.0 / 9.0;
+
+/// The size of a header's buttons (Share, "More options"), px: their icons are three quarters of it, Teams' 20 px.
+pub const HEADER_BUTTON: f32 = 27.0;
+
+/// How far a card's header is mixed from the bubble toward the text, in a dark and in a light theme: Teams Dark's
+/// header is 51 on a bubble of 41, Teams Light's 250 on 255.
+const HEADER_LIFT: (f32, f32) = (0.047, 0.023);
 
 /// The height of a card's header: the icon beside the name and the location.
 pub const HEADER_HEIGHT: f32 = 64.0;
+
+/// The size of a menu row's icon, px.
+const MENU_ICON: f32 = 14.0;
 
 /// The size of the type's icon in a card's header.
 const HEADER_ICON: f32 = 32.0;
@@ -76,7 +93,67 @@ const PREVIEW_UNKNOWN: (u32, u32) = (252, 252);
 pub const OPEN_IN_BROWSER: &str = "Open in browser";
 pub const OPEN_IN_APP: &str = "Open in desktop app";
 pub const DOWNLOAD: &str = "Download";
+pub const SHARE: &str = "Share";
 pub const COPY_LINK: &str = "Copy link";
+
+/// The colour of a card's header (and of the card under its picture), as Teams draws it: the bubble's surface a shade
+/// toward the text.
+#[must_use]
+pub fn header_colour(palette: Palette) -> u32 {
+    let lift = if theme::palette_is_dark(palette) {
+        HEADER_LIFT.0
+    } else {
+        HEADER_LIFT.1
+    };
+    theme::mix(palette.surface, palette.foreground, lift)
+}
+
+/// The colour of a card's picture while it shows no picture of the file (a zip, a document, a video with no
+/// thumbnail, one read): the app's background, as Teams draws it, darker than the bubble in a dark theme and a shade
+/// under the header in a light one.
+#[must_use]
+pub const fn picture_colour(palette: Palette) -> u32 {
+    palette.background
+}
+
+/// Teams' own type icons, in colour (our drawings after them): a video's and a zip's; the others are [`kind_glyph`]s.
+fn teams_icon(kind: FileKind) -> Option<Arc<Image>> {
+    static VIDEO: OnceLock<Arc<Image>> = OnceLock::new();
+    static ZIP: OnceLock<Arc<Image>> = OnceLock::new();
+    let (cell, svg): (&OnceLock<Arc<Image>>, &'static [u8]) = match kind {
+        FileKind::Video => (&VIDEO, include_bytes!("../assets/file-types/video.svg")),
+        FileKind::Archive => (&ZIP, include_bytes!("../assets/file-types/zip.svg")),
+        _ => return None,
+    };
+    Some(Arc::clone(cell.get_or_init(|| {
+        Arc::new(Image::from_bytes(ImageFormat::Svg, svg.to_vec()))
+    })))
+}
+
+/// The icon of a file type as a card draws it, `size` px square: Teams' own for a video and a zip, else its glyph in
+/// its colour. Its test selector is `<selector> teams` for Teams' own, `<selector> glyph` for a glyph.
+#[must_use]
+pub fn kind_icon(kind: FileKind, size: f32, selector: String) -> AnyElement {
+    match teams_icon(kind) {
+        Some(image) => div()
+            .debug_selector(move || format!("{selector} teams"))
+            .flex_none()
+            .size(px(size))
+            .child(img(image).size_full())
+            .into_any_element(),
+        None => div()
+            .debug_selector(move || format!("{selector} glyph"))
+            .flex_none()
+            .size(px(size))
+            .child(
+                kind_glyph(kind)
+                    .icon()
+                    .size(px(size))
+                    .text_color(rgb(kind_colour(kind))),
+            )
+            .into_any_element(),
+    }
+}
 
 /// The colour Teams draws a file type's icon in, the same in every theme.
 #[must_use]
@@ -176,8 +253,7 @@ impl RenderOnce for FileCard {
             .overflow_hidden()
             .border_1()
             .border_color(rgb(self.palette.border))
-            // the foreground faintly over the bubble: lighter on a dark one, darker on a light one
-            .bg(tint(self.palette.foreground, 0.04))
+            .bg(rgb(header_colour(self.palette)))
             .child(self.header(kind))
             .children(picture)
             .children(self.status(cx))
@@ -226,7 +302,7 @@ impl FileCard {
             ),
         };
         let group = SharedString::from(format!("file-preview-{id}"));
-        let more = self.more().map(|more| {
+        let more = self.more(FileKind::Image).map(|more| {
             div()
                 .absolute()
                 .top_1()
@@ -293,13 +369,7 @@ impl FileCard {
                     let name = name.clone();
                     move |window, cx| Tooltip::new(name.clone()).build(window, cx)
                 })
-                .child(
-                    kind_glyph(kind)
-                        .icon()
-                        .size(px(HEADER_ICON))
-                        .flex_none()
-                        .text_color(rgb(kind_colour(kind))),
-                )
+                .child(kind_icon(kind, HEADER_ICON, format!("file-icon-{}", self.id)))
                 .child(self.title(name)),
             &self.file,
             self.own(),
@@ -312,7 +382,7 @@ impl FileCard {
             .gap_1()
             .child(opens)
             .children((kind == FileKind::Video).then(|| self.share()).flatten())
-            .children(self.more())
+            .children(self.more(kind))
             .into_any_element()
     }
 
@@ -337,81 +407,78 @@ impl FileCard {
             .into_any_element()
     }
 
-    /// Share: the file's link to copy, as Teams' Share offers it first.
+    /// Share: the file's link to copy ([`share_menu`]); Teams' "Share this file" dialog isn't here yet.
     fn share(&self) -> Option<AnyElement> {
         let link = self.file.open_link()?.to_owned();
         let id = self.id.clone();
-        let button = icon_button(SharedString::from(format!("file-share-{id}")), Glyph::SHARE, "Share")
-            .small()
-            .dropdown_menu(move |menu, _, _| {
-                let link = link.clone();
-                menu.item(
-                    menu_item(&id, "share-copy", Glyph::LINK, COPY_LINK)
-                        .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(link.clone()))),
-                )
-            });
+        let button = header_button(format!("file-share-{id}"), Glyph::SHARE, SHARE)
+            .dropdown_menu(move |menu, _, _| share_menu(menu, &id, &link));
         Some(selected_by(format!("file-share-{}", self.id), button).into_any_element())
     }
 
-    /// "More options": the file's local actions, when it has a link to act on.
-    fn more(&self) -> Option<AnyElement> {
-        let open = self.file.open_link()?.to_owned();
-        if let Some(own) = self.own() {
-            return Some(self.own_more(own, open));
-        }
-        let download = self.file.download_link();
+    /// "More options": the file's actions, as Teams on the web offers them, when it has a link to act on: "Open in
+    /// browser" (not on a video's card), "Download", "Share" (its menu, [`share_menu`]) and "Copy link". An own
+    /// server's file is opened and downloaded through its engine (see the module docs).
+    fn more(&self, kind: FileKind) -> Option<AnyElement> {
+        let link = self.file.open_link()?.to_owned();
+        let opens = kind != FileKind::Video;
+        let actions = match self.own() {
+            Some(own) => Actions::Own(own),
+            None => Actions::Browser {
+                download: self.file.download_link(),
+            },
+        };
         let id = self.id.clone();
-        let button = icon_button(
-            SharedString::from(format!("file-more-{id}")),
-            Glyph::MORE,
-            "More options",
-        )
-        .small()
-        .dropdown_menu(move |menu, _, _| {
-            let open_link = open.clone();
-            let copied = open.clone();
-            let menu = menu.item(
-                menu_item(&id, "open", Glyph::EXTERNAL_LINK, OPEN_IN_BROWSER)
-                    .on_click(move |_, _, cx| cx.open_url(&open_link)),
-            );
-            let menu = match download.clone() {
-                Some(download) => menu.item(
-                    menu_item(&id, "download", Glyph::DOWNLOAD, DOWNLOAD)
-                        .on_click(move |_, _, cx| cx.open_url(&download)),
-                ),
-                None => menu,
-            };
-            menu.item(
-                menu_item(&id, "copy", Glyph::LINK, COPY_LINK)
-                    .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))),
-            )
-        });
+        let button = header_button(format!("file-more-{id}"), Glyph::MORE, "More options").dropdown_menu(
+            move |menu, window, cx| {
+                let menu = match &actions {
+                    _ if !opens => menu,
+                    Actions::Own(own) => {
+                        let own = own.clone();
+                        menu.item(
+                            menu_item(&id, "open", Glyph::EXTERNAL_LINK, OPEN_IN_APP)
+                                .on_click(move |_, _, cx| own.open(cx)),
+                        )
+                    }
+                    Actions::Browser { .. } => {
+                        let link = link.clone();
+                        menu.item(
+                            menu_item(&id, "open", Glyph::EXTERNAL_LINK, OPEN_IN_BROWSER)
+                                .on_click(move |_, _, cx| cx.open_url(&link)),
+                        )
+                    }
+                };
+                let menu = match &actions {
+                    Actions::Own(own) => {
+                        let own = own.clone();
+                        menu.item(
+                            menu_item(&id, "download", Glyph::DOWNLOAD, DOWNLOAD)
+                                .on_click(move |_, _, cx| own.download(cx)),
+                        )
+                    }
+                    Actions::Browser {
+                        download: Some(download),
+                    } => {
+                        let download = download.clone();
+                        menu.item(
+                            menu_item(&id, "download", Glyph::DOWNLOAD, DOWNLOAD)
+                                .on_click(move |_, _, cx| cx.open_url(&download)),
+                        )
+                    }
+                    Actions::Browser { download: None } => menu,
+                };
+                let (shared, copied) = (link.clone(), link.clone());
+                let share_id = id.clone();
+                menu.submenu_with_icon(Some(menu_icon(Glyph::SHARE)), SHARE, window, cx, move |menu, _, _| {
+                    share_menu(menu, &share_id, &shared)
+                })
+                .item(
+                    menu_item(&id, "copy", Glyph::LINK, COPY_LINK)
+                        .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))),
+                )
+            },
+        );
         Some(selected_by(format!("file-more-{}", self.id), button).into_any_element())
-    }
-
-    /// "More options" of an own server's file: opened and downloaded through its engine (see the module docs).
-    fn own_more(&self, own: OwnFile, link: String) -> AnyElement {
-        let id = self.id.clone();
-        let button = icon_button(
-            SharedString::from(format!("file-more-{id}")),
-            Glyph::MORE,
-            "More options",
-        )
-        .small()
-        .dropdown_menu(move |menu, _, _| {
-            let (opened, downloaded, copied) = (own.clone(), own.clone(), link.clone());
-            menu.item(
-                menu_item(&id, "open", Glyph::EXTERNAL_LINK, OPEN_IN_APP).on_click(move |_, _, cx| opened.open(cx)),
-            )
-            .item(
-                menu_item(&id, "download", Glyph::DOWNLOAD, DOWNLOAD).on_click(move |_, _, cx| downloaded.download(cx)),
-            )
-            .item(
-                menu_item(&id, "copy", Glyph::LINK, COPY_LINK)
-                    .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))),
-            )
-        });
-        selected_by(format!("file-more-{}", self.id), button).into_any_element()
     }
 
     /// The file as its own server's, read through `source`'s engine: when it has an engine and its links aren't on
@@ -438,8 +505,9 @@ impl FileCard {
         )
     }
 
-    /// The picture of the file under its header: its thumbnail, a tinted box while it is read, else the large icon of
-    /// its type, which is all that a file with no thumbnail (an archive, a document) shows there.
+    /// The picture of the file under its header, 16:9 of the card's width: its thumbnail, the picture's shade while it
+    /// is read, else the large icon of its type, which is all that a file with no thumbnail (an archive, a document)
+    /// shows there.
     fn picture(&self, kind: FileKind, cx: &mut App) -> AnyElement {
         let palette = self.palette;
         let state = match (&self.source, self.file.share_url.as_deref()) {
@@ -455,18 +523,7 @@ impl FileCard {
             PictureState::Reading => ("file-thumbnail-reading", div().size_full().into_any_element()),
             PictureState::Missing => (
                 "file-thumbnail-none",
-                div()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        kind_glyph(kind)
-                            .icon()
-                            .size(px(PICTURE_ICON))
-                            .text_color(rgb(kind_colour(kind))),
-                    )
-                    .into_any_element(),
+                no_picture(kind, &format!("file-picture-icon-{id}")),
             ),
         };
         open_on_click(
@@ -474,13 +531,47 @@ impl FileCard {
                 .id(SharedString::from(format!("file-picture-{id}")))
                 .debug_selector(move || format!("{selector}-{id}"))
                 .w_full()
-                .h(px(PICTURE_HEIGHT))
-                .bg(tint(palette.foreground, 0.06))
+                .aspect_ratio(PICTURE_RATIO)
+                .bg(rgb(picture_colour(palette)))
                 .child(shown),
             &self.file,
             self.own(),
         )
     }
+}
+
+/// The picture of a file that has none to show (see [`picture_colour`]): the large icon of its type in the middle.
+/// Its icon's test selector is `<selector> teams` or `<selector> glyph` ([`kind_icon`]).
+#[must_use]
+pub fn no_picture(kind: FileKind, selector: &str) -> AnyElement {
+    div()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(kind_icon(kind, PICTURE_ICON, selector.to_owned()))
+        .into_any_element()
+}
+
+/// What "More options" does with a file: through the browser (a Microsoft file), or through its engine (an own
+/// server's).
+enum Actions {
+    Browser { download: Option<String> },
+    Own(OwnFile),
+}
+
+/// A header's button: `glyph` at Teams' size ([`HEADER_BUTTON`]), `tip` its tooltip.
+fn header_button(id: String, glyph: Glyph, tip: &'static str) -> Button {
+    icon_button(SharedString::from(id), glyph, tip).with_size(px(HEADER_BUTTON))
+}
+
+/// Share's menu (the video card's button, and the item in "More options"): "Copy link", the file's `link`.
+fn share_menu(menu: PopupMenu, card: &str, link: &str) -> PopupMenu {
+    let link = link.to_owned();
+    menu.item(
+        menu_item(card, "share-copy", Glyph::LINK, COPY_LINK)
+            .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(link.clone()))),
+    )
 }
 
 /// `element` opening `file` when clicked, with the pointer's hand: an own server's through its engine ([`OwnFile::open`]),
@@ -655,17 +746,67 @@ pub fn safe_name(name: &str) -> String {
     }
 }
 
-/// A "More options" row: its icon and words, its test selector `file-menu-<what>-<card>`.
+/// A "More options" row: its icon and words, its test selector `file-menu-<what>-<card>`. The icon is in the menu's
+/// own column, as Share's (a menu of its own, which the kit draws with its icon there) is, so the rows line up.
 fn menu_item(card: &str, what: &str, glyph: Glyph, label: &'static str) -> PopupMenuItem {
     let selector = format!("file-menu-{what}-{card}");
     PopupMenuItem::element(move |_, _| {
         let selector = selector.clone();
-        div()
-            .debug_selector(move || selector.clone())
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(glyph.icon().size(px(14.0)))
-            .child(label)
+        div().debug_selector(move || selector.clone()).child(label)
     })
+    .icon(menu_icon(glyph))
+}
+
+/// A menu row's icon: the kit draws the icons of its column at 10.5 px; scaled to the 14 px of the app's menus, and
+/// moved left by what the scale adds on the right, so that it keeps its space from the words.
+fn menu_icon(glyph: Glyph) -> gpui_component::Icon {
+    let scale = MENU_ICON / 10.5;
+    glyph.icon().transform(
+        gpui::Transformation::scale(gpui::size(scale, scale))
+            .with_translation(gpui::point(px(-(MENU_ICON - 10.5) / 2.0), px(0.0))),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{header_colour, picture_colour};
+    use crate::theme::{DARK_PALETTE, LIGHT_PALETTE};
+
+    /// `colour`'s red, green and blue.
+    fn channels(colour: u32) -> [u32; 3] {
+        [colour >> 16 & 0xff, colour >> 8 & 0xff, colour & 0xff]
+    }
+
+    /// Whether each channel of `colour` is within `near` of `wanted`.
+    fn about(colour: u32, wanted: u32, near: u32) -> bool {
+        channels(colour).iter().all(|channel| channel.abs_diff(wanted) <= near)
+    }
+
+    #[test]
+    fn a_cards_header_and_empty_picture_have_teams_shades() {
+        // Teams Dark: the bubble 41, the header 51, the picture 31 (darker than the bubble)
+        assert!(
+            about(header_colour(DARK_PALETTE), 51, 1),
+            "{:06x}",
+            header_colour(DARK_PALETTE)
+        );
+        assert!(
+            about(picture_colour(DARK_PALETTE), 31, 1),
+            "{:06x}",
+            picture_colour(DARK_PALETTE)
+        );
+        // Teams Light: the bubble 255, the header 250, the picture 245 (a shade under the header)
+        assert!(
+            about(header_colour(LIGHT_PALETTE), 250, 1),
+            "{:06x}",
+            header_colour(LIGHT_PALETTE)
+        );
+        assert!(
+            about(picture_colour(LIGHT_PALETTE), 245, 5),
+            "{:06x}",
+            picture_colour(LIGHT_PALETTE)
+        );
+        let picture: u32 = channels(picture_colour(LIGHT_PALETTE)).iter().sum();
+        assert!(picture.abs_diff(3 * 245) <= 6, "{picture}");
+    }
 }

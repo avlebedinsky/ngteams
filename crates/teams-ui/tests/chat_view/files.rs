@@ -1,9 +1,11 @@
 //! The files a message carries, drawn as Teams draws them (`teams_ui::files`), on GPUI's test context over the fake
-//! engine: a card per file under the text, side by side and wrapping when the window is narrow; a video's card holding
-//! its player, the video's thumbnail asked of the engine by its sharing link and shown in it until it plays (the
-//! player's black box without one), a document's card the large icon of its type; a click on the name opens the sharing link,
-//! "More options" downloads it or copies the link; nothing about the files is said to be unshown; an image with a
-//! preview is drawn as the picture alone, its card when the preview can't be had. The message is the synthetic fixture
+//! engine: a card per file under the text, side by side and wrapping when the window is narrow, its picture 16:9 of
+//! the card's width however narrow; a video's card holding its player, the video's thumbnail asked of the engine by
+//! its sharing link and shown alone in it until it plays (the controls only while the pointer is on it; the large
+//! video icon without a thumbnail), a document's card the large icon of its type; Teams' type icons and header
+//! buttons; a click on the name opens the sharing link, "More options" offers Teams' items (Share's "Copy link" too);
+//! an own server's file names its owner; nothing about the files is said to be unshown; an image with a preview is
+//! drawn as the picture alone, its card when the preview can't be had. The message is the synthetic fixture
 //! `tests/fixtures/chatsvc/files.json`: every name, link and id is made up.
 
 use std::sync::Arc;
@@ -150,7 +152,7 @@ fn a_videos_thumbnail_is_asked_of_the_engine_and_shown_in_its_player_and_a_click
 }
 
 #[test]
-fn a_video_without_a_thumbnail_shows_its_players_black_box_and_narrow_cards_wrap() {
+fn a_video_without_a_thumbnail_shows_the_large_video_icon_and_narrow_cards_wrap() {
     let rig = rig();
     let (written_trace, _) = trace();
     let (_view, cx) = chat_window(&rig, written_trace);
@@ -158,6 +160,10 @@ fn a_video_without_a_thumbnail_shows_its_players_black_box_and_narrow_cards_wrap
     draw(cx);
     assert!(bounds(cx, &format!("video-player-{ID}-0")).is_some(), "the player");
     assert!(bounds(cx, &format!("video-poster-{ID}-0")).is_none(), "no thumbnail");
+    // never a black box with the controls over it: the large video icon on the picture's shade, the controls hidden
+    assert!(bounds(cx, &format!("video-no-thumbnail-{ID}-0")).is_some());
+    assert!(bounds(cx, &format!("video-icon-{ID}-0 teams")).is_some());
+    assert!(bounds(cx, &format!("video-controls-{ID}-0 on-hover")).is_some());
     let video = bounds(cx, &format!("file-card-{ID}-0")).expect("the video's card");
     let document = bounds(cx, &format!("file-card-{ID}-1")).expect("the document's card");
     assert!(
@@ -172,17 +178,168 @@ fn more_options_download_the_file_and_copy_its_link() {
     let shares = share_urls();
     let (written_trace, _) = trace();
     let (_view, cx) = chat_window(&rig, written_trace);
-    click(cx, &format!("file-more-{ID}-0"));
+    click(cx, &format!("file-more-{ID}-1"));
     assert!(
-        bounds(cx, &format!("file-menu-open-{ID}-0")).is_some(),
+        bounds(cx, &format!("file-menu-open-{ID}-1")).is_some(),
         "Open in browser"
     );
-    click(cx, &format!("file-menu-download-{ID}-0"));
-    assert_eq!(cx.opened_url(), Some(format!("{}?download=1", shares[0])));
+    click(cx, &format!("file-menu-download-{ID}-1"));
+    assert_eq!(cx.opened_url(), Some(format!("{}?download=1", shares[1])));
     click(cx, &format!("file-more-{ID}-0"));
     click(cx, &format!("file-menu-copy-{ID}-0"));
-    let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
-    assert_eq!(copied.as_deref(), Some(shares[0].as_str()));
+    assert_eq!(copied(cx).as_deref(), Some(shares[0].as_str()));
+}
+
+/// What the clipboard holds.
+fn copied(cx: &mut VisualTestContext) -> Option<String> {
+    cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+}
+
+/// Opens "More options" of card `at` and walks down to its row `row` (counted from 1), then into Share's menu.
+fn into_share_of_more(cx: &mut VisualTestContext, at: usize, row: usize) {
+    click(cx, &format!("file-more-{ID}-{at}"));
+    let keys = vec!["down"; row].join(" ");
+    cx.simulate_keystrokes(&keys);
+    cx.simulate_keystrokes("right");
+    draw(cx);
+}
+
+#[test]
+fn more_options_offer_what_teams_offers_on_a_video_and_on_a_document() {
+    let rig = rig();
+    let shares = share_urls();
+    let (written_trace, _) = trace();
+    let (_view, cx) = chat_window(&rig, written_trace);
+    // a video's card: Download, Share, Copy link; no Open in browser, as Teams on the web has it
+    click(cx, &format!("file-more-{ID}-0"));
+    assert!(
+        bounds(cx, &format!("file-menu-open-{ID}-0")).is_none(),
+        "no Open on a video"
+    );
+    assert!(bounds(cx, &format!("file-menu-download-{ID}-0")).is_some());
+    assert!(bounds(cx, &format!("file-menu-copy-{ID}-0")).is_some());
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    // its second row is Share, whose menu copies the link
+    into_share_of_more(cx, 0, 2);
+    click(cx, &format!("file-menu-share-copy-{ID}-0"));
+    assert_eq!(copied(cx).as_deref(), Some(shares[0].as_str()));
+    // a document's card: Open in browser, Download, Share, Copy link; Share is its third row
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new()));
+    click(cx, &format!("file-more-{ID}-1"));
+    for row in ["open", "download", "copy"] {
+        assert!(bounds(cx, &format!("file-menu-{row}-{ID}-1")).is_some(), "{row}");
+    }
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    into_share_of_more(cx, 1, 3);
+    click(cx, &format!("file-menu-share-copy-{ID}-1"));
+    assert_eq!(copied(cx).as_deref(), Some(shares[1].as_str()));
+}
+
+#[test]
+fn share_on_a_videos_card_copies_its_link() {
+    let rig = rig();
+    let shares = share_urls();
+    let (written_trace, _) = trace();
+    let (_view, cx) = chat_window(&rig, written_trace);
+    click(cx, &format!("file-share-{ID}-0"));
+    click(cx, &format!("file-menu-share-copy-{ID}-0"));
+    assert_eq!(copied(cx).as_deref(), Some(shares[0].as_str()));
+}
+
+#[test]
+fn a_videos_card_shows_its_thumbnail_alone_and_the_controls_only_under_the_pointer() {
+    let (_rig, _view, cx) = shown_with_thumbnail();
+    assert!(bounds(cx, &format!("video-poster-{ID}-0")).is_some(), "the still frame");
+    assert!(
+        bounds(cx, &format!("video-controls-{ID}-0 on-hover")).is_some(),
+        "the controls wait for the pointer"
+    );
+    assert!(bounds(cx, &format!("video-controls-{ID}-0 shown")).is_none());
+}
+
+/// Whether `inner`'s height is 9/16 of its width, to a pixel.
+fn sixteen_nine(inner: Bounds<Pixels>) -> bool {
+    (f32::from(inner.size.height) - f32::from(inner.size.width) * 9.0 / 16.0).abs() <= 1.0
+}
+
+#[test]
+fn in_a_narrow_window_each_cards_picture_stays_16_9_of_its_width() {
+    let (_rig, _view, cx) = shown_with_thumbnail();
+    cx.simulate_resize(size(px(330.0), px(900.0)));
+    draw(cx);
+    for at in 0..2 {
+        let card = bounds(cx, &format!("file-card-{ID}-{at}")).expect("the card");
+        assert!(
+            f32::from(card.size.width) < teams_ui::files::CARD_WIDTH - 20.0,
+            "narrow: {card:?}"
+        );
+    }
+    let player = bounds(cx, &format!("video-player-{ID}-0")).expect("the player");
+    assert!(sixteen_nine(player), "the video: {player:?}");
+    let document = bounds(cx, &format!("file-thumbnail-none-{ID}-1")).expect("the document's picture");
+    assert!(sixteen_nine(document), "the document: {document:?}");
+    // wide again: the full card's 16:9
+    cx.simulate_resize(size(px(1100.0), px(900.0)));
+    draw(cx);
+    let player = bounds(cx, &format!("video-player-{ID}-0")).expect("the player");
+    assert!(sixteen_nine(player), "{player:?}");
+    assert!((f32::from(player.size.height) - 178.0).abs() <= 2.0, "{player:?}");
+}
+
+#[test]
+fn a_cards_header_has_teams_type_icons_and_buttons_of_teams_size() {
+    let (_rig, _view, cx) = shown_with_thumbnail();
+    // Teams' own icon for a video (the play mark in a white box); a document's is its type's glyph
+    assert!(bounds(cx, &format!("file-icon-{ID}-0 teams")).is_some());
+    assert!(bounds(cx, &format!("file-icon-{ID}-1 glyph")).is_some());
+    for button in [
+        format!("file-share-{ID}-0"),
+        format!("file-more-{ID}-0"),
+        format!("file-more-{ID}-1"),
+    ] {
+        let drawn = bounds(cx, &button).expect("the button");
+        let side = f32::from(drawn.size.width);
+        assert!((25.0..=32.0).contains(&side), "{button}: {drawn:?}");
+    }
+}
+
+#[test]
+fn a_zips_card_has_teams_folder_icon_in_its_header_and_its_picture() {
+    let (_view, cx) = grid_chat(grid_message(|files| files));
+    assert!(bounds(cx, &format!("file-icon-{ID}-0 teams")).is_some(), "the header's");
+    assert!(
+        bounds(cx, &format!("file-picture-icon-{ID}-0 teams")).is_some(),
+        "the picture's"
+    );
+}
+
+/// The own server's account id of b, as its drive's path names it: b's MRI's id without the dashes.
+const OWN_SITE: &str = "https://chat.example:8443/sp/personal/0000000000004000800000000000000b/";
+
+/// A message from b of one document in an own server's drive: `owner` the id of the drive's account (in its path).
+fn own_drive_message(owner: &str) -> Message {
+    let site = OWN_SITE.replace("0000000000004000800000000000000b", owner);
+    let share = format!("{site}Documents/Microsoft%20Teams%20Chat%20Files/made-up%20plan.pdf");
+    let entry = serde_json::json!({"@type": teams_proto::chat::FILE_TYPE, "fileName": "made-up plan.pdf",
+        "fileType": "pdf", "state": "active", "objectUrl": share,
+        "fileInfo": {"shareUrl": share, "fileUrl": share, "siteUrl": site}, "baseUrl": site});
+    let mut stored = message(ID, LAB_B, "", NOON);
+    stored.properties = Some(serde_json::json!({"files": Value::Array(vec![entry]).to_string()}).to_string());
+    stored
+}
+
+#[test]
+fn an_own_servers_file_names_its_owner_by_name_not_by_the_accounts_id() {
+    let (view, cx) = grid_chat(own_drive_message("0000000000004000800000000000000b"));
+    let item = items(&view, cx).remove(0);
+    assert_eq!(item.files[0].location.as_deref(), Some("personal > Lab Bee"));
+    // an account the view doesn't know keeps its id
+    let unknown = "00000000000040008000000000000ddd";
+    let (view, cx) = grid_chat(own_drive_message(unknown));
+    let item = items(&view, cx).remove(0);
+    assert_eq!(item.files[0].location, Some(format!("personal > {unknown}")));
 }
 
 /// A made-up image file's preview on AMS, as an entry's `filePreview` names it.
