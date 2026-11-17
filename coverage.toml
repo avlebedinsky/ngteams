@@ -81,7 +81,7 @@ context = { "crates/teams-media/src/video/effects.rs" = "787856448e591791db31587
 
 
 [unmapped_sources."crates/teams-proto/src/chat/mod.rs"]
-sha256 = "c65f3d9c459b028436d34b6e543d6966a7249ff90bd81361a9de603ca2aafc9b"
+sha256 = "71333cfb7c7fa47e68b17ab095effe753c89c96cba5057a344c555bce16d7d41"
 reason = "module declarations, re-exports and documentation only; no executable items"
 
 
