@@ -911,7 +911,7 @@ async fn with_redis_down_a_post_is_let_through_and_the_warning_names_no_secret()
         return;
     };
     redis.start().await;
-    let rig = Rig::start_on(Backend::Sqlite, "redis-down", "", Some(redis.url.clone())).await;
+    let mut rig = Rig::start_on(Backend::Sqlite, "redis-down", "", Some(redis.url.clone())).await;
     let ada = rig.user(&rig.first, "ada@own.test").await;
     let bert = rig.user(&rig.first, "bert@own.test").await;
     let chat = group_chat(&ada, &[&bert]).await;
@@ -948,10 +948,11 @@ async fn with_redis_down_a_post_is_let_through_and_the_warning_names_no_secret()
         .count();
     assert_eq!(posted, 1);
     drop((ada, bert));
-    let logs = rig.logs.clone();
-    rig.stop(&[&link]).await;
+    // the log is read before `stop` drops the deployment's directory, which holds it
+    rig.stop_nodes().await;
     // the warning is logged inside the webhook's own span, which names its path and no query
-    let log = std::fs::read_to_string(logs.join("node-a-start-1.log")).unwrap();
+    let log = std::fs::read_to_string(rig.logs.join("node-a-start-1.log")).unwrap();
+    rig.stop(&[&link]).await;
     let warned = log
         .lines()
         .find(|line| line.contains("can't count a workflow's webhook posts"))
