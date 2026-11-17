@@ -51,7 +51,7 @@ fn told(view: &Entity<ChatView>, cx: &mut VisualTestContext) -> std::rc::Rc<std:
     let kept = std::rc::Rc::clone(&told);
     cx.update(|_, cx| {
         cx.subscribe(view, move |_, event: &ChatViewEvent, _| {
-            kept.borrow_mut().push(event.clone())
+            kept.borrow_mut().push(event.clone());
         })
         .detach();
     });
@@ -111,6 +111,28 @@ fn the_plus_lists_the_apps_for_the_box_and_its_search_and_keys_work() {
     assert!(!found(cx, "apps-flyout"));
 }
 
+/// The search ran at once, with no words, as its command says.
+fn the_search_ran_at_once(rig: &Rig) {
+    let asks = rig.core.bot_asks.lock().unwrap();
+    let [ask] = asks.as_slice() else { panic!("{asks:?}") };
+    assert!(matches!(&ask.kind, InvokeKind::Query { command, parameters, .. }
+        if command == "findRecords" && parameters == &[("keyword".to_owned(), String::new())]));
+    assert_eq!(ask.app_id, FINDER);
+    assert_eq!(ask.conversation.as_deref(), Some(AB));
+}
+
+/// The text the chat's send carried.
+fn sent(rig: &Rig) -> teams_proto::chat::MessageText {
+    let actions = rig.core.actions.lock().unwrap().clone();
+    actions
+        .iter()
+        .find_map(|action| match action {
+            Action::Send { conversation, text } if conversation == AB => Some(text.clone()),
+            _ => None,
+        })
+        .expect("a send")
+}
+
 #[test]
 fn a_result_goes_into_the_box_and_out_with_the_message() {
     let rig = apps_rig(true);
@@ -123,15 +145,7 @@ fn a_result_goes_into_the_box_and_out_with_the_message() {
     rig.core.bot_answers.lock().unwrap().extend([Ok(results()), Ok(chosen)]);
     click(cx, "compose-apps");
     click(cx, &format!("apps-flyout-app-{FINDER}"));
-    // the search ran at once, with no words, as its command says
-    {
-        let asks = rig.core.bot_asks.lock().unwrap();
-        let [ask] = asks.as_slice() else { panic!("{asks:?}") };
-        assert!(matches!(&ask.kind, InvokeKind::Query { command, parameters, .. }
-            if command == "findRecords" && parameters == &[("keyword".to_owned(), String::new())]));
-        assert_eq!(ask.app_id, FINDER);
-        assert_eq!(ask.conversation.as_deref(), Some(AB));
-    }
+    the_search_ran_at_once(&rig);
     // a result whose preview names an invoke asks the app for its card
     click(cx, "apps-flyout-result-0");
     assert!(matches!(&rig.core.bot_asks.lock().unwrap()[1].kind,
@@ -142,14 +156,7 @@ fn a_result_goes_into_the_box_and_out_with_the_message() {
     let compose = cx.update(|_, cx| view.read(cx).compose().clone());
     cx.update(|window, cx| compose.update(cx, |compose, cx| compose.send(window, cx)));
     cx.run_until_parked();
-    let actions = rig.core.actions.lock().unwrap().clone();
-    let sent = actions
-        .iter()
-        .find_map(|action| match action {
-            Action::Send { conversation, text } if conversation == AB => Some(text.clone()),
-            _ => None,
-        })
-        .expect("a send");
+    let sent = sent(&rig);
     assert_eq!(sent.cards().len(), 1);
     assert_eq!(sent.cards()[0].app_id, FINDER);
     assert_eq!(sent.cards()[0].content["body"][0]["text"], "Record 1, chosen");

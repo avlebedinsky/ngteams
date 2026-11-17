@@ -828,7 +828,7 @@ fn a_sign_in_button_opens_its_page_and_a_dialog_button_asks_for_its_dialog() {
     let kept = std::rc::Rc::clone(&told);
     cx.update(|_, cx| {
         cx.subscribe(&view, move |_, event: &ChatViewEvent, _| {
-            kept.borrow_mut().push(event.clone())
+            kept.borrow_mut().push(event.clone());
         })
         .detach();
     });

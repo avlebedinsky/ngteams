@@ -286,10 +286,10 @@ mod tests {
         assert_eq!(find.parameters.len(), 1);
         assert!(find.parameters[0].required);
         assert_eq!(find.parameters[0].title, "q");
-        let make = &commands[1];
-        assert!(make.action && make.fetch_task);
-        assert_eq!(make.contexts, [CommandContext::Message, CommandContext::Compose]);
-        let task = make.task.clone().unwrap();
+        let action = &commands[1];
+        assert!(action.action && action.fetch_task);
+        assert_eq!(action.contexts, [CommandContext::Message, CommandContext::Compose]);
+        let task = action.task.clone().unwrap();
         assert_eq!(task.width, Some(DialogSize::Large));
         assert_eq!(task.height, Some(DialogSize::Pixels(300)));
         assert_eq!(task.url, None);
