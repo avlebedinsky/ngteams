@@ -604,6 +604,10 @@ fn a_package_changed_before_the_prompt_is_refused_against_the_verified_digest() 
     );
 }
 
+// The per-user copy is a Linux-only install form: `packaging/linux/install.sh` copies the
+// `linux-x86_64.tar.gz` tree into ~/.local/opt. macOS updates only its app bundle, and there
+// `MARKER` and `IDENTITY` are paths in that bundle, so the fake Linux tree isn't a release on macOS.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_per_user_copy_updates_its_own_files_with_no_password_prompt() {
     // the per-user layout of `packaging/linux/install.sh`: the archive's folder in ~/.local/opt
@@ -632,10 +636,12 @@ fn a_per_user_copy_updates_its_own_files_with_no_password_prompt() {
     assert!(!asked.exists(), "a per-user copy never asks for a password");
 }
 
+#[cfg(target_os = "linux")]
 const APP_ID: &str = "com.nickalie.ngteams";
 
 /// A system package's tree of `version` at `root` (`/opt/ngteams`, marked for pacman), with the files
 /// `packaging/linux/install.sh` copies and the script itself.
+#[cfg(target_os = "linux")]
 fn package_tree(root: &std::path::Path, version: &str) {
     tree(root, version, Format::Pacman).unwrap();
     // a package's programs are executable; the fake tree's are plain files
@@ -656,6 +662,7 @@ fn package_tree(root: &std::path::Path, version: &str) {
 }
 
 /// Every way to ask for a password, in `tools`, as programs that only write their name to `asked`.
+#[cfg(target_os = "linux")]
 fn password_tools(tools: &std::path::Path, asked: &std::path::Path) {
     fs::create_dir_all(tools).unwrap();
     for tool in ["pkexec", "sudo", "su", "doas", "run0"] {
@@ -669,7 +676,9 @@ fn password_tools(tools: &std::path::Path, asked: &std::path::Path) {
 
 /// What `packaging/linux/install.sh` leaves for the user: a system package's tree copied by the user's own run of the
 /// script into `~/.local/opt/ngteams`, with the menu entry and the links. Then the app's own update of that copy: no
-/// password tool runs at any step, and the entry and links still start it.
+/// password tool runs at any step, and the entry and links still start it. Linux only, as
+/// [`a_per_user_copy_updates_its_own_files_with_no_password_prompt`] says.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_copy_made_by_install_sh_updates_itself_with_no_password_tool() {
     let temp = tempfile::tempdir().unwrap();
