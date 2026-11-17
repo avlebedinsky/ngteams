@@ -1594,8 +1594,10 @@ the 1:1 chat and its history stay its two people's.
   `fanout::keyspace` (`Keyspace::key`, and `Shared`, the only way to a node's Redis connection): new code that keeps
   anything in Redis names it there, never with a bare key.
 - To upgrade from a version without the namespaced keys, restart all nodes together. In a rolling upgrade, the old
-  and the new nodes use different names, so pushes and replays between them are lost until all nodes run the new
-  version.
+  and the new nodes use different names: until all nodes run the new version, pushes and replays between them are
+  lost, presence and sign-in holds are not shared, and the command line's disconnects do not reach the nodes of the
+  other version. The upgrade also abandons the data kept under the old names: the journals' replay state, active
+  sign-in holds and presence start again empty.
 - A Trouter socket lives on one node. Its node subscribes to the account's `push:<mri>` and `trouter:<mri>` (control:
   a registration taken, a socket's claim to its endpoint, an event the journal didn't keep, a disconnect) topics. A
   kept event is appended to the account's journal before it is published, so the node that is woken reads it there,
