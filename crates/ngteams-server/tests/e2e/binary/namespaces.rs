@@ -9,10 +9,13 @@ use std::time::Duration;
 
 use futures_util::future::join_all;
 use serde_json::json;
-use teams_core::engine::{Event, MessageChange, Source};
+use teams_core::Availability;
+use teams_core::engine::{Event, MessageChange, OwnStatus, Source};
+use teams_proto::ManualAvailability;
 use teams_trouter::Down;
 use tokio::time::Instant;
 
+use super::directory::support::{Seat, reads_as};
 use super::push::support::{Link, User, brief, options};
 use super::support::{Deployment, LOGIN_WINDOW_SECONDS, Node};
 use crate::support::{Backend, PASSWORD, PG_ENV, REDIS_ENV, redis_url};
@@ -749,6 +752,73 @@ async fn deployments_in_one_namespace_share_holds_and_a_copy_without_its_own_nam
     );
     let _ = id;
     drop((x_a, x_b, z_b));
+    z.stop().await;
+    x.stop().await;
+}
+
+/// `x_a` (a client of a in the original) comes online, then sets Busy. `x_b`, at the other node, sees each change
+/// pushed and reads Busy.
+async fn online_then_busy(x_a: &mut Seat, x_b: &mut Seat) {
+    x_b.watch(&x_a.mri).await;
+    let mark = x_b.mark();
+    x_a.in_use().await;
+    x_b.sees(mark, &x_a.mri, &Availability::Available).await;
+    let mark = x_b.mark();
+    x_a.report(OwnStatus::Manual(ManualAvailability::Busy)).await;
+    x_b.sees(mark, &x_a.mri, &Availability::Busy).await;
+    reads_as(x_b, &x_a.mri, "Busy").await;
+}
+
+/// The client of b in `y` (a database copy of `x`: the same account ids) watches a. Then a of `x` comes online and
+/// sets Busy ([`online_then_busy`]). If `shared`, y's b reads a as Available: the copy shares a's endpoints in Redis,
+/// but not the status set by hand, which is in the database. Else it reads Offline and was told of no status of a.
+async fn busy_in_x_reads_in_y(x: &Site, y: &Site, shared: bool) {
+    let mut x_a = Seat::sign_in(&x.nodes[0], &x.origin, "a@own.test").await;
+    let mut x_b = Seat::sign_in(&x.nodes[1], &x.origin, "b@own.test").await;
+    let mut y_b = Seat::sign_in(&y.nodes[1], &y.origin, "b@own.test").await;
+    assert_eq!(x_b.mri, y_b.mri, "the copy has other account ids");
+    y_b.watch(&x_a.mri).await;
+    let y_mark = y_b.mark();
+    online_then_busy(&mut x_a, &mut x_b).await;
+    if shared {
+        reads_as(&y_b, &x_a.mri, "Available").await;
+    } else {
+        y_b.idle_for(Duration::from_secs(3)).await;
+        assert_eq!(y_b.reads(&x_a.mri).await.as_deref(), Some("Offline"), "y reads x's a");
+        let told: Vec<_> = y_b
+            .told(y_mark, &x_a.mri)
+            .into_iter()
+            .filter(|shown| !matches!(shown, Availability::Offline | Availability::Unknown))
+            .collect();
+        assert_eq!(told, Vec::<Availability>::new(), "y was told of x's a");
+    }
+    x_a.close();
+}
+
+/// A client's presence endpoints are kept in Redis under the deployment's namespace. A restored copy with its own
+/// namespace never shows the original's account online, although its accounts have the same ids. A copy without its
+/// own namespace shares the tenant id's namespace, so it shows the account online: the check can see a shared status.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_account_online_on_the_original_shows_online_in_a_copy_only_when_the_copy_has_no_namespace_of_its_own() {
+    let Some(redis) = shared_redis("namespaces: presence") else {
+        return;
+    };
+    let (mut x, mut y) = original_and_restored_copy(&redis).await;
+    x.start().await;
+    y.start().await;
+    one_tenant(&x, &y, "qa-10@own.test").await;
+    busy_in_x_reads_in_y(&x, &y, false).await;
+    y.stop().await;
+    x.stop().await;
+
+    let mut x = Site::new("x", &redis, "", "").await;
+    x.provision(&all_users());
+    let copy = restored_copy(&mut x).await;
+    let mut z = Site::on("z", &redis, Some(copy), "", "").await;
+    x.start().await;
+    z.start().await;
+    one_tenant(&x, &z, "qa-10@own.test").await;
+    busy_in_x_reads_in_y(&x, &z, true).await;
     z.stop().await;
     x.stop().await;
 }
