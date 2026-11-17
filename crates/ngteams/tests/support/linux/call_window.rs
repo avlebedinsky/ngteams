@@ -10,16 +10,17 @@
 //! passed through. Then, driven by each sandbox's keyboard and b's notification's actions and read by the traces, the
 //! recordings:
 //!
-//! - a calls b (Ctrl+Shift+C in the a–b chat a's settings open); b's banner, ringtone and notification come, and
-//!   the ringtone is in b's recording; b answers from the notification's Answer; both connect, and each one's tone is
-//!   in the other's recording, clean in each 20 ms (no noise, gap or click near its level); while the call runs, a's microphone moves (M3 Task 20): to a USB microphone a's
-//!   settings choose (the sandbox adds the node; the choice goes through the settings model, as the settings view
-//!   makes it), back to the system's when the settings follow it again, to a headset plugged in above the system's
-//!   (following the system), and back once the headset is unplugged, b hearing each one's tone alone in turn and the
-//!   call never ending; a turns its camera on (Ctrl+Shift+O: the sandbox's fake camera, H.264 the bundled
-//!   source's), and b's window presents a's picture through GPUI's external surface and a's its self view (each
-//!   counted by the trace's `video-tile presented`); a hangs up (Ctrl+Shift+H) and b's call ends with it, b's
-//!   window staying on who ended it (with Call back) until it closes by itself;
+//! - a calls b (Ctrl+Shift+C in the a–b chat a's settings open); b's banner, ringtone and notification come, and the
+//!   ringtone is in b's recording; b answers from the notification's Answer; both connect, and each one's tone is in
+//!   the other's recording, clean in its last 2 s of 20 ms windows (a median of 30 dB over noise, gaps and clicks, and
+//!   at most one window in twenty under 20 dB); while the call runs, a's microphone moves (M3 Task 20): to a USB
+//!   microphone a's settings choose (the sandbox adds the node; the choice goes through the settings model, as the
+//!   settings view makes it), back to the system's when the settings follow it again, to a headset plugged in above the
+//!   system's (following the system), and back once the headset is unplugged, b hearing each one's tone alone in turn
+//!   and the call never ending; a turns its camera on (Ctrl+Shift+O: the sandbox's fake camera, H.264 the bundled
+//!   source's), and b's window presents a's picture through GPUI's external surface and a's its self view (each counted
+//!   by the trace's `video-tile presented`); a hangs up (Ctrl+Shift+H) and b's call ends with it, b's window staying on
+//!   who ended it (with Call back) until it closes by itself;
 //! - a calls b again; b declines from the notification's Decline; a's call is taken by b's voicemail (as captured) and
 //!   a's call window and in-call strip say so; a hangs up;
 //! - a places the test call from the settings' Calls page ("Make a test call"): the same call window, the echo's cell
@@ -470,8 +471,9 @@ fn loudest(path: &Path, hz: f32, stretch: Duration) -> SandboxResult<f32> {
         .fold(0.0, f32::max))
 }
 
-/// Judges the last 2 s of the recording at `path` in 20 ms windows: the tone at `hz` fits each window, and the rest
-/// (a gap, a click, noise) stays far under it.
+/// Judges the last 2 s of the recording at `path` in 20 ms windows: over the windows, the tone at `hz` is a median
+/// of at least [`CLEAN_DB`] over the rest (a gap, a click, noise), and at most [`DISTURBED_SHARE`] of the windows are
+/// disturbed (under [`DISTURBED_DB`]).
 fn heard_clean(path: &Path, hz: f32, who: &str) -> SandboxResult {
     let samples = wav::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
     let window = usize::try_from(SAMPLE_RATE / 1_000)? * JUDGED_MS;

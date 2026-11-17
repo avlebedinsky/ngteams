@@ -1,6 +1,7 @@
 //! QA 422: the far end of a Windows client's calls, for a person who listens to what the client plays. The real
-//! server binary on SQLite and the run's coturn; `NGTS_TEST_TURN_URLS` adds the relay URL a client in a VM reaches
-//! (through an SSH tunnel). Three synthetic people answer every call that rings them:
+//! server binary on SQLite and the run's coturn; `NGTS_TEST_TURN_URLS` replaces the run's coturn URL with its list,
+//! so the list must hold the relay URL a client in a VM reaches (through an SSH tunnel) and the loopback URL of the
+//! coturn for the people on the host. Three synthetic people answer every call that rings them:
 //!
 //! - Bert sends a 1 kHz tone at half scale;
 //! - Cora sends silence (in a group call, what the client hears is Bert's tone alone);
@@ -10,7 +11,7 @@
 //! The client's account is `w@own.test` (Wendy). The rig writes to `NGTS_QA_FAR_DIR`: `origin` (the server's public
 //! origin), `chats` (the chat ids: `bert`, `dora`, `group` of Bert, Cora and Wendy) and `events.log` (each call event
 //! of each person, with the Unix time in ms). It takes commands from the lines added to `commands` there:
-//! `hold <who>`, `resume <who>`, `hangup <who>`, `call <who>` (that person calls Wendy 1:1) and `quit`.
+//! `hold <who>`, `resume <who>`, `hangup <who>`, `call <who>` (Bert or Dora call Wendy 1:1; Cora calls the group) and `quit`.
 //!
 //! Run it by hand, for at most `NGTS_QA_FAR_SECONDS` (default 3 h): `--ignored --nocapture
 //! binary::calls::qa_windows_far_end`.
@@ -284,7 +285,9 @@ async fn qa_windows_far_end() {
     let mut rig = Rig { dir, log };
     rig.note("rig", &format!("ready at {}", group.origin));
     let deadline = Instant::now() + Duration::from_secs(seconds);
-    let mut read = rig.commands(&mut 0).iter().map(|line| line.len() + 1).sum();
+    // the commands of an earlier run are not done again
+    let mut read = 0;
+    rig.commands(&mut read);
     'run: while Instant::now() < deadline {
         for person in &mut people {
             serve(&mut rig, person).await;

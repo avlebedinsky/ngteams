@@ -14,8 +14,10 @@ use crate::tone::{Tone, ToneGenerator, purity};
 
 pub(super) const PACED: &str = "paced-speaker ";
 
+/// 10.5 periods in each 10 ms frame: a dropped or repeated frame turns the tone's phase over, and its window is
+/// disturbed.
 const TONE: Tone = Tone {
-    hz: 1000.0,
+    hz: 1050.0,
     amplitude: 0.5,
 };
 /// 20 ms at 48 kHz.

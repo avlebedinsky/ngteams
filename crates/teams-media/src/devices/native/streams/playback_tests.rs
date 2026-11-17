@@ -10,11 +10,13 @@ use super::*;
 use crate::devices::{FRAME_DURATION, Reach};
 use crate::tone::{Tone, ToneGenerator, purity};
 
+/// 10.5 periods in each 10 ms frame: a dropped or repeated frame turns the tone's phase over, so the window that holds
+/// the join is disturbed (a tone with whole periods in a frame would go on as one clean sine).
 const TONE: Tone = Tone {
-    hz: 1000.0,
+    hz: 1050.0,
     amplitude: 0.5,
 };
-/// 20 ms at 48 kHz: 20 whole periods of the tone.
+/// 20 ms at 48 kHz: 21 whole periods of the tone.
 const WINDOW: usize = 960;
 /// A window is disturbed when what the tone does not explain is within this of the tone.
 const DISTURBED_DB: f32 = 20.0;
@@ -150,6 +152,20 @@ fn the_fit_finds_a_clean_tone_and_a_cut_in_it() {
     assert_eq!(disturbed(&samples, 0), (8, 1));
     assert_eq!(disturbed(&samples, 9), (0, 0));
     assert_eq!(disturbed(&vec![0.0; WINDOW * 10], 0), (0, 0));
+}
+
+#[test]
+fn the_fit_finds_a_dropped_or_a_repeated_frame() {
+    let mut tone = ToneGenerator::new(TONE);
+    let mut samples = vec![0.0; WINDOW * 11];
+    tone.fill(&mut samples);
+    let mut dropped = samples.clone();
+    dropped.drain(WINDOW * 4 + 200..WINDOW * 4 + 200 + FRAME_SAMPLES);
+    assert_eq!(disturbed(&dropped, 0), (8, 1));
+    let mut repeated = samples[..WINDOW * 10].to_vec();
+    let frame = repeated[WINDOW * 4 + 200..][..FRAME_SAMPLES].to_vec();
+    repeated.splice(WINDOW * 4 + 200..WINDOW * 4 + 200, frame);
+    assert_eq!(disturbed(&repeated[..WINDOW * 10], 0), (8, 1));
 }
 
 #[test]
