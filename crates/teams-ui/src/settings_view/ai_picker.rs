@@ -332,9 +332,9 @@ impl AiPicker {
             )
             .into(),
             Ok(_) => words.sends.into(),
-            Err(Failure::NotInstalled(None)) => format!(
-                "No AI provider can do this. Install Claude Code (claude) or the Codex CLI (codex), or add an API \
-                 key under AI providers, to {}.",
+            Err(failure @ Failure::NotInstalled(None)) => format!(
+                "{} Install or turn on one of the two, or turn on or add an API provider under AI providers, to {}.",
+                failure.message(),
                 words.install
             )
             .into(),

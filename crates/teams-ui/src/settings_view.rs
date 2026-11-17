@@ -1652,6 +1652,16 @@ fn row_with(
     control: impl IntoElement,
     palette: Palette,
 ) -> AnyElement {
+    row_colored(title, description, palette.muted_foreground, control)
+}
+
+/// [`row_with`], its description in `color`.
+fn row_colored(
+    title: SharedString,
+    description: Option<SharedString>,
+    color: u32,
+    control: impl IntoElement,
+) -> AnyElement {
     div()
         .min_h(px(56.0))
         .px_4()
@@ -1667,12 +1677,7 @@ fn row_with(
                 .flex_col()
                 .gap_0p5()
                 .child(title)
-                .children(description.map(|description| {
-                    div()
-                        .text_sm()
-                        .text_color(rgb(palette.muted_foreground))
-                        .child(description)
-                })),
+                .children(description.map(|description| div().text_sm().text_color(rgb(color)).child(description))),
         )
         .child(div().flex_none().child(control))
         .into_any_element()

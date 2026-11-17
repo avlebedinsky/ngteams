@@ -4,10 +4,13 @@
 //! `teams-core`'s ([`teams_core::ai_api`]): this crate holds no HTTP client and never reads a key.
 //!
 //! - Each answer streams, and a request runs on a thread of its own: the wait that asks it looks at its deadline and
-//!   its stop flag while the answer comes, as for a tool's process.
+//!   its stop flag while the answer comes, as for a tool's process. When the wait ends without the answer (stopped,
+//!   too slow), the request's own flag is set, and its thread drops the response at the next line, so the API stops
+//!   the answer. No request stays open between two questions.
 //! - **Failures** say what the user can do: the key refused, no credit, a rate limit, a model that the API does not
 //!   know, or the API's own words with the key cut out of them. Nothing here logs what is asked or answered, or a key.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
@@ -67,7 +70,7 @@ impl Conversation {
     /// Asks `message` in the conversation, telling `partial` the answer so far; by `deadline`, until `stop`.
     ///
     /// # Errors
-    /// The API refused, failed, took too long, or `stop` was set.
+    /// The API refused, failed, gave no text, took too long, or `stop` was set.
     pub fn ask(
         &mut self,
         message: &str,
@@ -75,10 +78,16 @@ impl Conversation {
         stop: &AtomicBool,
         partial: &mut dyn FnMut(&str),
     ) -> Result<String, Failure> {
+        if stop.load(Ordering::Relaxed) {
+            return Err(Failure::Stopped(self.backend, None));
+        }
         self.history.push(("user", message.to_owned()));
+        let dropped = Arc::new(AtomicBool::new(false));
         let asked = self
-            .send(deadline)
+            .send(deadline, &dropped)
             .and_then(|events| self.wait(&events, deadline, stop, partial));
+        // the request's thread, if it still reads, drops the response
+        dropped.store(true, Ordering::Relaxed);
         match &asked {
             Ok(text) => self.history.push(("assistant", text.clone())),
             Err(_) => {
@@ -88,8 +97,8 @@ impl Conversation {
         asked
     }
 
-    /// Starts the request on a thread of its own: its events.
-    fn send(&self, deadline: Instant) -> Result<Receiver<Event>, Failure> {
+    /// Starts the request on a thread of its own, which drops it once `dropped` is set: its events.
+    fn send(&self, deadline: Instant, dropped: &Arc<AtomicBool>) -> Result<Receiver<Event>, Failure> {
         let backend = self.backend;
         let left = deadline.saturating_duration_since(Instant::now());
         let question = Question {
@@ -99,11 +108,12 @@ impl Conversation {
             effort: self.effort,
         };
         let api = self.api.clone();
+        let dropped = Arc::clone(dropped);
         let (sender, events) = mpsc::channel();
         thread::Builder::new()
             .name("ngteams-ai-api".to_owned())
             .spawn(move || {
-                let answer = api.ask(&question, left, &mut |part| {
+                let answer = api.ask(&question, left, &dropped, &mut |part| {
                     let _ = sender.send(Event::Delta(part.to_owned()));
                 });
                 let done = answer.map_err(|error| failure(backend, &question.model, error));
@@ -176,6 +186,7 @@ fn failure(backend: Backend, model: &str, error: ApiError) -> Failure {
         ApiError::RateLimited => Failure::RateLimited(backend),
         ApiError::UnknownModel => Failure::UnknownModel(backend, model.to_owned()),
         ApiError::Stopped(why) => Failure::Stopped(backend, Some(why)),
+        ApiError::Cancelled => Failure::Stopped(backend, None),
     }
 }
 

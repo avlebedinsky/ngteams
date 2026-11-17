@@ -322,6 +322,21 @@ fn edit_saved(opened: &mut Opened, saved: &Provider, keys: &MemoryKeys) -> Provi
     assert_eq!(opened.editing(), None);
     assert_eq!(opened.settings().ai_providers[1], edited);
 
+    // the switch turned off while the editor is open stays off after Save
+    opened.click("ai-provider-api-1-edit");
+    opened.click("ai-provider-api-1-switch");
+    opened.click("ai-provider-save");
+    assert_eq!(opened.editing(), None);
+    assert_eq!(
+        opened.settings().ai_providers[1],
+        Provider {
+            enabled: false,
+            ..edited.clone()
+        }
+    );
+    opened.click("ai-provider-api-1-switch");
+    assert_eq!(opened.settings().ai_providers[1], edited);
+
     edited
 }
 

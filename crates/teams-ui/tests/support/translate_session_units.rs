@@ -373,7 +373,11 @@ fn a_missing_tool_is_not_installed() {
         Failure::NotInstalled(Some(Backend::Codex)).message(),
         "The Codex CLI (codex) isn't installed."
     );
-    assert!(Failure::NotInstalled(None).message().starts_with("Neither Claude Code"));
+    assert!(
+        Failure::NotInstalled(None)
+            .message()
+            .starts_with("No AI provider can do this")
+    );
     assert_eq!(
         Failure::TimedOut(Backend::Codex).message(),
         "The Codex CLI took too long to answer."

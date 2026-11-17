@@ -495,6 +495,21 @@ Giphy's public media CDN holds GIFs selected by Teams' picker. The native transp
 | --- | --- | --- | --- | --- | --- |
 | `GET` | `/media/<id>/<file>.gif` (a message names it as `https://media<n>.giphy.com/media/v1.<token>/<id>/giphy.gif`, sometimes with a query) | a GIF a message shows, picked from Teams' GIF picker: its bytes | Read (`GiphyPicture`) | [chat.md](chat.md#pictures-in-messages) | the user's chats (the `<img>`, read for its shape); the read without the token and on `media.giphy.com` checked by hand (the same bytes); native on the mock only; own server: public host |
 
+## AI providers with the user's own key (`api.anthropic.com`, `api.openai.com`, a compatible server's base URL)
+
+Not Teams: the AI work (captions, recap summary, chat and draft translation, correction) can go to an API with a key
+that the user gives (Settings → General → AI providers). The requests are `teams_core::ai_api`'s, outside the Teams
+transport: no Teams token goes to them, no redirect is followed, and the key stays in the system keyring. An
+OpenAI-compatible server (Ollama, LM Studio) is at a base URL that the user types, also on plain `http`, with or
+without a key. Each answer streams as server-sent events.
+
+| Method | Path | What it does | Native | Notes · task | Evidence |
+| --- | --- | --- | --- | --- | --- |
+| `POST` | `https://api.anthropic.com/v1/messages` (`x-api-key`, `anthropic-version`) | asks a model, the conversation so far with it; the answer streams | `ai_api::Api::ask` | [development.md](../development.md) | native on a loopback mock only; own server: not served (not Teams: the AI API that the user gave a key for) |
+| `GET` | `https://api.anthropic.com/v1/models?limit=1000` | the models the key can ask (Test connection, the model pickers) | `ai_api::Api::models` | [development.md](../development.md) | native on a loopback mock only; own server: not served (not Teams: the AI API that the user gave a key for) |
+| `POST` | `https://api.openai.com/v1/chat/completions`, `<base URL>/chat/completions` (bearer key, if any) | asks a model, the conversation so far with it; the answer streams | `ai_api::Api::ask` | [development.md](../development.md) | native on a loopback mock only; own server: not served (not Teams: the AI API that the user gave a key for) |
+| `GET` | `https://api.openai.com/v1/models`, `<base URL>/models` | the models the key or the server offers | `ai_api::Api::models` | [development.md](../development.md) | native on a loopback mock only; own server: not served (not Teams: the AI API that the user gave a key for) |
+
 ## App tiles (`res.cdn.office.net`, `statics.teams.cdn.office.net`)
 
 Microsoft's public CDN holds each app's tile, which an app definition names in `largeImageUrl`. The native transport reads it with no account credential, on `Service::AppPictures` (`https://res.cdn.office.net/teamsappdata/`) or `Service::StaticAppPictures` (`https://statics.teams.cdn.office.net/`, its `app-assets/` and `evergreen-assets/apps/` folders only). An own-server account's tiles are on its own origin under `/teamsappdata/`, read on `Service::AppPictures` with no token ([apps.md](apps.md#own-servers)).

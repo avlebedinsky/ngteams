@@ -7,6 +7,7 @@
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -157,7 +158,7 @@ fn api(kind: ApiKind, base: &str) -> Api {
 
 fn ask(kind: ApiKind, answer: Answer) -> Result<String, ApiError> {
     let mock = Mock::new(vec![answer]);
-    api(kind, &mock.base).ask(&question(None), TIME, &mut |_| {})
+    api(kind, &mock.base).ask(&question(None), TIME, &AtomicBool::new(false), &mut |_| {})
 }
 
 #[test]
@@ -165,7 +166,9 @@ fn anthropic_streams_its_answer_with_the_key_the_version_and_the_effort() {
     let mock = Mock::new(vec![anthropic_answer(&["Bon", "jour"])]);
     let mut parts = Vec::new();
     let answer = api(ApiKind::Anthropic, &format!("{}/", mock.base))
-        .ask(&question(Some("low")), TIME, &mut |part| parts.push(part.to_owned()))
+        .ask(&question(Some("low")), TIME, &AtomicBool::new(false), &mut |part| {
+            parts.push(part.to_owned());
+        })
         .unwrap();
     assert_eq!(answer, "Bonjour");
     assert_eq!(parts, ["Bon", "jour"]);
@@ -196,12 +199,17 @@ fn anthropic_streams_its_answer_with_the_key_the_version_and_the_effort() {
 fn openai_streams_its_answer_with_a_bearer_key_and_the_instructions_first() {
     let mock = Mock::new(vec![openai_answer(&["Hal", "lo"]), openai_answer(&["ok"])]);
     let answer = api(ApiKind::OpenAi, &mock.base)
-        .ask(&question(Some("medium")), TIME, &mut |_| {})
+        .ask(&question(Some("medium")), TIME, &AtomicBool::new(false), &mut |_| {})
         .unwrap();
     assert_eq!(answer, "Hallo");
     // a local server without a key, and no effort
     let keyless = Api::new(ApiKind::OpenAi, &mock.base, None).unwrap();
-    assert_eq!(keyless.ask(&question(None), TIME, &mut |_| {}).unwrap(), "ok");
+    assert_eq!(
+        keyless
+            .ask(&question(None), TIME, &AtomicBool::new(false), &mut |_| {})
+            .unwrap(),
+        "ok"
+    );
     let taken = mock.taken();
     assert_eq!(taken[0].line, "POST /chat/completions HTTP/1.1");
     assert_eq!(taken[0].header("authorization"), Some(format!("Bearer {KEY}").as_str()));
@@ -324,11 +332,37 @@ fn an_error_in_the_stream_a_refusal_and_no_answer_stop_it() {
         ask(ApiKind::OpenAi, (200, "text/event-stream", noisy)),
         Ok("ok".to_owned())
     );
-    // an answer that ends without text is an empty answer
+    // an answer that ends without text, or with only spaces, is no answer
     assert_eq!(
         ask(ApiKind::OpenAi, (200, "text/event-stream", sse(&["[DONE]"]))),
-        Ok(String::new())
+        Err(ApiError::Stopped("it gave no answer.".to_owned()))
     );
+    assert_eq!(
+        ask(ApiKind::Anthropic, anthropic_answer(&[" ", "\\n"])),
+        Err(ApiError::Stopped("it gave no answer.".to_owned()))
+    );
+}
+
+#[test]
+fn a_stop_drops_the_request() {
+    // set before the request: nothing is sent
+    let mock = Mock::new(vec![openai_answer(&["never"])]);
+    let stop = AtomicBool::new(true);
+    assert_eq!(
+        api(ApiKind::OpenAi, &mock.base).ask(&question(None), TIME, &stop, &mut |_| {}),
+        Err(ApiError::Cancelled)
+    );
+    assert!(mock.taken().is_empty());
+    // set while the answer streams: the next line drops the response
+    let mock = Mock::new(vec![anthropic_answer(&["Bon", "jour", "!"])]);
+    let stop = AtomicBool::new(false);
+    let mut parts = Vec::new();
+    let stopped = api(ApiKind::Anthropic, &mock.base).ask(&question(None), TIME, &stop, &mut |part| {
+        parts.push(part.to_owned());
+        stop.store(true, Ordering::Relaxed);
+    });
+    assert_eq!(stopped, Err(ApiError::Cancelled));
+    assert_eq!(parts, ["Bon"]);
 }
 
 #[test]
@@ -337,7 +371,7 @@ fn a_server_that_cannot_be_reached_or_is_slow_says_so() {
     let base = format!("http://{}", listener.local_addr().unwrap());
     drop(listener);
     assert!(matches!(
-        api(ApiKind::OpenAi, &base).ask(&question(None), TIME, &mut |_| {}),
+        api(ApiKind::OpenAi, &base).ask(&question(None), TIME, &AtomicBool::new(false), &mut |_| {}),
         Err(ApiError::Stopped(why)) if why.contains("could not be reached")
     ));
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -349,7 +383,12 @@ fn a_server_that_cannot_be_reached_or_is_slow_says_so() {
     });
     let started = Instant::now();
     assert_eq!(
-        api(ApiKind::OpenAi, &base).ask(&question(None), Duration::from_millis(300), &mut |_| {}),
+        api(ApiKind::OpenAi, &base).ask(
+            &question(None),
+            Duration::from_millis(300),
+            &AtomicBool::new(false),
+            &mut |_| {}
+        ),
         Err(ApiError::TimedOut)
     );
     assert!(started.elapsed() < Duration::from_secs(4));

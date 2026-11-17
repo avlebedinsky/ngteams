@@ -4,7 +4,7 @@
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -486,6 +486,59 @@ fn a_slow_answer_times_out_and_a_stop_ends_the_wait() {
     let stopped = conversation.ask("Hello", Instant::now() + Duration::from_secs(5), &stop, &mut |_| {});
     assert_eq!(stopped, Err(Failure::Stopped(Backend::OpenAi, None)));
     drop(release);
+}
+
+#[test]
+fn a_wait_that_ends_drops_the_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let (asked, ended) = mpsc::channel::<()>();
+    let (dropped, seen) = mpsc::channel::<bool>();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut line = String::new();
+        while reader.read_line(&mut line).is_ok_and(|read| read > 2) {
+            line.clear();
+        }
+        let delta = "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n";
+        let _ = write!(
+            stream,
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{delta}"
+        );
+        let _ = stream.flush();
+        let _ = ended.recv_timeout(Duration::from_secs(5));
+        // the answer goes on: the client drops the connection at the next line
+        let until = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < until {
+            if stream
+                .write_all(delta.as_bytes())
+                .and_then(|()| stream.flush())
+                .is_err()
+            {
+                let _ = dropped.send(true);
+                return;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let _ = dropped.send(false);
+    });
+    let launch = launch(Backend::OpenAi, Work::Chat, Model::Recommended, target(&base, true));
+    let Target::Api(api) = &launch.target else {
+        unreachable!()
+    };
+    let mut conversation = Conversation::start(&launch, api).unwrap();
+    // stopped long before the deadline (the request's own timeout), at the first part of the answer
+    let stop = AtomicBool::new(false);
+    let mut parts = Vec::new();
+    let answer = conversation.ask("Hello", Instant::now() + Duration::from_secs(30), &stop, &mut |part| {
+        parts.push(part.to_owned());
+        stop.store(true, Ordering::Relaxed);
+    });
+    assert_eq!(answer, Err(Failure::Stopped(Backend::OpenAi, None)));
+    assert_eq!(parts, ["a"]);
+    asked.send(()).unwrap();
+    assert_eq!(seen.recv_timeout(Duration::from_secs(10)), Ok(true));
 }
 
 fn provider(kind: Backend, base: &str) -> Provider {

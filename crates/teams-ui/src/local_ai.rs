@@ -1,9 +1,9 @@
-//! The AI command-line tools the app runs on this computer, shared by everything that asks one: live captions
+//! The AI providers that the app asks, shared by everything that asks one: live captions
 //! translated ([`crate::translate`]), a meeting's recap summarized ([`crate::recap_summary`]), a chat translated
 //! ([`crate::chat_translate`]), a draft proofread ([`crate::message_correct`]) and a draft translated in its box
-//! ([`crate::draft_translate`]). Claude Code and the Codex CLI, each with the model the user picked for that work
-//! ([`AiChoice`]: the one recommended for the work, the tool's own default, or any model the tool takes, named),
-//! started as a child process with nothing of the user's setup that could act on what it is given:
+//! ([`crate::draft_translate`]). Each is asked with the model the user picked for that work ([`AiChoice`]: the one
+//! recommended for the work, the provider's own default, or any model it takes, named). Claude Code and the Codex CLI
+//! are started as a child process with nothing of the user's setup that could act on what it is given:
 //!
 //! - **Claude Code** runs as `claude -p --input-format stream-json --output-format stream-json`: one user message per
 //!   question in one conversation, its `result` line the answer (a chat's translation also reads its text as it
@@ -13,12 +13,17 @@
 //!   base instructions are ours, then one `turn/start` per question, its last agent message the answer (its deltas
 //!   the text so far). Hooks, apps,
 //!   plugins, MCP servers, tools and project docs are turned off for it.
+//! - **An API provider** with the user's key (Anthropic, OpenAI, an OpenAI-compatible server): a conversation over
+//!   HTTP ([`api`]). The list of the providers, their order and their switches, and their keys in the keyring are
+//!   [`providers`]; a [`Target`] is where a [`Launch`] goes, a tool's program or an API.
 //!
 //! The models each tool offers are listed from what it reports itself ([`catalog`]), never from a list of ours.
 //!
-//! [`Tool`] is one such process: started, asked on its stdin and read back from its stdout, each wait bounded and
-//! stopped as soon as its caller drops the work. **Failures** ([`Failure`]) say what the user can do: the tool missing,
-//! signed out, too slow, or stopped in its own words. Nothing here logs what is asked or answered, or the tool's output.
+//! [`Tool`] is one such process or API conversation: started, asked and read back, each wait bounded and stopped as
+//! soon as its caller drops the work. **Failures** ([`Failure`]) say what the user can do: the tool missing, signed out,
+//! too slow, or stopped in its own words; for an API also no key, no credit, a rate limit, a model it does not know, no
+//! model chosen, the provider turned off or removed. Nothing here logs what is asked or answered, the tool's output, or
+//! a key.
 
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::{Path, PathBuf};
@@ -146,7 +151,8 @@ impl Backend {
         }
     }
 
-    /// How hard Codex reasons for `work` (Claude Code takes no such setting).
+    /// How hard the model reasons for `work`: Codex's effort, Anthropic's `output_config.effort`, OpenAI's
+    /// `reasoning_effort` (Claude Code and OpenAI-compatible servers take none).
     #[must_use]
     pub fn effort(self, work: Work) -> &'static str {
         match work {
@@ -558,11 +564,15 @@ pub enum Failure {
 const PROVIDERS_PLACE: &str = "Settings under General, AI providers";
 
 impl Failure {
-    /// What a draft's failure line adds when the tool isn't installed: install the one named, or one of the two.
+    /// What a draft's failure line adds when the tool isn't installed: install the one named; with no provider, install
+    /// or turn on a tool, or an API provider.
     #[must_use]
     pub fn install_hint(&self) -> &'static str {
         match self {
-            Self::NotInstalled(None) => " Install one, or choose another tool in Settings under General.",
+            Self::NotInstalled(None) => {
+                " Install or turn on Claude Code or the Codex CLI, or turn on or add an API provider with a key in \
+                 Settings under General, AI providers."
+            }
             Self::NotInstalled(Some(_)) => " Install it, or choose another tool in Settings under General.",
             _ => "",
         }
@@ -572,9 +582,9 @@ impl Failure {
     #[must_use]
     pub fn message(&self) -> String {
         match self {
-            Self::NotInstalled(None) => {
-                "Neither Claude Code (claude) nor the Codex CLI (codex) is installed.".to_owned()
-            }
+            Self::NotInstalled(None) => "No AI provider can do this: no Claude Code (claude) or Codex CLI (codex) is \
+                                         installed and on, and no API provider is on with a key."
+                .to_owned(),
             Self::NotInstalled(Some(backend)) => {
                 format!("{} ({}) isn't installed.", backend.tool(), backend.program())
             }
@@ -730,7 +740,9 @@ impl Tool {
         Ok(text.trim().to_owned())
     }
 
-    /// Ends it: a process's stdin closed (both tools leave then), and after a moment its whole group killed.
+    /// Ends it: a process's stdin closed (both tools leave then), and after a moment its whole group killed. An API
+    /// conversation has no request open between two questions (a wait that ends drops its request), so nothing is left
+    /// to end.
     pub fn close(self) {
         if let Link::Process(process) = self.link {
             process.close();

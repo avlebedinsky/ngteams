@@ -32,7 +32,7 @@ use gpui_component::switch::Switch;
 use gpui_component::{Disableable as _, Selectable as _, Sizable as _};
 use teams_auth::secrets::Secret;
 
-use super::{group, row, row_with};
+use super::{group, row, row_colored, row_with};
 use crate::icons::{Glyph, Spinning as _, icon_button, selected_by};
 use crate::local_ai::providers::{self, AiKeys, ApiModels, KeyVault as _, MAX_NAME, MemoryKeys};
 use crate::local_ai::{Backend, Model, Provider, ToolChoice, Tools, Work, api};
@@ -54,6 +54,18 @@ enum Tested {
     /// The API listed this many models.
     Connected(usize),
     Failed(SharedString),
+}
+
+impl Tested {
+    /// What the editor's "Test connection" row says of it.
+    fn note(&self) -> SharedString {
+        match self {
+            Self::Running => "Testing the connection\u{2026}".into(),
+            Self::Connected(1) => "Connected: 1 model".into(),
+            Self::Connected(count) => format!("Connected: {count} models").into(),
+            Self::Failed(why) => why.clone(),
+        }
+    }
 }
 
 /// What the editor waits for.
@@ -423,14 +435,23 @@ impl AiProviders {
     }
 
     /// Writes `provider` into the list and closes its editor; its models are listed again when its key or base URL
-    /// changed, or when it is new.
+    /// changed, or when it is new. A provider in the list takes only what the editor sets (name, base URL, model, a
+    /// key saved): its switch and the rest stay as they are now, also when they changed while the editor was open.
     fn commit(&mut self, provider: &Provider, key_changed: bool, cx: &mut Context<Self>) {
         let mut list = self.list(cx);
         let held = list.iter().position(|held| held.id == provider.id);
         let relist =
             !provider.kind.is_cli() && (key_changed || held.is_none_or(|at| list[at].base_url != provider.base_url));
         match held {
-            Some(at) => list[at] = provider.clone(),
+            Some(at) => {
+                let held = &mut list[at];
+                held.name.clone_from(&provider.name);
+                held.base_url.clone_from(&provider.base_url);
+                held.model.clone_from(&provider.model);
+                if key_changed {
+                    held.has_key = provider.has_key;
+                }
+            }
             None => list.push(provider.clone()),
         }
         if self.editing() == Some(provider.id.as_str()) {
@@ -534,13 +555,7 @@ impl AiProviders {
     /// What "Test connection" says now, if anything.
     #[must_use]
     pub fn tested(&self) -> Option<SharedString> {
-        let tested = self.editor.as_ref()?.tested.as_ref()?;
-        Some(match tested {
-            Tested::Running => "Testing the connection\u{2026}".into(),
-            Tested::Connected(1) => "Connected: 1 model".into(),
-            Tested::Connected(count) => format!("Connected: {count} models").into(),
-            Tested::Failed(why) => why.clone(),
-        })
+        self.editor.as_ref()?.tested.as_ref().map(Tested::note)
     }
 
     /// What the open editor says is wrong, if anything.
@@ -803,10 +818,14 @@ impl AiProviders {
                 "Ask the API for its models with the values above.".into(),
                 palette.muted_foreground,
             ),
-            Some(Tested::Running) => ("Testing the connection\u{2026}".into(), palette.muted_foreground),
-            Some(Tested::Connected(1)) => ("Connected: 1 model".into(), palette.foreground),
-            Some(Tested::Connected(count)) => (format!("Connected: {count} models").into(), palette.foreground),
-            Some(Tested::Failed(why)) => (why.clone(), theme::DANGER),
+            Some(tested) => (
+                tested.note(),
+                match tested {
+                    Tested::Running => palette.muted_foreground,
+                    Tested::Connected(_) => palette.foreground,
+                    Tested::Failed(_) => theme::DANGER,
+                },
+            ),
         };
         let mut button = Button::new("ai-provider-test")
             .label("Test connection")
@@ -876,25 +895,7 @@ fn input(selector: &'static str, state: &Entity<InputState>, disabled: bool, mas
 
 /// An editor's row: its name and a note in `color` leading, its control trailing.
 fn noted(title: &'static str, note: SharedString, color: u32, control: impl IntoElement) -> AnyElement {
-    div()
-        .min_h(px(56.0))
-        .px_4()
-        .py_2p5()
-        .flex()
-        .items_center()
-        .gap_4()
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap_0p5()
-                .child(title)
-                .child(div().text_sm().text_color(rgb(color)).child(note)),
-        )
-        .child(div().flex_none().child(control))
-        .into_any_element()
+    row_colored(title.into(), Some(note), color, control)
 }
 
 impl Render for AiProviders {

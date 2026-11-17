@@ -420,11 +420,8 @@ fn with_no_tool_installed_it_says_so_and_offers_the_setting() {
     let DraftTranslationStatus::Failed(why) = status(&compose, cx) else {
         panic!("{:?}", status(&compose, cx))
     };
-    assert!(why.contains("Neither Claude Code"), "{why}");
-    assert!(
-        why.ends_with("Install one, or choose another tool in Settings under General."),
-        "{why}"
-    );
+    assert!(why.contains("No AI provider can do this"), "{why}");
+    assert!(why.ends_with("in Settings under General, AI providers."), "{why}");
     assert!(cx.debug_bounds("compose-draft-translation-settings").is_some());
     assert!(fake.asked().is_empty());
     assert_eq!(value(&compose, cx), "hello");

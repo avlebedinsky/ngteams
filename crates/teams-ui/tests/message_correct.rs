@@ -470,7 +470,7 @@ fn a_missing_tool_says_which_and_where_to_choose_another() {
     let CorrectionStatus::Failed(why) = status(&compose, cx) else {
         panic!("not failed");
     };
-    assert!(why.contains("Neither Claude Code"), "{why}");
+    assert!(why.contains("No AI provider can do this"), "{why}");
     assert!(why.contains("Settings"), "{why}");
     assert_eq!(value(&compose, cx), "teh report");
 }

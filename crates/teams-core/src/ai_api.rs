@@ -3,6 +3,7 @@
 //! read a key out of its `Secret`, so these requests are made here; `teams-ui` keeps the conversation and its words.
 //!
 //! - [`Api::ask`] blocks while the answer streams (server-sent events), and gives each part of the text as it comes.
+//!   Once its stop flag is set, it drops the response at the next line that comes, so the API stops the answer.
 //! - No redirect is followed, so the key goes only to the base URL that the user gave. This is not the Teams
 //!   transport: no Teams token goes here, and a local OpenAI-compatible server can be on plain `http`.
 //! - An [`ApiError`] tells what the user can do: the key refused, no credit, a rate limit, a model that the API does
@@ -11,6 +12,7 @@
 
 use std::fmt;
 use std::io::{BufRead as _, BufReader, Read as _};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -51,6 +53,8 @@ pub enum ApiError {
     RateLimited,
     /// The API does not know the model.
     UnknownModel,
+    /// The stop flag was set: the request was dropped.
+    Cancelled,
     /// Another failure, in words for the user (never with the key in them).
     Stopped(String),
 }
@@ -117,11 +121,21 @@ impl Api {
         })
     }
 
-    /// Asks `question` within `timeout`, giving `part` each part of the answer as it comes (this blocks).
+    /// Asks `question` within `timeout`, giving `part` each part of the answer as it comes (this blocks), until `stop`
+    /// is set: then the response is dropped at its next line.
     ///
     /// # Errors
-    /// The API refused, failed, or took too long.
-    pub fn ask(&self, question: &Question, timeout: Duration, part: &mut dyn FnMut(&str)) -> Result<String, ApiError> {
+    /// The API refused, failed, took too long, gave no text, or `stop` was set.
+    pub fn ask(
+        &self,
+        question: &Question,
+        timeout: Duration,
+        stop: &AtomicBool,
+        part: &mut dyn FnMut(&str),
+    ) -> Result<String, ApiError> {
+        if stop.load(Ordering::Relaxed) {
+            return Err(ApiError::Cancelled);
+        }
         let response = self
             .question(question)
             .timeout(timeout.max(Duration::from_millis(1)))
@@ -130,7 +144,7 @@ impl Api {
         if !response.status().is_success() {
             return Err(self.refused(response));
         }
-        self.read_stream(response, part)
+        self.read_stream(response, stop, part)
     }
 
     /// The models that the API lists (`/v1/models`), in its order, within `timeout` (this blocks).
@@ -215,21 +229,23 @@ impl Api {
         }
     }
 
-    /// The answer in the server-sent events of `response`, given to `part` as it comes.
+    /// The answer in the server-sent events of `response`, given to `part` as it comes, until `stop` is set.
     fn read_stream(
         &self,
         response: reqwest::blocking::Response,
+        stop: &AtomicBool,
         part: &mut dyn FnMut(&str),
     ) -> Result<String, ApiError> {
         let mut text = String::new();
-        let mut ended = false;
         for line in BufReader::new(response).lines() {
+            if stop.load(Ordering::Relaxed) {
+                return Err(ApiError::Cancelled);
+            }
             let line = line.map_err(|error| ApiError::Stopped(self.scrub(&error.to_string())))?;
             let Some(data) = line.strip_prefix("data:").map(str::trim) else {
                 continue;
             };
             if data == "[DONE]" {
-                ended = true;
                 break;
             }
             let Ok(event) = serde_json::from_str::<Value>(data) else {
@@ -246,10 +262,7 @@ impl Api {
                     Some("message_delta") if event.pointer("/delta/stop_reason") == Some(&json!("refusal")) => {
                         return Err(ApiError::Stopped("it declined to answer.".to_owned()));
                     }
-                    Some("message_stop") => {
-                        ended = true;
-                        break;
-                    }
+                    Some("message_stop") => break,
                     _ => None,
                 }
             } else {
@@ -260,7 +273,9 @@ impl Api {
                 part(delta);
             }
         }
-        if !ended && text.is_empty() {
+        // no text (all the tokens went to thinking, a filter, only spaces): an empty turn in the conversation would
+        // make the API refuse each question after it
+        if text.trim().is_empty() {
             return Err(ApiError::Stopped("it gave no answer.".to_owned()));
         }
         Ok(text)
