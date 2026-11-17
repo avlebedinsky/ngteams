@@ -588,15 +588,11 @@ impl Nodes {
         let Some(url) = &self.redis else {
             return Ok(Box::new(Local::new()));
         };
-        let namespace = match &self.namespace {
-            Some(namespace) => namespace.clone(),
-            None => crate::db::meta::tenant(&self.db)
-                .await
-                .map_err(|error| FanoutError::Unavailable(error.to_string()))?,
-        };
-        Ok(Box::new(
-            Redis::connect(url, Keyspace::new(&namespace), self.timeout).await?,
-        ))
+        let tenant = crate::db::meta::tenant(&self.db)
+            .await
+            .map_err(|error| FanoutError::Unavailable(error.to_string()))?;
+        let keys = Keyspace::of(self.namespace.as_deref(), &tenant);
+        Ok(Box::new(Redis::connect(url, keys, self.timeout).await?))
     }
 }
 

@@ -16,13 +16,19 @@ pub struct Keyspace {
 }
 
 impl Keyspace {
-    /// The keyspace of `namespace`: the configured one, or else the deployment's tenant id, which every node of a
-    /// deployment reads from its database and no other deployment has.
+    /// The keyspace of `namespace`.
     #[must_use]
     pub fn new(namespace: &str) -> Self {
         Self {
             prefix: format!("{PREFIX}:{namespace}:"),
         }
+    }
+
+    /// The keyspace of a deployment: its `configured` namespace, or else its `tenant` id, which every node reads from
+    /// the database and no other deployment has. The nodes and the command line choose it here, so they agree.
+    #[must_use]
+    pub fn of(configured: Option<&str>, tenant: &str) -> Self {
+        Self::new(configured.unwrap_or(tenant))
     }
 
     /// The Redis key or channel of `name` (`login:<account>`, `push:<mri>`, `journal:<topic>`).
@@ -86,6 +92,12 @@ mod tests {
         let configured = Keyspace::new("staging");
         assert_eq!(configured.key("login:x"), "ngts:staging:login:x");
         assert_ne!(tenant, configured);
+    }
+
+    #[test]
+    fn a_configured_namespace_is_chosen_over_the_tenant() {
+        assert_eq!(Keyspace::of(Some("staging"), "0f0e"), Keyspace::new("staging"));
+        assert_eq!(Keyspace::of(None, "0f0e"), Keyspace::new("0f0e"));
     }
 
     #[test]

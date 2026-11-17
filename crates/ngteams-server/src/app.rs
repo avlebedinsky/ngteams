@@ -121,7 +121,7 @@ impl App {
         let mut shared = None;
         let (fanout, journal, throttle, setup_throttle, workflow_limit): Started = match &config.redis_url {
             Some(url) => {
-                let keys = Keyspace::new(config.redis_namespace.as_deref().unwrap_or(&tenant));
+                let keys = Keyspace::of(config.redis_namespace.as_deref(), &tenant);
                 let redis = Redis::connect(url, keys, config.redis_timeout()).await?;
                 let throttle = Throttle::redis(config.login.clone(), redis.shared(), "login");
                 let setup_throttle = Throttle::redis(setup_limits, redis.shared(), "setup");
