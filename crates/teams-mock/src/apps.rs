@@ -25,6 +25,8 @@ pub enum AppPlace {
 pub(crate) struct Installs {
     pub(crate) added: BTreeMap<AppPlace, Vec<String>>,
     removed: BTreeMap<AppPlace, Vec<String>>,
+    /// The made-up apps a test defined beside the fixtures' ([`crate::ChatServiceMock::add_app`]).
+    pub(crate) defined: Vec<Value>,
 }
 
 /// The made-up account's object id, which its entitlements are listed under.
@@ -51,6 +53,9 @@ pub(crate) fn serve(state: &mut State, request: &Request) -> Option<ResponseTemp
             Some(json(200, &user_entitlements(state)))
         }
         ("GET", [.., "chats", chat, "apps", "chatentitlements"]) => Some(json(200, &chat_entitlements(state, chat))),
+        ("POST", [.., "users", "apps", "batchedDefinitions"]) => {
+            Some(json(200, &json!(requested_definitions(state, &request.body))))
+        }
         ("POST", [.., "teams", "apps", "aggregatedEntitlements"]) => {
             Some(json(200, &team_entitlements(state, &request.body)))
         }
@@ -75,13 +80,7 @@ fn add(state: &mut State, place: AppPlace, body: &[u8]) -> Option<ResponseTempla
     let Some(id) = definition.get("id").and_then(Value::as_str).map(str::to_owned) else {
         return Some(ResponseTemplate::new(400));
     };
-    if let Some(removed) = state.apps.removed.get_mut(&place) {
-        removed.retain(|gone| *gone != id);
-    }
-    let added = state.apps.added.entry(place).or_default();
-    if !added.contains(&id) {
-        added.push(id.clone());
-    }
+    install(state, place, &id);
     Some(json(
         201,
         &json!({ "value": { "id": id, "state": "Installed", "installedBy": OWNER } }),
@@ -102,10 +101,41 @@ fn remove(state: &mut State, place: &AppPlace, app: &str) -> ResponseTemplate {
     ResponseTemplate::new(200)
 }
 
-fn definition(id: &str) -> Option<Value> {
-    crate::team_apps::definitions()
+/// The fixtures' made-up apps, then the ones a test defined.
+fn definitions(state: &State) -> Vec<Value> {
+    let mut all = crate::team_apps::definitions();
+    all.extend(state.apps.defined.iter().cloned());
+    all
+}
+
+fn definition(state: &State, id: &str) -> Option<Value> {
+    definitions(state)
         .into_iter()
         .find(|definition| definition.get("id").and_then(Value::as_str) == Some(id))
+}
+
+fn requested_definitions(state: &State, body: &[u8]) -> Vec<Value> {
+    let ids: Vec<String> = serde_json::from_slice(body).unwrap_or_default();
+    definitions(state)
+        .into_iter()
+        .filter(|definition| {
+            definition
+                .get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| ids.iter().any(|asked| asked == id))
+        })
+        .collect()
+}
+
+/// Adds the app `id` at `place`, as the add write does.
+pub(crate) fn install(state: &mut State, place: AppPlace, id: &str) {
+    if let Some(removed) = state.apps.removed.get_mut(&place) {
+        removed.retain(|gone| gone != id);
+    }
+    let added = state.apps.added.entry(place).or_default();
+    if !added.iter().any(|known| known == id) {
+        added.push(id.to_owned());
+    }
 }
 
 /// What Teams lists at `place` before a write: the app it keeps for everyone; for the account an app it has as
@@ -149,7 +179,7 @@ fn user_entitlements(state: &State) -> Value {
         .iter()
         .filter_map(|entitlement| {
             let id = entitlement.get("id")?.as_str()?;
-            Some((id.to_owned(), definition(id)?))
+            Some((id.to_owned(), definition(state, id)?))
         })
         .collect();
     json!({ "value": { "userEntitlements": { OWNER: listed }, "definitions": definitions } })
@@ -159,7 +189,7 @@ fn chat_entitlements(state: &State, chat: &str) -> Value {
     let listed = entitlements(state, &AppPlace::Chat(chat.to_owned()));
     let definitions: Vec<Value> = listed
         .iter()
-        .filter_map(|entitlement| definition(entitlement.get("id")?.as_str()?))
+        .filter_map(|entitlement| definition(state, entitlement.get("id")?.as_str()?))
         .collect();
     json!({ "value": { "entitlements": listed, "definitions": definitions } })
 }
@@ -174,7 +204,7 @@ fn team_entitlements(state: &State, body: &[u8]) -> Value {
             (team, Value::Array(listed))
         })
         .collect();
-    let definitions: serde_json::Map<String, Value> = crate::team_apps::definitions()
+    let definitions: serde_json::Map<String, Value> = definitions(state)
         .into_iter()
         .filter_map(|definition| Some((definition.get("id")?.as_str()?.to_owned(), definition)))
         .collect();

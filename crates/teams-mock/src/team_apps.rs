@@ -10,10 +10,9 @@ use wiremock::ResponseTemplate;
 use crate::chatsvc::json;
 
 /// The answer to `method` on `segments` when it is one of these; `None` for any other path.
-pub(crate) fn serve(method: &str, segments: &[&str], body: &[u8]) -> Option<ResponseTemplate> {
+pub(crate) fn serve(method: &str, segments: &[&str]) -> Option<ResponseTemplate> {
     match (method, segments) {
         ("POST", [.., "users", "apps", "store"]) => Some(json(200, &store())),
-        ("POST", [.., "users", "apps", "batchedDefinitions"]) => Some(json(200, &json!(requested_definitions(body)))),
         ("GET", [.., "teamtemplates", "v1.0", "en-us"]) => Some(json(200, &templates())),
         ("GET", [.., "teamtemplates", "v1.0", _, "Public", _]) => Some(json(200, &template())),
         ("GET", [.., "teams", "usergroups"]) => Some(json(200, &json!([]))),
@@ -68,19 +67,6 @@ fn tile() -> ResponseTemplate {
         Ok(()) => ResponseTemplate::new(200).set_body_raw(png, "application/octet-stream"),
         Err(_) => ResponseTemplate::new(500),
     }
-}
-
-fn requested_definitions(body: &[u8]) -> Vec<Value> {
-    let ids: Vec<String> = serde_json::from_slice(body).unwrap_or_default();
-    definitions()
-        .into_iter()
-        .filter(|definition| {
-            definition
-                .get("id")
-                .and_then(Value::as_str)
-                .is_some_and(|id| ids.iter().any(|asked| asked == id))
-        })
-        .collect()
 }
 
 /// Made-up apps: a tab app, one with a bot, one Teams keeps for itself; the organization's app, with a bot to chat

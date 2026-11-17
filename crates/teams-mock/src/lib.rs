@@ -940,6 +940,32 @@ impl ChatServiceMock {
         self.lock().apps.added.get(place).cloned().unwrap_or_default()
     }
 
+    /// Defines a made-up app beside the fixtures' (`team_apps.rs`): its `definition` as the service gives it, served
+    /// wherever theirs are (the definitions read, and the account's, a chat's and a team's apps).
+    pub fn add_app(&self, definition: Value) {
+        self.lock().apps.defined.push(definition);
+    }
+
+    /// Adds the app `id` at `place`, as the add write does (`apps.rs`).
+    pub fn install_app(&self, place: AppPlace, id: &str) {
+        apps::install(&mut self.lock(), place, id);
+    }
+
+    /// The 1:1 chat of a and the bot `bot` (`28:<bot id>`), with no messages yet, as Teams names it
+    /// (`19:<a's id>_<bot id>@unq.gbl.spaces`); its id, or `None` when `bot` is not a bot's MRI or the fixtures have no
+    /// empty chat to make its list entry from.
+    #[must_use = "None says no chat was made"]
+    pub fn add_bot_chat(&self, bot: &str) -> Option<String> {
+        let bot_id = bot.strip_prefix("28:")?;
+        let mut state = self.lock();
+        let empty = state.fixtures.entries.get(1).cloned()?;
+        let id = format!("19:{}_{bot_id}@unq.gbl.spaces", LAB_A.trim_start_matches("8:orgid:"));
+        let time = state.tick();
+        let conversation = world::created(&empty, &id, world::Kind::OneToOne, &[LAB_A, bot], time);
+        state.conversations.push(conversation);
+        Some(id)
+    }
+
     /// The channel writes the mock took, in order (`channels.rs`).
     #[must_use]
     pub fn channel_writes(&self) -> Vec<ChannelWrite> {
