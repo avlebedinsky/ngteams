@@ -133,11 +133,29 @@ fn shell_window(rig: &Rig, trace: Arc<ViewTrace>) -> (Entity<Shell>, &'static mu
 }
 
 fn bounds(cx: &mut VisualTestContext, selector: &str) -> Option<gpui::Bounds<gpui::Pixels>> {
+    draw(cx);
+    cx.debug_bounds(Box::leak(selector.to_owned().into_boxed_str()))
+}
+
+/// Draws a new frame when the window is idle.
+fn draw(cx: &mut VisualTestContext) {
     cx.run_until_parked();
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    cx.debug_bounds(Box::leak(selector.to_owned().into_boxed_str()))
+}
+
+/// The bounds of each of `selectors`, all from one frame. An opened view rises in on the wall clock, so each frame
+/// can draw it at a different height: compare the positions of parts only inside one frame.
+fn bounds_in_one_frame<const N: usize>(
+    cx: &mut VisualTestContext,
+    selectors: [String; N],
+) -> [gpui::Bounds<gpui::Pixels>; N] {
+    draw(cx);
+    selectors.map(|selector| {
+        cx.debug_bounds(Box::leak(selector.clone().into_boxed_str()))
+            .unwrap_or_else(|| panic!("{selector} is drawn"))
+    })
 }
 
 fn click(cx: &mut VisualTestContext, selector: &str) {
@@ -570,10 +588,15 @@ fn an_email_post_s_card_ends_with_view_original_email_and_reply_in_thread() {
     let rig = rig();
     let (shell, cx) = email_channel(&rig);
     // the subject over the text, the rows under it, in the post's card
-    let card = bounds(cx, &format!("bubble-{EMAIL}")).unwrap();
-    let subject = bounds(cx, &format!("post-subject-{EMAIL}")).unwrap();
-    let original = bounds(cx, &format!("email-original-{EMAIL}")).unwrap();
-    let reply = bounds(cx, &format!("email-reply-{EMAIL}")).unwrap();
+    let [card, subject, original, reply] = bounds_in_one_frame(
+        cx,
+        [
+            format!("bubble-{EMAIL}"),
+            format!("post-subject-{EMAIL}"),
+            format!("email-original-{EMAIL}"),
+            format!("email-reply-{EMAIL}"),
+        ],
+    );
     assert!(
         card.top() <= subject.top() && subject.bottom() <= original.top(),
         "{subject:?} {original:?}"
@@ -605,15 +628,21 @@ fn an_email_post_s_card_spans_the_avatar_column_and_holds_its_icon_sender_and_to
     let rig = rig();
     let (_shell, cx) = email_channel(&rig);
     cx.simulate_resize(gpui::size(gpui::px(1280.0), gpui::px(800.0)));
-    let card = bounds(cx, &format!("bubble-{EMAIL}")).unwrap();
+    let [card, icon, sender, time, to, subject, avatar] = bounds_in_one_frame(
+        cx,
+        [
+            format!("bubble-{EMAIL}"),
+            format!("email-icon-{EMAIL}"),
+            format!("email-sender-{EMAIL}"),
+            format!("email-time-{EMAIL}"),
+            format!("email-to-{EMAIL}"),
+            format!("post-subject-{EMAIL}"),
+            format!("avatar-{POST}"),
+        ],
+    );
     let inside = |part: gpui::Bounds<gpui::Pixels>| {
         card.left() <= part.left() && part.right() <= card.right() && card.top() <= part.top()
     };
-    let icon = bounds(cx, &format!("email-icon-{EMAIL}")).unwrap();
-    let sender = bounds(cx, &format!("email-sender-{EMAIL}")).unwrap();
-    let time = bounds(cx, &format!("email-time-{EMAIL}")).unwrap();
-    let to = bounds(cx, &format!("email-to-{EMAIL}")).unwrap();
-    let subject = bounds(cx, &format!("post-subject-{EMAIL}")).unwrap();
     for (part, at) in [("icon", icon), ("sender", sender), ("time", time), ("to", to)] {
         assert!(inside(at), "the {part} {at:?} is in the card {card:?}");
         assert!(
@@ -625,7 +654,6 @@ fn an_email_post_s_card_spans_the_avatar_column_and_holds_its_icon_sender_and_to
     assert!(icon.right() <= sender.left() && icon.right() <= to.left());
     assert!(sender.bottom() <= to.top() && sender.right() <= time.left());
     // the card starts where a person's avatar does, as Teams draws an email post
-    let avatar = bounds(cx, &format!("avatar-{POST}")).unwrap();
     assert!(card.left() <= avatar.left(), "{card:?} {avatar:?}");
 }
 
