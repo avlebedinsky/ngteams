@@ -310,13 +310,18 @@ async fn created(server: &TestServer) -> Result<Vec<(String, i64)>, ngteams_serv
     ngteams_server::with_conn!(db, |conn| Ok(query.load(conn).await?))
 }
 
+/// The rotation period, and so the pre-publish time, of the housekeeping test, in seconds. Key times are whole seconds:
+/// a period of one would let a key made late in a second sign from the next, before a loaded host's next check.
+const ROTATION: u64 = 3;
+
 #[tokio::test(flavor = "multi_thread")]
 async fn housekeeping_publishes_the_next_bot_key_before_it_signs_and_drops_one_nothing_it_signed_can_still_use() {
     let registry = Registry::open_with(crate::support::Backend::Sqlite, |config| {
-        config.bots.key_rotation = 1;
+        config.bots.key_rotation = ROTATION;
         config.bots.activity_token_lifetime = 1;
     })
     .await;
+    let period = Duration::from_secs(ROTATION) + Duration::from_millis(100);
     let server = &registry.server;
     let added = registry
         .register("Echo (synthetic)", "https://bot.example.test/api/messages")
@@ -347,7 +352,7 @@ async fn housekeeping_publishes_the_next_bot_key_before_it_signs_and_drops_one_n
     assert!(shown.contains(&first) && !shown.contains("PRIVATE"), "{shown}");
 
     // due, but a media node alone doesn't rotate the bots' keys: the API does
-    tokio::time::sleep(Duration::from_millis(1100)).await;
+    tokio::time::sleep(period).await;
     ngteams_server::app::tidy_for(&server.app, ngteams_server::mixer::Role::Media).await;
     assert_eq!(published(server).await, std::slice::from_ref(&first));
 
@@ -359,7 +364,7 @@ async fn housekeeping_publishes_the_next_bot_key_before_it_signs_and_drops_one_n
     let next = keys.iter().find(|key| **key != first).unwrap().clone();
 
     // published long enough, it signs; the first is retired but still published
-    tokio::time::sleep(Duration::from_millis(1100)).await;
+    tokio::time::sleep(period).await;
     ngteams_server::app::tidy(&server.app).await;
     assert_eq!(signing(), next);
     let keys = published(server).await;

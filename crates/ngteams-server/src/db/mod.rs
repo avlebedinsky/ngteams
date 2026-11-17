@@ -4,8 +4,11 @@
 //! Each query is written once inside [`with_conn!`],
 //! which runs it on whichever connection the pool holds. Postgres goes through diesel-async's tokio-postgres
 //! connection; SQLite through Diesel's own connection on the blocking pool, one connection per node (its writes
-//! serialize anyway, and a single writer never meets `SQLITE_BUSY`). Foundation times are Unix seconds; chat
-//! arrival times and versions are Unix milliseconds.
+//! serialize anyway). Foundation times are Unix seconds; chat arrival times and versions are Unix milliseconds.
+//!
+//! Other processes may open the same SQLite file at once (the operator's commands beside a running or starting
+//! server): every SQLite connection waits on a lock another holds ([`SQLITE_BUSY_TIMEOUT_MS`]) before it does
+//! anything else, and the migrations run as one write transaction a second migrating process waits for.
 //!
 //! SQLite's own `lower` folds ASCII only, so each SQLite connection replaces it with Rust's Unicode one: a
 //! case-insensitive match written with [`lower`] then finds "Élodie" on both backends.
@@ -38,6 +41,8 @@ const MIGRATION_LOCK: i64 = 0x6e67_7473;
 const CHECKOUT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long SQLite waits on a lock another process holds (the admin CLI beside a running server).
 const SQLITE_BUSY_TIMEOUT_MS: u32 = 5000;
+/// How long a process waits for another one's SQLite migrations, as a Postgres node waits for the advisory lock.
+const SQLITE_MIGRATION_WAIT_MS: u32 = 120_000;
 
 /// Why a database call failed. Never carries a value from a row.
 #[derive(Debug, thiserror::Error)]
@@ -150,7 +155,8 @@ impl Db {
     }
 
     /// Applies the migrations not yet applied. On Postgres a session advisory lock makes nodes starting at once take
-    /// turns; the lock goes with the dedicated connection.
+    /// turns; the lock goes with the dedicated connection. On SQLite they run in one `BEGIN IMMEDIATE` transaction:
+    /// a second process that migrates at once waits for it, then finds them applied.
     ///
     /// # Errors
     /// A migration fails.
@@ -164,8 +170,21 @@ impl Db {
                 run_migrations(connection, POSTGRES_MIGRATIONS).await
             }
             Pool::Sqlite(pool) => {
-                let connection = pool.dedicated_connection().await?;
-                run_migrations(connection, SQLITE_MIGRATIONS).await
+                let mut connection = pool.dedicated_connection().await?;
+                connection
+                    .batch_execute(&format!("PRAGMA busy_timeout = {SQLITE_MIGRATION_WAIT_MS}"))
+                    .await?;
+                connection
+                    .spawn_blocking(|sqlite| {
+                        Ok(sqlite
+                            .immediate_transaction(|sqlite| {
+                                sqlite.run_pending_migrations(SQLITE_MIGRATIONS).map(|_| ())
+                            })
+                            .map_err(|error: Box<dyn std::error::Error + Send + Sync>| {
+                                DbError::Migration(error.to_string())
+                            }))
+                    })
+                    .await?
             }
         }
     }
@@ -185,14 +204,20 @@ diesel::define_sql_function! {
     fn lower(text: diesel::sql_types::Text) -> diesel::sql_types::Text;
 }
 
-/// A SQLite connection with foreign keys on, WAL, a busy timeout and the Unicode `lower`.
+/// A SQLite connection with a busy timeout, WAL, foreign keys on and the Unicode `lower`. The timeout comes first:
+/// switching to WAL takes a lock another process may hold.
 fn sqlite_setup(path: &str) -> BoxFuture<'_, diesel::ConnectionResult<Sqlite>> {
     async move {
         let mut connection = Sqlite::establish(path).await?;
         connection
-            .batch_execute(&format!(
-                "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS};"
-            ))
+            .batch_execute(&format!("PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}"))
+            .await
+            .map_err(ConnectionError::CouldntSetupConfiguration)?;
+        wal(&mut connection)
+            .await
+            .map_err(ConnectionError::CouldntSetupConfiguration)?;
+        connection
+            .batch_execute("PRAGMA foreign_keys = ON")
             .await
             .map_err(ConnectionError::CouldntSetupConfiguration)?;
         connection
@@ -202,6 +227,19 @@ fn sqlite_setup(path: &str) -> BoxFuture<'_, diesel::ConnectionResult<Sqlite>> {
         Ok(connection)
     }
     .boxed()
+}
+
+/// Puts the file in WAL mode, which it keeps; once it is in WAL this changes nothing. The switch reads the file and
+/// then asks for its write lock, so while another process switches a new file at the same moment SQLite fails it at
+/// once (`SQLITE_BUSY`, as waiting could deadlock) whatever the busy timeout. It then waits for that write lock
+/// before it holds any other (`BEGIN IMMEDIATE`, which the busy timeout covers), by when the other's switch is done.
+async fn wal(connection: &mut Sqlite) -> diesel::QueryResult<()> {
+    if connection.batch_execute("PRAGMA journal_mode = WAL").await.is_ok() {
+        return Ok(());
+    }
+    connection
+        .batch_execute("BEGIN IMMEDIATE; ROLLBACK; PRAGMA journal_mode = WAL")
+        .await
 }
 
 /// Runs the pending migrations on the blocking pool (the harness blocks on the connection's futures).
@@ -247,5 +285,33 @@ pub(crate) fn conflict(error: diesel::result::Error) -> DbError {
             DbError::Conflict
         }
         error => DbError::Query(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use diesel::connection::SimpleConnection as _;
+    use diesel::{Connection as _, SqliteConnection};
+
+    use super::*;
+
+    /// A new file another process writes before it is in WAL (as while it switches it): the switch can't wait for
+    /// that writer, so the connection waits for its write lock instead, then switches the file.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_connection_waits_for_another_process_writing_a_new_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.sqlite");
+        let mut other = SqliteConnection::establish(path.to_str().unwrap()).unwrap();
+        other
+            .batch_execute("CREATE TABLE held (x); BEGIN IMMEDIATE; INSERT INTO held VALUES (1);")
+            .unwrap();
+        let url = format!("sqlite://{}", path.display());
+        let connecting = tokio::spawn(async move { Db::connect(&url, 1).await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!connecting.is_finished(), "{:?}", connecting.await);
+        other.batch_execute("COMMIT").unwrap();
+        connecting.await.unwrap().unwrap();
+        // the header's read and write versions: 2 is WAL
+        assert_eq!(std::fs::read(&path).unwrap()[18..20], [2, 2]);
     }
 }

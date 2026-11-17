@@ -152,9 +152,20 @@ impl Node {
         self.start_with_log(Stdio::null()).await;
     }
 
-    /// Starts it with its log (standard error) written to `log`.
+    /// Starts it with its log (standard error) written to `log`; a start that fails shows that log.
     pub async fn start_logged(&mut self, log: &Path) {
-        self.start_with_log(std::fs::File::create(log).unwrap().into()).await;
+        use futures_util::FutureExt as _;
+        let started = std::panic::AssertUnwindSafe(self.start_with_log(std::fs::File::create(log).unwrap().into()))
+            .catch_unwind()
+            .await;
+        if let Err(failure) = started {
+            let why = failure
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| failure.downcast_ref::<&str>().copied())
+                .unwrap_or("panic");
+            panic!("{why}; its log:\n{}", std::fs::read_to_string(log).unwrap_or_default());
+        }
     }
 
     async fn start_with_log(&mut self, log: Stdio) {

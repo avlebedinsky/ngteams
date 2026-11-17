@@ -1568,6 +1568,10 @@ the 1:1 chat and its history stay its two people's.
 
 - HTTP nodes keep no state of their own: Postgres is the source of truth, so any node answers any request. SQLite
   means a single node; it needs no Redis.
+- On SQLite the operator's commands (`user add`, `migrate` and the others) may run beside a node that is running or
+  still starting, on the same file: the file is in WAL mode, each process waits up to 5 seconds for a lock another
+  holds, and the migrations run as one write transaction a second process waits for (up to 2 minutes) before it
+  finds them applied. Only processes on one machine share the file; never put it on a network filesystem.
 - With Redis, a write's events go to `Fanout::publish` on a topic such as `push:<mri>`, and every node that holds a
   subscriber for it delivers them. Each node keeps one Redis subscription per topic and feeds its local subscribers
   from it. Without Redis the same `Fanout` trait is one process's broadcast.

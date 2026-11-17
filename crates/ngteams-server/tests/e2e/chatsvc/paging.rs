@@ -1,10 +1,11 @@
 //! A bounded conversation scan leaves concurrent writes for the following sync, on either database.
 
+use serde_json::{Value, json};
 use teams_proto::chat::ChatReads;
 use teams_proto::{CreateChat, Mri};
 
 use super::client;
-use crate::support::{TestServer, backends, own_stream};
+use crate::support::{Backend, TestServer, backends, own_stream};
 
 /// The ids of the chats among listed conversations: the account's own streams left out.
 fn chat_ids(listed: &[teams_proto::chat::Conversation]) -> Vec<String> {
@@ -13,6 +14,61 @@ fn chat_ids(listed: &[teams_proto::chat::Conversation]) -> Vec<String> {
         .map(|entry| entry.id.clone())
         .filter(|id| !own_stream(id))
         .collect()
+}
+
+/// How many reactions of 60 KiB keys make a summary past the page's 3 MiB.
+const OVERSIZED_KEYS: usize = 72;
+
+/// Stores `count` reactions of 60 KiB keys by `a` on `message`, as that many writes would have left them, in one
+/// update. Each write through the service rewrites the whole message, so writing them one by one is quadratic: tens
+/// of seconds in a debug build, past the client's 30-second timeout on a loaded host.
+async fn store_reactions(pair: &super::messages::Pair, backend: Backend, message: &str, count: usize) {
+    use diesel::sql_types::{BigInt, Text};
+    use diesel_async::RunQueryDsl as _;
+    use ngteams_server::db::{DbError, with_conn};
+
+    #[derive(diesel::QueryableByName)]
+    struct Stored {
+        #[diesel(sql_type = Text)]
+        body: String,
+    }
+
+    let (select, update) = match backend {
+        Backend::Sqlite => (
+            "SELECT body FROM chat_messages WHERE chat_id = ? AND id = ?",
+            "UPDATE chat_messages SET body = ? WHERE chat_id = ? AND id = ?",
+        ),
+        Backend::Postgres => (
+            "SELECT body FROM chat_messages WHERE chat_id = $1 AND id = $2",
+            "UPDATE chat_messages SET body = $1 WHERE chat_id = $2 AND id = $3",
+        ),
+    };
+    let id: i64 = message.parse().unwrap();
+    let mri = format!("8:orgid:{}", pair.a_id);
+    async {
+        with_conn!(&pair.server.app.db, |conn| {
+            let stored: Stored = diesel::sql_query(select)
+                .bind::<Text, _>(&pair.chat)
+                .bind::<BigInt, _>(id)
+                .get_result(conn)
+                .await?;
+            let mut body: Value = serde_json::from_str(&stored.body).unwrap();
+            let emotions = body["properties"]["emotions"].as_array_mut().unwrap();
+            for index in 0..count {
+                let key = format!("{index}-{}", "x".repeat(60 * 1024));
+                emotions.push(json!({"key": key, "users": [{"mri": mri, "time": 1, "value": "1"}]}));
+            }
+            diesel::sql_query(update)
+                .bind::<Text, _>(body.to_string())
+                .bind::<Text, _>(&pair.chat)
+                .bind::<BigInt, _>(id)
+                .execute(conn)
+                .await?;
+        });
+        Ok::<_, DbError>(())
+    }
+    .await
+    .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -37,14 +93,13 @@ async fn oversized_reaction_summaries_do_not_block_conversation_paging() {
             chat.last_message_raw.as_ref().unwrap()["annotationsSummary"]["emotions"]["like"],
             1
         );
-        for index in 0..72 {
-            let key = format!("{index}-{}", "x".repeat(60 * 1024));
-            let response = writer
-                .write(teams_proto::SetReaction::new(&pair.chat, &message, key))
-                .await
-                .unwrap();
-            assert_eq!(response.status(), 200);
-        }
+        store_reactions(&pair, backend, &message, OVERSIZED_KEYS - 1).await;
+        let key = format!("{}-{}", OVERSIZED_KEYS - 1, "x".repeat(60 * 1024));
+        let response = writer
+            .write(teams_proto::SetReaction::new(&pair.chat, &message, key))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
         let c = pair.server.add_user("c@own.test", "Cora").await;
         let later = group_with_preview(&pair, &c, "After the oversized preview", "still reachable").await;
         let mut page = reads

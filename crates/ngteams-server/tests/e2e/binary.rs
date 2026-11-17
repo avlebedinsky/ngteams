@@ -12,6 +12,7 @@ mod namespaces;
 mod push;
 mod search;
 mod setup;
+mod sqlite;
 pub(crate) mod support;
 mod teams;
 mod workflows;
