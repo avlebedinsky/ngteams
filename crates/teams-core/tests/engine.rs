@@ -1557,6 +1557,30 @@ async fn store_queries_and_history_requests_are_served_while_catch_up_waits() {
     b.shutdown();
 }
 
+/// A chat list row asks whether a 1:1 chat is a bot's (`known_bot_app`): the apps asks read no store,
+/// so one is answered while a catch-up read waits, as a store query is. The account's apps are read once a run, before
+/// the hold, so the answer needs no read.
+#[tokio::test]
+async fn an_app_lookup_is_answered_while_catch_up_waits() {
+    let lab = Lab::start().await;
+    let b = native(&lab, LAB_B, QUIET);
+    b.handle.sync().await.unwrap();
+    let requests = b.handle.requests();
+    let partner = LAB_A.trim_start_matches("8:orgid:");
+    let before = requests.known_bot_app(partner).await.unwrap();
+
+    b.reads_held.send_replace(true);
+    let sync = b.handle.sync();
+    let lookup = tokio::time::timeout(Duration::from_secs(5), requests.known_bot_app(partner)).await;
+    let lookup = lookup.expect("an app lookup waited for the catch-up").unwrap();
+    assert_eq!(lookup, before);
+
+    b.reads_held.send_replace(false);
+    let report = sync.await.unwrap();
+    assert!(report.failed.is_empty(), "{report:?}");
+    b.shutdown();
+}
+
 #[tokio::test]
 async fn a_write_whose_check_cant_sync_is_answered_as_the_row_that_waits() {
     let lab = Lab::start().await;

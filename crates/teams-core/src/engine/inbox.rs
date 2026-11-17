@@ -7,6 +7,8 @@
 //!
 //! - **Answered meanwhile**: every store query and cached person, team and chat listing. Person lookups wait for
 //!   the main loop. The teams scheduler lives here so its one read can start, settle and publish during catch-up.
+//!   The apps asks ([`AppReads`]) read the service only, never the store, so they go at once: a view's app lookup
+//!   (a chat list row asks whether a 1:1 chat is a bot's) never waits for the catch-up.
 //! - **Priority reads**: opened conversations and older history use one foreground lane beside the pending
 //!   background read. Requests remain FIFO within that lane, except one for a conversation being read waits until
 //!   its cursor is stored. Duplicate message syncs share the successful result; canceled queued reads are skipped.
@@ -39,6 +41,7 @@ use super::{Action, EngineError, Event, MessageChange, Query, Request, Responder
 use crate::calling::CallActions;
 use crate::outbox::{Command, enqueue};
 use crate::sync::{Changes, Meanwhile, PriorityRead};
+use crate::team_apps::AppReads;
 use crate::teams::{Teams, TeamsRead, TeamsReadError};
 use crate::{profiles, teams};
 
@@ -51,6 +54,8 @@ pub(super) struct Inbox<C> {
     known: HashMap<String, String>,
     requests: Mutex<Requests>,
     teams: std::sync::Mutex<Teams<C>>,
+    /// The apps asks, answered at once (see the module docs).
+    apps: AppReads<C>,
     events: mpsc::UnboundedSender<Event>,
     read_only: bool,
     /// The calling a call action goes to meanwhile, once it runs.
@@ -74,6 +79,10 @@ impl<C: Credentials + 'static> Inbox<C> {
         &self.cloud
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the inbox's parts, each handed in once at the engine's start"
+    )]
     pub(super) fn new(
         me: String,
         known: HashMap<String, String>,
@@ -81,6 +90,7 @@ impl<C: Credentials + 'static> Inbox<C> {
         events: mpsc::UnboundedSender<Event>,
         read_only: bool,
         teams: Teams<C>,
+        apps: AppReads<C>,
     ) -> Self {
         Self {
             cloud: teams.cloud().clone(),
@@ -89,6 +99,7 @@ impl<C: Credentials + 'static> Inbox<C> {
             events,
             read_only,
             teams: std::sync::Mutex::new(teams),
+            apps,
             calls: OnceLock::new(),
             stopping: AtomicBool::new(false),
             teams_changed: AtomicBool::new(false),
@@ -328,6 +339,10 @@ impl<C: Credentials + 'static> Inbox<C> {
             Request::ChatListing(reply) => {
                 let _ = reply.send(teams::stored_listing(store).map_err(EngineError::from));
                 Some(Request::ChatListing(answered()))
+            }
+            Request::TeamApps(ask) => {
+                self.apps.answer(*ask);
+                None
             }
             Request::Shutdown => {
                 self.stopping.store(true, Ordering::Relaxed);

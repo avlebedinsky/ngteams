@@ -98,6 +98,40 @@ where
 {
     /// Answers `ask`.
     pub(crate) fn team_apps_ask(&mut self, ask: TeamAppsAsk) {
+        self.app_reads().answer(ask);
+    }
+
+    /// What answers the apps asks, sharing this run's definitions and bots ([`AppReads`]).
+    pub(crate) fn app_reads(&self) -> AppReads<C> {
+        AppReads {
+            client: Arc::clone(&self.client),
+            app_definitions: Arc::clone(&self.app_definitions),
+            bots: Arc::clone(&self.bots),
+        }
+    }
+}
+
+/// What answers the apps asks ([`TeamAppsAsk`]): the account's client and the definitions and bots this run read. An
+/// ask reads the service only, never the store, so the engine's loop and its inbox both answer one at once: a chat
+/// list's bot lookup does not wait for a catch-up read (`engine/inbox.rs`).
+pub(crate) struct AppReads<C> {
+    client: Arc<teams_proto::Client<teams_proto::HttpTransport<C>>>,
+    app_definitions: Arc<AppDefinitionsCache>,
+    bots: Arc<BotIndex>,
+}
+
+impl<C: Credentials + 'static> AppReads<C> {
+    /// Runs `read` beside the engine's loop and answers `reply` with what it found.
+    fn spawn_read<V, F>(&self, reply: Responder<V>, read: F)
+    where
+        V: Send + 'static,
+        F: AsyncFnOnce(&teams_proto::Client<teams_proto::HttpTransport<C>>) -> V + 'static,
+    {
+        crate::team_admin::spawn_read(Arc::clone(&self.client), reply, read);
+    }
+
+    /// Answers `ask`.
+    pub(crate) fn answer(&self, ask: TeamAppsAsk) {
         match ask {
             TeamAppsAsk::NotificationSettings { reply } => self.spawn_read(reply, notification_settings),
             TeamAppsAsk::Definition { id, reply } => {

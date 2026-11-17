@@ -2214,6 +2214,7 @@ where
             events.clone(),
             outbox.is_read_only(),
             teams,
+            channels.app_reads(),
         ));
         let catch_up = CatchUp::new(parts.client, Arc::clone(&outbox), me).with_meanwhile(inbox.clone());
         Self {

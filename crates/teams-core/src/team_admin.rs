@@ -414,11 +414,7 @@ where
         V: Send + 'static,
         F: AsyncFnOnce(&Client<HttpTransport<C>>) -> V + 'static,
     {
-        let client = Arc::clone(&self.client);
-        tokio::task::spawn_local(async move {
-            let found = read(&client).await;
-            let _ = reply.send(Ok(found));
-        });
+        spawn_read(Arc::clone(&self.client), reply, read);
     }
 
     fn channel_read(&self, query: teams_proto::ChannelRead, reply: Responder<teams_proto::ChannelData>) {
@@ -771,6 +767,19 @@ fn picture_format(bytes: &[u8]) -> Option<PastedFormat> {
         [0x89, b'P', b'N', b'G', ..] => Some(PastedFormat::Png),
         _ => None,
     }
+}
+
+/// Runs `read` through `client` beside the engine's loop and answers `reply` with what it found.
+pub(crate) fn spawn_read<C, V, F>(client: Arc<Client<HttpTransport<C>>>, reply: Responder<V>, read: F)
+where
+    C: Credentials + 'static,
+    V: Send + 'static,
+    F: AsyncFnOnce(&Client<HttpTransport<C>>) -> V + 'static,
+{
+    tokio::task::spawn_local(async move {
+        let found = read(&client).await;
+        let _ = reply.send(Ok(found));
+    });
 }
 
 #[cfg(test)]
