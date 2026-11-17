@@ -718,7 +718,8 @@ A bot gets the server's token with MSAL's client-credentials request, unchanged:
 names it. There is no create call: a person's first message to that id makes the chat when the bot's app is enabled
 and the person may use it (`everyone`, or listed in `users`); otherwise the post is 404 as for any unknown chat. A
 bot makes the same chat with `POST v3/conversations` under the same rule. In the chat's members and thread reads the
-bot is `28:<id>`.
+bot is `28:<id>`. A bot's message gets a numeric `clientmessageid` from the server, as a Microsoft bot's message has,
+so a person's read receipt can name it.
 
 **To a bot.** In a 1:1 chat the bot gets each message (`message`), edit (`messageUpdate`, `channelData.eventType`
 `editMessage`), delete (`messageDelete`, `softDeleteMessage`) and typing (`typing`) of the person; in a group chat only

@@ -130,12 +130,7 @@ pub(super) async fn insert_by(db: &Db, draft: &Message, base: &str, poster: Post
                     body["conversationLink"] = format!("{link};messageid={root}").into();
                 }
             }
-            body["id"] = version.to_string().into();
-            body["version"] = version.to_string().into();
-            body["sequenceId"] = version.into();
-            body["composetime"] = wire::iso(version).into();
-            body["originalarrivaltime"] = wire::iso(version).into();
-            row.body = body.to_string();
+            stamp(&mut row, &mut body, version);
             diesel::insert_into(chat_messages::table)
                 .values(&row)
                 .execute(conn)
@@ -416,6 +411,23 @@ pub(super) async fn around(db: &Db, chat: &str, reader: &str, at: i64, size: i64
         past.sort_unstable_by_key(|row| std::cmp::Reverse(row.id));
         Ok(past)
     })
+}
+
+/// Gives a new message `row` with `body` its id and times (`version`), and its `clientmessageid` when it has none.
+fn stamp(row: &mut Message, body: &mut Value, version: i64) {
+    if row.client_id.is_none() && !is_event(body) {
+        // the server's own posts (a bot's, the Workflows bot's, a call's): Teams gives every message that is not a
+        // thread event a `clientmessageid`, and a read receipt names it
+        let made = wire::client_message_id();
+        body["clientmessageid"] = made.clone().into();
+        row.client_id = Some(made);
+    }
+    body["id"] = version.to_string().into();
+    body["version"] = version.to_string().into();
+    body["sequenceId"] = version.into();
+    body["composetime"] = wire::iso(version).into();
+    body["originalarrivaltime"] = wire::iso(version).into();
+    row.body = body.to_string();
 }
 
 /// A thread's own event (`ThreadActivity/…`): written by the service, changed by nobody.

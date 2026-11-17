@@ -109,6 +109,12 @@ pub(super) fn conversation(app: &App, caller: &Caller, chat: &Chat) -> Value {
     })
 }
 
+/// A new `clientmessageid` for a message the server posts itself: a random 64-bit number in decimal, as Teams' ids
+/// are (17 to 20 digits seen on bots' messages).
+pub(super) fn client_message_id() -> String {
+    uuid::Uuid::new_v4().as_u64_pair().0.to_string()
+}
+
 pub(super) fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

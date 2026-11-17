@@ -1208,6 +1208,10 @@ The native client: [`teams_core::activity`](../../crates/teams-core/src/activity
   the last message read (its id and its `clientmessageid`) and when the horizon was set. a's client set it with `PUT
   v1/users/ME/conversations/<chat>/properties?name=consumptionhorizon` (`{"consumptionhorizon": "…"}`, answered 200
   with an empty body) after its own posts; the conversation list carries it in `properties`.
+- A receipt names a message's `clientmessageid`, and every message that counts as unread has one. In the lab
+  accounts' synced stores (read 2026-11-17 for shape only), each bot message (`28:` senders, the Workflows bot's
+  cards included) carries a random numeric id of 17 to 20 digits. Only thread events (`ThreadActivity/…`) have none.
+  Thus a bot chat is marked read as any chat is.
 - `GET v1/threads/<chat>/consumptionhorizons` answers `{id, version, consumptionhorizons: []}`: for the lab chat the
   list was empty both times it was read (the members' horizons that others may see, when read receipts are on).
 - A page sends its receipt only while it is in use. In the first run b's page sent none while it showed a's messages;

@@ -206,6 +206,54 @@ async fn a_user_writes_to_a_bot_and_syncs_its_text_markdown_and_card_replies() {
     }
 }
 
+/// QA 229 Q2: the bot's answers carry a `clientmessageid`, as a Microsoft bot's do, so the account's read receipt
+/// names the newest of them and the chat is no longer unread.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_user_reads_the_bots_answers_and_the_chat_is_read() {
+    for backend in backends() {
+        let setup = Setup::open(backend).await;
+        let chat = setup.chat();
+        let sent = setup.send(&chat, "anything new?").await;
+        let got = setup.bot.next_of("message").await;
+        let connector = setup.connector(got.activity["serviceUrl"].as_str().unwrap()).await;
+        for text in ["one", "two"] {
+            let (status, answer) = connector.reply(&chat, &sent, Connector::text(text)).await;
+            assert_eq!(status, 200, "{answer}");
+        }
+
+        let messages = setup.synced(&chat).await;
+        let newest = messages.last().unwrap();
+        assert_eq!(newest.sender.as_deref(), Some(format!("28:{}", setup.bot_id).as_str()));
+        let ids: Vec<&str> = messages
+            .iter()
+            .filter(|message| message.sender == newest.sender)
+            .map(|message| message.client_message_id.as_deref().unwrap_or_default())
+            .collect();
+        assert!(
+            ids.iter()
+                .all(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())),
+            "{ids:?}"
+        );
+        assert_ne!(ids[0], ids[1]);
+        assert_eq!(setup.engine.unread_count(&chat).await.unwrap(), 2);
+
+        let row = setup
+            .engine
+            .write(Action::Read {
+                conversation: chat.clone(),
+                message_id: newest.id.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(row.state, OutboxState::Sent, "{row:?}");
+        setup.synced(&chat).await;
+        assert_eq!(setup.engine.unread_count(&chat).await.unwrap(), 0);
+        let horizon = setup.engine.read_horizon(&chat).await.unwrap().unwrap();
+        assert_eq!(horizon.last_read_arrival.to_string(), newest.id);
+        setup.stop().await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn edits_deletes_and_typing_go_both_ways() {
     for backend in backends() {
