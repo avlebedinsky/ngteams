@@ -1783,6 +1783,14 @@ impl Calls {
         cx.notify();
     }
 
+    /// The user asked the camera of `call` on or off: shown so at once.
+    fn camera_asked(&mut self, call: CallId, on: bool, cx: &mut Context<Self>) {
+        if let Some(active) = self.call.as_mut().filter(|active| active.id == call) {
+            active.camera = on;
+            cx.notify();
+        }
+    }
+
     /// How the engine answered `ask`'s action.
     fn answered(
         &mut self,
@@ -1802,10 +1810,7 @@ impl Calls {
                     CallAction::Mute { muted, .. } => active.muted = *muted,
                     // shown raised at once, as Teams does; the roster tells it as it stands
                     CallAction::RaiseHand { raised, .. } => active.hand_raised = *raised,
-                    CallAction::Camera { on, .. } => {
-                        active.camera = *on;
-                        active.check.camera |= *on;
-                    }
+                    CallAction::Camera { on, .. } => active.check.camera |= *on,
                     // listed ringing at once, as Teams lists them; called again, ringing again
                     CallAction::Add { invitee, .. } => {
                         let name = match ask {
@@ -1841,12 +1846,18 @@ impl Calls {
                         self.asked = None;
                     }
                 }
-                // a camera the media couldn't turn on (its device missing, the portal refusing it): it doesn't work
-                if let (CallAction::Camera { call, on: true }, EngineError::Call(CallActionError::Media(_))) =
-                    (action, &error)
+                // a camera the engine didn't turn shows as it was, unless a later switch was asked since
+                if let CallAction::Camera { call, on } = action
                     && let Some(active) = self.call.as_mut().filter(|active| active.id == *call)
                 {
-                    active.check.camera_failed = true;
+                    if active.camera == *on {
+                        active.camera = !*on;
+                        cx.notify();
+                    }
+                    // a camera the media couldn't turn on (its device missing, the portal refusing it): it doesn't work
+                    if *on && matches!(error, EngineError::Call(CallActionError::Media(_))) {
+                        active.check.camera_failed = true;
+                    }
                 }
                 self.refuse(ask, refusal_kind(&error), refusal_text(&error), cx);
             }
@@ -2044,6 +2055,10 @@ pub fn ask_then(
             calls.answering = Some(call);
             cx.notify();
         });
+    }
+    // the camera shows as asked at once, as Teams' toolbar shows it, while it opens or waits for a renegotiation
+    if let CallAction::Camera { call, on } = action {
+        calls.update(cx, |calls, cx| calls.camera_asked(call, on, cx));
     }
     let reply = core.call(action.clone());
     let (weak, trace) = (calls.downgrade(), Arc::clone(trace));

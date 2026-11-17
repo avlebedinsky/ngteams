@@ -1401,6 +1401,50 @@ fn the_camera_is_off_when_a_call_starts_and_goes_on_and_off_by_its_key_its_butto
     no_name_in(&written);
 }
 
+/// The camera shows as asked at once, as Teams' toolbar shows it, while the engine still opens it or waits for a
+/// renegotiation; the later switch's state stands whatever order the answers come in, and a refused switch shows the
+/// camera as it was.
+#[test]
+fn the_camera_shows_as_asked_at_once_and_as_it_was_when_the_engine_refuses() {
+    let feed = VideoFeed::new();
+    let rig = video_calling(&feed);
+    let (trace, written) = trace();
+    let (_shell, cx) = shell_window(&rig, Some(AB), trace);
+    registered(&rig);
+    cx.simulate_keystrokes("ctrl-shift-c");
+    cx.run_until_parked();
+    status(&rig, 1, CallStatus::Connected);
+    let camera = |rig: &Rig| rig.cx.read(|cx| calls_of(rig).read(cx).call().unwrap().camera);
+
+    *rig.core.hold_calls.lock().unwrap() = true;
+    click(cx, "call-camera");
+    assert!(camera(&rig), "on while the engine opens it");
+    let on = lines(&written, "in-call", "shown").last().cloned().unwrap();
+    assert_eq!(kinds(&on), ["chat", "connected", "unmuted", "camera-on"]);
+    click(cx, "call-camera");
+    assert!(!camera(&rig), "off again before the first switch was answered");
+    let held = std::mem::take(&mut *rig.core.held_calls.lock().unwrap());
+    assert_eq!(held.len(), 2);
+    let mut held = held.into_iter().rev();
+    held.next().unwrap().send(Ok(call(1)));
+    held.next().unwrap().send(Ok(call(1)));
+    cx.run_until_parked();
+    assert!(!camera(&rig), "the later switch's state stands");
+
+    click(cx, "call-camera");
+    assert!(camera(&rig));
+    let held = std::mem::take(&mut *rig.core.held_calls.lock().unwrap());
+    for answer in held {
+        answer.send(Err(EngineError::Call(CallActionError::NoVideo)));
+    }
+    cx.run_until_parked();
+    assert!(!camera(&rig), "a refused switch shows the camera as it was");
+    assert_eq!(
+        kinds(lines(&written, "call", "refused").last().unwrap()),
+        ["camera", "no-video"]
+    );
+}
+
 #[test]
 fn the_test_call_shows_as_a_call_with_echo_its_camera_and_its_self_view() {
     let feed = VideoFeed::new();
