@@ -125,6 +125,9 @@ const SHOWN_SERVER: &str = "https://chat.example.test:8443";
 const SHOWN_HOST: &str = "chat.example.test:8443";
 /// The app's control socket, in the sandbox dir.
 const CTL_SOCKET: &str = "ctl.sock";
+/// The file in the sandbox dir the child adds a line `<UPN>` to each time the app opens the sign-in window again for
+/// an account signed out (a release's `main` opens it; the child only says it).
+const SIGN_IN_AGAIN_FILE: &str = "sign-in-again";
 /// The file in the sandbox dir the parent writes to have the mock's requests said.
 const MOCK_ASK: &str = "say-mock";
 /// The rail's "+", and the "Own server" segment of the window it opens, as the sandbox's output shows them.
@@ -304,6 +307,27 @@ fn hidden(width: u32, dark: bool, workflows: bool) -> hidden_qa::Look {
     hidden_qa::Look { width, dark, workflows }
 }
 
+/// The app's sign-in window again for `account`, said by [`said_sign_in_again`].
+fn sign_in_again_saying(account: &ngteams::accounts_file::PersonalAccount) -> app::SignInAgain {
+    let upn = account.upn.clone();
+    std::rc::Rc::new(move |_: &mut App| said_sign_in_again(&upn))
+}
+
+/// Adds `upn` to [`SIGN_IN_AGAIN_FILE`]: the app opened the sign-in window again for that account.
+fn said_sign_in_again(upn: &str) {
+    say(&format!("sign-in-again {upn}"));
+    let Ok(dir) = own::sandbox_dir() else {
+        return;
+    };
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(SIGN_IN_AGAIN_FILE));
+    if let Ok(mut file) = file {
+        let _ = writeln!(file, "{upn}");
+    }
+}
+
 /// The child's view trace, line by line as it comes.
 struct TraceReader {
     lines: mpsc::Receiver<serde_json::Value>,
@@ -350,6 +374,22 @@ impl TraceReader {
             ensure(!hit, || format!("trace line {what}; seen {:?}", self.seen))?;
         }
         Ok(())
+    }
+
+    /// Whether a line `found` takes comes within `within`, among those not seen yet.
+    fn next_within(&mut self, within: Duration, found: impl Fn(&serde_json::Value) -> bool) -> bool {
+        let until = std::time::Instant::now() + within;
+        while let Some(left) = until.checked_duration_since(std::time::Instant::now()) {
+            let Ok(line) = self.lines.recv_timeout(left) else {
+                return false;
+            };
+            let hit = found(&line);
+            self.seen.push(line);
+            if hit {
+                return true;
+            }
+        }
+        false
     }
 
     /// Waits for a line `found` takes among those not seen yet.
@@ -1590,7 +1630,7 @@ fn child_window(mode: Mode) -> SandboxResult {
                 settings: teams_ui::SettingsModel::load(settings),
                 // the sandbox's private bus, with its fake notification server and tray watcher
                 bus: teams_ui::bus::address_from_env(),
-                sign_in_again: std::rc::Rc::new(|_| std::rc::Rc::new(|_| {})),
+                sign_in_again: std::rc::Rc::new(sign_in_again_saying),
                 runner,
                 read_only: false,
             },

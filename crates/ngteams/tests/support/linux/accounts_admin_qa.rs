@@ -11,7 +11,8 @@
 //!   administrator made and unmade, the only administrator neither demoted nor deleted, a deletion cancelled with
 //!   Escape and one confirmed, the list loading and failing while the server is stopped, and Try again.
 //! - [`roles_while_running`]: a user promoted and demoted while the app runs (what the page shows now and after the
-//!   app starts again), and a user who can't sign in any more while their client runs.
+//!   app starts again), and a user who can't sign in any more while their client runs: the client signs out and
+//!   the window does not ask for her password again.
 //! - [`page_at`]: the page and its dialogs at 480 px and 1280 px, in Teams Light and Dark, keyboard only; at 1280 px
 //!   the account menu over the list, whose item over a user's row takes the click alone.
 
@@ -29,9 +30,9 @@ use ui_sandbox::{NIRI_FULL_WINDOW, Running, Sandbox, SandboxOptions, SandboxResu
 
 use super::admin::{offers_manage_users, server_user, tabs};
 use super::{
-    OWN_CA_ENV, OWN_NAME, OWN_ORIGIN_ENV, OWN_SEGMENT_AT, OWN_UPN, RAIL_ADD_AT, ROOT_ENV, SIGN_IN, TraceReader, WAIT,
-    accounts_shown, ctl, ensure, field, own, prompt_active, prompt_line, prompt_now, quit_and_finish, say, shot,
-    start_with,
+    OWN_CA_ENV, OWN_NAME, OWN_ORIGIN_ENV, OWN_SEGMENT_AT, OWN_UPN, RAIL_ADD_AT, ROOT_ENV, SIGN_IN, SIGN_IN_AGAIN_FILE,
+    TraceReader, WAIT, accounts_shown, ctl, ensure, field, own, prompt_active, prompt_line, prompt_now,
+    quit_and_finish, say, shot, start_with,
 };
 
 /// The administrator's password, typed into the first-run form.
@@ -991,14 +992,22 @@ fn demoted_while_shown(sandbox: &Sandbox, server: &own::Own, rita: &str, notes: 
     shot(sandbox, "ngteams-qa-promoted-after-restart.png")?;
     server.cli(&["user", "demote", RUNNING], None)?;
     // a key in the search: the page asks the server, which says she's no administrator; the app then takes the
-    // page away, at times before the page itself heard the answer (so its reason isn't always traced)
+    // page away, at times before the page itself heard the answer (so its reason isn't always traced): the wait
+    // ends at the answer traced or at the page gone, whichever comes first
     input.click(700, 173, keys::BTN_LEFT)?;
     input.type_text("a")?;
-    let traced = trace
-        .next_where("the page's answer after the demotion", |line| {
+    let start = Instant::now();
+    let traced = loop {
+        let answer = trace.next_within(Duration::from_millis(500), |line| {
             line["view"] == "user-admin" && line["change"] == "failed"
-        })
-        .is_ok();
+        });
+        if answer || !offers_manage_users(sandbox, rita) {
+            break answer;
+        }
+        ensure(start.elapsed() < WAIT, || {
+            "the page neither traced the server's answer nor went after the demotion".to_owned()
+        })?;
+    };
     notes.push(format!(
         "demoted while the page shows: the page traced the server's answer={traced}"
     ));
@@ -1022,6 +1031,8 @@ fn turned_off_while_running(
     (rita, admin, rita_id): (&str, &str, &str),
     notes: &mut Vec<String>,
 ) -> SandboxResult {
+    // the sandbox dir outlives this app: only what this app opened counts
+    let _ = fs::remove_file(sandbox.path(SIGN_IN_AGAIN_FILE));
     let root = tempfile::tempdir()?;
     let (running, mut trace) = seeded_app(sandbox, server, "admin-two", &root)?;
     let mut input = sandbox.input()?;
@@ -1046,7 +1057,15 @@ fn turned_off_while_running(
     let refused = grant(server, RUNNING, own::PASSWORD)?;
     notes.push(format!("Rita's password grant after: {refused}"));
     ctl(sandbox, &["account", "switch", rita])?;
-    let seen = prompts_for_a_while(&running);
+    let out_after = signed_out_after(sandbox, server)?;
+    notes.push(format!(
+        "Rita's client signed out {} ms after the switch",
+        out_after.as_millis()
+    ));
+    // the turned-off account's sign-out ends with nothing more to see: the window again would come within this time
+    std::thread::sleep(UNASKED);
+    let again = fs::read_to_string(sandbox.path(SIGN_IN_AGAIN_FILE)).unwrap_or_default();
+    let asked = again.lines().any(|upn| upn == RUNNING);
     let rita_mri = format!("8:orgid:{rita_id}");
     let trace_lines: Vec<String> = trace
         .seen
@@ -1055,26 +1074,41 @@ fn turned_off_while_running(
         .map(ToString::to_string)
         .collect();
     shot(sandbox, "ngteams-qa-disabled-client.png")?;
-    notes.push(format!("Rita's client after: prompts {seen:?}"));
+    notes.push(format!(
+        "Rita's client after: the sign-in window again for {:?}",
+        again.lines().collect::<Vec<_>>()
+    ));
     let status = ctl(sandbox, &["status"]).unwrap_or_else(|error| error.to_string());
     notes.push(format!("ngteamsctl status: {status}"));
     notes.push(format!("trace lines of Rita or the status: {trace_lines:?}"));
+    ensure(!asked, || {
+        "the app opens the sign-in window again for Rita, but an administrator turned her off".to_owned()
+    })?;
     quit_and_finish(sandbox, &mut trace, running)
 }
 
-/// What the window asking for an account said in the next minute (until it asks Rita).
-fn prompts_for_a_while(running: &Running) -> Vec<String> {
+/// How long the app has, once Rita's client is signed out, to open the sign-in window again. It opens nothing for an
+/// account that an administrator turned off; for an account signed out for another reason it opens the window once
+/// the account's engine stops.
+const UNASKED: Duration = Duration::from_secs(5);
+
+/// Waits until `ngteamsctl status` says that Rita's client on `server` is signed out: the time from the call.
+fn signed_out_after(sandbox: &Sandbox, server: &own::Own) -> SandboxResult<Duration> {
     let start = Instant::now();
-    let mut seen: Vec<String> = Vec::new();
-    while start.elapsed() < Duration::from_secs(60) {
-        if let Ok(line) = running.line_where(Duration::from_millis(500), |line| line.starts_with("prompt ")) {
-            seen.push(line);
+    loop {
+        let status = ctl(sandbox, &["status"])?;
+        let out = status.lines().any(|line| {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            words.contains(&RUNNING) && words.contains(&server.origin()) && words.contains(&"signed_out")
+        });
+        if out {
+            return Ok(start.elapsed());
         }
-        if seen.iter().any(|line| line.contains(&format!(" user={RUNNING} "))) {
-            break;
-        }
+        ensure(start.elapsed() < SIGN_IN, || {
+            format!("Rita's client is not signed out after her sign-in was turned off: {status}")
+        })?;
+        std::thread::sleep(Duration::from_millis(250));
     }
-    seen
 }
 
 // --- the page at a width, light or dark ---
