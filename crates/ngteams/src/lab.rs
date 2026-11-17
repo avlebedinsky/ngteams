@@ -87,12 +87,13 @@ pub async fn sign_in_own<S: SecretStore>(
     input: &mut dyn std::io::BufRead,
     store: &S,
 ) -> Result<String, String> {
-    // room for any password at once, so no copy is left behind when the line grows; zeroed once it is a secret
+    // The buffer has room for any password, so a line that grows leaves no copy. The line end is cut in place, also
+    // without a copy. The secret zeroes the buffer.
     let mut line = String::with_capacity(1024);
     let read = input.read_line(&mut line);
-    let line = Secret::new(line);
+    line.truncate(line.trim_end_matches(['\r', '\n']).len());
+    let password = Secret::new(line);
     read.map_err(|error| format!("the password can't be read: {error}"))?;
-    let password = Secret::new(line.expose().trim_end_matches(['\r', '\n']));
     let setup = crate::setup::Setup::new(paths).map_err(|error| error.to_string())?;
     let account = account(&setup.paths)?;
     let signed = crate::signin::sign_in_own_again(&setup, &account, &password, store).await?;
