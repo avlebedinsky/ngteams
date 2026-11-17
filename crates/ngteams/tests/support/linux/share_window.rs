@@ -17,6 +17,11 @@
 //! - **Group call**: the mock's c rings a and b in the a–b–c chat, both answer. a shares: a new portal session, the
 //!   sharing line described `sendonly` to the service, a's screen read for [`HOLD`], the session open; a stops: the
 //!   session closed, the line described `recvonly`; repeated three times. (The mock's mixer doesn't pass a's frames on to b.)
+//! - **Renegotiation (1:1)**: three calls a makes to b. a's camera opens slowly here (a USB camera can take seconds),
+//!   so a's camera switch holds its renegotiation open meanwhile. a turns the camera on and shares at once: the share
+//!   waits, no refusal is told, and once the camera's offer settled the share's goes; b presents a's camera, then a's
+//!   screen. a stops sharing while the camera's renegotiation is open: the stop waits, then goes, and b presents a's
+//!   camera and no longer the screen. a shares twice while it is open: one share goes. a's offers go one at a time.
 //! - Screenshots of a's window while it shares and of b's window showing a's screen, under `target/ui-shots/` (and
 //!   `$SHARE_EVIDENCE`, if set).
 //!
@@ -43,8 +48,8 @@ use teams_auth::token::TokenError;
 use teams_core::account::web_client_info;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Parts, Push};
 use teams_core::{CallMedia, CallParts, Identity, Outbox, Relay};
-use teams_media::devices::Devices;
 use teams_media::devices::pipewire::{PipeWireDevices, Reach};
+use teams_media::devices::{AudioSink, AudioSource, DeviceError, DeviceReady, Devices, VideoSource};
 use teams_media::processing::ProcessingConfig;
 use teams_media::relay::RelayServer;
 use teams_media::session::SessionConfig;
@@ -83,12 +88,18 @@ const SKYPE_ENV: &str = "NGTEAMS_SHARE_SKYPE";
 const DIR_ENV: &str = "NGTEAMS_SHARE_DIR";
 /// Where the screenshots are copied besides `target/ui-shots/`, if set (the QA run's evidence).
 const EVIDENCE_ENV: &str = "SHARE_EVIDENCE";
-/// The steps to run, by name (`one-to-one`, `group`), comma-separated; all of them when unset.
+/// The steps to run, by name (`one-to-one`, `group`, `renegotiation`), comma-separated; all of them when unset.
 const STEPS_ENV: &str = "SHARE_STEPS";
 /// Set to `dark` for a's Teams Dark screenshots; b keeps the screenshot reader's light palette.
 const THEME_ENV: &str = "SHARE_THEME";
+/// Set to `dark` for b's Teams Dark screenshots in the `renegotiation` step (the other steps read b's window as light).
+const THEME_B_ENV: &str = "SHARE_THEME_B";
 /// The file in the sandbox dir the parent writes to have the child quit.
 const QUIT_TRIGGER: &str = "quit";
+/// While this file is in the sandbox dir, the camera opens only once it is gone (a slow camera).
+const HOLD_CAMERA: &str = "hold-camera";
+/// The file the child writes in the sandbox dir when its camera was asked for and is held.
+const CAMERA_HELD: &str = "camera-held";
 /// From the child's start to its `ready`.
 const STARTUP: Duration = Duration::from_secs(120);
 /// Anything else the parent waits for.
@@ -194,8 +205,17 @@ fn parent() -> SandboxResult {
             say("step group");
             group_call(&mut user, &mut a, &mut b)?;
         }
+        if wanted("renegotiation") {
+            say("step renegotiation");
+            if let Err(error) = renegotiation(&mut user, &mut a, &mut b) {
+                user.shot_a("share-reneg-failed-a.png")?;
+                user.shot_b("share-reneg-failed-b.png")?;
+                return Err(error);
+            }
+        }
         Ok(())
     });
+    keep_logs(&lab.dir);
     let outcome = outcome.map_err(|error| {
         format!(
             "{error}\n--- a: {}\n--- b: {}\n--- a's sandbox{}\n--- b's sandbox{}",
@@ -313,6 +333,121 @@ fn group_call(user: &mut User<'_>, a: &mut AppUnderTest, b: &mut AppUnderTest) -
 
     hang_up(&mut user.a_input, a)?;
     hang_up(&mut user.b_input, b)?;
+    Ok(())
+}
+
+/// Three 1:1 calls a makes to b. a's camera opens slowly, so when a turns it on, its renegotiation stays open until
+/// the test lets the camera open: a shares, stops sharing, or shares twice in that time. Each case has a call of its
+/// own, so that the camera turns on for the first time in it.
+fn renegotiation(user: &mut User<'_>, a: &mut AppUnderTest, b: &mut AppUnderTest) -> SandboxResult {
+    // 1. the camera and Share at once: the share waits for the camera's renegotiation, then goes after it
+    let refused = call_up(user, a, b)?;
+    let round = user.calls("ScreenCast.OpenPipeWireRemote") + 1;
+    user.camera_on_held(a)?;
+    user.share(a, round)?;
+    user.waits(a, b, refused, (0, true), "share while the camera turns on")?;
+    user.shot_a("share-reneg-1-waits.png")?;
+    user.release_camera()?;
+    b.trace
+        .next_where("b: a's camera presented", |line| is_presented(line, "remote"))?;
+    b.presents_share("camera and share")?;
+    user.holds("camera and share", round)?;
+    user.settled(2)?;
+    a.logged("sharing its screen true once its open renegotiation settled")?;
+    user.shot_a("share-reneg-1-sharing.png")?;
+    user.shot_b("share-reneg-1-far-end.png")?;
+    say("renegotiation 1: the camera's offer, then the share's; b presents both");
+    user.stop_sharing(a, round)?;
+    user.settled(3)?;
+    leave(user, a, b, refused)?;
+
+    // 2. Stop sharing while the camera's renegotiation is open: the stop waits, then goes
+    let refused = call_up(user, a, b)?;
+    let round = round + 1;
+    user.share(a, round)?;
+    user.settled(1)?;
+    b.presents_share("share before the camera")?;
+    user.camera_on_held(a)?;
+    user.click_stop_sharing(a, round)?;
+    let read = user.screen_frames()?;
+    user.waits(a, b, refused, (1, false), "stop sharing while the camera turns on")?;
+    if user.calls("ScreenCast.Close") >= round {
+        return Err("stop sharing while the camera turns on: the portal session closed before the stop went".into());
+    }
+    if user.screen_frames()? <= read {
+        return Err("stop sharing while the camera turns on: a's screen is no longer read while the stop waits".into());
+    }
+    user.shot_a("share-reneg-2-stop-waits.png")?;
+    user.release_camera()?;
+    user.stopped(round, "stop sharing while the camera turns on")?;
+    b.no_more_share("stop sharing while the camera turns on")?;
+    user.settled(3)?;
+    a.logged("sharing its screen false once its open renegotiation settled")?;
+    user.shot_a("share-reneg-2-stopped.png")?;
+    user.shot_b("share-reneg-2-far-end-stopped.png")?;
+    say("renegotiation 2: the stop went after the camera's offer; b no longer presents a's screen");
+    leave(user, a, b, refused)?;
+
+    // 3. Share twice while the camera's renegotiation is open: one share goes
+    let refused = call_up(user, a, b)?;
+    let round = round + 1;
+    user.camera_on_held(a)?;
+    user.share(a, round)?;
+    let asked = a.trace.asked("share");
+    user.a_keys("ctrl+shift+e")?;
+    user.a_keys("down")?;
+    user.a_keys("enter")?;
+    a.trace.next_where("the second share: asked", |line| {
+        line["view"] == "call" && line["change"] == "asked" && strings(line, "kinds").iter().any(|kind| kind == "share")
+    })?;
+    if a.trace.asked("share") <= asked {
+        return Err("the second share wasn't asked".into());
+    }
+    user.waits(a, b, refused, (0, true), "two shares while the camera turns on")?;
+    if user.calls("ScreenCast.OpenPipeWireRemote") > round {
+        return Err(format!("the second share opened another portal session: {:?}", user.portal()).into());
+    }
+    user.release_camera()?;
+    b.presents_share("two shares")?;
+    user.holds("two shares", round)?;
+    user.settled(2)?;
+    if user.calls("ScreenCast.OpenPipeWireRemote") > round {
+        return Err(format!("two shares opened two portal sessions: {:?}", user.portal()).into());
+    }
+    user.shot_a("share-reneg-3-sharing.png")?;
+    user.shot_b("share-reneg-3-far-end.png")?;
+    say("renegotiation 3: two shares while the camera turned on; one share went");
+    user.stop_sharing(a, round)?;
+    user.settled(3)?;
+    leave(user, a, b, refused)
+}
+
+/// a calls b in their chat, b answers; the refusals each app told so far.
+fn call_up(user: &mut User<'_>, a: &mut AppUnderTest, b: &mut AppUnderTest) -> SandboxResult<(usize, usize)> {
+    thread::sleep(Duration::from_secs(3));
+    let seen = ringing_seen(user.b_box);
+    user.a_keys("ctrl+shift+c")?;
+    a.in_call(&["chat", "ringing"])?;
+    let ringing = call_notification(user.b_box, seen)?;
+    user.b_box.bus().invoke_action(ringing, "answer")?;
+    b.in_call(&["incoming", "connected"])?;
+    a.in_call(&["chat", "connected"])?;
+    user.find_call_window()?;
+    Ok((a.trace.refused(), b.trace.refused()))
+}
+
+/// a hangs up; neither app told a refusal since `refused`.
+fn leave(user: &mut User<'_>, a: &mut AppUnderTest, b: &mut AppUnderTest, refused: (usize, usize)) -> SandboxResult {
+    if (a.trace.refused(), b.trace.refused()) != refused {
+        return Err(format!(
+            "a call action was refused: a {:?}, b {:?}",
+            a.trace.refusals(),
+            b.trace.refusals()
+        )
+        .into());
+    }
+    hang_up(&mut user.a_input, a)?;
+    b.in_call(&["ended", "remote"])?;
     Ok(())
 }
 
@@ -502,6 +637,12 @@ impl<'a> User<'a> {
 
     /// a clicks Stop sharing: the portal's session `round` closed, a's screen no longer read, Share back.
     fn stop_sharing(&mut self, a: &mut AppUnderTest, round: usize) -> SandboxResult {
+        self.click_stop_sharing(a, round)?;
+        self.stopped(round, &format!("stop sharing {round}"))
+    }
+
+    /// a clicks Stop sharing, and the app asks for it.
+    fn click_stop_sharing(&mut self, a: &mut AppUnderTest, round: usize) -> SandboxResult {
         let stop = self.share_button(true)?;
         let asked = a.trace.asked("share");
         self.click(stop)?;
@@ -514,6 +655,11 @@ impl<'a> User<'a> {
         if a.trace.asked("share") <= asked {
             return Err(format!("{what}: Stop sharing wasn't asked").into());
         }
+        Ok(())
+    }
+
+    /// The share stopped: the portal's session `round` closed, a's screen no longer read, Share back.
+    fn stopped(&mut self, round: usize, what: &str) -> SandboxResult {
         wait_until(WAIT, || (self.calls("ScreenCast.Close") >= round).then_some(()))
             .ok_or_else(|| format!("{what}: the portal session wasn't closed: {:?}", self.portal()))?;
         thread::sleep(Duration::from_secs(1));
@@ -525,6 +671,100 @@ impl<'a> User<'a> {
         }
         self.share_button(false)?;
         Ok(())
+    }
+
+    /// a turns its camera on, and the camera holds until [`Self::release_camera`]: the camera's renegotiation open.
+    fn camera_on_held(&mut self, a: &mut AppUnderTest) -> SandboxResult {
+        let _ = fs::remove_file(self.a_box.path(CAMERA_HELD));
+        fs::write(self.a_box.path(HOLD_CAMERA), "")?;
+        let asked = a.trace.asked("camera");
+        self.a_keys("ctrl+shift+o")?;
+        wait_until(WAIT, || self.a_box.path(CAMERA_HELD).exists().then_some(()))
+            .ok_or("a's camera wasn't asked for")?;
+        if a.trace.asked("camera") <= asked {
+            return Err("a's camera wasn't asked".into());
+        }
+        Ok(())
+    }
+
+    /// a's held camera opens.
+    fn release_camera(&self) -> SandboxResult {
+        fs::remove_file(self.a_box.path(HOLD_CAMERA))?;
+        Ok(())
+    }
+
+    /// While a's camera holds, `what` waits: a sent no offer past its `offers` before, neither app told a refusal, and
+    /// for a share `starting`, b presents none of it.
+    fn waits(
+        &mut self,
+        a: &mut AppUnderTest,
+        b: &mut AppUnderTest,
+        refused: (usize, usize),
+        (offers, starting): (usize, bool),
+        what: &str,
+    ) -> SandboxResult {
+        let mark = b.trace.mark();
+        thread::sleep(Duration::from_secs(3));
+        let (sent, _) = self.offers()?;
+        if sent != offers {
+            return Err(format!(
+                "{what}: a sent {sent} offers while its camera's renegotiation was open (before: {offers})"
+            )
+            .into());
+        }
+        if (a.trace.refused(), b.trace.refused()) != refused {
+            return Err(format!(
+                "{what}: a call action was refused: a {:?}, b {:?}",
+                a.trace.refusals(),
+                b.trace.refusals()
+            )
+            .into());
+        }
+        if starting && b.trace.since(mark, is_share_presented) {
+            return Err(format!("{what}: b presents a's screen before the share went").into());
+        }
+        say(&format!("{what}: waits, no refusal"));
+        Ok(())
+    }
+
+    /// a's offers (`renegotiate`) on the newest call, and whether one waits for its answer (`acknowledge`): an error
+    /// when one went while another waited.
+    fn offers(&self) -> SandboxResult<(usize, bool)> {
+        let calls = self.mock.calls();
+        let call = calls.last().ok_or("the mock has no call")?;
+        let (mut sent, mut open) = (0, false);
+        for (op, account) in &call.requests {
+            if account != LAB_A {
+                continue;
+            }
+            match op.as_str() {
+                "renegotiate" if open => {
+                    return Err(format!("a sent two offers at once: {:?}", call.requests).into());
+                }
+                "renegotiate" => {
+                    open = true;
+                    sent += 1;
+                }
+                "acknowledge" => open = false,
+                _ => {}
+            }
+        }
+        Ok((sent, open))
+    }
+
+    /// Waits until a sent `offers` offers, each answered, one at a time.
+    fn settled(&self, offers: usize) -> SandboxResult {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let (sent, open) = self.offers()?;
+            if sent == offers && !open {
+                return Ok(());
+            }
+            if sent > offers || Instant::now() > deadline {
+                return Err(format!("a sent {sent} offers (open: {open}); {offers} were expected").into());
+            }
+            thread::sleep(Duration::from_millis(200));
+        }
     }
 
     fn screen_frames(&self) -> SandboxResult<u64> {
@@ -637,6 +877,23 @@ fn keep_shot(sandbox: &Sandbox, name: &str) -> SandboxResult {
     Ok(())
 }
 
+/// Copies a's and b's app logs (info: no payloads) into the evidence dir, if it is set.
+fn keep_logs(dir: &Path) {
+    let Some(evidence) = std::env::var_os(EVIDENCE_ENV).map(PathBuf::from) else {
+        return;
+    };
+    for alias in [Alias::A, Alias::B] {
+        let Ok(files) = fs::read_dir(dir.join(alias.to_string()).join("log")) else {
+            continue;
+        };
+        for file in files.filter_map(Result::ok) {
+            let name = format!("{alias}-{}", file.file_name().to_string_lossy());
+            let _ = fs::create_dir_all(&evidence);
+            let _ = fs::copy(file.path(), evidence.join(name));
+        }
+    }
+}
+
 /// The blobs of Teams' red in `within` (Leave, Stop sharing's mark).
 fn red_blobs(image: &RgbImage, within: Rect) -> Vec<Rect> {
     pixels::blobs(within, |x, y| {
@@ -700,7 +957,11 @@ fn ringing_seen(sandbox: &Sandbox) -> usize {
 }
 
 fn is_share_presented(line: &Value) -> bool {
-    line["view"] == "video-tile" && line["change"] == "presented" && strings(line, "kinds") == ["share"]
+    is_presented(line, "share")
+}
+
+fn is_presented(line: &Value, tile: &str) -> bool {
+    line["view"] == "video-tile" && line["change"] == "presented" && strings(line, "kinds") == [tile]
 }
 
 fn frames_of(line: &Value) -> u64 {
@@ -732,6 +993,8 @@ struct AppUnderTest {
     alias: Alias,
     running: Running,
     trace: TraceReader,
+    /// The app's log (info: no payloads).
+    log: PathBuf,
 }
 
 impl AppUnderTest {
@@ -746,6 +1009,7 @@ impl AppUnderTest {
         let account = alias.to_string();
         let own = dir.to_string_lossy().into_owned();
         let theme = std::env::var(THEME_ENV).unwrap_or_default();
+        let theme_b = std::env::var(THEME_B_ENV).unwrap_or_default();
         let child = sandbox.spawn_with_fds(
             &std::env::current_exe()?,
             &[],
@@ -759,6 +1023,7 @@ impl AppUnderTest {
                 (SKYPE_ENV, &skype),
                 (DIR_ENV, &own),
                 (THEME_ENV, &theme),
+                (THEME_B_ENV, &theme_b),
             ],
             &[writer.as_fd()],
         )?;
@@ -768,6 +1033,7 @@ impl AppUnderTest {
             alias,
             running,
             trace: TraceReader::start(reader),
+            log: dir.join("log"),
         };
         app.running
             .line_where(STARTUP, |line| line == "ready")
@@ -787,6 +1053,49 @@ impl AppUnderTest {
                     .iter()
                     .all(|kind| strings(line, "kinds").iter().any(|shown| shown == kind))
         })
+    }
+
+    /// Waits until the app's log has a line with `text`.
+    fn logged(&self, text: &str) -> SandboxResult {
+        wait_until(WAIT, || {
+            let lines = fs::read_dir(&self.log).ok()?;
+            lines
+                .filter_map(Result::ok)
+                .any(|file| fs::read_to_string(file.path()).is_ok_and(|log| log.contains(text)))
+                .then_some(())
+        })
+        .ok_or_else(|| format!("{}: no log line {text:?} in {}", self.alias, self.log.display()).into())
+    }
+
+    /// The far end's window presents a's screen anew: a first frame of it, then [`PRESENTED`] more.
+    fn presents_share(&mut self, what: &str) -> SandboxResult {
+        let first = self
+            .trace
+            .next_where(&format!("{what}: a's screen presented"), is_share_presented)?;
+        let more = frames_of(&first) + PRESENTED;
+        self.trace
+            .next_where(&format!("{what}: {more} frames of a's screen presented"), |line| {
+                is_share_presented(line) && frames_of(line) >= more
+            })?;
+        Ok(())
+    }
+
+    /// The far end's window presents no more of a's screen (no new frame of it), and presents a's camera again.
+    fn no_more_share(&mut self, what: &str) -> SandboxResult {
+        let mark = self.trace.mark();
+        thread::sleep(Duration::from_secs(2));
+        let stopped_at = self.trace.presented_share();
+        thread::sleep(Duration::from_secs(4));
+        if self.trace.presented_share() > stopped_at {
+            return Err(format!("{what}: {} still presents a's screen", self.alias).into());
+        }
+        if !self.trace.since(mark, |line| is_presented(line, "remote")) {
+            self.trace
+                .next_where(&format!("{what}: a's camera presented"), |line| {
+                    is_presented(line, "remote")
+                })?;
+        }
+        Ok(())
     }
 
     /// Asks the app to quit and waits for it to exit cleanly.
@@ -859,6 +1168,29 @@ impl TraceReader {
             .map(frames_of)
             .max()
             .unwrap_or(0)
+    }
+
+    /// Where the trace is now, for [`Self::since`].
+    fn mark(&mut self) -> usize {
+        self.catch_up().len()
+    }
+
+    /// Whether a line after `mark` is `found`.
+    fn since(&mut self, mark: usize, found: impl Fn(&Value) -> bool) -> bool {
+        self.catch_up().iter().skip(mark).any(found)
+    }
+
+    /// The `call refused` lines so far.
+    fn refused(&mut self) -> usize {
+        self.refusals().len()
+    }
+
+    fn refusals(&mut self) -> Vec<Value> {
+        self.catch_up()
+            .iter()
+            .filter(|line| line["view"] == "call" && line["change"] == "refused")
+            .cloned()
+            .collect()
     }
 
     fn wait_for(&mut self, view: &str, change: &str) -> SandboxResult<Value> {
@@ -1000,16 +1332,20 @@ fn engine(
     Ok(handle)
 }
 
-fn child(alias: Alias) -> SandboxResult {
-    ngteams::read_only::window_allowed_here()?;
-    let trace = teams_ui::ViewTrace::new(adopt_trace(env(TRACE_FD_ENV)?.parse()?)?);
-    let dir = PathBuf::from(env(DIR_ENV)?);
-    let pipewire = Arc::new(PipeWireDevices::connect(Reach::Sandbox)?);
-    let devices: Arc<dyn Devices + Send + Sync> = pipewire.clone();
-    let feed = VideoFeed::new();
-    let engine = engine(alias, Arc::clone(&devices), feed.clone(), &dir)?;
-    let first = support::started(alias, engine)?;
-    let runner = support::runner(&dir)?;
+/// The app's log (info: no payloads) in `dir`.
+fn app_log(dir: &Path) -> SandboxResult {
+    teams_log::install(&teams_log::Config {
+        dir: dir.join("log"),
+        setting: teams_log::Level::Info,
+        env: None,
+        rotation: teams_log::file::Rotation::default(),
+    })
+    .map_err(|error| format!("the app's log: {error}"))?;
+    Ok(())
+}
+
+/// The account's settings: a's with the chat with b open, in [`THEME_ENV`]'s theme; b's in [`THEME_B_ENV`]'s.
+fn settings(alias: Alias, dir: &Path) -> SandboxResult<SettingsFile> {
     let settings = SettingsFile::new(dir.join("settings.toml"));
     if alias == Alias::A {
         let opened = Settings {
@@ -1026,7 +1362,31 @@ fn child(alias: Alias) -> SandboxResult {
             ..Settings::default()
         };
         settings.save(&opened).map_err(|problem| format!("{problem:?}"))?;
+    } else if std::env::var(THEME_B_ENV).as_deref() == Ok("dark") {
+        let mut opened = Settings::default();
+        opened.appearance.follow_system = false;
+        opened.appearance.theme = teams_ui::theme::DARK_KEY;
+        settings.save(&opened).map_err(|problem| format!("{problem:?}"))?;
     }
+    Ok(settings)
+}
+
+fn child(alias: Alias) -> SandboxResult {
+    ngteams::read_only::window_allowed_here()?;
+    let trace = teams_ui::ViewTrace::new(adopt_trace(env(TRACE_FD_ENV)?.parse()?)?);
+    let dir = PathBuf::from(env(DIR_ENV)?);
+    app_log(&dir)?;
+    let pipewire = Arc::new(PipeWireDevices::connect(Reach::Sandbox)?);
+    let devices: Arc<dyn Devices + Send + Sync> = pipewire.clone();
+    let slow: Arc<dyn Devices + Send + Sync> = Arc::new(SlowCamera {
+        devices: pipewire.clone(),
+        sandbox: PathBuf::from(env(ui_sandbox::SANDBOX_ENV)?),
+    });
+    let feed = VideoFeed::new();
+    let engine = engine(alias, slow, feed.clone(), &dir)?;
+    let first = support::started(alias, engine)?;
+    let runner = support::runner(&dir)?;
+    let settings = settings(alias, &dir)?;
     let ringer: Arc<dyn Ringer> = Arc::new(SoundBoard::new(devices));
     let failed = Arc::new(Mutex::new(None));
     let failed_in_app = Arc::clone(&failed);
@@ -1072,6 +1432,46 @@ fn child(alias: Alias) -> SandboxResult {
     }
     say("quit");
     Ok(())
+}
+
+/// The sandbox's devices, with a camera that opens slowly while the parent asks it to (a USB camera can take
+/// seconds): while [`HOLD_CAMERA`] is in the sandbox dir, the camera opens only once it is gone.
+struct SlowCamera {
+    devices: Arc<PipeWireDevices>,
+    sandbox: PathBuf,
+}
+
+impl Devices for SlowCamera {
+    fn ready(&self) -> DeviceReady<'_> {
+        self.devices.ready()
+    }
+
+    fn preparing(&self) -> bool {
+        self.devices.preparing()
+    }
+
+    fn microphone(&self) -> Result<Box<dyn AudioSource>, DeviceError> {
+        self.devices.microphone()
+    }
+
+    fn speaker(&self) -> Result<Box<dyn AudioSink>, DeviceError> {
+        self.devices.speaker()
+    }
+
+    fn camera(&self) -> Result<Box<dyn VideoSource>, DeviceError> {
+        let hold = self.sandbox.join(HOLD_CAMERA);
+        if hold.exists() {
+            let _ = fs::write(self.sandbox.join(CAMERA_HELD), "");
+            while hold.exists() {
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+        self.devices.camera()
+    }
+
+    fn screen(&self) -> Result<Box<dyn VideoSource>, DeviceError> {
+        self.devices.screen()
+    }
 }
 
 /// Once the parent writes [`QUIT_TRIGGER`] in the sandbox dir: the engine shut down, then the app quits.
