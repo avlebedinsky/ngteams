@@ -32,6 +32,8 @@ use crate::support::{TestServer, backends, redis_url};
 use crate::trouter::{Account, ORIGIN, options};
 
 pub(super) const WAIT: Duration = Duration::from_secs(40);
+/// How many of the events a wait passed over its timeout shows.
+const SKIPPED_SHOWN: usize = 8;
 /// How long the media runs once connected, before what was heard is judged.
 pub(super) const TALK: Duration = Duration::from_secs(2);
 /// The far tone is heard at least this loud in a recording.
@@ -103,6 +105,9 @@ pub(super) struct Engine {
     pub(super) handle: EngineHandle,
     pub(super) recording: PathBuf,
     video: Shown,
+    /// The last view each call told of: a wait for a view starts from it, since a wait for another event passes over
+    /// views.
+    views: std::collections::HashMap<CallId, CallView>,
     _store: tempfile::TempDir,
 }
 
@@ -211,6 +216,7 @@ impl Engine {
             handle,
             recording,
             video,
+            views: std::collections::HashMap::new(),
             _store: store,
         };
         engine.ready().await;
@@ -235,14 +241,27 @@ impl Engine {
 
     pub(super) async fn next<T>(&mut self, mut pick: impl FnMut(&Event) -> Option<T>) -> T {
         let deadline = tokio::time::Instant::now() + WAIT;
+        let mut skipped = std::collections::VecDeque::new();
         loop {
             let event = tokio::time::timeout_at(deadline, self.handle.next_event())
                 .await
-                .unwrap_or_else(|_| panic!("{}: the event didn't come in time", self.mri))
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "{}: the event didn't come in time; the last others: {skipped:#?}",
+                        self.mri
+                    )
+                })
                 .expect("the engine runs");
+            if let Event::CallParticipants { call, view } = &event {
+                self.views.insert(*call, view.clone());
+            }
             if let Some(picked) = pick(&event) {
                 return picked;
             }
+            if skipped.len() == SKIPPED_SHOWN {
+                skipped.pop_front();
+            }
+            skipped.push_back(event);
         }
     }
 
@@ -293,7 +312,11 @@ impl Engine {
         .await
     }
 
+    /// The view of `call` once it is `wanted`: the last view told, or the next that is.
     pub(super) async fn view(&mut self, call: CallId, wanted: impl Fn(&CallView) -> bool) -> CallView {
+        if let Some(last) = self.views.get(&call).filter(|last| wanted(last)) {
+            return last.clone();
+        }
         self.next(|event| match event {
             Event::CallParticipants { call: of, view } if *of == call && wanted(view) => Some(view.clone()),
             _ => None,
