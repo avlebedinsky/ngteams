@@ -1328,6 +1328,47 @@ fn a_result_with_no_box_shown_says_so() {
 }
 
 #[test]
+fn a_result_for_a_chat_not_shown_never_goes_into_the_shown_chats_box() {
+    let rig = Rig::start();
+    let (shell, cx) = shell_window(&rig, true);
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(GROUP_CHAT.to_owned(), window, cx)));
+    cx.run_until_parked();
+    submit_dialog(&rig, &shell, polls_dialog(OTHER_GROUP), 0, poll_result(), cx);
+    let chat = cx.update(|_, cx| shell.read(cx).chat().cloned()).expect("the chat");
+    let compose = cx.update(|_, cx| chat.read(cx).compose().clone());
+    assert!(cx.update(|_, cx| compose.read(cx).app_cards().is_empty()));
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).toast().cloned()),
+        Some(teams_ui::app_dialog::NO_BOX.into())
+    );
+}
+
+#[test]
+fn a_result_for_another_channels_post_never_goes_into_the_shown_channels_boxes() {
+    const OTHER_CHANNEL: &str = "19:made-up-other-channel@thread.tacv2";
+    let rig = Rig::start();
+    *rig.core.teams.lock().unwrap() = Some(vec![channel_team()]);
+    let (shell, cx) = shell_window(&rig, true);
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_channel_id(CHANNEL.to_owned(), window, cx)));
+    cx.run_until_parked();
+    let chain = teams_proto::reply_chain_id(OTHER_CHANNEL, POST).expect("a chain");
+    submit_dialog(&rig, &shell, polls_dialog(&chain), 0, poll_result(), cx);
+    let channel = cx
+        .update(|_, cx| shell.read(cx).channel().cloned())
+        .expect("the channel");
+    assert!(
+        cx.update(|_, cx| channel.read(cx).thread().is_none()),
+        "no thread opens"
+    );
+    let posts = cx.update(|_, cx| channel.read(cx).posts().read(cx).compose().clone());
+    assert!(cx.update(|_, cx| posts.read(cx).app_cards().is_empty()));
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).toast().cloned()),
+        Some(teams_ui::app_dialog::NO_BOX.into())
+    );
+}
+
+#[test]
 fn a_task_fetch_button_in_a_dialog_opens_the_next_dialog_in_its_place() {
     let rig = Rig::start();
     let (shell, cx) = shell_window(&rig, true);

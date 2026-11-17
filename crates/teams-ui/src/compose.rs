@@ -34,7 +34,8 @@
 //! - **The box** is drawn as Teams' compose box: the editor on a raised, rounded surface with a hairline border
 //!   ([`BOX_HEIGHT`] at least), Teams' accent line in the brand colour along its foot while it has the focus, and its
 //!   controls inside it on the right: Format, Emoji, Attach, Loop (shown disabled, saying the app doesn't have it yet),
-//!   Actions and apps (disabled the same way, unless `NGTEAMS_BOTS=1` is set and the account's cloud serves apps: then
+//!   Actions and apps (disabled the same way, unless `NGTEAMS_BOTS=1` is set, the account's cloud serves apps, and the
+//!   box writes a chat's new message, not a channel's post, a thread's reply or an edit, outside read-only mode: then
 //!   it opens its flyout, [`apps`]), Correct, Translate and its language, a thin divider, then Send. The box can hold
 //!   apps' cards (a message extension's result), drawn over the tools, each with a close mark, and sent with the
 //!   message. Its
@@ -1322,10 +1323,13 @@ impl Compose {
         let editor = self.editor.read(cx);
         let built = match message_of_with(&doc, &quotes, &|id| editor.picture_node(id), &self.bots) {
             Ok(Some(built)) => built,
-            Ok(None) if !self.attachments.is_empty() || !self.apps.cards.is_empty() => match empty_file_text() {
-                Ok(text) => text,
-                Err(error) => return self.show_problem(format!("This message can't be sent: {error}"), cx),
-            },
+            // an edit carries no files and no cards: with no text, there is nothing to save
+            Ok(None) if !self.editing() && (!self.attachments.is_empty() || !self.apps.cards.is_empty()) => {
+                match empty_file_text() {
+                    Ok(text) => text,
+                    Err(error) => return self.show_problem(format!("This message can't be sent: {error}"), cx),
+                }
+            }
             Ok(None) => return,
             Err(error) => return self.show_problem(format!("This message can't be sent: {error}"), cx),
         };
@@ -1457,7 +1461,7 @@ impl Compose {
             self.apps.cards.retain(|card| !from.cards.contains(card));
             cx.notify();
         } else {
-            self.clear_sent(edit_of.is_some(), window, cx);
+            self.clear_sent(&from.cards, window, cx);
         }
         // a post's original is kept by the row it went out as
         let post = sent.filter(|_| edit_of.is_none());
@@ -1511,9 +1515,11 @@ impl Compose {
         // files attached since stay beside the text given back (a translated send's text left the box once it went),
         // but never beside an edit, which carries no files
         let edit_beside_files = matches!(draft.mode, Mode::Edit { .. }) && !self.attachments.is_empty();
-        if self.apps.cards.is_empty() {
-            self.apps.cards = std::mem::take(&mut draft.cards);
-        }
+        // the cards of the refused send come back before the cards that came into the box meanwhile
+        let mut cards = std::mem::take(&mut draft.cards);
+        cards.retain(|card| !self.apps.cards.contains(card));
+        cards.append(&mut self.apps.cards);
+        self.apps.cards = cards;
         if draft.attachments.is_empty()
             && (!self.editor.read(cx).is_empty() || self.mode != Mode::New || edit_beside_files)
         {
@@ -1570,14 +1576,11 @@ impl Compose {
         cx.notify();
     }
 
-    /// Empties the box after a send; an edit took no cards, so a card that came into the box meanwhile (an app
-    /// dialog's result) stays for the next message.
-    fn clear_sent(&mut self, edit: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let kept = if edit {
-            std::mem::take(&mut self.apps.cards)
-        } else {
-            Vec::new()
-        };
+    /// Empties the box after a send of `sent`, its cards; a card that the send did not take (one that came into the box
+    /// during an edit, which takes no cards, or during a send held for its translation) stays for the next message.
+    fn clear_sent(&mut self, sent: &[teams_proto::chat::AppCard], window: &mut Window, cx: &mut Context<Self>) {
+        let mut kept = std::mem::take(&mut self.apps.cards);
+        kept.retain(|card| !sent.contains(card));
         self.clear(window, cx);
         self.apps.cards = kept;
     }
@@ -1944,7 +1947,9 @@ impl Compose {
     /// send; once it holds something, a round button lit in the brand gradient that pops in, a button to the keyboard
     /// and to assistive tools as the kit's is.
     fn send_button(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let empty = (self.editor.read(cx).is_blank() && self.attachments.is_empty() && self.apps.cards.is_empty())
+        // an edit carries no files and no cards: they do not make it worth saving
+        let empty = (self.editor.read(cx).is_blank()
+            && (self.editing() || (self.attachments.is_empty() && self.apps.cards.is_empty())))
             || !self.files_ready()
             || !self.editor.read(cx).pictures_ready();
         let tip = match (matches!(self.mode, Mode::Edit { .. }), self.expanded) {

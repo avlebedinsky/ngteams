@@ -324,3 +324,84 @@ fn an_edit_waits_for_the_boxs_cards_and_never_carries_one() {
     assert!(!editing(cx));
     assert_eq!(cx.update(|_, cx| compose.read(cx).app_cards().len()), 1);
 }
+
+/// A second made-up result card, different from [`made_up_card`].
+fn other_card() -> teams_proto::chat::AppCard {
+    teams_proto::chat::AppCard::new(
+        FINDER.to_owned(),
+        "Made-up Finder".to_owned(),
+        None,
+        "application/vnd.microsoft.card.adaptive".to_owned(),
+        json!({"type": "AdaptiveCard", "body": [{"type": "TextBlock", "text": "Made up too"}]}),
+    )
+}
+
+#[test]
+fn a_blank_edit_beside_a_card_saves_nothing() {
+    const MINE: &str = "702";
+    let rig = apps_rig_with(
+        true,
+        vec![
+            message(ID, LAB_B, "<p>A made-up order</p>", NOON),
+            message(MINE, LAB_A, "<p>Mine</p>", NOON + 1_000),
+        ],
+    );
+    let (view, cx) = window(&rig);
+    let compose = cx.update(|_, cx| view.read(cx).compose().clone());
+    cx.update(|window, cx| view.update(cx, |view, cx| view.act(MessageAction::Edit, MINE, window, cx)));
+    cx.run_until_parked();
+    // a card comes in during the edit, then all the text of the edit is deleted
+    cx.update(|window, cx| {
+        compose.update(cx, |compose, cx| {
+            compose.add_app_card(made_up_card(), window, cx);
+            compose.editor().update(cx, teams_ui::compose::Editor::clear);
+            compose.send(window, cx);
+        });
+    });
+    cx.run_until_parked();
+    let edits = rig
+        .core
+        .actions
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|action| matches!(action, Action::Edit { .. }))
+        .count();
+    assert_eq!(edits, 0, "no blank edit goes out");
+    assert!(cx.update(|_, cx| matches!(compose.read(cx).mode(), teams_ui::compose::Mode::Edit { .. })));
+    assert_eq!(cx.update(|_, cx| compose.read(cx).app_cards().len()), 1);
+}
+
+#[test]
+fn a_refused_send_gives_its_card_back_beside_a_card_that_came_in_meanwhile() {
+    let rig = apps_rig(true);
+    let (view, cx) = window(&rig);
+    let compose = cx.update(|_, cx| view.read(cx).compose().clone());
+    rig.core
+        .write_errors
+        .lock()
+        .unwrap()
+        .push_back(teams_core::EngineError::Stopped);
+    // the write is refused after the next dialog's card came into the emptied box
+    cx.update(|window, cx| {
+        compose.update(cx, |compose, cx| {
+            compose.add_app_card(made_up_card(), window, cx);
+            compose.send(window, cx);
+            assert!(
+                compose.app_cards().is_empty(),
+                "the box empties once the write is asked for"
+            );
+            compose.add_app_card(other_card(), window, cx);
+        });
+    });
+    cx.run_until_parked();
+    let texts: Vec<String> = cx.update(|_, cx| {
+        compose
+            .read(cx)
+            .app_cards()
+            .iter()
+            .map(|card| card.content["body"][0]["text"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    });
+    assert_eq!(texts, ["Made up", "Made up too"], "the refused send's card first");
+}

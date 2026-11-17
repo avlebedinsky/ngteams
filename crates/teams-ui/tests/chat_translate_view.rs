@@ -528,8 +528,17 @@ fn a_translated_send_keeps_the_apps_cards_of_the_box() {
         "application/vnd.microsoft.card.adaptive".to_owned(),
         serde_json::json!({"type": "AdaptiveCard", "body": [{"type": "TextBlock", "text": "Made up"}]}),
     );
-    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.add_app_card(card, window, cx)));
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.add_app_card(card.clone(), window, cx)));
     send(&view, cx, "Hallo");
+    // a card that comes in while the text is translated is not sent: it stays for the next message
+    let later = teams_proto::chat::AppCard::new(
+        "00000000-0000-4000-8000-00000000e001".to_owned(),
+        "Made-up Finder".to_owned(),
+        None,
+        "application/vnd.microsoft.card.adaptive".to_owned(),
+        serde_json::json!({"type": "AdaptiveCard", "body": [{"type": "TextBlock", "text": "Made up later"}]}),
+    );
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.add_app_card(later.clone(), window, cx)));
     until(cx, |_| !sent_texts(&rig).is_empty());
     assert_eq!(sent_texts(&rig), ["EN Hallo"]);
     let cards: Vec<usize> = rig
@@ -544,5 +553,5 @@ fn a_translated_send_keeps_the_apps_cards_of_the_box() {
         })
         .collect();
     assert_eq!(cards, [1], "the card goes with the translated text");
-    assert!(cx.update(|_, cx| compose.read(cx).app_cards().is_empty()));
+    assert_eq!(cx.update(|_, cx| compose.read(cx).app_cards().to_vec()), [later]);
 }
