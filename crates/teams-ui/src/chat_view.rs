@@ -2778,12 +2778,16 @@ impl ChatView {
         self.people.get(mri).and_then(|(_, shown)| shown.as_ref())
     }
 
-    /// A message's sender's name and whether it is a name (not an MRI): their profile's, else the message's own,
-    /// else the engine's other names, else their MRI.
+    /// A message's sender's name and whether it is a name (not an MRI): a bot's app's, else their profile's, else
+    /// the message's own, else the engine's other names, else their MRI.
     fn sender_of(&self, message: &Message) -> (String, bool) {
         let Some(sender) = message.sender.as_deref() else {
             return ("Unknown".to_owned(), false);
         };
+        // Teams names a bot by its app, not by the name that its message carries
+        if let Some(app) = self.bot_faces.apps.get(sender) {
+            return (app.name().to_owned(), true);
+        }
         let shown = self.shown(sender);
         let carried = message
             .sender_name

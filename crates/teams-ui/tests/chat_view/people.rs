@@ -135,9 +135,13 @@ fn list_window(rig: &Rig) -> (Entity<ChatList>, &'static mut VisualTestContext) 
 }
 
 fn chat_window(rig: &Rig) -> (Entity<ChatView>, &'static mut VisualTestContext) {
+    chat_window_of(rig, AB)
+}
+
+fn chat_window_of(rig: &Rig, chat: &str) -> (Entity<ChatView>, &'static mut VisualTestContext) {
     let parts = super::parts::parts(rig, Settings::default(), Arc::new(ViewTrace::off()));
     let app: &'static mut TestAppContext = Box::leak(Box::new(rig.cx.clone()));
-    let (view, cx) = app.add_window_view(|window, cx| ChatView::new(parts, AB.to_owned(), window, cx));
+    let (view, cx) = app.add_window_view(|window, cx| ChatView::new(parts, chat.to_owned(), window, cx));
     cx.simulate_resize(size(px(800.0), px(600.0)));
     draw(cx);
     (view, cx)
@@ -228,6 +232,49 @@ fn the_chat_view_names_a_sender_by_their_profile_over_their_message_with_their_a
     draw(cx);
     let outsider = item(&view, cx, "100");
     assert_eq!((outsider.sender_name.as_ref(), outsider.face.named), ("Someone", true));
+}
+
+/// A made-up app's bot, and a bot that no app names.
+const HELPER_APP: &str = "00000000-0000-4000-8000-00000000a004";
+const HELPER_BOT: &str = "00000000-0000-4000-8000-00000000b004";
+const LONE_BOT: &str = "28:00000000-0000-4000-8000-00000000b0ff";
+
+#[test]
+fn a_bot_sender_is_named_by_its_app_over_the_name_its_message_carries() {
+    let rig = rig();
+    let helper = format!("28:{HELPER_BOT}");
+    let apps = teams_proto::AppDefinitions::read_answer(
+        serde_json::json!([{"id": HELPER_APP, "name": "Made-up Helper", "developerName": "Made-up Maker",
+            "version": "1.0.0", "bots": [{"id": HELPER_BOT, "scopes": ["personal", "groupChat"]}]}])
+        .to_string()
+        .as_bytes(),
+    );
+    rig.core
+        .bot_apps
+        .lock()
+        .unwrap()
+        .insert(HELPER_BOT.to_owned(), apps[0].clone());
+    rig.core.messages.lock().unwrap().insert(
+        GROUP.to_owned(),
+        vec![
+            message(GROUP, "400", &helper, Some("Helper bot"), 4_000),
+            message(GROUP, "500", LONE_BOT, Some("Lone bot"), 5_000),
+        ],
+    );
+    let (view, cx) = chat_window_of(&rig, GROUP);
+
+    // the app's name over its bot's message, as in the chat list, the header and the typing line
+    let from_helper = item(&view, cx, "400");
+    assert_eq!(
+        (from_helper.sender_name.as_ref(), from_helper.face.named),
+        ("Made-up Helper", true)
+    );
+    // a bot that no app names keeps the name that its message carries
+    let from_lone = item(&view, cx, "500");
+    assert_eq!(
+        (from_lone.sender_name.as_ref(), from_lone.face.named),
+        ("Lone bot", true)
+    );
 }
 
 #[test]

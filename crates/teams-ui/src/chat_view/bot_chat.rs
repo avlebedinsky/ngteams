@@ -1,5 +1,5 @@
 //! A bot's messages and a bot's chat, as Teams shows them: a bot sender's avatar is its app's icon on a tile
-//! ([`crate::bot_face`]) and its name the one its message carries, else its app's; a 1:1 chat with a bot that holds no
+//! ([`crate::bot_face`]) and its name its app's, else the one its message carries; a 1:1 chat with a bot that holds no
 //! message yet shows the app's intro where the messages go (its tile, name, maker and what it does), as a new
 //! conversation with a person says it is new.
 
