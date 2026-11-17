@@ -321,10 +321,13 @@ async fn thirty_channels_made_quickly_end_right_in_every_members_list_with_a_few
 
         let started = tokio::time::Instant::now();
         let names: Vec<String> = (1..=BURST).map(|n| format!("Burst {n:02} — ç{n}")).collect();
+        let mut made_at = Vec::new();
         for name in &names {
             channel(&a, &team, &group, name, NewChannelKind::Standard).await;
+            made_at.push(tokio::time::Instant::now());
         }
         let made = started.elapsed();
+        let pauses = pauses(&made_at);
         let mut expected: Vec<String> = names.clone();
         expected.push("General".into());
         expected.sort();
@@ -338,16 +341,17 @@ async fn thirty_channels_made_quickly_end_right_in_every_members_list_with_a_few
         }
         let reads = since(&each(&tallies, &[TEAMS_READ]), &before);
         eprintln!(
-            "{backend:?}: {BURST} channels made in {made:?}, every list right after {settled:?}; teams reads since the \
-             burst began, by a (who made them), b, c, d: {reads:?}"
+            "{backend:?}: {BURST} channels made in {made:?} with {pauses} pauses, every list right after {settled:?}; \
+             teams reads since the burst began, by a (who made them), b, c, d: {reads:?}"
         );
         // every list moved by a read the relay saw: a relay that counts nothing fails here
         assert!(
             reads.iter().all(|reads| *reads >= 1),
             "{reads:?}: a client's teams reads were not counted"
         );
-        // the members only hear of them: gathered, a read per 5 s of the burst and one after, not one per channel
-        let allowed = usize::try_from(settled.as_secs() / 5).unwrap_or(usize::MAX) + 2;
+        // the members only hear of them: gathered, a read per 5 s of the burst, one per pause and one after, not one
+        // per channel
+        let allowed = usize::try_from(settled.as_secs() / 5).unwrap_or(usize::MAX) + pauses + 2;
         // the maker reads them after each channel it made (as before the pushes); the pushes add the members' few
         assert!(
             reads[0] <= BURST + allowed,
@@ -363,6 +367,21 @@ async fn thirty_channels_made_quickly_end_right_in_every_members_list_with_a_few
         drop((a, b, c, d));
         rig.stop().await;
     }
+}
+
+/// How long a client waits for the next pushed team change before it reads the teams (`teams_core`'s
+/// `PUSHED_QUIET`).
+const PUSHED_QUIET: Duration = Duration::from_millis(500);
+/// How much later or earlier than its write a push may come to a member.
+const PUSH_JITTER: Duration = Duration::from_millis(250);
+
+/// The pauses between the writes made at `made_at` that a member's client may see as a pause of its pushes, and read
+/// the teams at: on a busy server a channel takes longer than [`PUSHED_QUIET`] to make.
+fn pauses(made_at: &[tokio::time::Instant]) -> usize {
+    made_at
+        .windows(2)
+        .filter(|made| made[1] - made[0] + PUSH_JITTER >= PUSHED_QUIET)
+        .count()
 }
 
 /// Waits until `user`'s list names exactly `expected` (sorted) as the team's channels.
