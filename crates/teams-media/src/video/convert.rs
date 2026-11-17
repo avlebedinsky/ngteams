@@ -1,11 +1,12 @@
 //! Frames between the devices, the codec and a window: whatever raw format a camera hands over turned into the I420
 //! the encoder takes ([`to_i420`], a Motion JPEG picture decoded first, scaled down by a whole factor to fit the size
 //! the call sends), and a decoded I420
-//! frame turned into the premultiplied BGRA a window draws ([`i420_to_bgra`]). Colours as the camera's pictures and
-//! H.264's are written: BT.601, limited range.
+//! frame turned into the premultiplied BGRA a window draws ([`i420_to_bgra`]); also our I420 to and from libwebrtc's
+//! buffer ([`to_buffer`], [`from_buffer`]). Colours as the camera's pictures and H.264's are written: BT.601, limited
+//! range.
 
 use libwebrtc::native::yuv_helper;
-use libwebrtc::video_frame::I420Buffer;
+use libwebrtc::video_frame::{I420Buffer, VideoBuffer as _};
 
 use crate::devices::{PixelFormat, VideoFrame};
 
@@ -104,18 +105,7 @@ struct Planes<'a> {
 /// loaded host, a Rust loop over the pixels of a 1280x800 screen took 0.4 s. The shared screen then went out at about
 /// 2 frames a second.
 fn by_libyuv(frame: &VideoFrame, factor: u32, width: u32, height: u32) -> Option<VideoFrame> {
-    let (columns, rows) = (to_usize(width), to_usize(height));
-    let mut data = vec![0_u8; columns * rows * 3 / 2];
-    if factor == 1 {
-        let (luma, chroma) = data.split_at_mut(columns * rows);
-        let (cb, cr) = chroma.split_at_mut(columns * rows / 4);
-        let planes = Planes {
-            y: (luma, width),
-            u: (cb, width / 2),
-            v: (cr, width / 2),
-        };
-        libyuv_into(frame, planes, width, height)?;
-    } else {
+    if factor > 1 {
         let (whole_width, whole_height) = (width.checked_mul(factor)?, height.checked_mul(factor)?);
         let mut whole = I420Buffer::new(whole_width, whole_height);
         let (stride_y, stride_u, stride_v) = whole.strides();
@@ -126,15 +116,18 @@ fn by_libyuv(frame: &VideoFrame, factor: u32, width: u32, height: u32) -> Option
             v: (cr, stride_v),
         };
         libyuv_into(frame, planes, whole_width, whole_height)?;
-        let scaled = whole.scale(i32::try_from(width).ok()?, i32::try_from(height).ok()?);
-        let (stride_y, stride_u, stride_v) = scaled.strides();
-        let (from_y, from_u, from_v) = scaled.data();
-        let (luma, chroma) = data.split_at_mut(columns * rows);
-        let (cb, cr) = chroma.split_at_mut(columns * rows / 4);
-        copy_rows(from_y, to_usize(stride_y), luma, columns, rows)?;
-        copy_rows(from_u, to_usize(stride_u), cb, columns / 2, rows / 2)?;
-        copy_rows(from_v, to_usize(stride_v), cr, columns / 2, rows / 2)?;
+        return from_buffer(&whole.scale(i32::try_from(width).ok()?, i32::try_from(height).ok()?));
     }
+    let (columns, rows) = (to_usize(width), to_usize(height));
+    let mut data = vec![0_u8; columns * rows * 3 / 2];
+    let (luma, chroma) = data.split_at_mut(columns * rows);
+    let (cb, cr) = chroma.split_at_mut(columns * rows / 4);
+    let planes = Planes {
+        y: (luma, width),
+        u: (cb, width / 2),
+        v: (cr, width / 2),
+    };
+    libyuv_into(frame, planes, width, height)?;
     Some(VideoFrame {
         width,
         height,
@@ -203,12 +196,84 @@ fn libyuv_into(frame: &VideoFrame, planes: Planes<'_>, width: u32, height: u32) 
     Some(())
 }
 
-/// Copies `rows` rows of `columns` bytes from `from` (rows `from_stride` apart) to `to` (rows `columns` apart).
-fn copy_rows(from: &[u8], from_stride: usize, to: &mut [u8], columns: usize, rows: usize) -> Option<()> {
-    for (row, target) in to.chunks_exact_mut(columns).take(rows).enumerate() {
-        target.copy_from_slice(from.get(row * from_stride..row * from_stride + columns)?);
+/// An I420 frame of ours (each plane's stride its width) as libwebrtc's buffer.
+pub(crate) fn to_buffer(frame: &VideoFrame) -> I420Buffer {
+    let mut buffer = I420Buffer::new(frame.width, frame.height);
+    let (stride_y, stride_u, stride_v) = buffer.strides();
+    let (width, height) = (to_usize(frame.width), to_usize(frame.height));
+    let (chroma_width, chroma_height) = (width / 2, height / 2);
+    let luma_size = width * height;
+    let (y, u, v) = buffer.data_mut();
+    copy_plane(&frame.data, width, y, to_usize(stride_y), width, height);
+    copy_plane(
+        frame.data.get(luma_size..).unwrap_or_default(),
+        chroma_width,
+        u,
+        to_usize(stride_u),
+        chroma_width,
+        chroma_height,
+    );
+    copy_plane(
+        frame.data.get(luma_size + luma_size / 4..).unwrap_or_default(),
+        chroma_width,
+        v,
+        to_usize(stride_v),
+        chroma_width,
+        chroma_height,
+    );
+    buffer
+}
+
+/// Copies `rows` rows of `columns` bytes from `from` (rows `from_stride` apart) to `to` (rows `to_stride` apart).
+fn copy_plane(from: &[u8], from_stride: usize, to: &mut [u8], to_stride: usize, columns: usize, rows: usize) {
+    for row in 0..rows {
+        let (Some(source), Some(target)) = (
+            from.get(row * from_stride..row * from_stride + columns),
+            to.get_mut(row * to_stride..row * to_stride + columns),
+        ) else {
+            return;
+        };
+        target.copy_from_slice(source);
     }
-    Some(())
+}
+
+/// A decoded picture as our I420 (even sides, each plane's stride its width).
+pub(crate) fn from_buffer(buffer: &I420Buffer) -> Option<VideoFrame> {
+    let (width, height) = (buffer.width() & !1, buffer.height() & !1);
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let (stride_y, stride_u, stride_v) = buffer.strides();
+    let (from_y, from_u, from_v) = buffer.data();
+    let (columns, rows) = (to_usize(width), to_usize(height));
+    let mut data = vec![0_u8; columns * rows * 3 / 2];
+    let (luma, chroma) = data.split_at_mut(columns * rows);
+    let (u_plane, v_plane) = chroma.split_at_mut(columns * rows / 4);
+    let (half_columns, half_rows) = (columns / 2, rows / 2);
+    copy_plane(from_y, to_usize(stride_y), luma, columns, columns, rows);
+    copy_plane(
+        from_u,
+        to_usize(stride_u),
+        u_plane,
+        half_columns,
+        half_columns,
+        half_rows,
+    );
+    copy_plane(
+        from_v,
+        to_usize(stride_v),
+        v_plane,
+        half_columns,
+        half_columns,
+        half_rows,
+    );
+    Some(VideoFrame {
+        width,
+        height,
+        format: PixelFormat::I420,
+        stride: width,
+        data,
+    })
 }
 
 /// Whether `frame`'s data is as long as its format, stride and height need.
@@ -609,5 +674,21 @@ mod tests {
         };
         assert!(to_i420(&broken, MaxSize::HD).is_none());
         assert_eq!(PixelFormat::Mjpeg.name(), "MJPG");
+    }
+
+    #[test]
+    fn an_i420_frame_goes_to_libwebrtc_and_back_unchanged() {
+        let (width, height) = (8, 4);
+        let data: Vec<u8> = (0..width * height * 3 / 2)
+            .map(|i| u8::try_from(i % 251).unwrap_or(0))
+            .collect();
+        let frame = VideoFrame {
+            width: 8,
+            height: 4,
+            format: PixelFormat::I420,
+            stride: 8,
+            data,
+        };
+        assert_eq!(from_buffer(&to_buffer(&frame)), Some(frame));
     }
 }

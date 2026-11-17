@@ -21,15 +21,15 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use libwebrtc::rtp_transceiver::RtpTransceiver;
-use libwebrtc::video_frame::{I420Buffer, VideoBuffer as _, VideoFrame as RtcVideoFrame, VideoRotation};
+use libwebrtc::video_frame::{VideoFrame as RtcVideoFrame, VideoRotation};
 use libwebrtc::video_source::native::NativeVideoSource;
 use libwebrtc::video_stream::native::NativeVideoStream;
 use libwebrtc::video_track::RtcVideoTrack;
 
-use crate::devices::{PixelFormat, VideoFrame, VideoSink, VideoSource};
+use crate::devices::{VideoFrame, VideoSink, VideoSource};
 use crate::rtc::{LineMap, Next, Peer, next_within};
 use crate::video::codec::EncoderSettings;
-use crate::video::convert::{MaxSize, to_i420};
+use crate::video::convert::{MaxSize, from_buffer, to_buffer, to_i420};
 use crate::video::effects::{BackgroundChoice, Effects};
 
 use super::{SessionDevice, SessionEvent, Shared};
@@ -294,86 +294,6 @@ impl ScreenLoop {
     }
 }
 
-/// An I420 frame of ours (each plane's stride its width) as libwebrtc's buffer.
-pub(crate) fn to_buffer(frame: &VideoFrame) -> I420Buffer {
-    let mut buffer = I420Buffer::new(frame.width, frame.height);
-    let (stride_y, stride_u, stride_v) = buffer.strides();
-    let (width, height) = (to_usize(frame.width), to_usize(frame.height));
-    let (chroma_width, chroma_height) = (width / 2, height / 2);
-    let luma_size = width * height;
-    let (y, u, v) = buffer.data_mut();
-    copy_plane(&frame.data, width, y, to_usize(stride_y), width, height);
-    copy_plane(
-        frame.data.get(luma_size..).unwrap_or_default(),
-        chroma_width,
-        u,
-        to_usize(stride_u),
-        chroma_width,
-        chroma_height,
-    );
-    copy_plane(
-        frame.data.get(luma_size + luma_size / 4..).unwrap_or_default(),
-        chroma_width,
-        v,
-        to_usize(stride_v),
-        chroma_width,
-        chroma_height,
-    );
-    buffer
-}
-
-/// Copies `rows` rows of `columns` bytes from `from` (rows `from_stride` apart) to `to` (rows `to_stride` apart).
-fn copy_plane(from: &[u8], from_stride: usize, to: &mut [u8], to_stride: usize, columns: usize, rows: usize) {
-    for row in 0..rows {
-        let (Some(source), Some(target)) = (
-            from.get(row * from_stride..row * from_stride + columns),
-            to.get_mut(row * to_stride..row * to_stride + columns),
-        ) else {
-            return;
-        };
-        target.copy_from_slice(source);
-    }
-}
-
-/// A decoded picture as our I420 (even sides, each plane's stride its width).
-fn from_buffer(buffer: &I420Buffer) -> Option<VideoFrame> {
-    let (width, height) = (buffer.width() & !1, buffer.height() & !1);
-    if width == 0 || height == 0 {
-        return None;
-    }
-    let (stride_y, stride_u, stride_v) = buffer.strides();
-    let (from_y, from_u, from_v) = buffer.data();
-    let (columns, rows) = (to_usize(width), to_usize(height));
-    let mut data = vec![0_u8; columns * rows * 3 / 2];
-    let (luma, chroma) = data.split_at_mut(columns * rows);
-    let (u_plane, v_plane) = chroma.split_at_mut(columns * rows / 4);
-    let (half_columns, half_rows) = (columns / 2, rows / 2);
-    copy_plane(from_y, to_usize(stride_y), luma, columns, columns, rows);
-    copy_plane(
-        from_u,
-        to_usize(stride_u),
-        u_plane,
-        half_columns,
-        half_columns,
-        half_rows,
-    );
-    copy_plane(
-        from_v,
-        to_usize(stride_v),
-        v_plane,
-        half_columns,
-        half_columns,
-        half_rows,
-    );
-    Some(VideoFrame {
-        width,
-        height,
-        format: PixelFormat::I420,
-        stride: width,
-        data,
-    })
-}
-
 /// A decoding thread's parts: the far end's video track and the line it came on.
 pub(super) struct Decoder {
     pub(super) shared: Arc<Shared>,
@@ -427,30 +347,5 @@ impl Decoder {
             }
         }
         stream.close();
-    }
-}
-
-fn to_usize(value: u32) -> usize {
-    usize::try_from(value).unwrap_or(usize::MAX)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn an_i420_frame_goes_to_libwebrtc_and_back_unchanged() {
-        let (width, height) = (8, 4);
-        let data: Vec<u8> = (0..width * height * 3 / 2)
-            .map(|i| u8::try_from(i % 251).unwrap_or(0))
-            .collect();
-        let frame = VideoFrame {
-            width: 8,
-            height: 4,
-            format: PixelFormat::I420,
-            stride: 8,
-            data,
-        };
-        assert_eq!(from_buffer(&to_buffer(&frame)), Some(frame));
     }
 }

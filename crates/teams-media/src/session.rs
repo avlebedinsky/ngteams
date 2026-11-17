@@ -61,10 +61,10 @@ use crate::processing::{AudioProcessing, ProcessingConfig, from_i16, to_i16};
 use crate::relay::RelayConfig;
 use crate::rtc::{Next, Peer, PeerEvent, next_within};
 pub use crate::rtc::{SHARING_LINE, SdpAnswer, SdpOffer};
+#[cfg(feature = "test-support")]
+pub(crate) use crate::video::convert::to_buffer as to_rtc_buffer;
 use control::Control;
 pub use control::SourceRequest;
-#[cfg(feature = "test-support")]
-pub(crate) use video::to_buffer as to_rtc_buffer;
 use video::{CameraLoop, ScreenLoop, VideoShared};
 pub use video::{RemoteSinks, VideoParts, VideoStats};
 
