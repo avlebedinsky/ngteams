@@ -46,7 +46,7 @@ fn party<'a>(view: &'a CallView, mri: &str) -> Option<&'a CallParticipant> {
 /// shown at least [`FRAMES`] frames of the shape the other's camera has. Gives the line of each other, in order.
 async fn sees(engine: &mut Engine, call: CallId, others: &[(&str, PatternCamera)]) -> Vec<usize> {
     let view = engine
-        .view(call, |view| {
+        .shown(call, |view| {
             others.iter().all(|(mri, _)| {
                 party(view, mri).is_some_and(|party| party.video_on && party.line.is_some_and(|line| line >= 1))
             })

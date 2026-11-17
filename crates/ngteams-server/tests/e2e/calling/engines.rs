@@ -105,7 +105,7 @@ pub(super) struct Engine {
     pub(super) handle: EngineHandle,
     pub(super) recording: PathBuf,
     video: Shown,
-    /// The last view each call told of: a wait for a view starts from it, since a wait for another event passes over
+    /// The last view each call told of: [`Engine::shown`] starts from it, since a wait for another event passes over
     /// views.
     views: std::collections::HashMap<CallId, CallView>,
     _store: tempfile::TempDir,
@@ -312,8 +312,19 @@ impl Engine {
         .await
     }
 
-    /// The view of `call` once it is `wanted`: the last view told, or the next that is.
+    /// The next view of `call` that is `wanted`, told after this wait began.
     pub(super) async fn view(&mut self, call: CallId, wanted: impl Fn(&CallView) -> bool) -> CallView {
+        self.next(|event| match event {
+            Event::CallParticipants { call: of, view } if *of == call && wanted(view) => Some(view.clone()),
+            _ => None,
+        })
+        .await
+    }
+
+    /// The view of `call` once it is `wanted`: the last view told, or the next that is. The last view told can be
+    /// older than the views still in the queue, so use this only when no view after it can make `wanted` false
+    /// again (cameras that turned on and stay on).
+    pub(super) async fn shown(&mut self, call: CallId, wanted: impl Fn(&CallView) -> bool) -> CallView {
         if let Some(last) = self.views.get(&call).filter(|last| wanted(last)) {
             return last.clone();
         }
