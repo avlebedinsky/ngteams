@@ -1805,6 +1805,51 @@ fn the_account_s_renegotiation_waits_while_the_far_end_s_waits_for_its_answer() 
     assert_eq!(names(&effects(&mut calls)), ["renegotiate"]);
 }
 
+/// A camera switch of the account's waits while a renegotiation is open either way (the engine keeps the switch and
+/// offers it once that one settled): the far end's that waits for the account's answer, the account's begun, waiting
+/// for its answer or to go again after a `491`.
+#[test]
+fn a_renegotiation_is_open_while_either_end_s_waits() {
+    let now = Instant::now();
+    let (mut calls, call) = connected_call(now);
+    assert!(!calls.renegotiating(call), "none yet");
+
+    // the far end's offer delivered, the account's answer not yet made
+    let at = callback(&calls, "mediaRenegotiation");
+    calls.on_delivery(&delivery(&at, &negotiation()), Observed::Renegotiation, now);
+    drop(effects(&mut calls));
+    assert!(
+        calls.renegotiating(call),
+        "the far end's waits for the account's answer"
+    );
+    assert!(matches!(calls.begin_renegotiation(call), Err(CallError::NotNow)));
+    calls.answer_media(call, media()).unwrap();
+    drop(effects(&mut calls));
+    assert!(!calls.renegotiating(call), "answered");
+
+    // the account's: begun, then waiting for its answer, then turned away to go again
+    calls.begin_renegotiation(call).unwrap();
+    assert!(calls.renegotiating(call), "begun");
+    calls.renegotiate(call, &media()).unwrap();
+    drop(effects(&mut calls));
+    assert!(calls.renegotiating(call), "its answer waits");
+    let rejection = latest_callback(&calls, "rejection");
+    calls.on_delivery(&delivery(&rejection, &in_progress()), Observed::Nothing, now);
+    drop(effects(&mut calls));
+    assert!(calls.renegotiating(call), "it goes again after the `491`");
+    calls.tick(now + RENEGOTIATION_RETRY);
+    drop(effects(&mut calls));
+    let answered = latest_callback(&calls, "mediaAnswer");
+    calls.on_delivery(
+        &delivery(&answered, &media_answer("v=1\r\n")),
+        Observed::Renegotiation,
+        now,
+    );
+    drop(effects(&mut calls));
+    assert!(!calls.renegotiating(call), "settled");
+    assert!(!calls.renegotiating(CallId(call.get() + 1)), "another call");
+}
+
 #[test]
 fn a_rejected_renegotiation_or_one_whose_answer_doesn_t_read_fails_the_call() {
     let now = Instant::now();

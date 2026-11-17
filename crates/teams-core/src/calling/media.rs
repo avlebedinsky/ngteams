@@ -568,9 +568,9 @@ pub(super) struct LiveMedia {
     /// Its camera, as the account last turned it, when it takes video (its video started); `None`: no
     /// video.
     pub(super) camera: Option<bool>,
-    /// A renegotiation of ours gave way to the far end's: the far end's is answered with our camera's line only
-    /// receiving, and our camera's line offered again once it was ([`offer_camera`]).
-    pub(super) reoffer_owed: bool,
+    /// What our camera's line owes once the open renegotiation settled; while one is owed the far end's
+    /// renegotiation is answered with that line only receiving.
+    pub(super) reoffer: Reoffer,
     /// Who shares a screen in the call now.
     pub(super) shares: Shares,
     /// Who is in the call, whose video each receiving line shows, who speaks; a group call's that takes video
@@ -581,6 +581,18 @@ pub(super) struct LiveMedia {
     pub(super) capabilities: u64,
     /// The number of a group call's latest media descriptions (its start's, join's or `accept`'s is `1`).
     pub(super) described: u64,
+}
+
+/// What our camera's line owes once the open renegotiation settled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Reoffer {
+    Nothing,
+    /// A renegotiation of ours gave way to the far end's: our camera's line is offered again as the camera goes
+    /// ([`offer_camera`]).
+    Line,
+    /// The account turned the camera while a renegotiation was open: `camera` says how it goes, and the camera turns
+    /// that way with its line offered ([`camera`]).
+    Camera,
 }
 
 /// Who shares a screen in a call: the account (`own`), the far end (`theirs`: a 1:1 call's far end's sharing line in
@@ -620,7 +632,7 @@ impl LiveMedia {
     pub(super) fn new(call: CallId, prepared: Prepared) -> Self {
         Self {
             camera: prepared.video.then_some(false),
-            reoffer_owed: false,
+            reoffer: Reoffer::Nothing,
             shares: Shares::default(),
             gallery: Gallery::new(prepared.group_call, prepared.group.is_some()),
             capabilities: 0,
@@ -849,7 +861,7 @@ pub(super) fn group_camera(
 /// a renegotiation of ours gave way to it (that line is offered again next, [`offer_camera`]).
 pub(super) fn answer(live: &LiveMedia, offer: MediaContent) -> impl FnOnce() -> MediaDone + Send + use<> {
     let (call, session, dialect) = (live.call, Arc::clone(&live.session), Arc::clone(&live.dialect));
-    let receive_only = live.reoffer_owed;
+    let receive_only = live.reoffer != Reoffer::Nothing;
     move || {
         let result = ngc(&offer).and_then(|offer| {
             let mut dialect = lock(&dialect);

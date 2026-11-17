@@ -3,10 +3,13 @@
 //! answers; the peer's video shown once its renegotiation offers it; the camera turned off stops what is sent; the test
 //! call's camera as a 1:1 call's, the media controller's peer answering. A group call's video is `group`'s.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::support::{A_TONE, B_TONE, Lab, wait_until};
 use teams_core::{CallAction, CallStatus, End};
+use teams_media::devices::file::{AudioInput, FileDevices, Pacing, PatternCamera};
+use teams_media::devices::{AudioSink, AudioSource, DeviceError, Devices, VideoSource};
 use teams_mock::{AB_CHAT, ECHO, LAB_A, LAB_B, LAB_C};
 use teams_proto::Mri;
 
@@ -200,4 +203,117 @@ async fn native_ends_turn_their_cameras_on_and_each_shows_the_other_s() {
             "{who}: {sent:?}"
         );
     }
+}
+
+/// File devices whose first camera opens only once the test lets it (`release`), told at `asked` when it is asked: a
+/// camera switch's renegotiation held open.
+struct HeldCamera {
+    files: FileDevices,
+    asked: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl HeldCamera {
+    fn new() -> (Arc<Self>, std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (asked, told) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let devices = Arc::new(Self {
+            files: FileDevices {
+                input: AudioInput::Tone(A_TONE),
+                recording: None,
+                camera: PatternCamera::default(),
+                pacing: Pacing::RealTime,
+            },
+            asked: Mutex::new(Some(asked)),
+            release: Mutex::new(released),
+        });
+        (devices, told, release)
+    }
+}
+
+impl Devices for HeldCamera {
+    fn microphone(&self) -> Result<Box<dyn AudioSource>, DeviceError> {
+        self.files.microphone()
+    }
+
+    fn speaker(&self) -> Result<Box<dyn AudioSink>, DeviceError> {
+        self.files.speaker()
+    }
+
+    fn camera(&self) -> Result<Box<dyn VideoSource>, DeviceError> {
+        if let Some(asked) = self.asked.lock().unwrap().take() {
+            let _ = asked.send(());
+            let _ = self.release.lock().unwrap().recv();
+        }
+        self.files.camera()
+    }
+}
+
+/// The renegotiations `mri` sent on the mock's newest call, each answered (acknowledged) before the next went: never
+/// two offers at once.
+fn renegotiated_one_at_a_time(lab: &Lab, mri: &str) -> usize {
+    let sent = lab.sent_by(mri);
+    let mut open = false;
+    let mut count = 0;
+    for op in &sent {
+        match op.as_str() {
+            "renegotiate" => {
+                assert!(!open, "two offers at once: {sent:?}");
+                open = true;
+                count += 1;
+            }
+            "acknowledge" => open = false,
+            _ => {}
+        }
+    }
+    count
+}
+
+/// The camera turned off while its own camera-on renegotiation is still open (the camera opening): as in Teams the
+/// switch is taken, not refused, and once the `on` settled the camera goes off with a renegotiation of its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_camera_switched_while_its_own_renegotiation_is_open_ends_as_the_later_switch_says() {
+    let lab = Lab::start().await;
+    let (devices, asked, release) = HeldCamera::new();
+    let mut a = lab.account_with_devices(devices).await;
+    let id = lab.mock.ring(LAB_C, LAB_A);
+    let incoming = a.incoming().await;
+    let requests = a.handle.requests();
+    let call = requests.call(CallAction::Answer { call: incoming.call }).await.unwrap();
+    a.status(call, &CallStatus::Connected).await;
+
+    let on = tokio::spawn({
+        let requests = requests.clone();
+        async move { requests.call(CallAction::Camera { call, on: true }).await }
+    });
+    tokio::task::spawn_blocking(move || asked.recv_timeout(Duration::from_secs(30)))
+        .await
+        .unwrap()
+        .expect("the camera was asked to open");
+    // the `on` renegotiation is open: the `off` is taken all the same
+    assert_eq!(
+        requests.call(CallAction::Camera { call, on: false }).await.unwrap(),
+        call
+    );
+    release.send(()).unwrap();
+    assert_eq!(on.await.unwrap().unwrap(), call);
+
+    // the `off` goes once the `on` was answered: two renegotiations, one at a time, and the camera ends off
+    wait_until(|| {
+        renegotiated_one_at_a_time(&lab, LAB_A) == 2
+            && lab.sent_by(LAB_A).last().map(String::as_str) == Some("acknowledge")
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let shown = lab.mock.peer_stats(&id, LAB_A).unwrap().video.shown;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        lab.mock.peer_stats(&id, LAB_A).unwrap().video.shown,
+        shown,
+        "a's camera ended off"
+    );
+
+    requests.call(CallAction::HangUp { call }).await.unwrap();
+    assert_eq!(a.ended(call).await, End::HungUp);
+    assert_eq!(renegotiated_one_at_a_time(&lab, LAB_A), 2);
 }

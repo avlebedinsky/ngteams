@@ -870,6 +870,21 @@ impl Calls {
         Ok(())
     }
 
+    /// Whether a renegotiation of `call`, up, is open now, either way: the account's begun, waiting for its answer or
+    /// to go again after a `491`, or the far end's waiting for the account's answer. A new one begins once it settled.
+    #[must_use]
+    pub fn renegotiating(&self, call: CallId) -> bool {
+        self.call.as_ref().is_some_and(|current| {
+            current.id == call
+                && current.phase == Phase::Connected
+                && current.renegotiation.is_some()
+                && (current.negotiation.is_some()
+                    || current.reoffering
+                    || current.retry.is_some()
+                    || current.waits_for_answer())
+        })
+    }
+
     /// The account's renegotiation of `call` it began ([`Self::begin_renegotiation`]) won't go (its offer couldn't be
     /// made): another may begin, and the far end's that came meanwhile is told.
     pub fn give_up_renegotiation(&mut self, call: CallId) {

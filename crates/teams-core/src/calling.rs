@@ -970,7 +970,9 @@ where
             CallEvent::RenegotiationGaveWay { call } => {
                 if let Some(live) = self.live.as_mut().filter(|live| live.call == call) {
                     log::info!("call {}: its renegotiation gave way to the far end's", call.get());
-                    live.reoffer_owed = live.camera.is_some();
+                    if live.camera.is_some() && live.reoffer == media::Reoffer::Nothing {
+                        live.reoffer = media::Reoffer::Line;
+                    }
                 }
             }
             CallEvent::Ended { call, end } => self.ended(call, end),
@@ -1436,6 +1438,7 @@ where
                     if let Some(live) = self.live.as_mut().filter(|live| live.call == call) {
                         live.applied(now);
                     }
+                    self.offer_camera_again(call);
                 }
                 Err(why) => self.media_failed(call, &why, now),
             },
@@ -1530,23 +1533,36 @@ where
     }
 
     /// Once the far end's renegotiation that ours gave way to is answered (our camera's line only receiving), our
-    /// camera's line offered again as the camera goes, when it is on; tried again after the next answer when another
-    /// renegotiation is under way.
+    /// camera's line offered again as the camera goes, when it is on; likewise once a renegotiation open when the
+    /// account turned the camera settled (answered, its answer applied, or given up), the camera turned first. Tried
+    /// again after the next answer when another renegotiation is under way.
     fn offer_camera_again(&mut self, call: CallId) {
-        let Some(live) = self.live.as_mut().filter(|live| live.call == call && live.reoffer_owed) else {
+        let Some(live) = self
+            .live
+            .as_mut()
+            .filter(|live| live.call == call && live.reoffer != media::Reoffer::Nothing)
+        else {
             return;
         };
-        if live.camera != Some(true) {
-            live.reoffer_owed = false;
-            return;
-        }
+        let on = match live.camera {
+            Some(on) if on || live.reoffer == media::Reoffer::Camera => on,
+            _ => {
+                live.reoffer = media::Reoffer::Nothing;
+                return;
+            }
+        };
         match self.calls.begin_renegotiation(call) {
             Ok(()) => {
-                live.reoffer_owed = false;
+                let owed = std::mem::replace(&mut live.reoffer, media::Reoffer::Nothing);
                 // nobody waits for this one's answer
                 let (reply, _) = oneshot::channel();
-                let step = media::offer_camera(live, true, reply);
-                self.sdp_step(step);
+                if owed == media::Reoffer::Camera {
+                    let step = media::camera(live, Arc::clone(&self.media.devices), on, reply);
+                    self.sdp_step(step);
+                } else {
+                    let step = media::offer_camera(live, true, reply);
+                    self.sdp_step(step);
+                }
             }
             Err(error) => log::info!(
                 "call {}: its camera's line waits to be offered again: {error}",
@@ -1565,6 +1581,7 @@ where
         result: Result<Option<teams_media::sdp::NgcSdp>, String>,
         now: Instant,
     ) -> Result<(), CallActionError> {
+        let offered = matches!(result, Ok(Some(_)));
         let turned = match result {
             Ok(Some(offer)) => {
                 self.calls.set_video(call, offer.carries_video());
@@ -1585,7 +1602,9 @@ where
             }
         };
         if let Some(live) = self.live.as_mut().filter(|live| live.call == call) {
-            if turned.is_ok() {
+            if live.reoffer == media::Reoffer::Camera {
+                // a later switch waits for this renegotiation: it says how the camera ends
+            } else if turned.is_ok() {
                 live.camera = live.camera.map(|_| on);
                 log::info!("call {}: camera {}", call.get(), if on { "on" } else { "off" });
             } else if on && live.camera == Some(true) {
@@ -1593,7 +1612,30 @@ where
                 self.emit(Event::CameraOff { call });
             }
         }
+        if !offered {
+            // no renegotiation went: a later switch's goes now
+            self.offer_camera_again(call);
+        }
         turned
+    }
+
+    /// The account turned the camera of `call` while a renegotiation of it is open (either way): as in Teams the
+    /// switch is taken, the camera turns and its line is offered once that one settled ([`Self::offer_camera_again`]),
+    /// never two offers at once.
+    fn camera_waits(&mut self, call: CallId, on: bool) -> Result<CallId, CallActionError> {
+        let live = self
+            .live
+            .as_mut()
+            .filter(|live| live.call == call)
+            .ok_or(CallActionError::NoMedia)?;
+        live.camera = Some(on);
+        live.reoffer = media::Reoffer::Camera;
+        log::info!(
+            "call {}: camera {} once its open renegotiation settled",
+            call.get(),
+            if on { "on" } else { "off" }
+        );
+        Ok(call)
     }
 
     fn media_failed(&mut self, call: CallId, why: &str, now: Instant) {
@@ -1777,6 +1819,7 @@ where
                         self.sdp_step(step);
                         return;
                     }
+                    Err(_) if self.calls.renegotiating(call) => self.camera_waits(call, on),
                     Err(error) => Err(error.into()),
                 },
                 Some(_) => Err(CallActionError::NoVideo),
