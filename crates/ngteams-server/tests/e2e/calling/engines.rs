@@ -312,7 +312,8 @@ impl Engine {
         .await
     }
 
-    /// The next view of `call` that is `wanted`, told after this wait began.
+    /// The next view of `call` that is `wanted`, among the views that no earlier wait read. A view in the queue can be
+    /// older than the action before this wait, so `wanted` must be false for the views before that action.
     pub(super) async fn view(&mut self, call: CallId, wanted: impl Fn(&CallView) -> bool) -> CallView {
         self.next(|event| match event {
             Event::CallParticipants { call: of, view } if *of == call && wanted(view) => Some(view.clone()),
@@ -328,11 +329,7 @@ impl Engine {
         if let Some(last) = self.views.get(&call).filter(|last| wanted(last)) {
             return last.clone();
         }
-        self.next(|event| match event {
-            Event::CallParticipants { call: of, view } if *of == call && wanted(view) => Some(view.clone()),
-            _ => None,
-        })
-        .await
+        self.view(call, wanted).await
     }
 
     /// The next word of whether the far end holds `call`.

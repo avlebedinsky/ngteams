@@ -143,7 +143,8 @@ async fn three_join_a_scheduled_meeting_nobody_rings_and_its_chat_tells_its_star
         let a_call = joined(&mut ada, &join).await;
         let c_call = joined(&mut cora, &join).await;
         mixed.connected(&mixed.open_call().await, 3).await;
-        // each view read is told after the wait for it began: bert was in before ada and cora came, ada before cora
+        // each wait passes only on a view with the parties that came later, so not on a view still in the queue from
+        // before: bert was in before ada and cora came, ada before cora
         let (organizer, guest, last) = (ada.engine.mri.clone(), bert.engine.mri.clone(), cora.engine.mri.clone());
         bert.engine
             .view(b_call, |view| {

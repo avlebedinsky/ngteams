@@ -371,9 +371,12 @@ async fn a_callee_that_leaves_is_no_longer_heard_and_the_call_goes_on() {
         let id = mixed.open_call().await;
         mixed.connected(&id, 3).await;
         tokio::time::sleep(TALK).await;
+        let gone = c.mri.clone();
+        // a view with cora first: a view still in the queue from before she came has no cora either
+        a.view(calls[0], |view| view.participants.iter().any(|party| party.mri == gone))
+            .await;
         c.call(CallAction::HangUp { call: calls[2] }).await;
         c.ended(calls[2]).await;
-        let gone = c.mri.clone();
         a.view(calls[0], |view| view.participants.iter().all(|party| party.mri != gone))
             .await;
         mixed.connected(&id, 2).await;
