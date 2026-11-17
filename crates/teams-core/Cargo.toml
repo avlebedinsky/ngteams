@@ -14,6 +14,8 @@ license.workspace = true
 test-support = ["teams-proto/test-support"]
 
 [dependencies]
+# the AI APIs asked with a key that the user gives (`ai_api`): their requests block on a thread of the app's own
+reqwest = { workspace = true, features = ["blocking"] }
 # a calendar event's time without an offset placed in the desktop's time zone, as the calendar view places it
 chrono.workspace = true
 # The calendar service expects an IANA zone; Windows does not have /etc/localtime.

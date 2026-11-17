@@ -12669,7 +12669,6 @@ dependencies = [
  "percent-encoding",
  "raw-window-handle",
  "regex",
- "reqwest 0.13.5",
  "same-file",
  "serde",
  "serde_json",

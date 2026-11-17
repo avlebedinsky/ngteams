@@ -1,7 +1,8 @@
-//! The AI APIs' clients against a mock HTTP server on the loopback (synthetic keys, no network): each kind's request,
-//! its streamed answer, the conversation kept, its failures, and the listing of its models.
+//! A conversation with each AI API against a mock HTTP server on the loopback (synthetic keys, no network): the model
+//! and the effort asked, the conversation kept, the words of each failure, the wait's stop and deadline, and the
+//! listing of the models. The requests themselves are `teams-core`'s (`tests/ai_api.rs` there).
 
-use std::io::{BufReader, Write as _};
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
@@ -538,5 +539,4 @@ fn each_api_lists_its_models() {
         list_models(&provider(Backend::OpenAi, &mock.base), &keys_with_key()),
         Err(Failure::SignedOut(Backend::OpenAi))
     );
-    assert!(models_in("not json").is_empty());
 }

@@ -25,7 +25,7 @@ use super::{Backend, Tools};
 /// How long a tool may take to list its models.
 const LISTING: Duration = Duration::from_secs(15);
 /// The most of a tool's listing read, in bytes.
-pub(super) const MAX_LISTING: u64 = 4 << 20;
+const MAX_LISTING: u64 = 4 << 20;
 
 /// A model a tool offers.
 #[derive(Clone, Debug, PartialEq, Eq)]

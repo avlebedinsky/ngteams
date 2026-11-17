@@ -63,8 +63,6 @@ teams-media.workspace = true
 # the diagnostic log's level in the settings (changed live) and the "copy diagnostics" text; never installed here
 teams-log.workspace = true
 teams-platform.workspace = true
-# the AI providers' APIs (Anthropic, OpenAI and OpenAI-compatible servers), asked from the threads of the AI work
-reqwest = { workspace = true, features = ["blocking"] }
 url.workspace = true
 # an original email's file name, decoded from its link's path
 percent-encoding.workspace = true

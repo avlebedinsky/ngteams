@@ -471,6 +471,9 @@ impl AiPicker {
         picked: Option<&Picked>,
         cx: &mut Context<Self>,
     ) -> (Vec<Listed>, bool) {
+        // on every render, as before the API providers: the tools' listing starts on first use, so a tool found
+        // later (Try again) lists its models too
+        let catalog = Catalog::of(cx);
         let ToolChoice::Only(id) = &choice.tool else {
             return (Vec::new(), false);
         };
@@ -478,7 +481,6 @@ impl AiPicker {
             return (Vec::new(), false);
         };
         if picked.backend.is_cli() {
-            let catalog = Catalog::of(cx);
             return (catalog.models(picked.backend).to_vec(), !catalog.is_listed());
         }
         let Some(provider) = list.iter().find(|provider| provider.id == *id) else {

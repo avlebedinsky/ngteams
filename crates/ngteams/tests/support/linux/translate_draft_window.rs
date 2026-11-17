@@ -69,6 +69,7 @@ use teams_store::Store;
 use teams_trouter::{Options, Trouter, TrouterCredentials};
 use teams_ui::compose::{Compose, Mode};
 use teams_ui::draft_translate::menu::Row;
+use teams_ui::local_ai::{Backend, ToolChoice, Work};
 use teams_ui::shell::{Main, Shell};
 use teams_ui::view::Root;
 use teams_ui::window::KitRoot;
@@ -1531,16 +1532,17 @@ fn no_tool_installed(user: &mut User) -> SandboxResult {
     Ok(())
 }
 
-/// Settings → General → Message translation: the language by its menu; Codex (not installed); Claude and a model.
+/// Settings → General → Message translation: the language by its menu; Claude Code from the provider's dropdown and a
+/// model typed; Codex (chosen by an earlier build, not installed).
 fn the_settings(user: &mut User) -> SandboxResult {
     type_draft(user, "chat", DRAFT)?;
     user.ask("open-settings")?;
     user.until("Settings → General", |state| state["main"] == "settings:General")?;
     user.shots_in_both_themes("settings-general")?;
-    let (x, y) = message_translation_tools(user)?;
+    let [into, _, _] = message_translation_dropdowns(user)?;
     user.shots_in_both_themes("settings-message-translation")?;
 
-    user.click((x + 57, y - 83))?;
+    user.click(into)?;
     user.park()?;
     thread::sleep(SETTLE);
     user.shot("translate-settings-menu-light.png")?;
@@ -1548,24 +1550,26 @@ fn the_settings(user: &mut User) -> SandboxResult {
     user.key(keys::ENTER)?;
     user.until("French set in the settings", |state| language(state) == "French")?;
 
-    // the model's dropdown, the page's last control, where the page ends: its menu shows (the rows found again
+    // the model's dropdown, the page's last control, where the page ends: its menu shows (the dropdowns found again
     // after each change, as the page may move)
-    let (_, y) = lowest_segment_center(user)?;
-    if !dropdown_opens(user, (x + 55, y + 85))? {
+    let [_, _, model] = last_dropdowns(user)?;
+    if !dropdown_opens(user, model)? {
         return Err("a click on the model dropdown (Automatic) shows no menu".into());
     }
     user.shot("translate-settings-model-automatic-light.png")?;
     user.key(keys::ESC)?;
-    let (_, y) = lowest_segment_center(user)?;
-    user.click((x + 135, y))?;
-    user.park()?;
-    user.until("Codex chosen", |state| state["tool"] == "Only(Codex)")?;
-    let (_, y) = lowest_segment_center(user)?;
-    user.click((x + 73, y))?;
-    user.park()?;
-    user.until("Claude chosen", |state| state["tool"] == "Only(Claude)")?;
-    let (_, y) = lowest_segment_center(user)?;
-    if !dropdown_opens(user, (x + 55, y + 85))? {
+    // the provider's dropdown: Automatic, then the one tool found, Claude Code
+    let [_, provider, _] = last_dropdowns(user)?;
+    if !dropdown_opens(user, provider)? {
+        return Err("a click on the provider dropdown shows no menu".into());
+    }
+    user.shot("translate-settings-providers-light.png")?;
+    user.key(keys::DOWN)?;
+    user.key(keys::DOWN)?;
+    user.key(keys::ENTER)?;
+    user.until("Claude chosen", |state| state["tool"] == "Only(\"claude\")")?;
+    let [_, _, model] = last_dropdowns(user)?;
+    if !dropdown_opens(user, model)? {
         return Err("a click on the model dropdown (Claude) shows no menu".into());
     }
     user.shot("translate-settings-model-claude-light.png")?;
@@ -1591,15 +1595,10 @@ fn the_settings(user: &mut User) -> SandboxResult {
     if !calls.last().is_some_and(|call| call.ends_with("model=opus")) {
         return Err(format!("the tool wasn't started with the model typed: {calls:?}").into());
     }
-    // Codex chosen and not installed: said so, with the settings offered
-    user.ask("open-settings")?;
-    user.until("Settings again", |state| state["main"] == "settings:General")?;
-    // scrolled to the end again (Claude now the segment chosen)
-    message_translation_tools(user)?;
-    let (_, y) = lowest_segment_center(user)?;
-    user.click((x + 135, y))?;
-    user.park()?;
-    user.until("Codex chosen", |state| state["tool"] == "Only(Codex)")?;
+    // Codex chosen (as by the settings file of an earlier build: the dropdown offers only the tools found) and not
+    // installed: said so, with the settings offered
+    user.ask("choose-codex")?;
+    user.until("Codex chosen", |state| state["tool"] == "Only(\"codex\")")?;
     user.open("open-ab")?;
     type_draft(user, "chat", DRAFT)?;
     user.press("ctrl+shift+y")?;
@@ -1641,8 +1640,8 @@ fn dropdown_opens(user: &mut User, at: (u32, u32)) -> SandboxResult<bool> {
     Ok(changed > 400)
 }
 
-/// The centre of the lowest selected segment on the settings' page as it is now.
-fn lowest_segment_center(user: &mut User) -> SandboxResult<(u32, u32)> {
+/// The centres of the last three dropdowns on the settings' page as it is now, top to bottom.
+fn last_dropdowns(user: &mut User) -> SandboxResult<[(u32, u32); 3]> {
     let page = Rect {
         x0: 330,
         y0: 50,
@@ -1650,57 +1649,53 @@ fn lowest_segment_center(user: &mut User) -> SandboxResult<(u32, u32)> {
         y1: 790,
     };
     let screen = user.steady(page)?;
-    Ok(bounds_lowest_segment(&screen)
-        .ok_or("no selected segment on the page")?
-        .center())
+    let found = dropdowns_in(&screen, page);
+    match found.as_slice() {
+        [.., first, second, third] => Ok([*first, *second, *third]),
+        _ => Err(format!("fewer than three dropdowns on the page: {found:?}").into()),
+    }
 }
 
-/// The General page scrolled to its end by the wheel: the centre of Message translation's tool segment chosen,
-/// Automatic (the page's last selected segment).
-fn message_translation_tools(user: &mut User) -> SandboxResult<(u32, u32)> {
+/// The General page scrolled to its end by the wheel: Message translation's dropdowns (its language, its provider,
+/// its model), the page's last three.
+fn message_translation_dropdowns(user: &mut User) -> SandboxResult<[(u32, u32); 3]> {
     for _ in 0..6 {
         user.input.scroll(740, 400, 20)?;
     }
     user.park()?;
-    let automatic = lowest_segment_center(user)?;
-    if automatic.1 < 450 {
-        return Err(format!("the page isn't scrolled to Message translation: {automatic:?}").into());
+    let dropdowns = last_dropdowns(user)?;
+    if dropdowns[0].1 < 450 {
+        return Err(format!("the page isn't scrolled to Message translation: {dropdowns:?}").into());
     }
-    Ok(automatic)
+    Ok(dropdowns)
 }
 
-/// The lowest run of rows in the settings' page with a wide stretch of the brand's blues: a selected segment.
-fn bounds_lowest_segment(shot: &image::RgbImage) -> Option<Rect> {
-    let page = 800..shot.width().min(1270);
-    let lit = |y: u32| page.clone().filter(|&x| brandish(*shot.get_pixel(x, y))).count() >= 40;
-    // above the window's frame along the screen's foot, drawn in the brand's blues too
-    let mut bottom = shot.height().saturating_sub(12);
-    loop {
-        let found = (60..bottom).rev().find(|&y| lit(y))?;
-        let top = (60..=found).rev().take_while(|&y| lit(y)).last()?;
-        let band = Rect {
-            x0: page.start,
-            y0: top,
-            x1: page.end,
-            y1: found + 1,
-        };
-        // its filled columns: text's coloured fringes around it count only a few
-        let filled = |x: u32| (band.y0..band.y1).filter(|&y| brandish(*shot.get_pixel(x, y))).count() >= 15;
-        let columns: Vec<u32> = page.clone().filter(|&x| filled(x)).collect();
-        let segment = match (columns.first(), columns.last()) {
-            (Some(&x0), Some(&x1)) => Rect {
-                x0,
-                y0: band.y0,
-                x1: x1 + 1,
-                y1: band.y1,
-            },
-            _ => band,
-        };
-        if (20..=40).contains(&(segment.y1 - segment.y0)) && (44..=120).contains(&segment.width()) {
-            return Some(segment);
+/// The centres of the dropdowns in `shot` within `page`, top to bottom. A dropdown ends at the page's right column
+/// of controls (x 1153): its outline (or its fill) crosses the column just inside that end and not the card's column
+/// beside it, where a row's line or a card's edge crosses both.
+fn dropdowns_in(shot: &image::RgbImage, page: Rect) -> Vec<(u32, u32)> {
+    const INSIDE: u32 = 1146;
+    const BESIDE: u32 = 1160;
+    let differs = |y: u32| {
+        shot.get_pixel(INSIDE, y)
+            .0
+            .iter()
+            .zip(shot.get_pixel(BESIDE, y).0)
+            .any(|(&inside, beside)| inside.abs_diff(beside) > 10)
+    };
+    // the rows where the column differs, joined into spans when they are close (a dropdown's top and bottom edges)
+    let mut spans: Vec<(u32, u32)> = Vec::new();
+    for y in (page.y0..page.y1.min(shot.height())).filter(|&y| differs(y)) {
+        match spans.last_mut() {
+            Some((_, end)) if y - *end <= 36 => *end = y,
+            _ => spans.push((y, y)),
         }
-        bottom = top;
     }
+    spans
+        .into_iter()
+        .filter(|(top, bottom)| (26..=44).contains(&(bottom - top)))
+        .map(|(top, bottom)| (1100, u32::midpoint(top, bottom)))
+        .collect()
 }
 
 // --- the child: the app on the mock, answering the parent ---
@@ -1989,6 +1984,20 @@ fn on_shell(shell: &Entity<Shell>, verb: &str, window: &mut Window, cx: &mut App
                     |settings| {
                         settings.appearance.follow_system = false;
                         settings.appearance.theme = key;
+                    },
+                    cx,
+                );
+            });
+            "ok".to_owned()
+        }
+        "choose-codex" => {
+            let model = shell.read(cx).settings().clone();
+            model.update(cx, |model, cx| {
+                model.change(
+                    |settings| {
+                        let mut choice = settings.ai(Work::Draft).clone();
+                        choice.tool = ToolChoice::cli(Backend::Codex);
+                        settings.set_ai(Work::Draft, choice);
                     },
                     cx,
                 );

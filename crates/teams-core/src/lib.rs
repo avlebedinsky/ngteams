@@ -27,6 +27,8 @@
 //!   channel's posts, replies and reactions are the outbox's writes, as a chat's.
 //! - [`calling`]: the account's calls (M3 Task 14): the call session joining the signaling machine (`teams-call`), the
 //!   calling stack's socket, the outbox's call kind and the call's media (`teams-media`).
+//! - [`ai_api`]: the AI APIs that the app asks with a key that the user gives (Anthropic's, OpenAI's and an
+//!   OpenAI-compatible server's); the only place where such a request is made.
 //! - [`account`]: one account's engine, assembled with its session over the selected secret store, transports and
 //!   shared call floor; `ngteams` gives it the account's parts.
 //!
@@ -35,6 +37,7 @@
 
 pub mod account;
 pub mod activity;
+pub mod ai_api;
 mod attachments;
 pub mod blocked;
 pub mod bots;
