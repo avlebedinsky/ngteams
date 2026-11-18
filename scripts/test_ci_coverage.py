@@ -71,6 +71,11 @@ class EnvironmentTests(unittest.TestCase):
         self.assertIn("image: postgres:17", services)
         self.assertIn("image: redis:7", services)
         self.assertIn("image: rustfs/rustfs:", services)
+        # a namespaces test's 4 nodes × pool 16, on each of the 4 test threads, outgrow Postgres' default 100
+        connections = shards.split("      - name: Let Postgres take every test node's connections", 1)[1]
+        connections = connections.split("      - name: Run every assigned target", 1)[0]
+        self.assertIn("ALTER SYSTEM SET max_connections = 300", connections)
+        self.assertIn('docker restart "$POSTGRES"', connections)
         step = shards.split("      - name: Run every assigned target, retaining failures", 1)[1].split("      - ", 1)[0]
         self.assertIn("NGTEAMS_SERVER_PG_URL: postgres://postgres:ngts@host.docker.internal:5432/postgres", step)
         self.assertIn("NGTEAMS_SERVER_REDIS_URL: redis://host.docker.internal:6379", step)

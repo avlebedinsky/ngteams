@@ -1726,10 +1726,12 @@ through its loopback TURN server) against an in-process server on loopback, on S
 Redis cases. The picture and file tests keep their blobs in the S3 store `NGTEAMS_SERVER_S3_URL` names
 (`http://<access key>:<secret>@<host>:<port>/<bucket>`; they make the bucket), else in a temporary directory. CI's
 Coverage job sets all three from its service containers (RustFS for S3). Each test's deployment has a database and a
-Redis namespace of its own, so the tests run in parallel on one Postgres and one Redis. Locally:
+Redis namespace of its own, so the tests run in parallel on one Postgres and one Redis. That Postgres takes 300
+connections (CI's too): four test threads of two deployments with two nodes each, each node's pool 16. Locally:
 
 ```sh
-podman run -d --rm --name ngts-pg -e POSTGRES_PASSWORD=ngts -p 55432:5432 docker.io/library/postgres:17
+podman run -d --rm --name ngts-pg -e POSTGRES_PASSWORD=ngts -p 55432:5432 docker.io/library/postgres:17 \
+  -c max_connections=300
 podman run -d --rm --name ngts-redis -p 56379:6379 docker.io/library/redis:7
 podman run -d --rm --name ngts-s3 -p 59000:9000 -e RUSTFS_ACCESS_KEY=ngtsaccess -e RUSTFS_SECRET_KEY=ngtssecret \
   docker.io/rustfs/rustfs:1.0.5

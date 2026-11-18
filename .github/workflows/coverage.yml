@@ -245,6 +245,22 @@ jobs:
         run: |
           .github/ci/unpack.sh target
           rm target/coverage-*.tar.zst
+      # 4 test threads x 4 nodes x pool 16 is 256, over the default 100; a service takes no server options
+      - name: Let Postgres take every test node's connections
+        env:
+          POSTGRES: ${{ job.services.postgres.id }}
+        run: |
+          docker exec "$POSTGRES" psql -U postgres -c 'ALTER SYSTEM SET max_connections = 300'
+          docker restart "$POSTGRES"
+          for _ in $(seq 60); do
+            if docker exec "$POSTGRES" pg_isready -U postgres -h 127.0.0.1 &&
+              [ "$(docker exec "$POSTGRES" psql -U postgres -Atc 'SHOW max_connections')" = 300 ]; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Postgres didn't come back with 300 connections" >&2
+          exit 1
       - name: Wait for the S3 store
         run: |
           for _ in $(seq 60); do
