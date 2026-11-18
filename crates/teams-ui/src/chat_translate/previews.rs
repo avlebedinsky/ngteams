@@ -252,11 +252,12 @@ impl Previews {
         self.sessions.len()
     }
 
-    /// The language `conversation` is read in, if one was picked.
+    /// The language `conversation` is read in, if one was picked and the AI features are on.
     #[must_use]
     pub fn language_of(&self, conversation: &str, cx: &App) -> Option<&'static str> {
         let chat = teams_proto::stored_conversation(conversation);
-        self.settings.read(cx).settings().chat_language_of(self.core.me(), chat)
+        let language = self.settings.read(cx).settings().chat_language_of(self.core.me(), chat);
+        language.filter(|_| crate::local_ai::enabled(cx))
     }
 
     fn key_of(&self, message: &Message, cx: &App) -> Option<Key> {
@@ -462,10 +463,11 @@ impl Previews {
         self.known.insert(key, known);
     }
 
-    /// The settings changed: another tool or model starts over; a language picked or dropped is drawn again.
+    /// The settings changed: another tool or model, or the AI features turned off, starts over; a language picked or
+    /// dropped is drawn again.
     fn settings_changed(&mut self, cx: &mut Context<Self>) {
         let choice = self.settings.read(cx).settings().chat_translator.clone();
-        if choice != self.choice {
+        if choice != self.choice || !crate::local_ai::enabled(cx) {
             self.choice = choice;
             self.stop_tools();
             self.paused_until = None;

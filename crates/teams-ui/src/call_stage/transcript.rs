@@ -199,7 +199,7 @@ impl CallStage {
             .flex()
             .items_center()
             .gap_1()
-            .child(self.transcript_translate(cx))
+            .children(crate::local_ai::enabled(cx).then(|| self.transcript_translate(cx)))
             .child(selected_by(
                 "call-transcript-close",
                 icon_button("call-transcript-close", Glyph::X, "Close transcript")

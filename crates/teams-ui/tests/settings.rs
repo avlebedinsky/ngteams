@@ -108,6 +108,7 @@ fn changed() -> Settings {
             language: "de",
         }],
         sounds: teams_ui::sounds::SoundSettings::default(),
+        ai_features: Some(false),
         chat_translator: AiChoice {
             tool: TranslatorChoice::cli(Backend::Codex),
             model: teams_ui::local_ai::Model::Named("my-team-model".to_owned()),
@@ -528,6 +529,79 @@ fn nothing_writes_on_its_own_until_the_first_run_is_confirmed(cx: &mut TestAppCo
     let saved = cx.new(|_| SettingsModel::load(file.clone()).requiring_first_run());
     saved.update(cx, SettingsModel::confirm_first_run);
     assert!(!SettingsModel::load(file).requiring_first_run().awaiting_first_run());
+}
+
+#[test]
+fn use_ai_features_is_kept_in_the_file_and_missing_means_not_asked() {
+    // not asked yet: nothing written, read back as not asked
+    let defaults = Settings::default();
+    assert_eq!(defaults.ai_features, None);
+    assert!(!render(&defaults).contains("ai_features"));
+    assert_eq!(parse(&render(&defaults)).expect("TOML").0.ai_features, None);
+    for on in [false, true] {
+        let settings = Settings {
+            ai_features: Some(on),
+            ..Settings::default()
+        };
+        let text = render(&settings);
+        assert!(text.contains(&format!("ai_features = {on}")), "{text}");
+        let (read, problems) = parse(&text).expect("TOML");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(read.ai_features, Some(on));
+    }
+    let (read, problems) = parse("ai_features = \"off\"").expect("TOML");
+    assert_eq!(
+        read.ai_features, None,
+        "a bad value is not an answer: the notice asks again"
+    );
+    assert!(matches!(&problems[..], [Problem::BadValue { key: "ai_features", .. }]));
+}
+
+#[gpui::test]
+fn the_ai_notice_waits_after_the_first_run_and_its_answer_is_kept(cx: &mut TestAppContext) {
+    // the views of tests do not ask: the AI features run
+    let lab = SettingsModel::in_memory(Settings::default());
+    assert!(!lab.awaiting_ai_notice());
+    assert!(lab.uses_ai());
+    // the app asks after the first run's screen, and no AI feature runs before the answer
+    let model = cx.new(|_| SettingsModel::in_memory(Settings::default()).requiring_first_run());
+    cx.read(|cx| {
+        let model = model.read(cx);
+        assert!(model.awaiting_first_run() && !model.awaiting_ai_notice());
+        assert!(!model.uses_ai());
+    });
+    model.update(cx, SettingsModel::confirm_first_run);
+    cx.read(|cx| assert!(model.read(cx).awaiting_ai_notice() && !model.read(cx).uses_ai()));
+    model.update(cx, |model, cx| model.set_ai_features(false, cx));
+    cx.read(|cx| {
+        let model = model.read(cx);
+        assert!(!model.awaiting_ai_notice() && !model.uses_ai());
+        assert!(
+            !teams_ui::local_ai::enabled(cx),
+            "the answer is the app's switch at once"
+        );
+    });
+    model.update(cx, |model, cx| model.set_ai_features(true, cx));
+    cx.read(|cx| assert!(model.read(cx).uses_ai() && teams_ui::local_ai::enabled(cx)));
+    // an upgrade from a build without it: the first run was confirmed, the notice still asks once
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (file, path) = file_in(&dir);
+    fs::create_dir_all(path.parent().expect("a directory")).expect("made");
+    fs::write(&path, "first_run = \"confirmed\"\n").expect("written");
+    let upgraded = cx.new(|_| SettingsModel::load(file.clone()).requiring_first_run());
+    cx.read(|cx| assert!(upgraded.read(cx).awaiting_ai_notice()));
+    upgraded.update(cx, |model, cx| model.set_ai_features(false, cx));
+    let again = SettingsModel::load(file.clone()).requiring_first_run();
+    assert!(!again.awaiting_ai_notice(), "answered once, kept in the file");
+    assert!(!again.uses_ai());
+    // the read-only mode never asks, and runs no AI feature before an answer
+    let read_only = SettingsModel::in_memory(Settings {
+        first_run: FirstRunState::Confirmed,
+        ..Settings::default()
+    })
+    .requiring_first_run()
+    .read_only();
+    assert!(!read_only.awaiting_ai_notice() && !read_only.uses_ai());
 }
 
 #[test]

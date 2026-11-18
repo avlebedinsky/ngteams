@@ -351,7 +351,7 @@ struct Header(Entity<ChatTranslation>);
 
 impl Render for Header {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().p_4().child(header_button(&self.0, window, cx))
+        div().size_full().p_4().children(header_button(&self.0, window, cx))
     }
 }
 

@@ -27,7 +27,7 @@ use teams_ui::chat_view::ChatView;
 use teams_ui::compose::{Compose, CorrectionStatus, Editor, Quoted};
 use teams_ui::local_ai::{AiChoice, Backend, ToolChoice, Tools};
 use teams_ui::message_correct::Limits;
-use teams_ui::settings::Settings;
+use teams_ui::settings::{Settings, SettingsModel};
 
 const AB: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces";
 const OTHER: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000c@unq.gbl.spaces";
@@ -694,4 +694,80 @@ fn a_mention_survives_and_a_reply_s_quote_is_part_of_what_the_tool_reads() {
     assert_eq!(runs[0].attrs.mention.as_deref(), Some(LAB_B));
     assert_eq!(runs[0].text, "Lab Bee");
     assert_eq!(runs[1].text, " the report");
+}
+
+/// The a–b chat as [`chat_with`] opens it, with the settings model its views share.
+fn chat_and_settings(rig: &Rig) -> (Entity<Compose>, Entity<SettingsModel>, &'static mut VisualTestContext) {
+    rig.cx.update(teams_ui::window::init);
+    rig.cx.update(teams_ui::chat_view::init);
+    rig.core.messages.lock().unwrap().insert(
+        AB.to_owned(),
+        vec![message("1001", 1_000, LAB_B, "The Quuxify build passed")],
+    );
+    let parts = parts::parts(rig, Settings::default(), Arc::new(ViewTrace::off()));
+    let settings = parts.settings.clone();
+    let app: &'static mut TestAppContext = Box::leak(Box::new(rig.cx.clone()));
+    let (view, cx) = app.add_window_view(|window, cx| ChatView::new(parts, AB.to_owned(), window, cx));
+    cx.simulate_resize(size(px(800.0), px(600.0)));
+    until(cx, |cx| view.read_with(cx, |view, _| !view.items().is_empty()));
+    let compose = view.read_with(cx, |view, _| view.compose().clone());
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.focus(window, cx)));
+    (compose, settings, cx)
+}
+
+fn use_ai(settings: &Entity<SettingsModel>, on: bool, cx: &mut VisualTestContext) {
+    cx.update(|_, cx| settings.update(cx, |model, cx| model.set_ai_features(on, cx)));
+    draw(cx);
+}
+
+#[test]
+fn with_the_ai_features_off_the_box_offers_no_ai_and_no_tool_runs() {
+    let rig = Rig::start();
+    let fake = Fake::new(&rig);
+    let (compose, settings, cx) = chat_and_settings(&rig);
+    draw(cx);
+    let tools = ["compose-correct", "compose-translate"];
+    for tool in tools {
+        assert!(cx.debug_bounds(tool).is_some(), "{tool}");
+    }
+    use_ai(&settings, false, cx);
+    for tool in tools {
+        assert!(cx.debug_bounds(tool).is_none(), "{tool} while off");
+    }
+    type_in(&compose, cx, "teh report");
+    // neither the keys nor a direct call starts anything
+    cx.simulate_keystrokes("ctrl-shift-g");
+    cx.simulate_keystrokes("ctrl-shift-y");
+    ask(&compose, cx);
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.translate_draft(window, cx)));
+    draw(cx);
+    assert_eq!(status(&compose, cx), CorrectionStatus::Idle);
+    std::thread::sleep(Duration::from_millis(200));
+    draw(cx);
+    assert!(fake.questions().is_empty(), "the tool was asked while off");
+    assert_eq!(value(&compose, cx), "teh report");
+    // on again: the box offers them, and they run as before
+    use_ai(&settings, true, cx);
+    for tool in tools {
+        assert!(cx.debug_bounds(tool).is_some(), "{tool} on again");
+    }
+    ask(&compose, cx);
+    until_status(&compose, cx, &CorrectionStatus::Proposed);
+    assert!(fake.questions().contains("teh report"));
+}
+
+#[test]
+fn turning_the_ai_features_off_stops_a_correction_that_runs() {
+    let rig = Rig::start();
+    let fake = Fake::new(&rig);
+    fake.hold();
+    let (compose, settings, cx) = chat_and_settings(&rig);
+    type_in(&compose, cx, "teh report");
+    ask(&compose, cx);
+    let pid = fake.running_pid(cx);
+    use_ai(&settings, false, cx);
+    assert_eq!(status(&compose, cx), CorrectionStatus::Idle);
+    assert!(cx.debug_bounds("compose-correction").is_none());
+    fake.assert_stopped(pid, cx);
+    assert_eq!(value(&compose, cx), "teh report", "the draft stays as written");
 }

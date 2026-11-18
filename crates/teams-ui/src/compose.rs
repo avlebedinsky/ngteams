@@ -729,6 +729,8 @@ pub struct Compose {
     _editor_events: Subscription,
     _bar_events: Subscription,
     _presence: Subscription,
+    /// The AI switch: turned off, a correction or a draft's translation stops at once.
+    _ai_switch: Subscription,
 }
 
 impl EventEmitter<ComposeEvent> for Compose {}
@@ -876,6 +878,7 @@ impl Compose {
             _editor_events: editor_events,
             _bar_events: bar_events,
             _presence: presence,
+            _ai_switch: cx.observe_global::<crate::local_ai::AiSwitch>(Self::follow_ai_switch),
         }
     }
 
@@ -2169,7 +2172,7 @@ impl Compose {
         // an edit stays where its reply is: nothing is sent anywhere new
         let send_to =
             (self.writes == Writes::Thread && !matches!(self.mode, Mode::Edit { .. })).then(|| send_to_line(palette));
-        let fit = self.fit();
+        let fit = self.fit(cx);
         if self.expanded || !self.attachments.is_empty() || !self.apps.cards.is_empty() || fit.stacked {
             return surface
                 .flex()
@@ -2407,8 +2410,11 @@ impl Render for Compose {
             .on_action(cx.listener(|this, _: &editor::ToggleExpanded, window, cx| this.toggle_expanded(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleEmoji, window, cx| this.toggle_emoji(window, cx)))
             .on_action(cx.listener(|this, _: &AttachFiles, window, cx| this.choose_files(window, cx)))
-            .on_action(cx.listener(|this, _: &CorrectDraft, window, cx| this.correct_draft(window, cx)))
-            .on_action(cx.listener(|this, _: &TranslateDraft, window, cx| this.translate_draft(window, cx)))
+            .when(crate::local_ai::enabled(cx), |keyed| {
+                keyed
+                    .on_action(cx.listener(|this, _: &CorrectDraft, window, cx| this.correct_draft(window, cx)))
+                    .on_action(cx.listener(|this, _: &TranslateDraft, window, cx| this.translate_draft(window, cx)))
+            })
             .flex()
             .flex_col()
             .gap_1()

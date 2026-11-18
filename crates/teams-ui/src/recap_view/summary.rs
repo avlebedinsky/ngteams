@@ -57,9 +57,13 @@ impl RecapView {
         Some(summary)
     }
 
-    /// The pane shown beside the recording: the one picked, else the AI summary once one was asked for (made, being
-    /// made or failed) or when the part has no transcript, else the transcript.
+    /// The pane shown beside the recording: the transcript while the AI features are off; else the one picked, else
+    /// the AI summary once one was asked for (made, being made or failed) or when the part has no transcript, else the
+    /// transcript.
     pub fn pane(&mut self, cx: &mut Context<Self>) -> Pane {
+        if !crate::local_ai::enabled(cx) {
+            return Pane::Transcript;
+        }
         if let Some(pane) = self.pane {
             return pane;
         }
@@ -105,6 +109,9 @@ impl RecapView {
 
     /// Generate (or Regenerate): the shown part's summary made by the tool the settings pick.
     pub fn summarize(&mut self, cx: &mut Context<Self>) {
+        if !crate::local_ai::enabled(cx) {
+            return;
+        }
         let Some(input) = self.summary_input(cx).filter(|input| !input.is_empty()) else {
             return;
         };
@@ -121,6 +128,19 @@ impl RecapView {
         if let Some(summary) = self.summary(cx) {
             summary.update(cx, RecapSummary::cancel);
         }
+    }
+
+    /// The AI switch turned off: every summary being made stops.
+    pub(super) fn follow_ai_switch(&mut self, cx: &mut Context<Self>) {
+        if crate::local_ai::enabled(cx) {
+            return;
+        }
+        for (summary, _) in self.summaries.values() {
+            if matches!(summary.read(cx).state(), State::Running { .. }) {
+                summary.update(cx, RecapSummary::cancel);
+            }
+        }
+        cx.notify();
     }
 
     /// Try again after a tool was missing: the tools looked for again, then the summary made.

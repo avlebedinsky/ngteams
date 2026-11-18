@@ -88,8 +88,12 @@ impl Catalog {
         self.listed
     }
 
-    /// The app's: empty while the installed tools are being asked, which starts on first use.
+    /// The app's: empty while the installed tools are being asked, which starts on first use; empty and not asked
+    /// while the AI features are off.
     pub fn of(cx: &mut App) -> Self {
+        if !super::enabled(cx) {
+            return Self::default();
+        }
         if let Some(catalog) = cx.try_global::<Self>() {
             return catalog.clone();
         }
@@ -100,6 +104,9 @@ impl Catalog {
     /// Asks the app's tools for their models again (they changed), in the background; empty until they answer.
     pub fn relist(cx: &mut App) {
         cx.set_global(Self::default());
+        if !super::enabled(cx) {
+            return;
+        }
         let tools = Tools::of(cx);
         let asked = tools.clone();
         // on the background executor (a pool thread; the test scheduler's own in tests)

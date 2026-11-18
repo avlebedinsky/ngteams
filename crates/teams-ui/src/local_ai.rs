@@ -19,6 +19,11 @@
 //!
 //! The models each tool offers are listed from what it reports itself ([`catalog`]), never from a list of ours.
 //!
+//! **One switch** ([`AiSwitch`], "Use AI features" in Settings): every AI entry point asks [`enabled`] first. While it
+//! is off, [`pick`] refuses all work ([`Failure::Off`]), and no tool is looked for ([`Tools::of`]), no model is listed
+//! ([`Catalog::of`], [`providers::ApiModels::of`]) and no API is asked. The views hide each AI control while it is off.
+//! Only this module builds a [`Target`]: `tests/ai_switch.rs` keeps it so.
+//!
 //! [`Tool`] is one such process or API conversation: started, asked and read back, each wait bounded and stopped as
 //! soon as its caller drops the work. **Failures** ([`Failure`]) say what the user can do: the tool missing, signed out,
 //! too slow, or stopped in its own words; for an API also no key, no credit, a rate limit, a model it does not know, no
@@ -430,6 +435,30 @@ impl AiChoice {
     }
 }
 
+/// "Use AI features" as the settings last published it ([`crate::settings::SettingsModel::publish_ai`]): an app
+/// global that each AI entry point asks through [`enabled`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AiSwitch(pub bool);
+
+impl Global for AiSwitch {}
+
+impl AiSwitch {
+    /// Makes `on` the app's switch, when it changed. Off, the work that runs stops: each view that runs one follows
+    /// the switch.
+    pub fn publish(on: bool, cx: &mut App) {
+        if cx.try_global::<Self>() != Some(&Self(on)) {
+            cx.set_global(Self(on));
+        }
+    }
+}
+
+/// Whether the AI features may run now. The app publishes its switch at start, before any view; a view test that
+/// publishes none runs them.
+#[must_use]
+pub fn enabled(cx: &App) -> bool {
+    cx.try_global::<AiSwitch>().is_none_or(|switch| switch.0)
+}
+
 /// The tools found on this computer: an app global, looked for on the `PATH` once (and again on Try again:
 /// [`Tools::look_again`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -462,8 +491,11 @@ impl Tools {
         Self { found }
     }
 
-    /// The app's, looked for on first use.
+    /// The app's, looked for on first use; none while the AI features are off, and nothing is looked for.
     pub fn of(cx: &mut App) -> Self {
+        if !enabled(cx) {
+            return Self::default();
+        }
         if !cx.has_global::<Self>() {
             cx.set_global(Self::detect());
         }
@@ -473,7 +505,9 @@ impl Tools {
     /// Looks on the `PATH` again (Try again after a tool was missing); when what is found changed, the models the
     /// tools offer are listed again too.
     pub fn look_again(cx: &mut App) {
-        Self::found_again(Self::detect(), cx);
+        if enabled(cx) {
+            Self::found_again(Self::detect(), cx);
+        }
     }
 
     /// The tools a look on the `PATH` found: the app's from now on, and the models listed again when they changed.
@@ -558,6 +592,8 @@ pub enum Failure {
     TurnedOff(Backend),
     /// The provider chosen is not in the settings any more.
     NoProvider,
+    /// The user turned the AI features off ("Use AI features").
+    Off,
     /// A failure of the API provider that the user named: its words name that provider, so that two providers of one
     /// kind are told apart ([`Failure::of`]).
     Named(String, Box<Failure>),
@@ -607,7 +643,7 @@ impl Failure {
             | Self::UnknownModel(backend, _)
             | Self::NoModel(backend)
             | Self::TurnedOff(backend) => Some(*backend),
-            Self::NoProvider => None,
+            Self::NoProvider | Self::Off => None,
             Self::Named(_, failure) => failure.backend(),
         }
     }
@@ -658,6 +694,7 @@ impl Failure {
                  under General."
                     .to_owned()
             }
+            Self::Off => "The AI features are off. Turn on \"Use AI features\" in Settings under General.".to_owned(),
             Self::Named(_, failure) => failure.said_of(tool, name),
         }
     }

@@ -142,6 +142,9 @@ impl Compose {
 
     /// The button or its key: the draft translated, or the translation running stopped.
     pub fn translate_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !crate::local_ai::enabled(cx) {
+            return;
+        }
         if self.translating_draft() {
             self.cancel_draft_translation(window, cx);
         } else {

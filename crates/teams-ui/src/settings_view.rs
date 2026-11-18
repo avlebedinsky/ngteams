@@ -4,8 +4,8 @@
 //! and its control trailing.
 //!
 //! - **General**: the account's manual status, whether its availability is reported, the idle time after which
-//!   it no longer is, the time format (following the system's locale, 12-hour or 24-hour), the AI providers
-//!   ([`ai_providers::AiProviders`]), then the AI choices of the chats and the drafts.
+//!   it no longer is, the time format (following the system's locale, 12-hour or 24-hour), "Use AI features", and
+//!   while it is on the AI providers ([`ai_providers::AiProviders`]), then the AI choices of the chats and the drafts.
 //! - **Appearance**: the theme (following the system's light or dark mode with a theme for each, or one theme
 //!   whatever the system says), each a tile drawn in its own colours; the font size with its steps; the font family,
 //!   searchable among the system's.
@@ -19,7 +19,7 @@
 //!   endpoint is registered and the app isn't read-only, else said why), the calls' video switch ("Video in
 //!   calls"), and the camera's video effects (blur, a picture behind the person) with their self-preview
 //!   ([`crate::effects::EffectsPicker`], made while the page shows and dropped as it goes, its preview with it),
-//!   "Save live captions of every call" ([`crate::call_transcript`]), then the local AI tools: which tool and model translates live captions and which summarizes meeting recaps, each with
+//!   "Save live captions of every call" ([`crate::call_transcript`]), then, while "Use AI features" is on, the local AI tools: which tool and model translates live captions and which summarizes meeting recaps, each with
 //!   the same control ([`ai_picker::AiPicker`]).
 //! - **Diagnostics**: the diagnostic log's level and "Copy diagnostics".
 //! - **Manage users** (an own server's administrator alone, [`SettingsView::with_admin`]): the server's accounts
@@ -1181,7 +1181,9 @@ impl SettingsView {
             )],
             palette,
         ));
-        groups.extend(self.ai_pickers(cx).into_iter().map(IntoElement::into_any_element));
+        if self.model.read(cx).uses_ai() {
+            groups.extend(self.ai_pickers(cx).into_iter().map(IntoElement::into_any_element));
+        }
         groups
     }
 
@@ -1215,6 +1217,20 @@ impl SettingsView {
             rows.push(Self::test_call_row(offer, palette, cx));
         }
         rows
+    }
+
+    /// "Use AI features", on the General page before the AI providers: off, every AI box and control is hidden.
+    fn ai_switch(&self, on: bool, palette: Palette) -> AnyElement {
+        group(
+            Some("AI features"),
+            vec![row(
+                "Use AI features",
+                Some(USE_AI_NOTE),
+                self.switch("use-ai-features", on, |settings, on| settings.ai_features = Some(on)),
+                palette,
+            )],
+            palette,
+        )
     }
 
     /// The AI providers' box, on the General page before the AI choices.
@@ -1520,10 +1536,14 @@ impl SettingsView {
                 if self.apps_gone {
                     boxes.insert(0, note_box("settings-apps-gone", APPS_GONE, palette));
                 }
-                boxes.push(self.ai_providers(cx).into_any_element());
-                boxes.push(self.chat_ai_picker(cx).into_any_element());
-                boxes.push(self.correction_ai_picker(cx).into_any_element());
-                boxes.push(self.message_translation_ai_picker(cx).into_any_element());
+                let uses_ai = self.model.read(cx).uses_ai();
+                boxes.push(self.ai_switch(uses_ai, palette));
+                if uses_ai {
+                    boxes.push(self.ai_providers(cx).into_any_element());
+                    boxes.push(self.chat_ai_picker(cx).into_any_element());
+                    boxes.push(self.correction_ai_picker(cx).into_any_element());
+                    boxes.push(self.message_translation_ai_picker(cx).into_any_element());
+                }
                 boxes
             }
             Page::Appearance => self.appearance(&settings.appearance, palette, window, cx),
@@ -1561,6 +1581,9 @@ fn level_label(level: LogLevel) -> &'static str {
 
 /// A line under a row, in `color`, its test selector `selector`.
 /// What "Save live captions of every call" does, under it.
+/// What "Use AI features" does.
+pub const USE_AI_NOTE: &str = "Correct and translate messages, translate chats and captions, and summarize recaps \
+                               with your own Claude Code, Codex or API key. When off, no text goes to an AI provider.";
 pub const SAVE_CAPTIONS_NOTE: &str = "Turns captions on in every call and saves them on this computer as the call's \
                                       transcript, with its AI summary. Teams and the others in the call see nothing.";
 

@@ -192,7 +192,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 324 + 8 + 5 + 15 + 6] = [
+const STEPS: [Step; 5 + 324 + 8 + 5 + 15 + 6 + 10] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -1114,6 +1114,54 @@ const STEPS: [Step; 5 + 324 + 8 + 5 + 15 + 6] = [
     }),
     // the local AI tools in Teams Dark
     ("settings-ai-tools-dark", |shell, _, cx| show_ai_tools(shell, cx)),
+    // the AI notice, as the app shows it once after the first run's screen (or after an upgrade)
+    ("ai-notice", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
+        ask_ai_notice(shell, cx);
+    }),
+    ("ai-notice-dark", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
+    }),
+    // "Keep AI features on": the chat's box with Correct and Translate, the header's language, a message's menu
+    ("chat-ai-on-dark", |shell, window, cx| {
+        made_up_ai_tools(cx);
+        use_ai(shell, true, cx);
+        show_ai_chat(shell, window, cx);
+    }),
+    // "Use AI features" off: none of them
+    ("chat-ai-off-dark", |shell, window, cx| {
+        use_ai(shell, false, cx);
+        show_ai_chat(shell, window, cx);
+    }),
+    ("chat-ai-off", |shell, window, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
+        show_ai_chat(shell, window, cx);
+    }),
+    ("chat-ai-on", |shell, window, cx| {
+        use_ai(shell, true, cx);
+        show_ai_chat(shell, window, cx);
+    }),
+    // the switch in Settings under General: off, then on with the AI boxes under it
+    ("settings-ai-off", |shell, window, cx| {
+        close_ai_chat(shell, window, cx);
+        use_ai(shell, false, cx);
+        show_page(shell, Page::General, cx);
+        shell.read(cx).settings_view().read(cx).scroll_to_end();
+    }),
+    ("settings-ai-off-dark", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
+        shell.read(cx).settings_view().read(cx).scroll_to_end();
+    }),
+    ("settings-ai-on", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
+        made_up_ai_tools(cx);
+        use_ai(shell, true, cx);
+        show_page(shell, Page::General, cx);
+    }),
+    // the tour goes on in Teams Dark
+    ("settings-ai-on-dark", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
+    }),
     ("channel-dialog-dark", |shell, window, cx| {
         open_channel_dialog(shell, window, cx);
         with_channel_dialog(shell, cx, |dialog, cx| fill_channel_dialog(dialog, window, cx));
@@ -2819,6 +2867,54 @@ fn compact_card_in_channel(shell: &Entity<Shell>, window: &mut Window, cx: &mut 
         let face = channel_posts(shell, cx)?.read(cx).face_bounds(CHANNEL_POST)?;
         Some((CardOf::new(LAB_B, None), face))
     });
+}
+
+/// The settings as the app has them at the start: the AI notice waits, after the first run's screen was confirmed.
+fn ask_ai_notice(shell: &Entity<Shell>, cx: &mut App) {
+    let model = shell.read(cx).settings().clone();
+    model.update(cx, |model, cx| {
+        let held = teams_ui::SettingsModel::in_memory(teams_ui::settings::Settings::default());
+        *model = std::mem::replace(model, held).requiring_first_run();
+        model.change(
+            |settings| {
+                settings.first_run = teams_ui::settings::FirstRunState::Confirmed;
+                settings.ai_features = None;
+            },
+            cx,
+        );
+        cx.notify();
+    });
+}
+
+/// "Use AI features" turned on or off, as the notice and the settings' switch do.
+fn use_ai(shell: &Entity<Shell>, on: bool, cx: &mut App) {
+    let model = shell.read(cx).settings().clone();
+    model.update(cx, |model, cx| model.set_ai_features(on, cx));
+}
+
+/// The a–b chat with a draft in its box and the last message's "More options" open.
+fn show_ai_chat(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) {
+    shell.update(cx, |shell, cx| shell.open_chat(AB_CHAT.to_owned(), window, cx));
+    type_in_compose(shell, "Can we move the review to Friday?", window, cx);
+    if let Some((chat, message)) = last_message(shell, cx) {
+        chat.update(cx, |chat, cx| {
+            if chat.options().is_none() {
+                chat.toggle_options(&message, cx);
+            }
+        });
+    }
+}
+
+/// The chat's menu closed and its draft gone.
+fn close_ai_chat(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) {
+    if let Some((chat, message)) = last_message(shell, cx) {
+        chat.update(cx, |chat, cx| {
+            if chat.options().is_some() {
+                chat.toggle_options(&message, cx);
+            }
+        });
+    }
+    type_in_compose(shell, "", window, cx);
 }
 
 /// The app in Teams Dark (`Some` of its key), or back to following the system's light or dark (`None`).

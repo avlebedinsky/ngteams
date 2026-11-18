@@ -22,6 +22,10 @@
 //!   first-run screen ([`Settings::first_run`]) none of them is sent, whatever its switch says
 //!   ([`SettingsModel::sends_typing`], [`SettingsModel::sends_read_receipts`], [`SettingsModel::sends_presence`]). The
 //!   lab app doesn't ask: its settings send as their switches say.
+//! - **The AI notice** ([`SettingsModel::awaiting_ai_notice`]): an app that shows the first run's screen also asks
+//!   once if the user wants the AI features ([`Settings::ai_features`]), after that screen, or at the next start after
+//!   an upgrade. No AI feature runs before the answer. The answer and each later change go to the app's switch
+//!   ([`crate::local_ai::AiSwitch`]), which every AI entry point asks.
 //! - **Forgiving to read**: a missing file gives the defaults; a file that can't be read or isn't TOML gives the
 //!   defaults and is reported, and is never written over: changes hold in memory until the app quits, so the file
 //!   is there to mend by hand; a value that is bad (of the wrong type, out of range, a name this build doesn't know)
@@ -389,6 +393,9 @@ pub struct Settings {
     /// The AI providers the user set, in the user's order ([`crate::local_ai::providers`]); the command-line tools
     /// found on this computer that it does not hold come after them.
     pub ai_providers: Vec<Provider>,
+    /// "Use AI features": `Some(false)` turns every AI feature off ([`crate::local_ai::enabled`]). `None`: the user
+    /// was not asked yet, and the app shows the AI notice first ([`SettingsModel::awaiting_ai_notice`]).
+    pub ai_features: Option<bool>,
     /// Which sound plays for each event, how loud, and the pack they come from ([`crate::sounds`]).
     pub sounds: SoundSettings,
 }
@@ -613,6 +620,7 @@ impl Default for Settings {
             message_translate_to: crate::draft_translate::DEFAULT_LANGUAGE.to_owned(),
             message_translator: AiChoice::default(),
             ai_providers: Vec::new(),
+            ai_features: None,
             sounds: SoundSettings::default(),
         }
     }
@@ -625,6 +633,8 @@ pub mod keys {
     pub const SEND_READ_RECEIPTS: &str = "send_read_receipts";
     pub const SEND_PRESENCE: &str = "send_presence";
     pub const FIRST_RUN: &str = "first_run";
+    /// "Use AI features", `true` or `false`; missing: not asked yet.
+    pub const AI_FEATURES: &str = "ai_features";
     pub const NOTIFICATIONS: &str = "notifications";
     pub const MEETING_STARTED: &str = "meeting_started_notification";
     pub const IDLE_MINUTES: &str = "idle_minutes";
@@ -754,7 +764,7 @@ fn take(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem
                 .and_then(LogLevel::parse)
                 .ok_or(bad(keys::LOG_LEVEL, "not one of error, warn, info, debug"))?;
         }
-        keys::VIDEO_CALLS | keys::SAVE_CALL_CAPTIONS | keys::MEETING_STARTED => take_switch(settings, key, value)?,
+        key if SWITCHES.contains(&key) => take_switch(settings, key, value)?,
         keys::MICROPHONE | keys::SPEAKER | keys::CAMERA => take_device(settings, key, value)?,
         keys::VIDEO_EFFECT => take_video_effect(settings, value)?,
         keys::FOLLOW_SYSTEM_THEME
@@ -971,8 +981,25 @@ fn take_appearance(appearance: &mut Appearance, key: &str, value: &Value) -> Res
     Ok(())
 }
 
-/// Takes an on/off switch: video in calls, saving every call's captions, or the meeting started notification.
+/// The settings that [`take_switch`] takes.
+const SWITCHES: [&str; 4] = [
+    keys::VIDEO_CALLS,
+    keys::SAVE_CALL_CAPTIONS,
+    keys::MEETING_STARTED,
+    keys::AI_FEATURES,
+];
+
+/// Takes an on/off switch: video in calls, saving every call's captions, the meeting started notification, or "Use AI
+/// features".
 fn take_switch(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem> {
+    if key == keys::AI_FEATURES {
+        let on = value.as_bool().ok_or(Problem::BadValue {
+            key: keys::AI_FEATURES,
+            why: "not true or false",
+        })?;
+        settings.ai_features = Some(on);
+        return Ok(());
+    }
     let (key, switch) = match key {
         keys::VIDEO_CALLS => (keys::VIDEO_CALLS, &mut settings.video_calls),
         keys::MEETING_STARTED => (keys::MEETING_STARTED, &mut settings.meeting_started),
@@ -1119,6 +1146,9 @@ pub fn render(settings: &Settings) -> String {
         keys::FIRST_RUN.to_owned(),
         Value::String(settings.first_run.key().to_owned()),
     );
+    if let Some(on) = settings.ai_features {
+        table.insert(keys::AI_FEATURES.to_owned(), Value::Boolean(on));
+    }
     table.insert(
         keys::NOTIFICATIONS.to_owned(),
         Value::String(settings.notifications.key().to_owned()),
@@ -1506,10 +1536,11 @@ impl SettingsModel {
         }
     }
 
-    /// Makes the settings' AI providers the app's ([`crate::local_ai::Providers`]): once, when the app starts; each
-    /// change after that does it by itself.
+    /// Makes the settings' AI providers and "Use AI features" the app's ([`crate::local_ai::Providers`],
+    /// [`crate::local_ai::AiSwitch`]): once, when the app starts; each change after that does it by itself.
     pub fn publish_ai(&self, cx: &mut App) {
         crate::local_ai::Providers::publish(&self.settings.ai_providers, cx);
+        crate::local_ai::AiSwitch::publish(self.uses_ai(), cx);
     }
 
     /// Settings kept in memory only: nothing is read or written.
@@ -1703,6 +1734,25 @@ impl SettingsModel {
         self.signals == Signals::AfterFirstRun && self.settings.first_run == FirstRunState::Waiting
     }
 
+    /// Whether the AI notice waits for the user: the app asks for the first run's screen, that screen is confirmed, and
+    /// the user did not answer "Use AI features" yet (an upgrade from a build without it asks too).
+    #[must_use]
+    pub fn awaiting_ai_notice(&self) -> bool {
+        self.signals == Signals::AfterFirstRun && !self.awaiting_first_run() && self.settings.ai_features.is_none()
+    }
+
+    /// Whether the AI features may run now: as "Use AI features" says. Before the user answers it, they run only where
+    /// the app does not ask (the views of tests); an app that asks, or the read-only mode, keeps them off.
+    #[must_use]
+    pub fn uses_ai(&self) -> bool {
+        self.settings.ai_features.unwrap_or(self.signals == Signals::AsSwitched)
+    }
+
+    /// Turns every AI feature on or off: the AI notice's answer, and the switch in Settings.
+    pub fn set_ai_features(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.change(|settings| settings.ai_features = Some(on), cx);
+    }
+
     /// Whether typing is sent now: its switch is on, no first run waits, and the app isn't read-only.
     #[must_use]
     pub fn sends_typing(&self) -> bool {
@@ -1809,6 +1859,8 @@ impl SettingsModel {
         if self.settings == before {
             return;
         }
+        // the same value changes nothing; a model that never published (a view test) publishes it now
+        crate::local_ai::AiSwitch::publish(self.uses_ai(), cx);
         if self.settings.log_level != before.log_level {
             // no log installed (a view test): nothing to tell
             let _ = teams_log::apply_setting(self.settings.log_level);

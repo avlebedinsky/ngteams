@@ -193,6 +193,9 @@ impl Compose {
 
     /// The button or its key: a correction asked for, the one running stopped, or the one shown given the keyboard.
     pub fn correct_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !crate::local_ai::enabled(cx) {
+            return;
+        }
         match self.correction.state {
             State::Running { .. } => self.end_correction(window, cx),
             State::Proposed(_) => window.focus(&self.correction.focus, cx),
@@ -340,6 +343,15 @@ impl Compose {
     /// Whatever the correction was, it ends (the box sent, or was emptied).
     pub(super) fn forget_correction(&mut self) {
         self.correction.state = State::Idle;
+    }
+
+    /// The AI switch turned off: a correction and a draft's translation stop, their process with them.
+    pub(super) fn follow_ai_switch(&mut self, cx: &mut Context<Self>) {
+        if !crate::local_ai::enabled(cx) {
+            self.forget_correction();
+            self.forget_draft_translation();
+            cx.notify();
+        }
     }
 
     /// Whether Escape has a correction to end.

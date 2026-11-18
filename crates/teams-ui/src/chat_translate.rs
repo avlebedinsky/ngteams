@@ -844,7 +844,9 @@ impl ChatTranslation {
     /// translated again). The "Translate to" language is theirs while the chat isn't translated.
     fn reconcile(&mut self, cx: &mut Context<Self>) {
         let settings = self.settings.read(cx).settings();
-        let language = settings.chat_language_of(self.core.me(), &self.chat);
+        let language = settings
+            .chat_language_of(self.core.me(), &self.chat)
+            .filter(|_| crate::local_ai::enabled(cx));
         let choice = settings.chat_translator.clone();
         let translate_to = settings.message_translate_to.clone();
         // the store keeps them: asked again once the chat is read as written

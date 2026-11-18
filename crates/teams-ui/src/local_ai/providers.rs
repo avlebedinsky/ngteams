@@ -361,11 +361,14 @@ pub fn pick_from(list: &[Provider], tools: &Tools, keys: &AiKeys, choice: &ToolC
     })
 }
 
-/// The provider `choice` comes to in the app (see [`pick_from`]).
+/// The provider `choice` comes to in the app (see [`pick_from`]): the gate of all AI work.
 ///
 /// # Errors
-/// As [`pick_from`].
+/// The AI features are off ([`Failure::Off`]); else as [`pick_from`].
 pub fn pick(choice: &ToolChoice, cx: &mut App) -> Result<Picked, Failure> {
+    if !super::enabled(cx) {
+        return Err(Failure::Off);
+    }
     let list = Providers::of(cx);
     let tools = Tools::of(cx);
     let keys = AiKeys::of(cx);
@@ -490,6 +493,9 @@ impl Global for ApiModels {}
 impl ApiModels {
     /// What `provider` listed; `None` while it is asked, which starts on first use.
     pub fn of(provider: &Provider, cx: &mut App) -> Option<Listing> {
+        if !super::enabled(cx) {
+            return Some(Err(Failure::Off));
+        }
         // only read: a mutable access tells the observers, and a view that draws this observes it
         if let Some(held) = cx.try_global::<Self>() {
             if let Some(listing) = held.listed.get(&provider.id) {
@@ -505,6 +511,9 @@ impl ApiModels {
 
     /// Asks `provider` for its models again, in the background.
     pub fn relist(provider: &Provider, cx: &mut App) {
+        if !super::enabled(cx) {
+            return;
+        }
         let held = cx.default_global::<Self>();
         held.listed.remove(&provider.id);
         held.asking.insert(provider.id.clone(), provider.clone());

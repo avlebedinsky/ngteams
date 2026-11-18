@@ -181,6 +181,8 @@ pub struct RecapView {
     note: Option<SharedString>,
     focus: FocusHandle,
     _typed: Subscription,
+    /// The AI switch: turned off, a summary being made stops.
+    _ai_switch: Subscription,
     reading: Option<Task<()>>,
     /// The app's settings: the tool summaries are made with, and where they are kept.
     settings: Option<Entity<SettingsModel>>,
@@ -233,6 +235,7 @@ impl RecapView {
             note: None,
             focus: cx.focus_handle(),
             _typed: typed,
+            _ai_switch: cx.observe_global::<crate::local_ai::AiSwitch>(Self::follow_ai_switch),
             reading: None,
             settings: None,
             pane: None,
@@ -1338,14 +1341,17 @@ impl RecapView {
                 .child(label)
                 .on_click(cx.listener(move |this, _, _, cx| this.show_pane(pane, cx)))
         };
+        let ai = crate::local_ai::enabled(cx);
         let mut pills = div().flex_none().flex().gap_2().px_4().pt_4().pb_2();
-        pills = pills.child(pill(Pane::AiSummary, "AI summary", "summary", cx));
+        if ai {
+            pills = pills.child(pill(Pane::AiSummary, "AI summary", "summary", cx));
+        }
         if offers_transcript {
             pills = pills.child(pill(Pane::Transcript, "Transcript", "transcript", cx));
         }
         let body = match shown {
             Pane::Transcript if has_transcript => self.transcript_pane(window, palette, cx),
-            Pane::Transcript if offers_transcript => {
+            Pane::Transcript if offers_transcript || !ai => {
                 let state = empty_state(Glyph::TRANSCRIPT, NO_TRANSCRIPT_YET, palette).child(
                     div()
                         .max_w(px(320.0))

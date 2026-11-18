@@ -194,20 +194,22 @@ struct Row {
 }
 
 impl Compose {
-    /// Where this box's tools go at the width it was last drawn at.
-    pub(super) fn fit(&self) -> Fit {
+    /// Where this box's tools go at the width it was last drawn at; the AI tools only while the AI features are on.
+    pub(super) fn fit(&self, cx: &App) -> Fit {
         let mut tools = vec![Tool::Format, Tool::Emoji];
         if self.writes_a_chat() {
             tools.extend([Tool::Attach, Tool::Loop, Tool::Apps]);
         }
-        tools.extend([Tool::Correct, Tool::Translate, Tool::Language]);
+        if crate::local_ai::enabled(cx) {
+            tools.extend([Tool::Correct, Tool::Translate, Tool::Language]);
+        }
         fit(self.box_at.get().map(|bounds| bounds.size.width), self.rem, &tools)
     }
 
     /// Whether the box was last drawn stacked: the text on top, its tools on a row under it.
     #[must_use]
-    pub fn is_stacked(&self) -> bool {
-        self.fit().stacked
+    pub fn is_stacked(&self, cx: &App) -> bool {
+        self.fit(cx).stacked
     }
 
     /// What a tool's row in the menu says, and whether it is off or lit, as its button would be.
@@ -275,7 +277,7 @@ impl Compose {
 
     /// The rows "More options" shows now, one for each tool in it.
     fn more_rows(&self, cx: &App) -> Vec<Row> {
-        self.fit().more.iter().map(|tool| self.row(*tool, cx)).collect()
+        self.fit(cx).more.iter().map(|tool| self.row(*tool, cx)).collect()
     }
 
     /// "More options" of `rows`, the keyboard in it.

@@ -89,6 +89,7 @@ macro_rules! ctrl {
 pub mod account_prompt;
 pub mod accounts;
 pub mod activity_view;
+pub mod ai_notice;
 pub mod app_admin;
 pub mod app_dialog;
 pub mod app_icon;

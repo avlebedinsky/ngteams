@@ -233,7 +233,7 @@ impl CaptionTranslation {
         let settings = self.settings.read(cx).settings();
         let want = settings
             .caption_translate_to
-            .filter(|_| self.showing)
+            .filter(|_| self.showing && crate::local_ai::enabled(cx))
             .map(|target| (target, settings.caption_translator.clone()));
         if want != self.config {
             self.config.clone_from(&want);

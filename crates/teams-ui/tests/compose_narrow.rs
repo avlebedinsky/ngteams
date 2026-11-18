@@ -114,7 +114,7 @@ fn a_narrow_box_keeps_its_text_field_usable_and_its_tools_in_more() {
         "the tools that do not fit go into More options"
     );
     assert!(shown(cx, "compose-send"), "Send stays in the box");
-    assert!(compose.read_with(cx, |compose, _| compose.is_stacked()));
+    assert!(compose.read_with(cx, Compose::is_stacked));
     let hidden: Vec<_> = TOOLS.iter().filter(|tool| cx.debug_bounds(tool).is_none()).collect();
     assert!(!hidden.is_empty(), "some tools go into the menu");
     // the box stays inside its pane
@@ -129,7 +129,7 @@ fn a_wide_box_keeps_all_its_tools_and_no_more_button() {
     for tool in TOOLS {
         assert!(shown(cx, tool), "{tool} is in a wide box");
     }
-    assert!(!compose.read_with(cx, |compose, _| compose.is_stacked()));
+    assert!(!compose.read_with(cx, Compose::is_stacked));
     assert!(!shown(cx, "compose-more"));
     assert!(shown(cx, "compose-send"));
 }
@@ -210,7 +210,7 @@ fn a_channel_box_moves_only_the_tools_it_has() {
     draw(cx);
     assert!(width(cx, "rich-editor") >= USABLE);
     // its text cannot keep a usable width beside its tools: it stacks, and its own tools are in More options
-    assert!(compose.read_with(cx, |compose, _| compose.is_stacked()));
+    assert!(compose.read_with(cx, Compose::is_stacked));
     assert!(shown(cx, "compose-more"), "a narrow channel box has More options");
     click(cx, "compose-more");
     assert!(shown(cx, "compose-more-menu"));

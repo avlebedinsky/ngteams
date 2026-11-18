@@ -66,6 +66,7 @@ use teams_proto::ManualAvailability;
 
 use crate::accounts::{AccountTile, Accounts};
 use crate::activity_view::{ActivityParts, ActivityView, ActivityViewEvent};
+use crate::ai_notice::AiNotice;
 use crate::bridge::Core;
 use crate::calendar_view::{CalendarView, CalendarViewEvent};
 use crate::call_view::CallBar;
@@ -327,6 +328,9 @@ pub struct Shell {
     calendar: Entity<CalendarView>,
     /// The first run's screen, shown over everything while it waits ([`SettingsModel::awaiting_first_run`]).
     first_run: Entity<FirstRun>,
+    /// The AI notice, shown over everything after the first run's screen while it waits
+    /// ([`SettingsModel::awaiting_ai_notice`]).
+    ai_notice: Entity<AiNotice>,
     switcher: Option<(Entity<Switcher>, Subscription)>,
     /// A team's "Create a channel" dialog, while it is open.
     channel_dialog: Option<(Entity<ChannelDialog>, Subscription)>,
@@ -430,6 +434,9 @@ impl Shell {
         let (sidebar, new_message_asked) = Self::make_sidebar(&list, &teams, &models, &trace, window, cx);
         let (settings_view, test_call_asked) = Self::make_settings_view(&core, &settings, &trace, cx);
         let first_run = cx.new(|cx| FirstRun::new(settings.clone(), cx));
+        let ai_notice = cx.new(|cx| AiNotice::new(settings.clone(), cx));
+        // the app publishes it at start too; a shell made by itself (tests, the tour) follows its own settings
+        crate::local_ai::AiSwitch::publish(settings.read(cx).uses_ai(), cx);
         let (calendar, calendar_events) = Self::calendar(&core, &models, &trace, &settings, window, cx);
         let [settled, presence, renamed] = Self::observe_header(&settings, &models, &list, cx);
         let (call_bar, calling) = Self::calls(&core, &models, &list, &trace, &settings, cx);
@@ -456,6 +463,7 @@ impl Shell {
             settings_view,
             calendar,
             first_run,
+            ai_notice,
             switcher: None,
             channel_dialog: None,
             teams_page: None,
@@ -3309,7 +3317,7 @@ impl Shell {
                     |(_, chosen)| (self.team_face(id, palette, cx), chosen.name.clone()),
                 );
                 let join = self.channel_join_button(id, cx);
-                let translate = shown.map(|(view, _)| {
+                let translate = shown.and_then(|(view, _)| {
                     let model = view.read(cx).posts().read(cx).translation().clone();
                     crate::chat_translate::header_button(&model, window, cx)
                 });
@@ -3366,7 +3374,7 @@ impl Shell {
         let people = self.people_header_button(id, cx);
         let flyout = self.people_layer(id, cx);
         // the chat's language: its messages read in it, and the account's sent in the chat's own
-        let translate = chat.as_ref().map(|chat| {
+        let translate = chat.as_ref().and_then(|chat| {
             let model = chat.read(cx).translation().clone();
             crate::chat_translate::header_button(&model, window, cx)
         });
@@ -3571,19 +3579,7 @@ impl Render for Shell {
         let toast = self.toast_view(palette, cx);
         let more_apps = self.more_apps_view(palette, cx);
         let card = self.card_layer(window, cx);
-        let first_run = self.settings.read(cx).awaiting_first_run().then(|| {
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .occlude()
-                .bg(gpui::rgba(0x0000_0080))
-                .child(self.first_run.clone())
-        });
+        let first_run = self.first_run_layer(cx);
         div()
             .key_context(CONTEXT)
             .track_focus(&self.focus)
@@ -3618,6 +3614,33 @@ impl Render for Shell {
             .children(card)
             .children(toast)
             .children(first_run)
+    }
+}
+
+impl Shell {
+    /// The first run's screen, then the AI notice, over everything while one waits for the user.
+    fn first_run_layer(&self, cx: &App) -> Option<gpui::Div> {
+        let settings = self.settings.read(cx);
+        let view: AnyView = if settings.awaiting_first_run() {
+            self.first_run.clone().into()
+        } else if settings.awaiting_ai_notice() {
+            self.ai_notice.clone().into()
+        } else {
+            return None;
+        };
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .occlude()
+                .bg(gpui::rgba(0x0000_0080))
+                .child(view),
+        )
     }
 }
 

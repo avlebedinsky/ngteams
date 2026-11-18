@@ -61,7 +61,7 @@ built for your desktop instead of a web page in a wrapper.
 - Keep every call's captions as a searchable transcript, saved only on this computer
 - Get an AI summary of a meeting: purpose, key takeaways, topics, next steps and open questions
 
-Translation, corrections and summaries use your own [Claude Code](https://claude.com/product/claude-code) or Codex CLI, or your own Anthropic, OpenAI or OpenAI-compatible API key (OpenRouter, Ollama, LM Studio, Azure). Each feature can use a different provider (Settings > General > AI providers), and all stay off until you turn them on. API keys stay in the system keyring.
+Translation, corrections and summaries use your own [Claude Code](https://claude.com/product/claude-code) or Codex CLI, or your own Anthropic, OpenAI or OpenAI-compatible API key (OpenRouter, Ollama, LM Studio, Azure). Each feature can use a different provider (Settings > General > AI providers), and all stay off until you turn them on. API keys stay in the system keyring. At the first start, a short notice explains this and lets you turn every AI feature off; **Use AI features** in Settings > General changes it later.
 
 **Make it yours**
 - Teams Light and Dark, High Contrast, Solarized Light and Dark, Nord and Dracula themes
@@ -286,6 +286,7 @@ The [full command list](docs/development.md#ngteamsctl) covers chats, calls, the
 - Your messages and settings are stored on your computer, and your sign-in is kept in your desktop keyring.
 - Your camera starts off, and only you can turn it on.
 - The update check asks GitHub for ngteams' latest release. It sends no account data and no sign-in, only the app's name and version.
+- With **Use AI features** off, no text goes to an AI tool or provider, and the app does not look for the tools.
 - If you turn on translation or AI summaries, or ask for a correction, that text goes to the tool you picked and its provider. Translating a chat, or one of its messages, also sends its earlier messages, its title and its members' names; a correction also sends the chat's recent messages. Translating the message you are writing sends only its words and the language.
 - Logs at the debug level contain message text, so don't post them publicly.
 

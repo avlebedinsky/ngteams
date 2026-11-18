@@ -344,8 +344,11 @@ impl RenderOnce for Trigger {
     }
 }
 
-/// The chat header's language picker over `model` (see the module docs).
-pub fn header_button(model: &Entity<ChatTranslation>, window: &mut Window, cx: &mut App) -> AnyElement {
+/// The chat header's language picker over `model` (see the module docs); none while the AI features are off.
+pub fn header_button(model: &Entity<ChatTranslation>, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
+    if !crate::local_ai::enabled(cx) {
+        return None;
+    }
     let translation = model.read(cx);
     let chosen = translation.language();
     let busy = translation.busy();
@@ -375,8 +378,10 @@ pub fn header_button(model: &Entity<ChatTranslation>, window: &mut Window, cx: &
     } else {
         face
     };
-    div()
-        .debug_selector(|| "chat-translate".to_owned())
-        .child(face)
-        .into_any_element()
+    Some(
+        div()
+            .debug_selector(|| "chat-translate".to_owned())
+            .child(face)
+            .into_any_element(),
+    )
 }

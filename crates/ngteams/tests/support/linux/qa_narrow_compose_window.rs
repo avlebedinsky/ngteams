@@ -2127,7 +2127,7 @@ fn box_state(compose: &Entity<Compose>, window: &Window, cx: &App) -> Value {
         "text": compose.value(cx).to_string(),
         "mode": mode,
         "focused": compose.focused(window, cx),
-        "stacked": compose.is_stacked(),
+        "stacked": compose.is_stacked(cx),
         "narrow": compose.is_narrow(),
         "more_open": compose.more_open(),
         "expanded": compose.is_expanded(),

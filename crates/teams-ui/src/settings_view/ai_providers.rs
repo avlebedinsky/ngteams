@@ -509,6 +509,9 @@ impl AiProviders {
     /// "Test connection": asks the API for its models with the values typed (a key typed, else the one saved), in
     /// the background.
     pub fn test_connection(&mut self, cx: &mut Context<Self>) {
+        if !crate::local_ai::enabled(cx) {
+            return;
+        }
         let Some(editor) = self.editor.as_mut() else { return };
         let mut provider = match editor.edited(cx) {
             Ok(provider) => provider,
