@@ -12,6 +12,7 @@
 //! [`ctl`] serves `ngteamsctl`'s control socket over the running app.
 //! [`handoff`] hands a second launch, or a Teams link, to the app already running over that socket.
 //! `update` installs a newer release of an app installed from one, from the title bar (Linux only for now).
+//! [`prepare`] is the installer's run of the app, which does the slow work of a first start at install time.
 
 pub mod accounts;
 pub mod accounts_file;
@@ -29,6 +30,7 @@ pub mod lab;
 pub mod mac_app;
 pub mod own_admin;
 pub mod own_prompt;
+pub mod prepare;
 pub mod read_only;
 pub mod refusal;
 pub mod restart;

@@ -309,7 +309,8 @@ jobs:
           & "$package/bin/ngteamsctl.exe" --help
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "PACKAGE=$package" >> $env:GITHUB_ENV
-      # Per user on this runner, as a user would; never starts the app. Its files must be the zip's, byte for byte.
+      # Per user on this runner, as a user would; starts the app only as Setup's --prepare run (no window, account or
+      # network). Its files must be the zip's, byte for byte.
       - name: Install and uninstall the installer
         run: scripts/test-windows-installer.ps1 -Installer "dist/ngteams-$env:VERSION-windows-x86_64-setup.exe" -Package $env:PACKAGE
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

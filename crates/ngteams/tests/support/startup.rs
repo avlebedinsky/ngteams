@@ -648,6 +648,20 @@ fn a_restart_leaves_out_only_the_link_it_opened() {
     );
 }
 
+/// The installer's `--prepare` run exits with success only when each step passed; it opens no account or window.
+#[test]
+fn the_installers_run_tells_a_failed_step_by_its_exit_code() {
+    let step = |result: Result<(), String>| ngteams::prepare::Step {
+        name: "synthetic",
+        work: Box::new(move || result),
+    };
+    assert_eq!(super::prepare(vec![step(Ok(()))]), ExitCode::SUCCESS);
+    assert_eq!(super::prepare(vec![step(Err("refused".into()))]), ExitCode::FAILURE);
+    let cli = super::Cli::try_parse_from(["ngteams", "--prepare"]).unwrap();
+    assert!(cli.prepare && cli.command.is_none() && cli.account.is_none());
+    assert!(super::Cli::try_parse_from(["ngteams", "--prepare", "--build-identity"]).is_err());
+}
+
 /// A link macOS handed the app and it didn't open (one that launched it before the first sign-in) goes to the next
 /// run's arguments, unless those keep a link of their own: a run takes one.
 #[test]

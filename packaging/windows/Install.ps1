@@ -92,6 +92,10 @@ $link.WorkingDirectory = Split-Path $exe
 $link.IconLocation = "$exe,0"
 $link.Description = 'ngteams'
 $link.Save()
+# The app's installer run: Defender checks each new program file and GStreamer lists its plugins now, not at the
+# first start. It opens no window or account and sends nothing; the setup goes on also when it fails.
+$prepare = Start-Process -FilePath $exe -ArgumentList '--prepare' -WorkingDirectory (Split-Path $exe) -WindowStyle Hidden -PassThru
+$prepare.WaitForExit()
 # On its first normal launch, the app sets this shortcut's AppUserModelID and toast activator properties and
 # registers its native COM notification server. Setup does not launch a sending client to do that.
 $program = 'HKCU:/Software/Classes/ngteams.msteams'

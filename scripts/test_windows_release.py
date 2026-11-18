@@ -168,6 +168,24 @@ class WindowsInstallerScript(unittest.TestCase):
         self.assertIn('format!("ngteams-{version}-windows-x86_64-setup.exe")', updater)
         self.assertIn('"windows-setup" => Some(Self::WindowsSetup)', updater)
 
+    def test_setup_prepares_the_first_start_before_it_starts_the_app(self):
+        runs = [line for line in SCRIPT.split("[Run]\n", 1)[1].split("\n\n", 1)[0].splitlines()
+                if line.startswith("Filename:")]
+        self.assertEqual(len(runs), 3)
+        prepare = runs[0]
+        self.assertIn('Parameters: "--prepare"', prepare)
+        self.assertIn("runhidden", prepare)
+        self.assertIn("waituntilterminated", prepare)
+        self.assertNotIn("nowait", prepare)
+        self.assertNotIn("postinstall", prepare)
+        self.assertNotIn("Check:", prepare, "also the updater's silent run prepares")
+        self.assertTrue(all('"{app}\\bin\\ngteams.exe"' in run for run in runs))
+        self.assertTrue(all("--prepare" not in run for run in runs[1:]))
+        cli = (REPO / "crates/ngteams/src/cli.rs").read_text(encoding="utf-8")
+        self.assertIn("pub prepare: bool", cli)
+        install = (REPO / "packaging/windows/Install.ps1").read_text(encoding="utf-8")
+        self.assertLess(install.index("'--prepare'"), install.index("Installed ngteams"))
+
     def test_the_compiler_is_pinned_by_version_and_hash(self):
         pins = json.loads((REPO / "packaging/windows/installer-pins.json").read_text(encoding="utf-8"))
         self.assertRegex(pins["innosetup_sha256"], "^[0-9a-f]{64}$")

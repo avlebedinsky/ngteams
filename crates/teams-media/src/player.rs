@@ -39,6 +39,15 @@ pub(crate) use run::start_gstreamer;
 pub use source::{Abandon, ByteSource, ByteStream, Cache, Pieces, SourceError};
 pub use stream::{Part, Presentation, SegmentSource, Span, Track, TrackKind};
 
+/// Starts `GStreamer` in this process as a player does, which brings its registry of plugins up to date. The
+/// installer's run of the app (`ngteams --prepare`) does it, so that the first video or call does not wait for it.
+///
+/// # Errors
+/// `GStreamer` cannot start ([`Failure::NoCodec`]).
+pub fn prepare() -> Result<(), Failure> {
+    start_gstreamer()
+}
+
 /// What a dropped player stops: its reads, so one waiting for the network gives up.
 trait Stop: Send + Sync {
     fn stop(&self);

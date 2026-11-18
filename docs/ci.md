@@ -521,13 +521,18 @@ removal of the previous version that failed on a held file, from where the marke
 program, the app's own notification registration, and the shortcut and `msteams:` handler unless they now open
 another copy (a zip's), and keeps `%LOCALAPPDATA%\ngteams` and Credential Manager. The app's updater runs the installer
 with `/VERYSILENT /UPDATEPID=<pid> /DIR=<folder>`: it waits for the app to exit, upgrades, and starts it again, the previous
-version when the upgrade fails. The `windows` job installs and uninstalls it on the
-runner with `scripts/test-windows-installer.ps1` (never starting the app) and checks every installed program file
-against the zip's `PACKAGE-MANIFEST.json`.
+version when the upgrade fails. After the files are in place, setup runs `ngteams.exe --prepare` and waits for it
+(two minutes at most): Microsoft Defender checks each new, unsigned program file on its first use, often for 10 s or
+more, and `GStreamer` lists its plugins. Thus setup does that work, not the first start (`crates/ngteams/src/prepare.rs`).
+The zip's `Install.ps1` does the same. The `windows` job installs and uninstalls it on the runner with
+`scripts/test-windows-installer.ps1` (which starts the app only as that `--prepare` run) and checks every installed
+program file against the zip's `PACKAGE-MANIFEST.json`.
 
 ### Windows code signing
 
-Nothing is signed yet, so SmartScreen may warn on the installer and the app (the README says how to proceed). The
+Nothing is signed yet, so SmartScreen may warn on the installer and the app (the README says how to proceed). Defender
+marks each unsigned file "not trusted" and checks it in the cloud on its first use (on a test VM, 10-16 s for one
+file); a trusted signature can make that check shorter. The
 hook is `scripts/package-release-windows.ps1 -SignCommand '<command>'`: an Inno Setup sign tool command line, `$f`
 for the quoted file and `$q` for a quote, for example `signtool.exe sign /fd sha256 /td sha256 /tr <timestamp URL>
 /f <certificate> $f`. It signs `ngteams.exe`, `ngteams-webview.exe` and `ngteamsctl.exe` before they are staged (so
