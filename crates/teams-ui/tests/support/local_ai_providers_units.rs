@@ -7,7 +7,7 @@ use std::sync::Arc;
 use teams_auth::secrets::Secret;
 
 use super::*;
-use crate::local_ai::{Model, Target};
+use crate::local_ai::{Model, Target, Work};
 
 fn tools(found: &[Backend]) -> Tools {
     Tools::with(
@@ -112,7 +112,7 @@ fn a_provider_chosen_says_why_it_cannot_work() {
     off.enabled = false;
     assert_eq!(
         picked(&[off], &none, &ToolChoice::Only("api-1".to_owned())),
-        Err(Failure::TurnedOff(Backend::OpenAi))
+        Err(Failure::TurnedOff(Backend::OpenAi).of("Synthetic api-1"))
     );
     assert_eq!(
         picked(
@@ -120,8 +120,69 @@ fn a_provider_chosen_says_why_it_cannot_work() {
             &none,
             &ToolChoice::Only("api-1".to_owned())
         ),
-        Err(Failure::NoKey(Backend::Anthropic))
+        Err(Failure::NoKey(Backend::Anthropic).of("Synthetic api-1"))
     );
+}
+
+#[test]
+fn a_picks_failure_names_the_api_provider_that_the_user_named() {
+    let none = Tools::default();
+    let mut off = api("api-1", Backend::OpenAi, true);
+    off.name = "QA OpenAI".to_owned();
+    off.enabled = false;
+    let mut no_key = api("api-2", Backend::Anthropic, false);
+    no_key.name = "QA Anthropic".to_owned();
+    let list = [off, no_key];
+    let message = |id: &str| {
+        pick_from(&list, &none, &AiKeys::default(), &ToolChoice::Only(id.to_owned()))
+            .unwrap_err()
+            .message()
+    };
+    assert_eq!(
+        message("api-1"),
+        "QA OpenAI is turned off in Settings under General, AI providers."
+    );
+    assert_eq!(
+        message("api-2"),
+        "QA Anthropic has no API key. Add one in Settings under General, AI providers."
+    );
+}
+
+#[test]
+fn the_progress_names_the_api_provider_and_its_model() {
+    let found = tools(&[Backend::Claude]);
+    let mut openai = api("api-1", Backend::OpenAi, true);
+    openai.name = "QA OpenAI".to_owned();
+    let mut compatible = api("api-2", Backend::Compatible, false);
+    compatible.name = "QA Server".to_owned();
+    let mut served = api("api-3", Backend::Compatible, false);
+    served.name = "QA Served".to_owned();
+    served.model = Some("qa-own-model".to_owned());
+    let list = [openai, compatible, served, Provider::cli(Backend::Claude)];
+    let label = |id: &str, work: Work, model: &Model| {
+        pick_from(&list, &found, &AiKeys::default(), &ToolChoice::Only(id.to_owned()))
+            .unwrap()
+            .label(work, model)
+    };
+    assert_eq!(
+        label("api-1", Work::Draft, &Model::Recommended),
+        "QA OpenAI (GPT-6.1-Terra)"
+    );
+    assert_eq!(
+        label("api-1", Work::Chat, &Model::Recommended),
+        "QA OpenAI (GPT-6-Luna)"
+    );
+    assert_eq!(
+        label("api-1", Work::Draft, &Model::Named("qa-model-7".to_owned())),
+        "QA OpenAI (qa-model-7)"
+    );
+    assert_eq!(label("api-2", Work::Draft, &Model::Recommended), "QA Server");
+    assert_eq!(
+        label("api-3", Work::Draft, &Model::ToolDefault),
+        "QA Served (qa-own-model)"
+    );
+    // a command-line tool is one of its kind: its words stay
+    assert_eq!(label("claude", Work::Draft, &Model::Recommended), "Claude Sonnet");
 }
 
 #[test]

@@ -175,6 +175,7 @@ fn api(base: &str, model: Option<&str>, has_key: bool) -> Target {
     keys.put("api-1", &Secret::new(KEY)).unwrap();
     Target::Api(ApiTarget {
         provider: "api-1".to_owned(),
+        name: "QA API".to_owned(),
         base_url: base.to_owned(),
         model: model.map(str::to_owned),
         has_key,
@@ -253,8 +254,14 @@ fn captions_through_an_openai_account_without_credit_say_so() {
     session.send(caption("the budget is ready", 1));
     match next(&session) {
         Outcome::Failed(failure) => {
-            assert_eq!(failure, Failure::NoCredit(Backend::OpenAi));
-            assert!(failure.message().contains("no credit left"), "{}", failure.message());
+            assert_eq!(failure, Failure::NoCredit(Backend::OpenAi).of("QA API"));
+            assert!(
+                failure
+                    .message()
+                    .starts_with("QA API says that the account has no credit left"),
+                "{}",
+                failure.message()
+            );
         }
         Outcome::Translated { text, .. } => panic!("translated without credit: {text}"),
     }
@@ -354,8 +361,12 @@ fn a_recap_summary_with_a_model_the_api_does_not_know_says_so() {
     };
     assert_eq!(
         failure,
-        Failure::UnknownModel(Backend::Anthropic, "no-such-model".to_owned())
+        Failure::UnknownModel(Backend::Anthropic, "no-such-model".to_owned()).of("QA API")
     );
-    assert!(failure.message().contains("does not know the model no-such-model"));
+    assert!(
+        failure
+            .message()
+            .starts_with("QA API does not know the model no-such-model")
+    );
     assert!(!failure.message().contains(KEY));
 }

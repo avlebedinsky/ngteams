@@ -137,6 +137,8 @@ pub struct Session {
     jobs: mpsc::Sender<Job>,
     stop: Arc<AtomicBool>,
     outcomes: async_channel::Receiver<Outcome>,
+    /// What a send that waits on it fails with when it stops: its provider named.
+    stopped: Failure,
 }
 
 impl Session {
@@ -146,6 +148,7 @@ impl Session {
         let (jobs, queued) = mpsc::channel();
         let (out, outcomes) = async_channel::unbounded();
         let stop = Arc::new(AtomicBool::new(false));
+        let stopped = spec.target.named(Failure::Stopped(spec.backend, None));
         let worker = Worker {
             spec,
             jobs: queued,
@@ -158,7 +161,18 @@ impl Session {
         let _ = thread::Builder::new()
             .name("chat-translate".into())
             .spawn(move || worker.run());
-        Self { jobs, stop, outcomes }
+        Self {
+            jobs,
+            stop,
+            outcomes,
+            stopped,
+        }
+    }
+
+    /// What a send that waits on it fails with when it stops.
+    #[must_use]
+    pub fn stopped(&self) -> Failure {
+        self.stopped.clone()
     }
 
     /// Hands `job` to the tool.
@@ -357,7 +371,9 @@ impl Worker {
             .ask(brief, context, &[], &mut |_| {}, |preface| {
                 prompt::outgoing(preface, to, re, text)
             })
-            .and_then(|(text, _)| prompt::read_outgoing(&text).ok_or_else(|| not_a_translation(backend)));
+            .and_then(|(text, _)| {
+                prompt::read_outgoing(&text).ok_or_else(|| self.spec.target.named(not_a_translation(backend)))
+            });
         Outcome::Outgoing { id, answer }
     }
 

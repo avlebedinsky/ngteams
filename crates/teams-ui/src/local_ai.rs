@@ -558,6 +558,9 @@ pub enum Failure {
     TurnedOff(Backend),
     /// The provider chosen is not in the settings any more.
     NoProvider,
+    /// A failure of the API provider that the user named: its words name that provider, so that two providers of one
+    /// kind are told apart ([`Failure::of`]).
+    Named(String, Box<Failure>),
 }
 
 /// Where the settings of the AI providers are.
@@ -574,7 +577,38 @@ impl Failure {
                  Settings under General, AI providers."
             }
             Self::NotInstalled(Some(_)) => " Install it, or choose another tool in Settings under General.",
+            Self::Named(_, failure) => failure.install_hint(),
             _ => "",
+        }
+    }
+
+    /// This failure said of the API provider named `name`. A command-line tool is one of its kind and keeps its own
+    /// words, as do the failures of no provider.
+    #[must_use]
+    pub fn of(self, name: &str) -> Self {
+        match self.backend() {
+            Some(backend) if !backend.is_cli() && !matches!(self, Self::Named(..)) => {
+                Self::Named(name.to_owned(), Box::new(self))
+            }
+            _ => self,
+        }
+    }
+
+    /// The kind of the provider that failed, if one did.
+    fn backend(&self) -> Option<Backend> {
+        match self {
+            Self::NotInstalled(backend) => *backend,
+            Self::SignedOut(backend)
+            | Self::TimedOut(backend)
+            | Self::Stopped(backend, _)
+            | Self::NoKey(backend)
+            | Self::NoCredit(backend)
+            | Self::RateLimited(backend)
+            | Self::UnknownModel(backend, _)
+            | Self::NoModel(backend)
+            | Self::TurnedOff(backend) => Some(*backend),
+            Self::NoProvider => None,
+            Self::Named(_, failure) => failure.backend(),
         }
     }
 
@@ -582,49 +616,49 @@ impl Failure {
     #[must_use]
     pub fn message(&self) -> String {
         match self {
+            Self::Named(name, failure) => failure.said_of(name, name),
+            failure => {
+                let backend = failure.backend();
+                failure.said_of(backend.map_or("", Backend::tool), backend.map_or("", Backend::name))
+            }
+        }
+    }
+
+    /// Its words, with `tool` the subject of a sentence and `name` the provider in a list.
+    fn said_of(&self, tool: &str, name: &str) -> String {
+        match self {
             Self::NotInstalled(None) => "No AI provider can do this: no Claude Code (claude) or Codex CLI (codex) is \
                                          installed and on, and no API provider is on with a key."
                 .to_owned(),
-            Self::NotInstalled(Some(backend)) => {
-                format!("{} ({}) isn't installed.", backend.tool(), backend.program())
-            }
+            Self::NotInstalled(Some(backend)) => format!("{tool} ({}) isn't installed.", backend.program()),
             Self::SignedOut(backend) if !backend.is_cli() => {
-                format!(
-                    "{} refused the API key. Check the key in {PROVIDERS_PLACE}.",
-                    backend.tool()
-                )
+                format!("{tool} refused the API key. Check the key in {PROVIDERS_PLACE}.")
             }
             Self::SignedOut(backend) => format!(
-                "{} isn't signed in. Run {} in a terminal, then try again.",
-                backend.tool(),
+                "{tool} isn't signed in. Run {} in a terminal, then try again.",
                 backend.sign_in()
             ),
-            Self::TimedOut(backend) => format!("{} took too long to answer.", backend.tool()),
-            Self::Stopped(backend, Some(why)) => format!("{} stopped: {why}", backend.tool()),
-            Self::Stopped(backend, None) => format!("{} stopped unexpectedly.", backend.tool()),
-            Self::NoKey(backend) => format!("{} has no API key. Add one in {PROVIDERS_PLACE}.", backend.tool()),
-            Self::NoCredit(backend) => format!(
-                "{} says that the account has no credit left. Add credit to it, then try again.",
-                backend.tool()
-            ),
-            Self::RateLimited(backend) => format!(
-                "{} refused more requests for now (rate limit). Wait a moment, then try again.",
-                backend.tool()
-            ),
-            Self::UnknownModel(backend, model) => format!(
-                "{} does not know the model {model}. Choose another model in Settings under General.",
-                backend.tool()
-            ),
-            Self::NoModel(backend) => format!(
-                "{} has no model chosen. Choose one in Settings under General.",
-                backend.tool()
-            ),
-            Self::TurnedOff(backend) => format!("{} is turned off in {PROVIDERS_PLACE}.", backend.name()),
+            Self::TimedOut(_) => format!("{tool} took too long to answer."),
+            Self::Stopped(_, Some(why)) => format!("{tool} stopped: {why}"),
+            Self::Stopped(_, None) => format!("{tool} stopped unexpectedly."),
+            Self::NoKey(_) => format!("{tool} has no API key. Add one in {PROVIDERS_PLACE}."),
+            Self::NoCredit(_) => {
+                format!("{tool} says that the account has no credit left. Add credit to it, then try again.")
+            }
+            Self::RateLimited(_) => {
+                format!("{tool} refused more requests for now (rate limit). Wait a moment, then try again.")
+            }
+            Self::UnknownModel(_, model) => {
+                format!("{tool} does not know the model {model}. Choose another model in Settings under General.")
+            }
+            Self::NoModel(_) => format!("{tool} has no model chosen. Choose one in Settings under General."),
+            Self::TurnedOff(_) => format!("{name} is turned off in {PROVIDERS_PLACE}."),
             Self::NoProvider => {
                 "The AI provider chosen for this is not in the settings any more. Choose another in Settings \
                  under General."
                     .to_owned()
             }
+            Self::Named(_, failure) => failure.said_of(tool, name),
         }
     }
 }
@@ -634,6 +668,17 @@ impl Failure {
 pub enum Target {
     Program(PathBuf),
     Api(providers::ApiTarget),
+}
+
+impl Target {
+    /// `failure` said of this target's API provider, by its name ([`Failure::of`]); a program's stays as it is.
+    #[must_use]
+    pub fn named(&self, failure: Failure) -> Failure {
+        match self {
+            Self::Program(_) => failure,
+            Self::Api(api) => failure.of(&api.name),
+        }
+    }
 }
 
 /// What a [`Tool`] runs: the tool, where it is, its work, model and instructions, and how long it may take to start.
@@ -670,7 +715,8 @@ pub struct Tool {
 
 enum Link {
     Process(Box<Process>),
-    Api(Box<api::Conversation>),
+    /// The conversation, and the name of its provider for the words of its failures.
+    Api(Box<api::Conversation>, String),
 }
 
 impl Tool {
@@ -681,7 +727,10 @@ impl Tool {
     pub fn start(launch: &Launch, stop: &AtomicBool) -> Result<Self, Failure> {
         let link = match &launch.target {
             Target::Program(program) => Link::Process(Box::new(Process::start(launch, program, stop)?)),
-            Target::Api(api) => Link::Api(Box::new(api::Conversation::start(launch, api)?)),
+            Target::Api(api) => Link::Api(
+                Box::new(api::Conversation::start(launch, api).map_err(|failure| failure.of(&api.name))?),
+                api.name.clone(),
+            ),
         };
         Ok(Self {
             link,
@@ -734,7 +783,9 @@ impl Tool {
         self.chars += message.len();
         let text = match &mut self.link {
             Link::Process(process) => process.ask(message, deadline, stop, partial),
-            Link::Api(conversation) => conversation.ask(message, deadline, stop, partial),
+            Link::Api(conversation, name) => conversation
+                .ask(message, deadline, stop, partial)
+                .map_err(|failure| failure.of(name)),
         }?;
         self.answered = true;
         Ok(text.trim().to_owned())

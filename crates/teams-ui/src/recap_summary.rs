@@ -710,7 +710,7 @@ impl RecapSummary {
 
     /// Makes a summary of `input` with the tool and model `choice` comes to (anew, when one was made).
     pub fn start(&mut self, choice: AiChoice, input: Input, cx: &mut Context<Self>) {
-        let crate::local_ai::Picked { backend, target, .. } = match crate::local_ai::pick(&choice.tool, cx) {
+        let picked = match crate::local_ai::pick(&choice.tool, cx) {
             Ok(picked) => picked,
             Err(failure) => {
                 self.state = State::Failed(failure);
@@ -718,7 +718,8 @@ impl RecapSummary {
                 return;
             }
         };
-        let label = backend.label_of(Work::Summary, &choice.model);
+        let label = picked.label(Work::Summary, &choice.model);
+        let crate::local_ai::Picked { backend, target, .. } = picked;
         let job = Summarizing::start(Request {
             backend,
             target,

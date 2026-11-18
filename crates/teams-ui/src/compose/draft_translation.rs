@@ -177,10 +177,12 @@ impl Compose {
         let settings = self.settings.read(cx).settings();
         let choice = settings.ai(Work::Draft).clone();
         let language = settings.message_translate_to.clone();
-        let crate::local_ai::Picked { backend, target, .. } = match crate::local_ai::pick(&choice.tool, cx) {
+        let picked = match crate::local_ai::pick(&choice.tool, cx) {
             Ok(picked) => picked,
             Err(failure) => return self.draft_translation_failed(&failure, cx),
         };
+        let label = picked.label(Work::Draft, &choice.model);
+        let crate::local_ai::Picked { backend, target, .. } = picked;
         let translating = Translating::start(
             Request {
                 backend,
@@ -201,7 +203,7 @@ impl Compose {
         self.draft_translation.state = State::Running {
             draft: doc,
             language: language.into(),
-            tool: backend.label_of(Work::Draft, &choice.model).into(),
+            tool: label.into(),
             _waiting: waiting,
             _translating: translating,
         };

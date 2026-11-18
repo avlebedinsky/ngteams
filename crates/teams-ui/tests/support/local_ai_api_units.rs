@@ -14,8 +14,8 @@ use serde_json::Value;
 use teams_auth::secrets::Secret;
 
 use super::*;
-use crate::local_ai::providers::{AiKeys, ApiTarget, MemoryKeys, Provider};
-use crate::local_ai::{Launch, Target};
+use crate::local_ai::providers::{AiKeys, ApiTarget, MemoryKeys, Provider, pick_from};
+use crate::local_ai::{Launch, Target, Tool, ToolChoice, Tools};
 
 /// The synthetic key every test gives.
 const KEY: &str = "sk-synthetic-test-key-0000";
@@ -144,6 +144,7 @@ fn keys_with_key() -> AiKeys {
 fn target(base: &str, has_key: bool) -> ApiTarget {
     ApiTarget {
         provider: "api-1".to_owned(),
+        name: "Synthetic".to_owned(),
         base_url: base.to_owned(),
         model: None,
         has_key,
@@ -590,6 +591,53 @@ fn each_api_lists_its_models() {
     )]);
     assert_eq!(
         list_models(&provider(Backend::OpenAi, &mock.base), &keys_with_key()),
-        Err(Failure::SignedOut(Backend::OpenAi))
+        Err(Failure::SignedOut(Backend::OpenAi).of("Synthetic"))
+    );
+}
+
+#[test]
+fn a_failure_of_an_api_provider_names_it() {
+    let refusal = || {
+        (
+            401,
+            "application/json",
+            r#"{"error":{"message":"Incorrect API key provided","code":"invalid_api_key"}}"#.to_owned(),
+        )
+    };
+    let mock = Mock::new(vec![refusal(), refusal()]);
+    let mut named = provider(Backend::OpenAi, &mock.base);
+    named.name = "QA OpenAI".to_owned();
+    let refused = "QA OpenAI refused the API key. Check the key in Settings under General, AI providers.";
+    let picked = pick_from(
+        std::slice::from_ref(&named),
+        &Tools::default(),
+        &keys_with_key(),
+        &ToolChoice::Only("api-1".to_owned()),
+    )
+    .unwrap();
+    let launch = Launch {
+        backend: picked.backend,
+        target: picked.target,
+        work: Work::Draft,
+        model: Model::Recommended,
+        instructions: "Synthetic instructions.".to_owned(),
+        first: Duration::from_secs(5),
+    };
+    let stop = AtomicBool::new(false);
+    let failure = Tool::start(&launch, &stop)
+        .and_then(|mut tool| tool.ask("Hello", Duration::from_secs(10), &stop))
+        .unwrap_err();
+    assert_eq!(failure.message(), refused);
+    // the editor's "Test connection"
+    assert_eq!(list_models(&named, &keys_with_key()).unwrap_err().message(), refused);
+    // no key in the keyring: before any request
+    let mut launch = launch;
+    if let Target::Api(api) = &mut launch.target {
+        api.keys = AiKeys::default();
+    }
+    let failure = Tool::start(&launch, &stop).err().unwrap();
+    assert_eq!(
+        failure.message(),
+        "QA OpenAI has no API key. Add one in Settings under General, AI providers."
     );
 }

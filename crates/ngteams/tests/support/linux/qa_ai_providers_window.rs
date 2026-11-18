@@ -1432,6 +1432,11 @@ fn correction_other_model_compatible(user: &mut User<'_>) -> SandboxResult {
     })?;
     user.shots("correction-compatible-other-model")?;
     user.press("Escape")?;
+    // the note under the provider names all that the request carries
+    user.ok("open-settings")?;
+    user.scroll(12)?;
+    user.shots("pickers-api-correction")?;
+    user.scroll(-30)?;
     Ok(())
 }
 
@@ -1539,6 +1544,10 @@ fn failures_say_why(user: &mut User<'_>) -> SandboxResult {
         if !status.starts_with("failed") || !status.contains(words) {
             wrong.push(format!("{name}: {status}"));
         }
+        // the provider's own name, so that two of one kind are told apart
+        if !status.contains("QA OpenAI") {
+            wrong.push(format!("{name} does not name the provider: {status}"));
+        }
         if [KEY_OPENAI, KEY_ANTHROPIC].iter().any(|key| status.contains(key)) {
             wrong.push(format!("{name} shows the key: {status}"));
         }
@@ -1558,7 +1567,7 @@ fn failures_say_why(user: &mut User<'_>) -> SandboxResult {
     let done = user.translate("failure model", WAIT)?;
     let status = done["status"].as_str().unwrap_or_default().to_owned();
     say(&format!("  unknown model: {status}"));
-    if !status.contains("does not know the model no-such-model") {
+    if !status.contains("QA OpenAI does not know the model no-such-model") {
         wrong.push(format!("unknown model: {status}"));
     }
     user.choose("draft", "api-2", "recommended")?;
@@ -1592,7 +1601,7 @@ fn slow_endpoint_stops(user: &mut User<'_>) -> SandboxResult {
     let done = user.translate("slow two", Duration::from_secs(150))?;
     let status = done["status"].as_str().unwrap_or_default().to_owned();
     say(&format!("  slow: {status}"));
-    ensure(status.contains("took too long"), || {
+    ensure(status.contains("QA OpenAI took too long"), || {
         format!("a server that never answers: {status}")
     })?;
     user.edit_field("api-2", 1, &format!("{}/v1", user.ai.base("ok")))?;

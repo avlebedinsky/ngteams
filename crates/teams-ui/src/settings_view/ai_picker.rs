@@ -39,10 +39,8 @@ use crate::theme;
 struct Words {
     title: &'static str,
     tool: &'static str,
-    /// What goes to the tool, and when.
+    /// What goes to the tool, and when: [`ON_THIS_COMPUTER`] says where.
     sends: &'static str,
-    /// What goes to an API provider, as a sentence's subject.
-    what: &'static str,
     /// What installing a tool lets the user do.
     install: &'static str,
     /// Why its recommended model is the one.
@@ -57,10 +55,10 @@ fn words(work: Work) -> Words {
         Work::Captions => Words {
             title: "Captions",
             tool: "Translate captions with",
-            sends: "When you translate live captions, their text goes to this tool on your computer and its provider.",
+            sends: "When you translate live captions, their text, the speakers' names, the call's title and the names of \
+                    the people in it go to this tool on your computer and its provider.",
             install: "translate live captions",
             model: "A fast model keeps translations up with the call.",
-            what: "The text of live captions that you translate",
             selector: "caption-translator",
             model_selector: "caption-translator-model",
             name_selector: "caption-translator-model-name",
@@ -68,11 +66,10 @@ fn words(work: Work) -> Words {
         Work::Summary => Words {
             title: "Meeting recaps",
             tool: "Summarize recaps with",
-            sends: "When you ask for a recap's AI summary, its transcript goes to this tool on your computer and its \
-                    provider.",
+            sends: "When you ask for a recap's AI summary, its transcript, the meeting's title and date, and the names \
+                    of the people who spoke go to this tool on your computer and its provider.",
             install: "summarize meeting recaps",
             model: "A stronger model writes a better summary of a long meeting.",
-            what: "The transcript of a recap that you summarize",
             selector: "recap-summarizer",
             model_selector: "recap-summarizer-model",
             name_selector: "recap-summarizer-model-name",
@@ -84,7 +81,6 @@ fn words(work: Work) -> Words {
             install: "translate chats",
             model: "A fast model keeps your messages from waiting; each request carries the chat, so terms and tone \
                     stay consistent.",
-            what: "The messages of a chat that you translate, and your own before they are sent,",
             selector: "chat-translator",
             model_selector: "chat-translator-model",
             name_selector: "chat-translator-model-name",
@@ -95,7 +91,6 @@ fn words(work: Work) -> Words {
             sends: crate::message_correct::SETTINGS_NOTE,
             install: "correct your messages",
             model: "A stronger model finds the word that fits; you wait only when you ask for a correction.",
-            what: "A draft that you ask to correct",
             selector: "message-corrector",
             model_selector: "message-corrector-model",
             name_selector: "message-corrector-model-name",
@@ -106,12 +101,23 @@ fn words(work: Work) -> Words {
             sends: crate::draft_translate::SETTINGS_NOTE,
             install: "translate your messages",
             model: "A stronger model writes the message as a native speaker would; you wait only when you translate.",
-            what: "A draft that you translate",
             selector: "message-translator",
             model_selector: "message-translator-model",
             name_selector: "message-translator-model-name",
         },
     }
+}
+
+/// Where a tool's note says that the work goes.
+const ON_THIS_COMPUTER: &str = "this tool on your computer and its provider";
+
+/// The note of an API provider named `name`: the tool's note for `work`, with the provider in the tool's place, so
+/// that the two always name the same data.
+fn api_note(work: Work, name: &str) -> String {
+    let sends = words(work)
+        .sends
+        .replacen(ON_THIS_COMPUTER, &format!("{name} with your API key"), 1);
+    format!("{sends} The model runs on its server.")
 }
 
 /// The control of one work's choice (see the module docs).
@@ -326,11 +332,7 @@ impl AiPicker {
             picks.push(pick(choice.tool.clone(), label));
         }
         let note: SharedString = match picked {
-            Ok(picked) if !picked.backend.is_cli() => format!(
-                "{} goes to {} with your API key. The model runs on its server.",
-                words.what, picked.name
-            )
-            .into(),
+            Ok(picked) if !picked.backend.is_cli() => api_note(self.work, &picked.name).into(),
             Ok(_) => words.sends.into(),
             Err(failure @ Failure::NotInstalled(None)) => format!(
                 "{} Install or turn on one of the two, or turn on or add an API provider under AI providers, to {}.",
@@ -532,3 +534,7 @@ impl Render for AiPicker {
         group(Some(words.title), rows, palette)
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/ai_picker_units.rs"]
+mod tests;

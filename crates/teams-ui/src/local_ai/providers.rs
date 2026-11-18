@@ -19,7 +19,7 @@ use teams_auth::secrets::Secret;
 use toml::{Table, Value};
 
 use super::catalog::Listed;
-use super::{Backend, Failure, Target, ToolChoice, Tools, api};
+use super::{Backend, Failure, Model, Target, ToolChoice, Tools, Work, api};
 
 /// The longest provider id kept, in bytes.
 const MAX_ID: usize = 64;
@@ -261,11 +261,30 @@ pub struct Picked {
     pub target: Target,
 }
 
+impl Picked {
+    /// What a view says the work runs with, `work` asking `model`.
+    #[must_use]
+    pub fn label(&self, work: Work, model: &Model) -> String {
+        let Target::Api(target) = &self.target else {
+            return self.backend.label_of(work, model);
+        };
+        match api::model_for(self.backend, work, model, target.model.as_deref()) {
+            Ok(asked) if self.backend.recommended(work) == Some(asked.as_str()) => {
+                format!("{} ({})", self.name, self.backend.label(work))
+            }
+            Ok(asked) => format!("{} ({asked})", self.name),
+            Err(_) => self.name.clone(),
+        }
+    }
+}
+
 /// Where an API's requests go and what reads its key, for the thread that asks it.
 #[derive(Clone, Debug)]
 pub struct ApiTarget {
     /// The provider's id: its key's name in the keyring.
     pub provider: String,
+    /// The name the user gave the provider, for the words of its failures.
+    pub name: String,
     pub base_url: String,
     /// The provider's own default model.
     pub model: Option<String>,
@@ -318,16 +337,17 @@ pub fn pick_from(list: &[Provider], tools: &Tools, keys: &AiKeys, choice: &ToolC
     };
     let backend = provider.kind;
     if !provider.enabled {
-        return Err(Failure::TurnedOff(backend));
+        return Err(Failure::TurnedOff(backend).of(&provider.name));
     }
     let target = if backend.is_cli() {
         Target::Program(tools.program(backend).ok_or(Failure::NotInstalled(Some(backend)))?)
     } else {
         if backend != Backend::Compatible && !provider.has_key {
-            return Err(Failure::NoKey(backend));
+            return Err(Failure::NoKey(backend).of(&provider.name));
         }
         Target::Api(ApiTarget {
             provider: provider.id.clone(),
+            name: provider.name.clone(),
             base_url: provider.base_url(),
             model: provider.model.clone(),
             has_key: provider.has_key,

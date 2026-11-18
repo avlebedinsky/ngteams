@@ -175,13 +175,18 @@ impl Worker {
         };
         let message = format!("<meeting>\n{}</meeting>\n{material}", input.brief);
         let backend = self.request.backend;
+        let target = &self.request.target;
         let summary = self.with_tool(instructions(), |tool, wait, stop| {
             let end = input.end();
             if let Some(summary) = parse(&tool.ask(&message, wait, stop)?, end) {
                 return Ok(summary);
             }
-            parse(&tool.ask(FIX_REQUEST, wait, stop)?, end)
-                .ok_or_else(|| Failure::Stopped(backend, Some("its answer wasn't a summary. Try again.".to_owned())))
+            parse(&tool.ask(FIX_REQUEST, wait, stop)?, end).ok_or_else(|| {
+                target.named(Failure::Stopped(
+                    backend,
+                    Some("its answer wasn't a summary. Try again.".to_owned()),
+                ))
+            })
         })?;
         Ok(Made {
             summary,

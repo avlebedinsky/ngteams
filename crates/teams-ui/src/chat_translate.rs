@@ -659,11 +659,13 @@ impl ChatTranslation {
 
     /// Stops the tool's session: a send waiting on it is told it stopped.
     fn stop_session(&mut self) {
-        self.session = None;
+        let stopped = self.session.take().map(|session| session.stopped());
         self.receiving = None;
         self.running = None;
         for (_, (_, answer)) in self.outgoing.drain() {
-            let _ = answer.try_send(Err(SendFailure::Tool(Failure::Stopped(Backend::Claude, None))));
+            if let Some(stopped) = &stopped {
+                let _ = answer.try_send(Err(SendFailure::Tool(stopped.clone())));
+            }
         }
     }
 
@@ -1169,6 +1171,10 @@ impl ChatTranslation {
         let id = self.next_job_id();
         let (reply, answer) = async_channel::bounded(1);
         self.outgoing.insert(id, (shells, reply));
+        let stopped = self
+            .session
+            .as_ref()
+            .map_or(Failure::Stopped(Backend::Claude, None), Session::stopped);
         if let Some(session) = &self.session {
             session.send(session::Job::Outgoing {
                 id,
@@ -1179,12 +1185,10 @@ impl ChatTranslation {
                 text: encoded,
             });
         }
-        Some(cx.background_executor().spawn(async move {
-            answer
-                .recv()
-                .await
-                .unwrap_or(Err(SendFailure::Tool(Failure::Stopped(Backend::Claude, None))))
-        }))
+        Some(
+            cx.background_executor()
+                .spawn(async move { answer.recv().await.unwrap_or(Err(SendFailure::Tool(stopped))) }),
+        )
     }
 
     /// The account's own message `original` was sent as `sent` (its translation): shown as written from now on. `key`
@@ -1457,8 +1461,8 @@ fn outgoing_of(answer: Result<(Option<String>, Option<String>), Failure>, shells
 }
 
 /// The settings' description of where a chat's text goes.
-pub const SETTINGS_NOTE: &str = "When you translate a chat, its messages and yours, with its title and its members' \
-     names, go to this tool on your computer and its provider.";
+pub const SETTINGS_NOTE: &str = "When you translate a chat, its messages, its title, its members' names and your own \
+     messages before they are sent go to this tool on your computer and its provider.";
 
 #[cfg(test)]
 #[path = "../tests/support/chat_translate_units.rs"]

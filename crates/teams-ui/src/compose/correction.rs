@@ -228,10 +228,12 @@ impl Compose {
 
     fn run_correction(&mut self, doc: Doc, encoded: Encoded, window: &mut Window, cx: &mut Context<Self>) {
         let choice = self.settings.read(cx).settings().ai(Work::Correction).clone();
-        let crate::local_ai::Picked { backend, target, .. } = match crate::local_ai::pick(&choice.tool, cx) {
+        let picked = match crate::local_ai::pick(&choice.tool, cx) {
             Ok(picked) => picked,
             Err(failure) => return self.correction_failed(doc, &failure, cx),
         };
+        let label = picked.label(Work::Correction, &choice.model);
+        let crate::local_ai::Picked { backend, target, .. } = picked;
         let correcting = Correcting::start(Request {
             backend,
             target,
@@ -248,7 +250,7 @@ impl Compose {
         });
         self.correction.state = State::Running {
             draft: doc,
-            tool: backend.label_of(Work::Correction, &choice.model).into(),
+            tool: label.into(),
             _waiting: waiting,
             _correcting: correcting,
         };

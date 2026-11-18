@@ -347,10 +347,10 @@ fn ask(session: &mut dyn Session, request: &Request, stop: &AtomicBool) -> Outco
         &request.draft,
     )
     .ok_or_else(|| {
-        Failure::Stopped(
+        request.target.named(Failure::Stopped(
             request.backend,
             Some("its answer didn't keep the message's formatting.".to_owned()),
-        )
+        ))
     })
 }
 

@@ -154,7 +154,7 @@ impl Conversation {
 }
 
 /// The model to ask: the one chosen, else the provider's default, else the one recommended for the work.
-fn model_for(backend: Backend, work: Work, model: &Model, own: Option<&str>) -> Result<String, Failure> {
+pub(super) fn model_for(backend: Backend, work: Work, model: &Model, own: Option<&str>) -> Result<String, Failure> {
     let named = match model {
         Model::Named(name) => Some(name.clone()),
         Model::Recommended => backend
@@ -195,9 +195,14 @@ fn failure(backend: Backend, model: &str, error: ApiError) -> Failure {
 /// # Errors
 /// No key, the API refused, or it could not be reached.
 pub fn list_models(provider: &Provider, keys: &AiKeys) -> Result<Vec<Listed>, Failure> {
+    listing(provider, keys).map_err(|failure| failure.of(&provider.name))
+}
+
+fn listing(provider: &Provider, keys: &AiKeys) -> Result<Vec<Listed>, Failure> {
     let backend = provider.kind;
     let target = ApiTarget {
         provider: provider.id.clone(),
+        name: provider.name.clone(),
         base_url: provider.base_url(),
         model: provider.model.clone(),
         has_key: provider.has_key,

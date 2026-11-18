@@ -422,6 +422,7 @@ fn a_saved_key_is_removed_and_a_test_says_what_the_api_refused(cx: &mut TestAppC
     let keys = memory();
     keys.put("api-1", &Secret::new(KEY)).unwrap();
     let anthropic = Provider {
+        name: "QA Anthropic".to_owned(),
         base_url: Some(mock.base.clone()),
         has_key: true,
         ..Provider::new_api(Backend::Anthropic, &[])
@@ -434,8 +435,11 @@ fn a_saved_key_is_removed_and_a_test_says_what_the_api_refused(cx: &mut TestAppC
     opened.click("ai-provider-api-1-edit");
     // the key saved goes with the test when none is typed
     opened.click("ai-provider-test");
-    let tested = opened.tested().unwrap();
-    assert!(tested.contains("refused the API key"), "{tested}");
+    // the provider's own name: two of one kind are told apart
+    assert_eq!(
+        opened.tested().as_deref(),
+        Some("QA Anthropic refused the API key. Check the key in Settings under General, AI providers.")
+    );
     assert!(mock.heads()[0].contains(KEY));
 
     opened.click("ai-provider-remove-key");
