@@ -1,7 +1,7 @@
 //! A chat read and written in a language of the user's choosing, translated on this computer by the AI command-line
 //! tool the user has ([`crate::local_ai`]: Claude Code or the Codex CLI, the chat model [`Work::Chat`]). Teams' own
-//! message translation needs Microsoft's service and works a message at a time; this one translates the whole chat,
-//! both ways, with the chat as context.
+//! message translation needs Microsoft's service; this one translates the whole chat, both ways, with the chat as
+//! context, or one message at a time, as Teams does.
 //!
 //! - **Per chat, off by default**: the chat's header has a language picker ([`header_button`]); the choice is kept per
 //!   account and chat in the settings ([`crate::settings::Settings::chat_languages`]), so it holds across restarts.
@@ -10,8 +10,8 @@
 //!   Codex; by default the fast model, as a send waits on it).
 //! - **Reading**: every text message the view holds (history, new ones, edits, replies with their quotes) is shown in
 //!   the language, as Teams shows a translated message: its translation, with Teams' translation mark beside its time
-//!   ([`Mark`]: "See original message" shows it as written, and back). One already in the language is shown as it is,
-//!   unmarked. Until its translation comes it shows as written, faded, "Translating…" beside its time; the view never waits.
+//!   ([`Mark`]: "See original message" shows it as written, and back). In a translated chat, one already in the
+//!   language is shown as it is, unmarked. Until its translation comes it shows as written, faded, "Translating…" beside its time; the view never waits.
 //! - **Kept in the store** (`teams-store`'s schema 20): each translation by the message's id, version and the
 //!   language, so reopening the chat, or a later run, shows it at once and asks the tool only for what is new, edited
 //!   or never translated. The chat view reads them for the messages it holds before anything goes to the tool.
@@ -38,8 +38,16 @@
 //!   them ([`session::Outcome::Partial`]), the newest batch first and, within a batch, the newest message first (the
 //!   end of the chat the view shows fills in first). Turning translation off (or picking another language) mid-run
 //!   stops the tool at once and drops what it was still writing.
-//! - **Failures** stop the reading ([`Status::Failed`]: the tool missing, signed out, too slow, or stopped): the chat
-//!   shows a notice saying why, with Try again, and its messages as written.
+//! - **Failures** stop the reading ([`Status::Failed`]: the tool missing, signed out, too slow, or stopped): a
+//!   translated chat shows a notice saying why, with Try again, and its messages as written.
+//! - **One message at a time** ([`ChatTranslation::translate_message`], [`Offer`]): while the chat isn't translated,
+//!   "Translate" in a message's More options menu shows it in the "Translate to" language of the settings
+//!   ([`crate::settings::Settings::message_translate_to`]), through the same tool, store and batches; "See original
+//!   message" shows it as written again. Which messages are translated so is kept in the store (`teams-store`'s
+//!   schema 26), so reopening the chat, or a later run, shows them translated again. A message already in the
+//!   language is marked as translated, its text as it is, as Teams does. A failure is marked at the message
+//!   ([`Mark::Stopped`]: why, and a click tries again), not in a notice. Translating the whole chat drops these
+//!   picks; they show again once the chat is read as written.
 //! - **Outside the view** ([`Previews`]): the chat list's preview, a new message's notification and the search's cards
 //!   show a translated chat's messages in its language too, through the same store, tool and prompts; the view tells it
 //!   what it translates, so nothing is asked twice. A reply's quote shows in the box as the chat shows the message.
@@ -429,8 +437,6 @@ pub struct ChatTranslation {
     language: Option<&'static str>,
     /// The language messages are read in now: the chat's, else the "Translate to" one while messages are picked.
     reading_in: Option<Reading>,
-    /// The "Translate to" setting, as last read.
-    translate_to: String,
     /// The messages the user asked to see translated, one at a time, while the chat isn't translated.
     picked: Arc<HashSet<String>>,
     /// The messages the store was asked about whether they were translated one at a time.
@@ -501,7 +507,6 @@ impl ChatTranslation {
             chat,
             language: None,
             reading_in: None,
-            translate_to: String::new(),
             picked: Arc::default(),
             picks_asked: HashSet::new(),
             picking: None,
@@ -835,7 +840,8 @@ impl ChatTranslation {
     }
 
     /// Follows the settings: a new language or tool starts over. A chat read in a language drops the messages picked
-    /// alone; the "Translate to" language is theirs while it isn't.
+    /// alone; once it is read as written again, the store is asked at once which of them were picked (they show
+    /// translated again). The "Translate to" language is theirs while the chat isn't translated.
     fn reconcile(&mut self, cx: &mut Context<Self>) {
         let settings = self.settings.read(cx).settings();
         let language = settings.chat_language_of(self.core.me(), &self.chat);
@@ -846,15 +852,16 @@ impl ChatTranslation {
             self.picked = Arc::default();
             self.picks_asked.clear();
             self.picking = None;
+            self.pick_again = false;
         }
         let reading = match language {
             Some(code) => Some(Reading::of_code(code)),
             None => (!self.picked.is_empty()).then(|| Reading::of_name(&translate_to)),
         };
-        self.translate_to = translate_to;
         if language == self.language && choice == self.choice && reading == self.reading_in {
             return;
         }
+        let read_as_written = self.language.is_some() && language.is_none();
         self.language = language;
         self.reading_in.clone_from(&reading);
         self.choice = choice;
@@ -873,6 +880,9 @@ impl ChatTranslation {
         if let Some(reading) = reading {
             self.read_brief(reading.key, cx);
             self.read_store(cx);
+        }
+        if read_as_written {
+            self.read_picked(cx);
         }
         self.share(cx);
         cx.notify();

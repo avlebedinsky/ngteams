@@ -393,3 +393,32 @@ async fn a_foreground_sync_from_before_the_listing_is_not_reused_over_a_newer_ve
     );
     rig.handle.shutdown();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_message_translated_alone_is_kept_and_read_back_while_the_catch_up_waits() {
+    let rig = Rig::new().await;
+    let first = synthetic_chat(0);
+    let opened = synthetic_chat(7);
+    let held = rig.hold_messages(&first);
+    let sync = rig.handle.sync();
+    assert!(held.wait_entered(WAIT));
+    soon(rig.handle.sync_conversation(&opened)).await.unwrap();
+    let messages = rig.handle.messages(&opened, None, 10).await.unwrap().messages;
+    let id = messages[0].id.clone();
+    // the write does not wait for the catch-up, and a later query reads it, in both directions
+    for translated in [true, false, true] {
+        soon(
+            rig.handle
+                .keep_translated_message(opened.clone(), id.clone(), translated),
+        )
+        .await
+        .unwrap();
+        let found = soon(rig.handle.translated_messages(opened.clone(), vec![id.clone()]))
+            .await
+            .unwrap();
+        assert_eq!(found.contains(&id), translated);
+    }
+    assert!(held.release());
+    soon(sync).await.unwrap();
+    rig.handle.shutdown();
+}

@@ -698,11 +698,71 @@ fn a_message_translated_alone_says_why_it_failed_and_tries_again() {
         "the chat itself isn't translated"
     );
     assert_eq!(offer_of(&view, cx, "1001"), Some(Offer::Translate));
-    // a click on the mark tries again, and fails the same way
+    // a click on the mark tries again (the tool is asked once more), and fails the same way
+    let model = translation(&view, cx);
+    let asked = cx.update(|_, cx| model.read(cx).batches());
+    assert!(asked > 0, "the first try went to the tool");
     let mark = cx.debug_bounds("translation-mark-1001").unwrap();
     cx.simulate_click(mark.center(), Modifiers::none());
     draw(cx);
     until(cx, |cx| {
-        matches!(mark_of(&view, cx, "1001"), Some(Mark::Stopped { .. }))
+        cx.update(|_, cx| model.read(cx).batches()) > asked
+            && matches!(mark_of(&view, cx, "1001"), Some(Mark::Stopped { .. }))
+    });
+}
+
+#[test]
+fn an_edit_of_an_own_message_translated_alone_starts_from_the_text_as_sent() {
+    use teams_ui::chat_translate::Mark;
+    let rig = Rig::start();
+    let dir = tempfile::tempdir().unwrap();
+    let fake = tool(dir.path(), "claude", FAKE_CLAUDE);
+    rig.cx
+        .update(|cx| cx.set_global(Tools::with(vec![(Backend::Claude, fake)])));
+    let (view, cx) = plain_chat(&rig);
+    let select = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| view.select(Some("1002".to_owned()), cx));
+            view.read(cx).focus_handle().clone().focus(window, cx);
+        });
+    };
+    select(cx);
+    cx.simulate_keystrokes("t");
+    until(cx, |cx| {
+        matches!(mark_of(&view, cx, "1002"), Some(Mark::Translated { .. }))
+    });
+    // the chat isn't translated: the edit goes out as written, so it starts from what was sent, not the translation
+    select(cx);
+    cx.simulate_keystrokes("e");
+    draw(cx);
+    let compose = cx.update(|_, cx| view.read(cx).compose().clone());
+    let text = cx.read(|cx| compose.read(cx).editor().read(cx).doc().plain_text());
+    assert_eq!(text, "Lunch?");
+}
+
+#[test]
+fn a_message_translated_alone_shows_translated_again_once_the_chat_is_read_as_written() {
+    use teams_ui::chat_translate::Mark;
+    let rig = Rig::start();
+    let dir = tempfile::tempdir().unwrap();
+    let fake = tool(dir.path(), "claude", FAKE_CLAUDE);
+    rig.cx
+        .update(|cx| cx.set_global(Tools::with(vec![(Backend::Claude, fake)])));
+    let (view, cx) = plain_chat(&rig);
+    translate_from_menu(cx, "1001");
+    until(cx, |cx| {
+        matches!(mark_of(&view, cx, "1001"), Some(Mark::Translated { .. }))
+    });
+    let model = translation(&view, cx);
+    cx.update(|_, cx| model.update(cx, |model, cx| model.set_language(Some("de"), cx)));
+    until(cx, |cx| {
+        ["1001", "1003"]
+            .iter()
+            .all(|id| matches!(mark_of(&view, cx, id), Some(Mark::Translated { .. })))
+    });
+    // no message comes meanwhile: the store is asked again at once
+    cx.update(|_, cx| model.update(cx, |model, cx| model.set_language(None, cx)));
+    until(cx, |cx| {
+        matches!(mark_of(&view, cx, "1001"), Some(Mark::Translated { .. })) && mark_of(&view, cx, "1003").is_none()
     });
 }

@@ -2102,12 +2102,10 @@ impl ChatView {
     fn edit(&mut self, message: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(held) = self.held_message(message) else { return };
         let mentioned = rich_text::mentioned(held.properties.as_deref());
-        // in a translated chat the edit starts from the text shown (what the account wrote), and goes out translated
-        let text = self
-            .translated
-            .0
-            .text_of(held)
-            .map_or_else(|| compose::rich_text_of(held), |shown| shown.as_ref().clone());
+        // in a translated chat the edit starts from the text shown (what the account wrote), and goes out translated;
+        // else from the text as sent, also when the message shows translated alone (the edit goes out as written)
+        let shown = self.translated.0.language.and_then(|_| self.translated.0.text_of(held));
+        let text = shown.map_or_else(|| compose::rich_text_of(held), |shown| shown.as_ref().clone());
         let loaded = compose::load(&text, &mentioned);
         // the apps of the message's bots, only while the bots are shown (`NGTEAMS_BOTS=1`): with the bots hidden, the
         // box refuses to send a bot's mention, as for a pasted one
@@ -5030,8 +5028,10 @@ fn translating_mark(id: &str, palette: Palette, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// Teams' translation mark of a message of a translated chat: a click shows it as sent, and back; while its
-/// translation comes, "Translating…" ([`translating_mark`]); one that couldn't be translated, a mark that says so.
+/// Teams' translation mark of a message read in a language (the language of a translated chat, or the "Translate to"
+/// language of a message translated alone): a click does what the message offers (see the original, see the
+/// translation, or try again after a stop); while its translation comes, "Translating…" ([`translating_mark`]); one
+/// that couldn't be translated, a mark that says so.
 fn translation_mark(item: &MessageItem, palette: Palette, cx: &mut Context<ChatView>) -> Option<AnyElement> {
     use chat_translate::Mark;
     let mark = item.translation.as_ref()?;

@@ -13,6 +13,8 @@
 //!   background read. Requests remain FIFO within that lane, except one for a conversation being read waits until
 //!   its cursor is stored. Duplicate message syncs share the successful result; canceled queued reads are skipped.
 //!   Teams reads use the same lane, so requesting many chats and lists cannot create a burst of parallel reads.
+//! - **Messages translated one at a time** ([`Request::KeepTranslatedMessage`]): kept in the store at once (only the
+//!   store changes), so a later query of them reads the write.
 //! - **Read receipts**: queued locally at once, advancing the shared read horizon for the messages seen; the
 //!   transport waits its turn with the other writes. Queries and read receipts also run while an outbox attempt waits.
 //! - **Call actions**: handed to the calling at once ([`Inbox::hand_calls_to`]), as the loop hands them: the calling
@@ -297,6 +299,17 @@ impl<C: Credentials + 'static> Inbox<C> {
             },
             Request::Query(query) => {
                 self.answer(store, query);
+                None
+            }
+            // a later query of the translated messages reads what this write keeps
+            Request::KeepTranslatedMessage {
+                conversation,
+                message,
+                translated,
+                reply,
+            } => {
+                let kept = store.set_translated_message(&conversation, &message, translated);
+                let _ = reply.send(kept.map_err(EngineError::from));
                 None
             }
             Request::Call(_, _, reply) if self.stopping.load(Ordering::Relaxed) => {
