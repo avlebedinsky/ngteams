@@ -1039,6 +1039,9 @@ The call tests (`teams-media`, and `teams-core --test calls`) open many sockets 
 - Every macOS link must have `-ObjC` (`.cargo/config.toml`). Without it, the first libwebrtc factory aborts with
   `+[NSString stringForStdString:]: unrecognized selector`. If you set `RUSTFLAGS`, add `-C link-arg=-ObjC` to it:
   the build script of `teams-media` stops a macOS build without it.
+- On a Mac with VPN interfaces (`utun`), run `teams-core --test calls group::` with `--test-threads 1`. TURN
+  allocations from those interfaces to the loopback relay of the tests get no answer. Two group tests that start
+  together can then fail.
 
 ```sh
 ulimit -n 4096
