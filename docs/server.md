@@ -158,6 +158,9 @@ takes a double underscore: `NGTEAMS_SERVER_TLS__CERT`, `NGTEAMS_SERVER_TOKENS__A
 | `bots.retry_delays` | `[15, 45]` | seconds before each new attempt of an activity a bot didn't take; one attempt more than there are entries |
 | `bots.delivery_lease` | `30` | seconds a node holds an activity it sends before another node may take it over; longer than `bots.send_timeout` |
 | `bots.send_timeout` | `10` | seconds a send to a bot may take, from connecting to the end of its answer |
+| `outgoing_webhooks.enabled` | `true` | whether the server serves a team's outgoing webhooks ([below](#outgoing-webhooks)): their routes, their mentions and authz's `outgoingWebhookService` |
+| `outgoing_webhooks.timeout_ms` | `5000` | milliseconds a webhook has for its answer, from connecting to its end: Teams' 5 seconds |
+| `outgoing_webhooks.max_picture_bytes` | `1048576` | the largest picture (PNG or JPEG) a webhook may have |
 | `[[rooms]]` | none | the meeting rooms the room finder lists, each `name`, `address` (its mailbox) and optionally `list` (its building), `capacity`, `floor`, `street`, `audio_device`, `video_device`, `display_device`, `wheelchair` |
 
 ## Operations
@@ -802,6 +805,51 @@ makes the first key and rotates these keys, at its start and at its housekeeping
 
 With `apps.enabled = false` none of these routes is served.
 
+## Outgoing webhooks
+
+A team's outgoing webhook works as in Teams ([`docs/protocol/bots.md`](protocol/bots.md#outgoing-webhooks)): a
+message in one of the team's standard channels that @mentions it goes to its callback URL, and the answer is the
+webhook's reply in the post's thread. It needs no app registration and no administrator.
+
+**Registration** is on the middle tier, `beta/teams/<team>/outgoingWebhooks` (the routes are in the protocol note).
+The team's owners make, change and remove its webhooks; so do its members while the team's settings let them add
+custom apps (`uploadCustomApp`), and the server's administrators for any team. The team's people list them and read
+their pictures, and only those who may change a webhook see its callback URL. A name is one per team in any letter
+case. The callback URL must be one the server sends to (the address guard of [bot delivery](#bot-chats-and-delivery),
+with `bots.allow_http_endpoints` and `bots.allowed_networks`); an address written in the URL is checked at once, a
+name when the server sends. Each webhook is an app account (`users.kind` `app`, `28:<id>`, which signs in nowhere and
+is in no chat). Its token is 32 random bytes, shown in base64 once, in the answer that made it. The server keeps it
+in the database as it keeps its other signing keys, because it signs with it. A removed webhook's account stays,
+deleted, for the replies it posted. While `outgoing_webhooks.enabled`, authz names `outgoingWebhookService` (the
+middle tier's base), so the client shows webhooks for the account.
+
+**A mention** in a standard channel of the webhook's team (a post, or a reply in a post's thread) by a person makes
+a row of the outbox (`outgoing_webhook_deliveries`) in the message's own transaction. A chat, a private channel, a
+mention of another team's webhook, an edit or an app's message makes none. The activity is Teams'
+(`conversation.id` `<channel>;messageid=<post>`, `text` with `<at>name</at>`, `from` `29:<id>`, `recipient` null,
+`channelData` with the team, the channel and the tenant); no token is in it, and it carries no credential to call the
+server back.
+
+**Delivery.** Every API node sends rows. A node takes a row from `pending` to `sending` with a compare-and-set update,
+so one node sends it, and posts it once, signed with `Authorization: HMAC <base64 HMAC-SHA256 of the exact body>`,
+through the address guard, with `outgoing_webhooks.timeout_ms` for the whole exchange. A post wakes every node's
+sender through the fan-out (`webhooks:wake`); a one-second poll covers a lost wake-up. The node that still holds the
+row records its end, and only then posts the reply, as the webhook (its name now) in the post's thread:
+
+- a 2xx answer with an activity: its text (Markdown, plain or XML, as a bot's) and its cards (Adaptive, hero,
+  thumbnail), each card's actions cut to those that open a link, as Teams allows a webhook;
+- a 2xx answer with an empty body, or an activity with no text and no card: no reply;
+- anything else (another status, no answer in time, a refused address, a body that is not an activity, an attachment
+  the client does not draw): Teams' reply "Sorry, there was a problem encountered with your request".
+
+A row is never sent twice. When a node dies while it sends, its row stays `sending` until its lease
+(`outgoing_webhooks.timeout_ms` + 10 s) runs out; then any node's sweep fails it with the apology and sends nothing.
+A row that waited more than a minute fails unsent, with no reply. A planned stop waits for the requests under way and
+their replies. Done and failed rows go after a day.
+
+With `outgoing_webhooks.enabled = false` none of this is served: no routes, no sends, no `outgoingWebhookService`. A
+mention of a webhook made before is kept but not sent: when the webhooks are on again, it fails unsent and silent.
+
 ## Prefix table
 
 Every service lives under the public origin with a fixed prefix. `Served` means the server answers it now, and authz
@@ -832,6 +880,7 @@ hands out its GTM where it has one.
 | Power Apps connections | `workflowsService` announces it; requests go to the client's fixed base | `/workflow-connections/` | the account's Teams connections, while `workflows.enabled` |
 | A bot's token endpoint and metadata | (the bot's authority) | `/<tenant>/oauth2/v2.0/token`, `/<tenant>/v2.0/.well-known/`, `/adfs/` | while `apps.enabled` |
 | The keys bots check activities with | (the bot's settings) | `/bot/v1/.well-known/`, `/<tenant>/discovery/v2.0/keys` | while `apps.enabled` |
+| A team's outgoing webhooks | `outgoingWebhookService` (the middle tier's base) | `/api/mt/part/<partition>/beta/teams/<team>/outgoingWebhooks` | while `outgoing_webhooks.enabled` |
 
 ## Optional services
 
@@ -848,6 +897,7 @@ account starts on the region it has). Each optional service has a GTM that annou
 | Live captions | `captionsService` | no | a call's Language and speech, the captions key and command, the saved captions |
 | Recording and transcription | `recordingService` | no | a call's Record and transcribe |
 | The app catalogue and bots | `appsService` | no | a team's Apps tab, Get more apps, a copied team's Apps, a bot card's buttons that send to the bot |
+| A team's outgoing webhooks | `outgoingWebhookService` | while `outgoing_webhooks.enabled` | Manage team's "Create an outgoing webhook" and the team's webhooks (client task 412) |
 
 `docs/protocol/endpoints.md` names for every request the client sends whether the server serves it, the client hides
 it, it goes to a public host, or it is a known gap (`own server: …`); `cargo test -p ngteams-server endpoints` checks

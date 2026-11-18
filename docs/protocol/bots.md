@@ -179,3 +179,69 @@ flag (`NGTEAMS_BOTS=1`), only a build run with it asks a bot (`teams_ui::bot_car
 - the bot's app id is the bot's own id until the engine knows each bot's app.
 
 Without the flag, or in read-only mode, a card's bot buttons open the message in Teams on the web, as before.
+
+## Outgoing webhooks
+
+A team's outgoing webhook is an app that the team's people @mention in its channels. Teams sends the mention to the
+webhook's service and posts the answer as the webhook's reply in the post's thread. Nothing here was seen in the
+lab: a webhook made in the lab tenant would send lab channel content to an outside address, which the lab rule does
+not allow (`docs/lab-rules.md`). The web client's own requests are still to be captured (client task 412, with every
+write held). Thus each part below is marked **documented** (Microsoft's public documentation and samples), **third
+party** (other services' documents) or **own design** (the own server's choice until a capture shows Teams' form).
+
+### What Teams does (documented)
+
+- **Make it.** A team owner opens Manage team > Apps > "Create an outgoing webhook" and gives a name (also what
+  people @mention), a callback URL (HTTPS), a description and an optional picture. Teams then shows a security token
+  once: an HMAC key in base64. The token does not expire.
+- **Where it works.** In the team's public (standard) channels, only when a message @mentions it. Not in chats, not
+  in private channels, not in another team. It sends nothing by itself, and it can't call any other API.
+- **The request.** `POST <callback URL>` with a Bot Framework `message` activity as the JSON body and
+  `Authorization: HMAC <base64 of HMAC-SHA256(key, the exact body bytes)>`. The key is the token's base64 decoded.
+- **The answer.** Within 5 seconds, an activity: `{"type": "message", "text": …}`, or `attachments` with Adaptive or
+  hero cards. A webhook's cards act only by opening a link (`openUrl`).
+- **A failure (third party).** When the service fails or does not answer in 5 seconds, the webhook's reply in the
+  thread says "Sorry, there was a problem encountered with your request".
+
+### The activity (documented, from Microsoft's samples)
+
+```json
+{"type": "message", "id": "<message id>", "timestamp": "…", "localTimestamp": "…",
+ "serviceUrl": "…", "channelId": "msteams",
+ "from": {"id": "29:<user>", "name": "<display name>", "aadObjectId": "<object id>"},
+ "conversation": {"isGroup": true, "id": "<channel>;messageid=<post>", "name": null,
+                  "conversationType": "channel", "tenantId": "<tenant>"},
+ "recipient": null, "textFormat": "plain", "locale": "en-US",
+ "text": "<at>Webhook name</at> the words",
+ "attachments": [{"contentType": "text/html", "content": "<the message's HTML>"}],
+ "entities": [{"type": "clientInfo", "locale": "en-US"}],
+ "channelData": {"teamsChannelId": "<channel>", "teamsTeamId": "<team>", "channel": {"id": "<channel>"},
+                 "team": {"id": "<team>"}, "tenant": {"id": "<tenant>"}}}
+```
+
+`conversation.id` names the post's thread, for a post and for a reply in its thread alike. The `serviceUrl` is
+Teams' own: a webhook has no credential to call it.
+
+### The middle tier's routes (own design)
+
+Under the account's middle tier (`<middle tier>/beta/teams/<team>/outgoingWebhooks`), with the account's token for
+`https://api.spaces.skype.com`. The team is its thread id. When a capture shows Teams' own form, the client and the
+own server change together.
+
+| Method | Path | Body | Answer |
+|---|---|---|---|
+| `GET` | `…/outgoingWebhooks` | none | 200 `{"value": [<webhook>]}`, ordered by name; for each of the team's people |
+| `POST` | `…/outgoingWebhooks` | `{"name", "callbackUrl", "description"?, "picture"?}` | 201 `{"value": <webhook> + "securityToken"}`: the only answer that shows the token |
+| `PUT` | `…/outgoingWebhooks/<id>` | any of the same fields; `"picture": null` removes it | 200 `{"value": <webhook>}` |
+| `DELETE` | `…/outgoingWebhooks/<id>` | none | 204 |
+| `GET` | `…/outgoingWebhooks/<id>/picture` | none | the picture (PNG or JPEG) |
+
+A webhook: `{"id", "mri": "28:<id>", "teamId", "name", "description", "canManage", "createdBy": "8:orgid:<id>",
+"createdTime", "pictureUrl"?, "callbackUrl"?}`. `callbackUrl` shows only to those who may change it (`canManage`).
+`picture` is a PNG or JPEG in base64. A refusal is `{"errorCode", "message"}`: 400 `BadRequest` (a form the server
+doesn't take, an address it doesn't send to), 403 `Forbidden` or `OperationNotAllowedOnArchivedTeam`, 404 `NotFound`
+(no such team or webhook for the caller), 409 `OutgoingWebhookNameAlreadyExists` (a name, in any letter case, that
+the team already has).
+
+A mention of a webhook is an ordinary mention in the message's `properties.mentions`, with `mri` `28:<id>`. Its
+replies come from `28:<id>`, with the webhook's name as `imdisplayname`, in the thread of the post.
