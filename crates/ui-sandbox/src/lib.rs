@@ -72,8 +72,7 @@ pub const REQUIRE_ENV: &str = "GPUI_SMOKE_REQUIRE";
 /// How long a compositor or the bus gets to create its sockets, and niri to write a screenshot.
 pub const SOCKET_WAIT: Duration = Duration::from_secs(15);
 
-/// Where weston's fake seat keeps its pointer (libweston's `weston_pointer_create`), in output pixels: over niri's
-/// window, which starts at the output's corner.
+/// Where weston's fake seat keeps its pointer (libweston's `weston_pointer_create`), in output pixels.
 const HOST_POINTER: (u32, u32) = (100, 100);
 /// How far from a point a cursor's drawn top-left may be and still stand at it: the arrow's tip is a few pixels from
 /// its hotspot.
@@ -557,13 +556,18 @@ impl Sandbox {
         Ok(())
     }
 
-    /// Waits until weston's own pointer has entered niri's window. weston sends that enter, at [`HOST_POINTER`], once
-    /// niri's first frame is on its output, and niri moves its cursor there as for a pointer motion: a virtual click
-    /// sent before it would land there instead.
+    /// If niri starts at the output's corner, waits until weston's own pointer enters its window.
+    /// weston sends that enter, at [`HOST_POINTER`], after niri's first frame reaches its output.
+    /// niri moves its cursor there, so a virtual click sent before the enter lands there instead.
     ///
     /// # Errors
     /// niri's cursor isn't there in time.
     fn wait_for_host_pointer(&self) -> SandboxResult {
+        let default = SandboxOptions::default();
+        if !self.options.fill_output && (self.options.width > default.width || self.options.height > default.height) {
+            // A larger desktop-shell output can place niri away from weston's pointer.
+            return Ok(());
+        }
         let png = self.path("host-pointer.png");
         let png_arg = png.to_string_lossy().into_owned();
         let entered = wait_until(SOCKET_WAIT, || {
