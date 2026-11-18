@@ -5,7 +5,7 @@
 
 mod concurrency;
 mod delivery;
-mod receiver;
+pub(crate) mod receiver;
 mod registry;
 
 use std::sync::Arc;

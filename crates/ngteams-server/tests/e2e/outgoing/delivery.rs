@@ -296,55 +296,12 @@ async fn a_failure_or_a_timeout_shows_as_teams_apology_and_an_empty_answer_shows
     for backend in backends() {
         let crew = Crew::open(backend).await;
         let (receiver, hook) = hooked(&crew).await;
-        let cases = [
-            (
-                "refused",
-                Reply {
-                    status: 500,
-                    body: "{}".into(),
-                    delay: Duration::ZERO,
-                },
-                true,
-            ),
-            (
-                "garbled",
-                Reply {
-                    status: 200,
-                    body: "not json".into(),
-                    delay: Duration::ZERO,
-                },
-                true,
-            ),
-            (
-                "unknown attachment",
-                Reply::json(&json!({"type": "message", "attachments": [
-                {"contentType": "image/png", "contentUrl": "https://x.example.test/a.png"}]})),
-                true,
-            ),
-            (
-                "late",
-                Reply {
-                    status: 200,
-                    body: json!({"text": "too late"}).to_string(),
-                    delay: Duration::from_secs(7),
-                },
-                true,
-            ),
-            (
-                "empty",
-                Reply {
-                    status: 200,
-                    body: String::new(),
-                    delay: Duration::ZERO,
-                },
-                false,
-            ),
-        ];
-        for (case, reply, apology) in cases {
+        for (case, reply, apology) in failure_cases() {
             receiver.answer(reply);
-            let started = Instant::now();
             let post = mention(&crew.ada, &crew.channel, &hook, HOOK, case).await;
-            assert!(receiver.next().await.signed, "{case}");
+            let got = receiver.next().await;
+            assert!(got.signed, "{case}");
+            let started = got.at;
             let replies = replies_from(&crew.bert, &crew.channel, &post, &hook, 1).await;
             if apology {
                 assert_eq!(replies.len(), 1, "{case}: {replies:?}");
@@ -354,10 +311,12 @@ async fn a_failure_or_a_timeout_shows_as_teams_apology_and_an_empty_answer_shows
                 assert!(replies.is_empty(), "{case}: {replies:?}");
             }
             if case == "late" {
-                assert!(
-                    started.elapsed() < Duration::from_secs(7),
-                    "the apology comes at about 5 s"
+                let posted_after = replies[0].arrival_time - got.timestamp;
+                eprintln!(
+                    "QA existing timeout {backend:?}: apology posted after {posted_after} ms, client sync after {} ms",
+                    started.elapsed().as_millis()
                 );
+                assert!(posted_after < 7000, "the apology comes at about 5 s");
             }
         }
         // the late answer never becomes a reply
@@ -373,6 +332,53 @@ async fn a_failure_or_a_timeout_shows_as_teams_apology_and_an_empty_answer_shows
         assert!(page.iter().all(|message| !message.content.contains("too late")));
         crew.stop().await;
     }
+}
+
+fn failure_cases() -> [(&'static str, Reply, bool); 5] {
+    [
+        (
+            "refused",
+            Reply {
+                status: 500,
+                body: "{}".into(),
+                delay: Duration::ZERO,
+            },
+            true,
+        ),
+        (
+            "garbled",
+            Reply {
+                status: 200,
+                body: "not json".into(),
+                delay: Duration::ZERO,
+            },
+            true,
+        ),
+        (
+            "unknown attachment",
+            Reply::json(&json!({"type": "message", "attachments": [
+            {"contentType": "image/png", "contentUrl": "https://x.example.test/a.png"}]})),
+            true,
+        ),
+        (
+            "late",
+            Reply {
+                status: 200,
+                body: json!({"text": "too late"}).to_string(),
+                delay: Duration::from_secs(7),
+            },
+            true,
+        ),
+        (
+            "empty",
+            Reply {
+                status: 200,
+                body: String::new(),
+                delay: Duration::ZERO,
+            },
+            false,
+        ),
+    ]
 }
 
 #[tokio::test(flavor = "multi_thread")]

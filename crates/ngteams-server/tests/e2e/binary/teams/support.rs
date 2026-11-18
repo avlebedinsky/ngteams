@@ -32,7 +32,7 @@ pub struct Seat {
     pub mri: String,
     pub client: Arc<TeamClient>,
     engine: Option<EngineHandle>,
-    session: Arc<Session<MemorySecretStore>>,
+    pub session: Arc<Session<MemorySecretStore>>,
     origin: String,
     endpoint: String,
     dir: TempDir,
@@ -301,6 +301,10 @@ pub struct Rig {
 
 impl Rig {
     pub async fn start(backend: Backend, flow: &str) -> Self {
+        Self::start_configured(backend, flow, "").await
+    }
+
+    pub async fn start_configured(backend: Backend, flow: &str, extra: &str) -> Self {
         eprintln!("real-binary teams, {flow}: {backend:?}");
         let redis = (backend == Backend::Postgres).then(redis_url).flatten();
         assert!(
@@ -310,9 +314,20 @@ impl Rig {
         let mut deployment = Deployment::new(backend, false, redis).await;
         deployment.origin = deployment.origin.replacen("http:", "https:", 1);
         let mut first = deployment.node("a");
+        append_config(&first, extra);
+        if !extra.is_empty() {
+            first.log_filter = "info".into();
+            first.role = Some(("api", None));
+        }
         first.cli(&["migrate"], "");
         for upn in ["a@own.test", "b@own.test", "c@own.test"] {
             first.add_user(upn, PASSWORD);
+        }
+        if !extra.is_empty() {
+            first.cli(
+                &["user", "add", "qa-admin@own.test", "--name", "QA Admin", "--admin"],
+                &format!("{PASSWORD}\n"),
+            );
         }
         let mut logs = Logs {
             dir: std::env::var_os(LOG_DIR).map(|dir| Path::new(&dir).join(format!("{flow}-{backend:?}"))),
@@ -321,6 +336,11 @@ impl Rig {
         logs.start(&mut first, "a").await;
         let mut second = (backend == Backend::Postgres).then(|| deployment.node("b"));
         if let Some(node) = &mut second {
+            append_config(node, extra);
+            if !extra.is_empty() {
+                node.log_filter = "info".into();
+                node.role = Some(("api", None));
+            }
             logs.start(node, "b").await;
         }
         let origin = &deployment.origin;
@@ -365,4 +385,10 @@ impl Rig {
         }
         self.first.stop().await;
     }
+}
+
+fn append_config(node: &Node, extra: &str) {
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new().append(true).open(&node.config).unwrap();
+    file.write_all(extra.as_bytes()).unwrap();
 }

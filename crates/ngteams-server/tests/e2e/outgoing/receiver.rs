@@ -3,7 +3,7 @@
 //! answers as the test sets it. Everything here is synthetic.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::body::Bytes;
@@ -18,6 +18,8 @@ use tokio::sync::mpsc;
 /// One request as the service got it.
 #[derive(Debug)]
 pub struct Received {
+    pub at: Instant,
+    pub timestamp: i64,
     pub activity: Value,
     pub body: Vec<u8>,
     pub authorization: Option<String>,
@@ -133,6 +135,8 @@ async fn receive(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: By
     let key = shared.key.lock().unwrap().clone();
     let signed = !key.is_empty() && authorization.as_deref() == Some(hmac(&key, &body).as_str());
     let _ = shared.sender.send(Received {
+        at: Instant::now(),
+        timestamp: chrono::Utc::now().timestamp_millis(),
         activity: serde_json::from_slice(&body).unwrap_or(Value::Null),
         body: body.to_vec(),
         authorization,

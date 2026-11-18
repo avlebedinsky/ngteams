@@ -9,6 +9,7 @@ mod cluster;
 mod directory;
 mod media;
 mod namespaces;
+mod outgoing;
 mod push;
 mod search;
 mod setup;
