@@ -98,7 +98,7 @@ const WESTON_CONFIG: &str =
     "[core]\nidle-time=0\n\n[shell]\npanel-position=none\nlocking=false\n\n[input-method]\npath=\n";
 /// A private niri: no Xwayland, no hotkey overlay, no animations.
 const NIRI_CONFIG: &str = "hotkey-overlay {\n    skip-at-startup\n}\nxwayland-satellite {\n    off\n}\n\
-animations {\n    off\n}\nprefer-no-csd\n";
+animations {\n    off\n}\nprefer-no-csd\ndebug {\n    dbus-interfaces-in-non-session-instances\n}\n";
 /// A niri layout where a window takes the whole output: no gaps, no focus ring, no border, full-width column.
 pub const NIRI_FULL_WINDOW: &str = "layout {\n    gaps 0\n    default-column-width { proportion 1.0; }\n\
     focus-ring {\n        off\n    }\n    border {\n        off\n    }\n}\n";
@@ -534,7 +534,14 @@ impl Sandbox {
 
     fn start_niri(&mut self, niri: &Path, parent: &Path) -> SandboxResult {
         let config = self.path("niri.kdl");
-        fs::write(&config, format!("{NIRI_CONFIG}{}", self.options.niri_extra))?;
+        fs::write(
+            &config,
+            format!(
+                "{NIRI_CONFIG}{}\nscreenshot-path {:?}\n",
+                self.options.niri_extra,
+                self.path("host-pointer.png").to_string_lossy()
+            ),
+        )?;
         let mut command = clean_command(niri);
         command
             .arg("-c")
@@ -576,17 +583,20 @@ impl Sandbox {
         }
         let png = self.path("host-pointer.png");
         let png_arg = png.to_string_lossy().into_owned();
+        let connection = self.bus.connect()?;
+        // Niri's IPC screenshots change the clipboard and send notifications.
+        let proxy = zbus::blocking::Proxy::new(
+            &connection,
+            "org.gnome.Shell.Screenshot",
+            "/org/gnome/Shell/Screenshot",
+            "org.gnome.Shell.Screenshot",
+        )?;
         let entered = wait_until(SOCKET_WAIT, || {
             let _ = fs::remove_file(&png);
-            self.niri_msg(&[
-                "action",
-                "screenshot-screen",
-                "--show-pointer",
-                "true",
-                "--path",
-                &png_arg,
-            ])
-            .ok()?;
+            let (saved, path): (bool, String) = proxy.call("Screenshot", &(true, false, &png_arg)).ok()?;
+            if !saved || Path::new(&path) != png {
+                return None;
+            }
             let shot = wait_until(SOCKET_WAIT, || image::open(&png).ok())?.to_rgb8();
             cursor_at(&shot, HOST_POINTER).then_some(())
         });

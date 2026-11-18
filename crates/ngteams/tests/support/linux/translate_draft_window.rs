@@ -388,7 +388,7 @@ impl Toolbar {
     fn line_band(self) -> Rect {
         Rect {
             x0: self.send.x1.saturating_sub(420),
-            y0: self.send.y0.saturating_sub(80),
+            y0: self.send.y0.saturating_sub(160),
             x1: self.send.x1 + 12,
             y1: self.send.y0.saturating_sub(16),
         }
@@ -640,8 +640,11 @@ impl<'a> User<'a> {
         let screen = self.look("line.png")?;
         let band = bar.line_band();
         let dark = |pixel: &image::Rgb<u8>| pixel.0.iter().all(|&channel| channel < 170);
-        // the line's rows: upwards from the box, the first rows with dark pixels, up to a gap (the messages above)
-        let inked = |y: u32| (band.x0..band.x1).any(|x| dark(screen.get_pixel(x, y)));
+        let right = (band.x0..band.x1)
+            .rev()
+            .find(|&x| (band.y0..band.y1).any(|y| dark(screen.get_pixel(x, y))))
+            .ok_or("no line over the box")?;
+        let inked = |y: u32| (right.saturating_sub(TOOL)..=right).any(|x| dark(screen.get_pixel(x, y)));
         let bottom = (band.y0..band.y1)
             .rev()
             .find(|&y| inked(y))

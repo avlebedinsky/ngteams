@@ -725,6 +725,7 @@ fn edited_and_reset(
     shot(sandbox, "ngteams-qa-reset-typed-done.png")?;
     let held = copied(sandbox, input)?;
     ensure(held.as_deref() == Some(TYPED), || format!("Copy gave {held:?}"))?;
+    input.key(keys::TAB)?;
     input.key(keys::ENTER)?;
     listed(trace, running, server, &[EVAN])?;
     let typed = grant(server, EVAN, TYPED)?;
@@ -755,6 +756,7 @@ fn edited_and_reset(
     ensure(suggested.chars().count() >= 8 && suggested != TYPED, || {
         format!("the suggested password is {} characters", suggested.chars().count())
     })?;
+    input.key(keys::TAB)?;
     input.key(keys::ENTER)?;
     listed(trace, running, server, &[EVAN])?;
     let with_suggested = grant(server, EVAN, &suggested)?;
