@@ -89,7 +89,7 @@ fn unavailable(what: &str, error: &dyn std::fmt::Display) -> Response {
 type Answer<T = Response> = Result<T, Refusal>;
 
 /// A registered webhook.
-#[derive(Clone, Debug, Queryable, Selectable, Insertable)]
+#[derive(Clone, Queryable, Selectable, Insertable)]
 #[diesel(table_name = outgoing_webhooks)]
 pub(crate) struct Hook {
     pub id: String,
@@ -103,6 +103,17 @@ pub(crate) struct Hook {
     pub created_by: String,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+impl std::fmt::Debug for Hook {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Hook")
+            .field("id", &self.id)
+            .field("team_id", &self.team_id)
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Hook {
@@ -288,8 +299,11 @@ fn picture_type(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-fn picture_key(id: &str) -> String {
-    format!("outgoing-webhooks/{id}/picture")
+fn picture_key(hook: &Hook) -> String {
+    match &hook.picture_etag {
+        Some(etag) if uuid::Uuid::parse_str(etag).is_ok() => format!("outgoing-webhooks/{}/picture/{etag}", hook.id),
+        _ => format!("outgoing-webhooks/{}/picture", hook.id),
+    }
 }
 
 /// A new HMAC key, as the token shows it: 32 random bytes in base64.
@@ -324,16 +338,16 @@ async fn create(
         description: form.description.unwrap_or_default(),
         callback_url,
         security_key: new_key()?,
-        picture_etag: picture.as_ref().map(|_| at.to_string()),
+        picture_etag: picture.as_ref().map(|_| uuid::Uuid::new_v4().to_string()),
         created_by: actor.id,
         created_at: at,
         updated_at: at,
     };
     if let Some(bytes) = picture {
-        store_picture(&app, &hook.id, bytes).await?;
+        store_picture(&app, &hook, bytes).await?;
     }
     if let Err(error) = insert(&app.db, &hook).await {
-        drop_picture(&app, &hook.id).await;
+        drop_picture(&app, &hook).await;
         return Err(error.into());
     }
     let mut made = shown(&app, &hook, true);
@@ -368,15 +382,15 @@ async fn insert(db: &Db, hook: &Hook) -> Result<(), DbError> {
         .await)
 }
 
-async fn store_picture(app: &App, id: &str, bytes: Bytes) -> Answer<()> {
+async fn store_picture(app: &App, hook: &Hook, bytes: Bytes) -> Answer<()> {
     app.storage
-        .put(&picture_key(id), bytes)
+        .put(&picture_key(hook), bytes)
         .await
         .map_err(|error| Refusal::Storage(error.to_string()))
 }
 
-async fn drop_picture(app: &App, id: &str) {
-    if let Err(error) = app.storage.delete(&picture_key(id)).await {
+async fn drop_picture(app: &App, hook: &Hook) {
+    if let Err(error) = app.storage.delete(&picture_key(hook)).await {
         tracing::warn!(%error, "an outgoing webhook's picture wasn't dropped");
     }
 }
@@ -398,6 +412,7 @@ async fn change(
     let team = access(&app.db, &actor.id, &team).await?.manager()?;
     let mut hook = of_team(&app.db, &team.id, &id).await?;
     let form = form(&app, input)?;
+    let previous = hook.clone();
     let at = crate::chatsvc::now();
     if let Some(name) = form.name {
         hook.name_key = name.to_lowercase();
@@ -409,20 +424,30 @@ async fn change(
     if let Some(description) = form.description {
         hook.description = description;
     }
-    match form.picture {
+    change_picture(&app, &mut hook, form.picture).await?;
+    hook.updated_at = at;
+    if let Err(error) = update(&app.db, &hook).await {
+        if hook.picture_etag != previous.picture_etag && hook.picture_etag.is_some() {
+            drop_picture(&app, &hook).await;
+        }
+        return Err(error.into());
+    }
+    if hook.picture_etag != previous.picture_etag && previous.picture_etag.is_some() {
+        drop_picture(&app, &previous).await;
+    }
+    Ok(Json(json!({ "value": shown(&app, &hook, true) })))
+}
+
+async fn change_picture(app: &App, hook: &mut Hook, picture: Picture) -> Answer<()> {
+    match picture {
         Picture::Set(bytes) => {
-            store_picture(&app, &hook.id, bytes).await?;
-            hook.picture_etag = Some(at.to_string());
+            hook.picture_etag = Some(uuid::Uuid::new_v4().to_string());
+            store_picture(app, hook, bytes).await?;
         }
-        Picture::Remove => {
-            drop_picture(&app, &hook.id).await;
-            hook.picture_etag = None;
-        }
+        Picture::Remove => hook.picture_etag = None,
         Picture::Keep => {}
     }
-    hook.updated_at = at;
-    update(&app.db, &hook).await?;
-    Ok(Json(json!({ "value": shown(&app, &hook, true) })))
+    Ok(())
 }
 
 async fn update(db: &Db, hook: &Hook) -> Result<(), DbError> {
@@ -462,7 +487,7 @@ async fn remove(
     let at = crate::chatsvc::now();
     delete(&app.db, &hook.id, at).await?;
     if hook.picture_etag.is_some() {
-        drop_picture(&app, &hook.id).await;
+        drop_picture(&app, &hook).await;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -487,10 +512,36 @@ async fn picture(State(app): State<Arc<App>>, actor: Me, Path((team, id)): Path<
     if hook.picture_etag.is_none() {
         return Err(Refusal::MISSING);
     }
-    let stored = app.storage.get(&picture_key(&hook.id)).await;
+    let stored = app.storage.get(&picture_key(&hook)).await;
     let bytes = stored
         .map_err(|error| Refusal::Storage(error.to_string()))?
         .ok_or(Refusal::MISSING)?;
     let kind = picture_type(&bytes).unwrap_or("application/octet-stream");
     Ok(([(CONTENT_TYPE, kind)], bytes).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hook_debug_does_not_show_its_key_or_callback_url() {
+        let hook = Hook {
+            id: "hook".to_owned(),
+            team_id: "team".to_owned(),
+            name: "Synthetic hook".to_owned(),
+            name_key: "synthetic hook".to_owned(),
+            description: String::new(),
+            callback_url: "https://example.test/private".to_owned(),
+            security_key: "synthetic-key".to_owned(),
+            picture_etag: None,
+            created_by: "author".to_owned(),
+            created_at: 0,
+            updated_at: 0,
+        };
+        let text = format!("{hook:?}");
+        assert!(text.contains("Synthetic hook"));
+        assert!(!text.contains(&hook.security_key));
+        assert!(!text.contains(&hook.callback_url));
+    }
 }

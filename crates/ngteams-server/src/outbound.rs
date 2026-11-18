@@ -193,7 +193,8 @@ impl Outbound {
             .header(reqwest::header::CONTENT_TYPE, "application/json; charset=utf-8")
             .body(body);
         if let Some(authorization) = authorization {
-            request = request.header(reqwest::header::AUTHORIZATION, authorization);
+            let value = sensitive_authorization(authorization)?;
+            request = request.header(reqwest::header::AUTHORIZATION, value);
         }
         let exchange = async {
             let mut answer = request.send().await.map_err(|error| refusal(&error))?;
@@ -216,6 +217,12 @@ impl Outbound {
     }
 }
 
+fn sensitive_authorization(authorization: &str) -> Result<reqwest::header::HeaderValue, OutboundError> {
+    let mut value = reqwest::header::HeaderValue::from_str(authorization).map_err(|_| OutboundError::Failed)?;
+    value.set_sensitive(true);
+    Ok(value)
+}
+
 /// What a failed request was: refused by the guard's resolver, or another failure.
 fn refusal(error: &reqwest::Error) -> OutboundError {
     let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
@@ -235,6 +242,17 @@ fn refusal(error: &reqwest::Error) -> OutboundError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bearer_and_hmac_headers_are_sensitive() {
+        for text in ["Bearer synthetic-token", "HMAC synthetic-signature"] {
+            let value = sensitive_authorization(text).unwrap();
+            assert!(value.is_sensitive());
+            assert_eq!(value.to_str().unwrap(), text);
+            assert!(!format!("{value:?}").contains(text));
+        }
+        assert!(sensitive_authorization("Bearer invalid\nheader").is_err());
+    }
 
     fn guard(networks: &[&str]) -> Guard {
         Guard {

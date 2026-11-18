@@ -84,6 +84,27 @@ async fn an_owner_registers_a_webhook_and_sees_its_token_once_and_the_team_sees_
     }
 }
 
+async fn refuse_invalid_forms(crew: &Crew) {
+    let path = hooks_path(&crew.team);
+    // the form: a name, a callback address the server sends to, no second webhook of one name in a team
+    let refused = [
+        json!({"name": "", "callbackUrl": "https://hooks.example.test/a"}),
+        json!({"name": "x".repeat(101), "callbackUrl": "https://hooks.example.test/a"}),
+        json!({"name": "Plain", "callbackUrl": "ftp://hooks.example.test/a"}),
+        json!({"name": "Plain", "callbackUrl": "not a url"}),
+        json!({"name": "Plain", "callbackUrl": "https://user:pw@hooks.example.test/a"}),
+        json!({"name": "Plain", "callbackUrl": "https://169.254.169.254/latest"}),
+        json!({"name": "Plain", "callbackUrl": "https://hooks.example.test/a", "picture": "bm90IGEgcGljdHVyZQ=="}),
+    ];
+    for body in refused {
+        let (status, answer) = crew.mt(ADA, Method::POST, &path, Some(body.clone())).await;
+        assert_eq!(status, 400, "{body} {answer}");
+    }
+    let twin = json!({"name": "status (SYNTHETIC)", "callbackUrl": "https://hooks.example.test/b"});
+    let (status, answer) = crew.mt(ADA, Method::POST, &path, Some(twin)).await;
+    assert_eq!(status, 409, "{answer}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_webhook_is_changed_and_removed_by_those_who_may_and_its_form_is_checked() {
     for backend in backends() {
@@ -93,25 +114,8 @@ async fn a_webhook_is_changed_and_removed_by_those_who_may_and_its_form_is_check
             .create("Status (synthetic)", "https://hooks.example.test/status")
             .await;
         let id = made["id"].as_str().unwrap().to_owned();
-        let token = made["securityToken"].as_str().unwrap().to_owned();
 
-        // the form: a name, a callback address the server sends to, no second webhook of one name in a team
-        let refused = [
-            json!({"name": "", "callbackUrl": "https://hooks.example.test/a"}),
-            json!({"name": "x".repeat(101), "callbackUrl": "https://hooks.example.test/a"}),
-            json!({"name": "Plain", "callbackUrl": "ftp://hooks.example.test/a"}),
-            json!({"name": "Plain", "callbackUrl": "not a url"}),
-            json!({"name": "Plain", "callbackUrl": "https://user:pw@hooks.example.test/a"}),
-            json!({"name": "Plain", "callbackUrl": "https://169.254.169.254/latest"}),
-            json!({"name": "Plain", "callbackUrl": "https://hooks.example.test/a", "picture": "bm90IGEgcGljdHVyZQ=="}),
-        ];
-        for body in refused {
-            let (status, answer) = crew.mt(ADA, Method::POST, &path, Some(body.clone())).await;
-            assert_eq!(status, 400, "{body} {answer}");
-        }
-        let twin = json!({"name": "status (SYNTHETIC)", "callbackUrl": "https://hooks.example.test/b"});
-        let (status, answer) = crew.mt(ADA, Method::POST, &path, Some(twin)).await;
-        assert_eq!(status, 409, "{answer}");
+        refuse_invalid_forms(&crew).await;
 
         // a member while the team's settings allow it; not once they don't; never someone off the team
         let bert_hook = json!({"name": "Bert's (synthetic)", "callbackUrl": "https://hooks.example.test/c"});
@@ -132,7 +136,7 @@ async fn a_webhook_is_changed_and_removed_by_those_who_may_and_its_form_is_check
         let (status, _) = crew.mt(BERT, Method::DELETE, &hook_path(&crew.team, &id), None).await;
         assert_eq!(status, 403);
 
-        // an owner changes it: the token stays and isn't shown again
+        // An owner changes it. The answer does not show its token again.
         let change = json!({"name": "Status v2 (synthetic)", "callbackUrl": "https://hooks.example.test/v2",
             "description": "Newer"});
         let (status, changed) = crew
@@ -175,7 +179,6 @@ async fn a_webhook_is_changed_and_removed_by_those_who_may_and_its_form_is_check
         assert_eq!(status, 404);
         let (_, left) = crew.mt(ADA, Method::GET, &path, None).await;
         assert!(names(&left).is_empty());
-        assert!(!token.is_empty());
         crew.stop().await;
     }
 }
@@ -199,5 +202,91 @@ async fn authz_announces_outgoing_webhooks_only_while_the_server_serves_them() {
         let (status, _) = off.mt(ADA, Method::POST, &hooks_path(&off.team), Some(body)).await;
         assert_eq!(status, 404);
         off.stop().await;
+    }
+}
+
+async fn picture_bytes(crew: &Crew, id: &str) -> (u16, Vec<u8>) {
+    crew.mt_raw(
+        BERT,
+        Method::GET,
+        &format!("{}/picture", hook_path(&crew.team, id)),
+        None,
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_name_change_keeps_the_picture_and_its_url() {
+    for backend in backends() {
+        let crew = Crew::open(backend).await;
+        let path = hooks_path(&crew.team);
+        let picture = png(48, 48);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&picture);
+        let (status, made) = crew
+            .mt(
+                ADA,
+                Method::POST,
+                &path,
+                Some(json!({
+                    "name": "First (synthetic)", "callbackUrl": "https://hooks.example.test/a", "picture": encoded
+                })),
+            )
+            .await;
+        assert_eq!(status, 201);
+        let id = made["value"]["id"].as_str().unwrap();
+        let original_url = &made["value"]["pictureUrl"];
+        crew.create("Second (synthetic)", "https://hooks.example.test/b").await;
+        let replacement = png(64, 64);
+        for picture_change in [
+            Value::Null,
+            json!(base64::engine::general_purpose::STANDARD.encode(&replacement)),
+        ] {
+            let (status, _) = crew
+                .mt(
+                    ADA,
+                    Method::PUT,
+                    &hook_path(&crew.team, id),
+                    Some(json!({"name": "Second (synthetic)", "picture": picture_change})),
+                )
+                .await;
+            assert_eq!(status, 409);
+            let (_, listed) = crew.mt(ADA, Method::GET, &path, None).await;
+            let listed = listed["value"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|hook| hook["id"] == id)
+                .unwrap();
+            assert_eq!(&listed["pictureUrl"], original_url);
+            let (status, bytes) = picture_bytes(&crew, id).await;
+            assert_eq!(status, 200);
+            assert_eq!(bytes, picture);
+        }
+        let (status, changed) = crew
+            .mt(
+                ADA,
+                Method::PUT,
+                &hook_path(&crew.team, id),
+                Some(json!({"picture": base64::engine::general_purpose::STANDARD.encode(&replacement)})),
+            )
+            .await;
+        assert_eq!(status, 200);
+        assert_ne!(&changed["value"]["pictureUrl"], original_url);
+        let (status, bytes) = picture_bytes(&crew, id).await;
+        assert_eq!(status, 200);
+        assert_eq!(bytes, replacement);
+        let (status, changed) = crew
+            .mt(
+                ADA,
+                Method::PUT,
+                &hook_path(&crew.team, id),
+                Some(json!({"picture": null})),
+            )
+            .await;
+        assert_eq!(status, 200);
+        assert!(changed["value"].get("pictureUrl").is_none());
+        let (status, _) = picture_bytes(&crew, id).await;
+        assert_eq!(status, 404);
+        crew.stop().await;
     }
 }

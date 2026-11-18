@@ -110,23 +110,26 @@ pub(crate) async fn post_as_app(app: &App, post: AppPost<'_>) -> Result<Option<i
     keep_as_app(app, post, in_channel.then_some(0)).await
 }
 
-/// Posts it in the thread of the channel's post `root` (an outgoing webhook's reply) and tells the thread's people;
-/// its id, or `None` when the thread isn't there.
-pub(crate) async fn reply_as_app(app: &App, post: AppPost<'_>, root: i64) -> Result<Option<i64>, DbError> {
-    keep_as_app(app, post, Some(root)).await
-}
-
 async fn keep_as_app(app: &App, post: AppPost<'_>, root_id: Option<i64>) -> Result<Option<i64>, DbError> {
     let base = wire::base(app);
+    let draft = app_draft(post, &base, root_id);
+    let Some(posted) = message_repo::insert_by(&app.db, &draft, &base, message_repo::Poster::App).await? else {
+        return Ok(None);
+    };
+    events::tell(app, "NewMessage", &posted.row.value()?, &posted.readers, &posted.told).await;
+    Ok(Some(posted.row.id))
+}
+
+fn app_draft(post: AppPost<'_>, base: &str, root_id: Option<i64>) -> message_repo::Message {
     let body = json!({
         "type": "Message", "conversationid": post.thread,
         "conversationLink": format!("{base}/v1/users/ME/conversations/{}", post.thread),
         "from": format!("{base}/v1/users/ME/contacts/28:{}", post.app),
         "fromDisplayNameInToken": post.name, "imdisplayname": post.name,
         "messagetype": post.kind, "contenttype": "Text", "content": post.content,
-        "properties": post.properties,
+        "properties": Value::Object(post.properties),
     });
-    let draft = message_repo::Message {
+    message_repo::Message {
         chat_id: post.thread.to_owned(),
         id: 0,
         owner_id: post.app.to_owned(),
@@ -134,12 +137,26 @@ async fn keep_as_app(app: &App, post: AppPost<'_>, root_id: Option<i64>) -> Resu
         version: 0,
         body: body.to_string(),
         root_id,
-    };
-    let Some(posted) = message_repo::insert_by(&app.db, &draft, &base, message_repo::Poster::App).await? else {
-        return Ok(None);
-    };
+    }
+}
+
+/// Keeps an app's reply in the caller's transaction.
+pub(crate) async fn reply_in<C: message_repo::MessageConnection>(
+    conn: &mut C,
+    app: &App,
+    post: AppPost<'_>,
+    root: i64,
+) -> Result<Option<message_repo::Posted>, DbError> {
+    let base = wire::base(app);
+    let draft = app_draft(post, &base, Some(root));
+    conn.insert_message(&draft, &base, message_repo::Poster::App, wire::now())
+        .await
+}
+
+/// Tells the readers about a message after its transaction commits.
+pub(crate) async fn announce_posted(app: &App, posted: &message_repo::Posted) -> Result<(), DbError> {
     events::tell(app, "NewMessage", &posted.row.value()?, &posted.readers, &posted.told).await;
-    Ok(Some(posted.row.id))
+    Ok(())
 }
 
 async fn keep(app: &App, post: Post<'_>) -> Result<Option<message_repo::Posted>, DbError> {

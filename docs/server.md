@@ -834,7 +834,7 @@ server back.
 so one node sends it, and posts it once, signed with `Authorization: HMAC <base64 HMAC-SHA256 of the exact body>`,
 through the address guard, with `outgoing_webhooks.timeout_ms` for the whole exchange. A post wakes every node's
 sender through the fan-out (`webhooks:wake`); a one-second poll covers a lost wake-up. The node that still holds the
-row records its end, and only then posts the reply, as the webhook (its name now) in the post's thread:
+row commits its terminal state and replies in one transaction. Replies use the webhook's current name in the post's thread:
 
 - a 2xx answer with an activity: its text (Markdown, plain or XML, as a bot's) and its cards (Adaptive, hero,
   thumbnail), each card's actions cut to those that open a link, as Teams allows a webhook;
@@ -842,6 +842,7 @@ row records its end, and only then posts the reply, as the webhook (its name now
 - anything else (another status, no answer in time, a refused address, a body that is not an activity, an attachment
   the client does not draw): Teams' reply "Sorry, there was a problem encountered with your request".
 
+If a reply insert fails, the transaction rolls back all replies and the terminal state. The sweep then posts the apology.
 A row is never sent twice. When a node dies while it sends, its row stays `sending` until its lease
 (`outgoing_webhooks.timeout_ms` + 10 s) runs out; then any node's sweep fails it with the apology and sends nothing.
 A row that waited more than a minute fails unsent, with no reply. A planned stop waits for the requests under way and

@@ -1,6 +1,6 @@
 //! The senders: every API node takes due rows of the outbox and posts each to its webhook once. A row goes from
 //! `pending` to `sending` by a compare-and-set update, so one node sends it; the node that still holds it when the
-//! request ends records the end, also by compare-and-set, and only then posts the reply. Thus a mention gets one
+//! request ends commits its replies and terminal state together, also by compare-and-set. Thus a mention gets one
 //! request and one reply at most. A row whose node died stays `sending` until its lease runs out: the sweep then
 //! fails it with Teams' apology and sends nothing again.
 
@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use diesel::prelude::*;
-use diesel_async::RunQueryDsl;
+use diesel_async::{AsyncConnection as _, RunQueryDsl};
 use serde_json::Value;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -214,50 +214,89 @@ async fn send(app: &App, node: &str, row: Delivery) {
     } else {
         attempt(app, &row).await
     };
-    if ended(app, node, &row, &outcome).await {
-        reply(app, &row, outcome).await;
-    }
+    ended(app, node, &row, &outcome).await;
 }
 
-/// Records how `node`'s send of `row` ended; whether the node still held it, so its reply is its own to post.
-async fn ended(app: &App, node: &str, row: &Delivery, outcome: &Outcome) -> bool {
+/// Ends a delivery in the caller's transaction only if this node still holds it.
+macro_rules! finish_in {
+    ($conn:expr, $node:expr, $id:expr, $state:expr, $error:expr) => {
+        diesel::update(
+            rows::table
+                .find($id)
+                .filter(rows::state.eq(SENDING))
+                .filter(rows::locked_by.eq($node)),
+        )
+        .set((
+            rows::state.eq($state),
+            rows::locked_until.eq(0),
+            rows::last_error.eq($error),
+            rows::updated_at.eq(crate::chatsvc::now()),
+        ))
+        .execute($conn)
+        .await?
+            == 1
+    };
+}
+
+/// Commits the replies and the terminal state together, while this node still holds the delivery.
+async fn ended(app: &App, node: &str, row: &Delivery, outcome: &Outcome) {
     let (state, error) = match outcome {
         Outcome::Answered(_) => (DONE, None),
         Outcome::Failed(error) => (FAILED, Some(error.as_str())),
         Outcome::Stale => (FAILED, Some("the mention waited too long to be sent")),
     };
-    let held = finish(&app.db, node, &row.id, state, error)
-        .await
-        .unwrap_or_else(|error| unkept(&error));
-    if held && let Some(error) = error {
-        tracing::info!(webhook = %row.webhook_id, %error, "a request to an outgoing webhook failed");
+    if let Err(error) = complete(app, node, row, state, error, outcome).await {
+        unkept(&error);
     }
-    held
 }
 
-fn unkept(error: &DbError) -> bool {
+async fn complete(
+    app: &App,
+    node: &str,
+    row: &Delivery,
+    state: &str,
+    error: Option<&str>,
+    outcome: &Outcome,
+) -> Result<(), DbError> {
+    let made = replies(outcome, &app.config.origin());
+    let hook = super::registry::hook(&app.db, &row.webhook_id).await?;
+    let posted = with_conn!(&app.db, |conn| conn
+        .transaction::<_, DbError, _>(async |conn| {
+            if !finish_in!(conn, node, &row.id, state, error) {
+                return Ok(Vec::new());
+            }
+            let mut posted = Vec::new();
+            if let Some(hook) = &hook {
+                for (kind, content) in &made {
+                    let post = crate::chatsvc::service::AppPost {
+                        thread: &row.chat_id,
+                        app: &row.webhook_id,
+                        name: &hook.name,
+                        kind,
+                        content,
+                        properties: serde_json::Map::new(),
+                    };
+                    if let Some(reply) = crate::chatsvc::service::reply_in(conn, app, post, row.root_id).await? {
+                        posted.push(reply);
+                    }
+                }
+            }
+            Ok(posted)
+        })
+        .await)?;
+    for post in posted {
+        crate::chatsvc::service::announce_posted(app, &post).await?;
+    }
+    Ok(())
+}
+
+fn unkept(error: &DbError) {
     tracing::warn!(%error, "an outgoing webhook delivery's end wasn't kept; the sweep fails it");
-    false
 }
 
-/// Records the end of `node`'s send of row `id`; whether the node still held it.
+#[cfg(test)]
 async fn finish(db: &Db, node: &str, id: &str, state: &str, error: Option<&str>) -> Result<bool, DbError> {
-    let now = crate::chatsvc::now();
-    let done = with_conn!(db, |conn| diesel::update(
-        rows::table
-            .find(id)
-            .filter(rows::state.eq(SENDING))
-            .filter(rows::locked_by.eq(node)),
-    )
-    .set((
-        rows::state.eq(state),
-        rows::locked_until.eq(0),
-        rows::last_error.eq(error),
-        rows::updated_at.eq(now),
-    ))
-    .execute(conn)
-    .await?);
-    Ok(done == 1)
+    with_conn!(db, |conn| Ok(finish_in!(conn, node, id, state, error)))
 }
 
 async fn attempt(app: &App, row: &Delivery) -> Outcome {
@@ -299,17 +338,6 @@ fn read(body: &[u8]) -> Outcome {
     }
 }
 
-/// Posts what `outcome` makes in the thread, as the webhook with its name now.
-async fn reply(app: &App, row: &Delivery, outcome: Outcome) {
-    let made = replies(&outcome, &app.config.origin());
-    if made.is_empty() {
-        return;
-    }
-    if let Err(error) = post_replies(app, row, made).await {
-        tracing::warn!(%error, "an outgoing webhook's reply wasn't posted");
-    }
-}
-
 /// The messages `outcome` makes: the answer's, Teams' apology, or none.
 fn replies(outcome: &Outcome, origin: &str) -> Vec<(&'static str, String)> {
     use crate::bots::activity::{Refused, messages};
@@ -322,24 +350,6 @@ fn replies(outcome: &Outcome, origin: &str) -> Vec<(&'static str, String)> {
         },
         Outcome::Failed(_) => vec![apology()],
     }
-}
-
-async fn post_replies(app: &App, row: &Delivery, made: Vec<(&'static str, String)>) -> Result<(), DbError> {
-    let Some(hook) = super::registry::hook(&app.db, &row.webhook_id).await? else {
-        return Ok(());
-    };
-    for (kind, content) in made {
-        let post = crate::chatsvc::service::AppPost {
-            thread: &row.chat_id,
-            app: &row.webhook_id,
-            name: &hook.name,
-            kind,
-            content: &content,
-            properties: serde_json::Map::new(),
-        };
-        crate::chatsvc::service::reply_as_app(app, post, row.root_id).await?;
-    }
-    Ok(())
 }
 
 fn apology() -> (&'static str, String) {
@@ -363,10 +373,11 @@ async fn sweep(app: &App) {
 }
 
 async fn fail_stuck(app: &App, row: &Delivery, now: i64) {
-    match take(&app.db, &row.id, SENDING, (FAILED, None, 0), now).await {
-        Ok(true) => reply(app, row, Outcome::Failed(String::new())).await,
-        Ok(false) => {}
-        Err(error) => tracing::warn!(%error, "an outgoing webhook delivery couldn't be swept"),
+    let Some(node) = row.locked_by.as_deref() else {
+        return;
+    };
+    if row.locked_until < now {
+        ended(app, node, row, &Outcome::Failed("the sender lease expired".to_owned())).await;
     }
 }
 
@@ -452,5 +463,55 @@ mod tests {
         assert_eq!(state(&db, &lost.id).await?, FAILED);
         assert_eq!(purge(&db, now + 1).await?, 2);
         Ok(())
+    }
+    #[tokio::test]
+    async fn replies_and_the_terminal_state_commit_together() -> Result<(), Box<dyn std::error::Error>> {
+        use diesel_async::SimpleAsyncConnection as _;
+        let dir = tempfile::tempdir()?;
+        let config = crate::config::Config {
+            database_url: format!("sqlite://{}", dir.path().join("server.sqlite").display()),
+            database_pool: 1,
+            ..crate::config::Config::default()
+        };
+        let app = App::start(config).await?;
+        with_conn!(&app.db, |conn| {
+            conn.batch_execute("PRAGMA foreign_keys = OFF;
+            INSERT INTO chats (id, creator, unique_roster, created_at, version, roster_version)
+                VALUES ('channel', 'author', 0, 0, 0, 0);
+            INSERT INTO outgoing_webhooks
+                (id, team_id, name, name_key, description, callback_url, security_key, created_by, created_at, updated_at)
+                VALUES ('hook', 'team', 'Synthetic hook', 'synthetic hook', '', 'https://example.test', '', 'author', 0, 0);
+            CREATE TRIGGER refuse_card BEFORE INSERT ON chat_messages
+                WHEN NEW.body LIKE '%RichText/Media_Card%'
+                BEGIN SELECT RAISE(ABORT, 'synthetic card failure'); END;").await?;
+        });
+        let row = Delivery::new("hook", "channel", 1, &serde_json::json!({}));
+        put(&app.db, &row).await?;
+        claim(&app.db, "node", -1).await?;
+        let answer = Outcome::Answered(Some(serde_json::json!({"type": "message", "text": "text before card",
+            "attachments": [{"contentType": "application/vnd.microsoft.card.hero", "content": {"title": "card"}}]})));
+        assert!(complete(&app, "node", &row, DONE, None, &answer).await.is_err());
+        assert_eq!(state(&app.db, &row.id).await?, SENDING);
+        assert_eq!(message_count(&app.db).await?, 0);
+        with_conn!(&app.db, |conn| conn.batch_execute("DROP TRIGGER refuse_card").await?);
+        sweep(&app).await;
+        assert_eq!(state(&app.db, &row.id).await?, FAILED);
+        assert_eq!(message_count(&app.db).await?, 1);
+        complete(&app, "node", &row, DONE, None, &answer).await?;
+        assert_eq!(message_count(&app.db).await?, 1);
+        let next = Delivery::new("hook", "channel", 1, &serde_json::json!({}));
+        put(&app.db, &next).await?;
+        claim(&app.db, "node", 60_000).await?;
+        complete(&app, "node", &next, DONE, None, &answer).await?;
+        assert_eq!(state(&app.db, &next.id).await?, DONE);
+        assert_eq!(message_count(&app.db).await?, 3);
+        Ok(())
+    }
+
+    async fn message_count(db: &Db) -> Result<i64, DbError> {
+        with_conn!(db, |conn| Ok(crate::chatsvc::schema::chat_messages::table
+            .count()
+            .get_result(conn)
+            .await?))
     }
 }

@@ -30,21 +30,56 @@ async fn hooked(crew: &Crew) -> (Receiver, String) {
 /// `seat`'s post in `conversation` that mentions the webhook `hook` (`name`), as Teams' composer sends it, through
 /// the account's own client: the native composer doesn't mention apps yet (client task 412). Its id.
 async fn mention(seat: &Seat, conversation: &str, hook: &str, name: &str, words: &str) -> String {
-    let mentions = json!([{"@type": "http://schema.skype.com/Mention", "itemid": "0", "mri": format!("28:{hook}"),
-        "mentionType": "person", "displayName": name}]);
     let post = RawPost {
         chat: conversation.into(),
-        body: json!({
-            "messagetype": "RichText/Html", "contenttype": "Text",
-            "clientmessageid": uuid::Uuid::new_v4().as_u128().to_string(),
-            "content": format!("<p><span itemtype=\"http://schema.skype.com/Mention\" itemscope itemid=\"0\">{name}</span> {words}</p>"),
-            "properties": {"mentions": mentions.to_string()},
-        }),
+        body: mention_body(hook, name, words),
     };
     let answer = seat.client.write(post).await.unwrap();
     assert_eq!(answer.status(), 201);
     let body: Value = serde_json::from_slice(answer.body()).unwrap();
     body["OriginalArrivalTime"].to_string().trim_matches('"').to_owned()
+}
+
+fn mention_body(hook: &str, name: &str, words: &str) -> Value {
+    let mentions = json!([{"@type": "http://schema.skype.com/Mention", "itemid": "0", "mri": format!("28:{hook}"),
+        "mentionType": "person", "displayName": name}]);
+    json!({
+        "messagetype": "RichText/Html", "contenttype": "Text",
+        "clientmessageid": uuid::Uuid::new_v4().as_u128().to_string(),
+        "content": format!("<p><span itemtype=\"http://schema.skype.com/Mention\" itemscope itemid=\"0\">{name}</span> {words}</p>"),
+        "properties": {"mentions": mentions.to_string()},
+    })
+}
+
+struct RawEdit {
+    post: RawPost,
+    id: String,
+}
+
+impl teams_proto::Request for RawEdit {
+    fn service(&self) -> teams_proto::Service {
+        teams_proto::Service::ChatService
+    }
+    fn method(&self) -> teams_proto::Method {
+        teams_proto::Method::Put
+    }
+    fn endpoint(&self) -> teams_proto::Endpoint {
+        teams_proto::Endpoint::new([
+            "v1",
+            "users",
+            "ME",
+            "conversations",
+            &self.post.chat,
+            "messages",
+            &self.id,
+        ])
+    }
+    fn body(&self) -> Option<Value> {
+        Some(self.post.body.clone())
+    }
+    fn is_write(&self) -> bool {
+        true
+    }
 }
 
 /// `seat`'s synced messages of `channel` in the thread of `post`, oldest first, but the post.
@@ -99,13 +134,67 @@ fn carries_token(value: &Value) -> bool {
     }
 }
 
+async fn ignored_posts(crew: &Crew, hook: &str, name: &str, post: &str) {
+    send(
+        &crew.ada.engine,
+        &crew.channel,
+        MessageText::plain("no mention").unwrap(),
+    )
+    .await;
+    let edited = crew
+        .ada
+        .client
+        .write(RawEdit {
+            post: RawPost {
+                chat: crew.channel.clone(),
+                body: mention_body(hook, name, "edited"),
+            },
+            id: post.to_owned(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(edited.status(), 200);
+    let draft = teams_core::ChannelDraft {
+        channel: crate::teams::new_channel(&crew.team, &crew.group, "Secret", teams_proto::NewChannelKind::Private),
+        show_by_default: false,
+    };
+    let made = crew.ada.engine.create_channel(draft).await.unwrap();
+    let private = crew
+        .ada
+        .engine
+        .channel_thread(
+            crew.team.as_str(),
+            crew.group.as_str(),
+            made.group.unwrap().as_str(),
+            "Secret",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    mention(&crew.ada, &private, hook, name, "private").await;
+    let (other, other_group) = crew.ada.make_team("Other (synthetic)", false).await;
+    crew.ada.add(&other, &other_group, &[&crew.bert]).await;
+    mention(&crew.ada, &other, hook, name, "wrong team").await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_mention_in_a_channel_reaches_the_webhook_signed_and_its_answer_is_the_reply_in_the_thread() {
     for backend in backends() {
         let crew = Crew::open(backend).await;
         let (receiver, hook) = hooked(&crew).await;
+        let renamed = "Renamed hook (synthetic)";
+        let path = format!("{}/{hook}", super::hooks_path(&crew.team));
+        let (status, _) = crew
+            .mt(
+                "ada@own.test",
+                reqwest::Method::PUT,
+                &path,
+                Some(json!({"name": renamed})),
+            )
+            .await;
+        assert_eq!(status, 200);
         receiver.answer(Reply::json(&json!({"type": "message", "text": "**Pong** for you"})));
-        let post = mention(&crew.ada, &crew.channel, &hook, HOOK, "status please").await;
+        let post = mention(&crew.ada, &crew.channel, &hook, renamed, "status please").await;
 
         let got = receiver.next().await;
         assert!(got.signed, "{:?}", got.authorization);
@@ -113,7 +202,7 @@ async fn a_mention_in_a_channel_reaches_the_webhook_signed_and_its_answer_is_the
         assert_eq!(activity["type"], "message");
         assert_eq!(activity["id"], post.as_str());
         assert_eq!(activity["channelId"], "msteams");
-        assert_eq!(activity["text"], format!("<at>{HOOK}</at> status please"));
+        assert_eq!(activity["text"], format!("<at>{renamed}</at> status please"));
         assert_eq!(activity["textFormat"], "plain");
         assert_eq!(activity["from"]["id"], format!("29:{}", crew.ada.id));
         assert_eq!(activity["from"]["aadObjectId"], crew.ada.id.as_str());
@@ -140,7 +229,7 @@ async fn a_mention_in_a_channel_reaches_the_webhook_signed_and_its_answer_is_the
         // the answer is the webhook's reply under the post, as the team's people sync it
         let replies = replies_from(&crew.bert, &crew.channel, &post, &hook, 1).await;
         assert_eq!(replies.len(), 1, "{replies:?}");
-        assert_eq!(replies[0].sender_name.as_deref(), Some(HOOK));
+        assert_eq!(replies[0].sender_name.as_deref(), Some(renamed));
         assert!(
             replies[0].content.contains("<strong>Pong</strong> for you"),
             "{}",
@@ -152,7 +241,7 @@ async fn a_mention_in_a_channel_reaches_the_webhook_signed_and_its_answer_is_the
             &json!({"type": "message", "text": "second answer", "textFormat": "plain"}),
         ));
         let chain_id = reply_chain_id(&crew.channel, &post).unwrap();
-        let reply = mention(&crew.bert, &chain_id, &hook, HOOK, "again").await;
+        let reply = mention(&crew.bert, &chain_id, &hook, renamed, "again").await;
         let got = receiver.next().await;
         assert!(got.signed);
         assert_eq!(got.activity["id"], reply.as_str());
@@ -162,45 +251,7 @@ async fn a_mention_in_a_channel_reaches_the_webhook_signed_and_its_answer_is_the
         assert_eq!(replies.len(), 2, "{replies:?}");
         assert!(replies[1].content.contains("second answer"));
 
-        // nothing that doesn't mention it in its team's channels: a plain post, an edit, a mention elsewhere
-        send(
-            &crew.ada.engine,
-            &crew.channel,
-            MessageText::plain("no mention").unwrap(),
-        )
-        .await;
-        let edited = crew
-            .ada
-            .engine
-            .write(teams_core::engine::Action::Edit {
-                conversation: crew.channel.clone(),
-                message_id: post.clone(),
-                text: MessageText::plain("edited").unwrap(),
-            })
-            .await
-            .unwrap();
-        assert_eq!(edited.state, teams_store::OutboxState::Sent, "{edited:?}");
-        let draft = teams_core::ChannelDraft {
-            channel: crate::teams::new_channel(&crew.team, &crew.group, "Secret", teams_proto::NewChannelKind::Private),
-            show_by_default: false,
-        };
-        let made = crew.ada.engine.create_channel(draft).await.unwrap();
-        let private = crew
-            .ada
-            .engine
-            .channel_thread(
-                crew.team.as_str(),
-                crew.group.as_str(),
-                made.group.unwrap().as_str(),
-                "Secret",
-            )
-            .await
-            .unwrap()
-            .unwrap();
-        mention(&crew.ada, &private, &hook, HOOK, "private").await;
-        let (other, other_group) = crew.ada.make_team("Other (synthetic)", false).await;
-        crew.ada.add(&other, &other_group, &[&crew.bert]).await;
-        mention(&crew.ada, &other, &hook, HOOK, "wrong team").await;
+        ignored_posts(&crew, &hook, renamed, &post).await;
         assert!(!receiver.gets_within(Duration::from_secs(3)).await);
         crew.stop().await;
     }
@@ -379,6 +430,52 @@ async fn two_nodes_send_each_mention_once() {
             assert_eq!(replies.len(), 1, "{post}: {replies:?}");
         }
         second.stop().await;
+        crew.stop().await;
+    }
+}
+
+async fn refuse_card_inserts(crew: &Crew, backend: crate::support::Backend) {
+    use diesel_async::SimpleAsyncConnection as _;
+    let sql = match backend {
+        crate::support::Backend::Sqlite => {
+            "CREATE TRIGGER refuse_card BEFORE INSERT ON chat_messages
+            WHEN NEW.body LIKE '%RichText/Media_Card%'
+            BEGIN SELECT RAISE(ABORT, 'synthetic card failure'); END;"
+        }
+        crate::support::Backend::Postgres => {
+            "CREATE FUNCTION refuse_card() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN IF NEW.body LIKE '%RichText/Media_Card%' THEN RAISE EXCEPTION 'synthetic card failure'; END IF;
+            RETURN NEW; END $$;
+            CREATE TRIGGER refuse_card BEFORE INSERT ON chat_messages FOR EACH ROW EXECUTE FUNCTION refuse_card();"
+        }
+    };
+    let result: Result<(), ngteams_server::db::DbError> = async {
+        ngteams_server::with_conn!(&crew.registry.server.app.db, |conn| conn.batch_execute(sql).await?);
+        Ok(())
+    }
+    .await;
+    result.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reply_insert_failure_rolls_back_all_replies_and_the_sweep_posts_one_apology() {
+    for backend in backends() {
+        let crew = Crew::open(backend).await;
+        let (receiver, hook) = hooked(&crew).await;
+        refuse_card_inserts(&crew, backend).await;
+        receiver.answer(Reply::json(&json!({"type": "message", "text": "Text before card",
+            "attachments": [{"contentType": "application/vnd.microsoft.card.hero", "content": {"title": "Card"}}]})));
+        let post = mention(&crew.ada, &crew.channel, &hook, HOOK, "reply?").await;
+        assert!(receiver.next().await.signed);
+        let mut replies = replies_from(&crew.bert, &crew.channel, &post, &hook, 1).await;
+        if replies.is_empty() {
+            replies = replies_from(&crew.bert, &crew.channel, &post, &hook, 1).await;
+        }
+        assert_eq!(replies.len(), 1, "{replies:?}");
+        assert!(replies[0].content.contains(APOLOGY), "{}", replies[0].content);
+        assert!(!receiver.gets_within(Duration::from_secs(2)).await);
+        let replies = thread(&crew.bert, &crew.channel, &post).await;
+        assert_eq!(replies.len(), 1);
         crew.stop().await;
     }
 }

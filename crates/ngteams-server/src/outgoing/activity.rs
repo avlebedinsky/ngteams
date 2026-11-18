@@ -144,6 +144,13 @@ fn keep_open_url(value: &mut Value) {
                     map.remove(key);
                 }
             }
+            if map.get("type").and_then(Value::as_str).is_some_and(open_url_kind)
+                && map
+                    .get("fallback")
+                    .is_some_and(|fallback| fallback.is_object() && !opens_url(fallback))
+            {
+                map.insert("fallback".to_owned(), "drop".into());
+            }
             map.values_mut().for_each(keep_open_url);
         }
         Value::Array(items) => items.iter_mut().for_each(keep_open_url),
@@ -152,9 +159,11 @@ fn keep_open_url(value: &mut Value) {
 }
 
 fn opens_url(action: &Value) -> bool {
-    action["type"]
-        .as_str()
-        .is_some_and(|kind| kind.eq_ignore_ascii_case("Action.OpenUrl") || kind.eq_ignore_ascii_case("openUrl"))
+    action["type"].as_str().is_some_and(open_url_kind)
+}
+
+fn open_url_kind(kind: &str) -> bool {
+    kind.eq_ignore_ascii_case("Action.OpenUrl") || kind.eq_ignore_ascii_case("openUrl")
 }
 
 #[cfg(test)]
@@ -220,6 +229,26 @@ mod tests {
             card["actions"],
             json!([{"type": "Action.OpenUrl", "url": "https://c.example.test"}])
         );
+    }
+
+    #[test]
+    fn open_url_fallbacks_never_become_submit_actions() {
+        let unsafe_action = json!({"type": "Action.OpenUrl", "url": "x", "fallback": {
+            "type": "Action.OpenUrl", "url": "y", "fallback": {
+                "type": "Action.Submit", "data": {"msteams": {"type": "imBack", "value": "send"}}
+            }
+        }});
+        let mut safe_action = unsafe_action.clone();
+        safe_action["fallback"]["fallback"] = "drop".into();
+        let answer = kept(json!({"attachments": [{"content": {
+            "actions": [unsafe_action.clone()], "buttons": [unsafe_action.clone()],
+            "selectAction": unsafe_action.clone(), "tap": unsafe_action
+        }}]}));
+        let card = &answer["attachments"][0]["content"];
+        assert_eq!(card["actions"][0], safe_action);
+        assert_eq!(card["buttons"][0], safe_action);
+        assert_eq!(card["selectAction"], safe_action);
+        assert_eq!(card["tap"], safe_action);
     }
 
     #[test]
