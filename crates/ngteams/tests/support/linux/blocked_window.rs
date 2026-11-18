@@ -89,6 +89,11 @@ const POLL: Duration = Duration::from_millis(50);
 const QUIET: Duration = Duration::from_millis(1500);
 /// Where the conversation pane starts, right of the rail and the chat list, in output pixels.
 const PANE_X: u32 = 420;
+/// A point in the conversation pane's messages, where the wheel scrolls them.
+const PANE_MIDDLE: (u32, u32) = (860, 400);
+/// How many times [`click_link`] scrolls the pane up looking for the link, and by how many notches (15 px each).
+const LINK_SCROLLS: u32 = 8;
+const LINK_SCROLL_NOTCHES: i32 = 6;
 
 // Teams' words, as the web client shows them.
 const FILE_TYPE_LINE: &str = "This message was blocked because it contains a file type that is not permitted.";
@@ -543,12 +548,25 @@ fn no_edited(state: &State, id: &str) -> SandboxResult {
 }
 
 /// Clicks the lowest link drawn in `colour` in the conversation pane (its underline at least `min` px long): the
-/// newest message's, the one the caller just blocked; the page the app asked the opener for.
+/// notice's of the message the caller just blocked, the only such link in its chat; the page the app asked the opener
+/// for. The notice heads its bubble, so a tall bubble (a file card's picture) with newer messages under it can hold
+/// it above the pane: the pane is scrolled up a few notches at a time until it shows.
 fn click_link(run: &mut AppRun, sandbox: &Sandbox, colour: u32, min: u32) -> SandboxResult<String> {
-    let shot = run.shot(sandbox, "blocked-link.png")?;
-    let lines = underlines(&shot, colour, min)?;
-    let Some(&(x0, x1, y)) = lines.iter().max_by_key(|(_, _, y)| *y) else {
-        return Err(format!("no link underlined in the pane ({})", shot.display()).into());
+    let mut found = None;
+    for _ in 0..LINK_SCROLLS {
+        let shot = run.shot(sandbox, "blocked-link.png")?;
+        found = underlines(&shot, colour, min)?.into_iter().max_by_key(|(_, _, y)| *y);
+        if found.is_some() {
+            break;
+        }
+        run.input.scroll(PANE_MIDDLE.0, PANE_MIDDLE.1, -LINK_SCROLL_NOTCHES)?;
+    }
+    let Some((x0, x1, y)) = found else {
+        return Err(format!(
+            "no link underlined in the pane, also after {LINK_SCROLLS} scrolls up (blocked-link.png in {})",
+            shots_dir()?.display()
+        )
+        .into());
     };
     let before = sandbox.opened()?.len();
     run.input.click(x0.midpoint(x1), y.saturating_sub(6), keys::BTN_LEFT)?;
