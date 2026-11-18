@@ -183,6 +183,40 @@ impl<C: Credentials + 'static> FileContents<C> {
     }
 }
 
+impl<C: Credentials + 'static> FileContents<C> {
+    /// Answers `reply` with what the sharing link `share_url` of the file at `object_url` lets people do, as its
+    /// permission on the file's site says it (Teams' "Share this file" shows it under the file's name); `None` when
+    /// the answer names no link of a known scope.
+    pub(crate) fn link_permission(
+        &self,
+        object_url: String,
+        share_url: String,
+        reply: Responder<Option<teams_proto::chat::LinkPermission>>,
+    ) {
+        let client = Arc::clone(&self.client);
+        tokio::task::spawn_local(async move {
+            let answer = match client
+                .transport()
+                .sharing_link_permission(&object_url, &share_url)
+                .await
+            {
+                Ok(answer) => Ok(teams_proto::chat::read_link_permission(answer.body())),
+                Err(error) => {
+                    log::info!("a shared file's link permission couldn't be read: {error}");
+                    Err(match error {
+                        HttpError::Status(answer) if !matches!(answer.status(), 408 | 429 | 500..=599) => {
+                            EngineError::FileUnavailable
+                        }
+                        HttpError::Refused(_) | HttpError::BodyTooLarge => EngineError::FileUnavailable,
+                        _ => EngineError::FileUnread,
+                    })
+                }
+            };
+            let _ = reply.send(answer);
+        });
+    }
+}
+
 /// Hands `body`'s pieces on to `tell` as they arrive, until all came, it fails, it stalls for [`STALLED`], or its reader
 /// let go of it (dropping `body` stops the read).
 async fn hand_on(mut body: FileBody, tell: &mpsc::Sender<Result<Vec<u8>, EngineError>>) {

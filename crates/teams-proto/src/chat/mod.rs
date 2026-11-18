@@ -21,6 +21,7 @@ mod code;
 mod compose;
 mod email;
 mod event;
+mod file_share;
 mod files;
 mod html;
 mod links;
@@ -35,6 +36,9 @@ pub use event::{
     CALL_MEDIA_PREFIX, CallEnd, CallStart, ChatEvent, ChatPolicy, MeetingTimes, Member, Members, Recording,
     RecordingContents, RecordingItem, RecordingStatus, Removed, TopicUpdate, Transcript, chat_event, is_call_media,
     meeting_times,
+};
+pub use file_share::{
+    LinkPermission, is_share_entry_in, read_link_permission, share_entry, share_entry_any, share_token,
 };
 pub use files::{
     FILE_TYPE, FileKind, FilePreview, SharedFile, SharedFiles, is_file_link, is_file_link_in, is_sharepoint_host,

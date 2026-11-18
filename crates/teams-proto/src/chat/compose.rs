@@ -97,6 +97,8 @@ pub struct MessageText {
     files: Vec<crate::UploadedFile>,
     /// The apps' cards after the text, and how long `html` is without their spans; boxed, as most messages have none.
     cards: Option<Box<(Vec<AppCard>, usize)>>,
+    /// Files shared on from other messages, each its entry as a share posts it ([`crate::chat::share_entry`]).
+    shared: Vec<Value>,
     text: RichText,
     mentioned: BTreeMap<String, Mri>,
     /// The app of each bot it mentions, by the bot's MRI.
@@ -190,6 +192,7 @@ impl MessageText {
             origin: cloud.origin().map(ToString::to_string),
             files: Vec::new(),
             cards: None,
+            shared: Vec::new(),
             text,
             mentioned: table,
             bots,
@@ -209,7 +212,9 @@ impl MessageText {
     /// # Errors
     /// Returns [`ComposeError::FileCloud`] for an off-cloud file, or a text validation error.
     pub fn for_cloud(self, cloud: &crate::Cloud) -> Result<Self, ComposeError> {
-        if self.files.iter().any(|file| file.site_in(cloud).is_none()) {
+        if self.files.iter().any(|file| file.site_in(cloud).is_none())
+            || !self.shared.iter().all(|entry| super::is_share_entry_in(cloud, entry))
+        {
             return Err(ComposeError::FileCloud);
         }
         let mut text = self.text;
@@ -217,7 +222,7 @@ impl MessageText {
             pictures_on(cloud, &mut text.nodes);
         }
         let cards = self.cards.map(|cards| cards.0).unwrap_or_default();
-        Self::build(cloud, text, self.mentioned, &self.bots).map(|text| text.with_files(self.files).with_cards(cards))
+        Self::build(cloud, text, self.mentioned, &self.bots).map(|text| text.with_files(self.files).with_cards(cards).with_shared(self.shared))
     }
 
     /// Plain text as one paragraph, no mention.
@@ -278,9 +283,32 @@ impl MessageText {
         Value::Array(self.cards().iter().map(AppCard::entry).collect()).to_string()
     }
 
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Files shared on from other messages, each its entry as a share posts it ([`crate::chat::share_entry`]): the
+    /// post names them as they are, with no upload and no grant.
+    #[must_use]
+    pub fn with_shared(mut self, entries: Vec<Value>) -> Self {
+        self.shared = entries;
+        self
+    }
+
+    /// The entries of the files it shares on ([`Self::with_shared`]).
+    #[must_use]
+    pub fn shared(&self) -> &[Value] {
+        &self.shared
+    }
+
+    /// `properties.files` as sent: the uploads' entries, then the entries of the files shared on.
     #[must_use]
     pub fn files_property(&self) -> String {
-        Value::Array(self.files.iter().map(crate::UploadedFile::entry).collect()).to_string()
+        Value::Array(
+            self.files
+                .iter()
+                .map(crate::UploadedFile::entry)
+                .chain(self.shared.iter().cloned())
+                .collect(),
+        )
+        .to_string()
     }
 
     /// The text as given.
@@ -354,6 +382,8 @@ struct Stored {
     files: Vec<crate::UploadedFile>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     cards: Vec<AppCard>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    shared: Vec<Value>,
     text: RichText,
     mentioned: BTreeMap<String, String>,
     /// The app of each bot mentioned, by the bot's MRI.
@@ -370,7 +400,12 @@ impl TryFrom<Stored> for MessageText {
             .as_deref()
             .map_or(Ok(crate::Cloud::Microsoft), crate::Cloud::own)
             .map_err(|_| ComposeError::Origin)?;
-        if stored.files.iter().any(|file| file.site_in(&cloud).is_none()) {
+        if stored.files.iter().any(|file| file.site_in(&cloud).is_none())
+            || !stored
+                .shared
+                .iter()
+                .all(|entry| super::is_share_entry_in(&cloud, entry))
+        {
             return Err(ComposeError::FileCloud);
         }
         let bots = stored.bots.into_iter().map(|(bot, app)| (Mri::new(bot), app)).collect();
@@ -383,7 +418,7 @@ impl TryFrom<Stored> for MessageText {
                 .map(|(item_id, mri)| (item_id, Mri::new(mri))),
             &bots,
         )
-        .map(|text| text.with_files(stored.files).with_cards(stored.cards))
+        .map(|text| text.with_files(stored.files).with_cards(stored.cards).with_shared(stored.shared))
     }
 }
 
@@ -393,6 +428,7 @@ impl From<MessageText> for Stored {
             origin: text.origin,
             files: text.files,
             cards: text.cards.map(|cards| cards.0).unwrap_or_default(),
+            shared: text.shared,
             text: text.text,
             mentioned: text
                 .mentioned

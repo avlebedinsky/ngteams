@@ -909,6 +909,50 @@ The fixture `tests/fixtures/chatsvc/files-grid.json` is written synthetic in the
   entry alone is read, an entry with no `@type` or another `…File` type is a file, and a file with no SharePoint
   link is drawn by its name with no link kept (the message still offers Teams on the web for it).
 
+### Files: shared on (lab, 2026-11-18)
+
+Lab account b opened Share on a video card of a's message in the a–b chat, in Teams on the web. b picked c (their 1:1
+chat) as the recipient, typed a message and pressed Share. c read the result in the b–c chat. The fixture
+`tests/fixtures/chatsvc/file-shared-on.json` is written synthetic in the shape of c's read.
+
+- **The dialog**: the title "Share this file", the line "You can share to any chat or channel.", a "More actions"
+  (…) button with "Share outside Teams" (SharePoint's own share page), and Close. "Add recipients" (marked as
+  necessary) is a box with the placeholder "Enter name, email, group or tag". "Message preview" is a box with "Add a
+  message (optional)", the file's card (its icon, its name, and under it what its link lets people do, "Anyone with
+  the link can edit"), then the file's picture, and the formatting and emoji buttons. At the bottom are "Copy link"
+  and Share. Share is off until a recipient is in the box.
+- **The recipient picker** finds people (a round picture, the name, the name again under it, and "(You)" after the
+  account's own), chats by their names (a group chat with its people's pictures), and channels (a square picture of
+  the team, the channel's name over the team's name in bold). Each pick is a chip with the picture, the name and a
+  remove mark. A query with no match shows "We couldn't find any matches." Escape clears what is typed.
+- **The reads**: when the dialog opens, the client reads the link's permission on the file's site,
+  `GET https://<tenant>-my.sharepoint.com/_api/v2.0/shares/u!<the sharing link, base64url>/permission` (the
+  site's SharePoint token). The answer has `roles`, and `link` with `scope` (`anonymous`), `type` (`edit`) and
+  `localizedDescription` ("Anyone with the link can edit"), which the card shows. It also reads the item
+  (`shares/u!<link>/?expand=site,driveItem(…)`) and its thumbnail.
+- **The send**: one `POST v1/users/ME/conversations/<recipient chat>/messages` for each recipient, an ordinary message
+  post (201). `content` is the message as one `<p>`. `properties.files` is a JSON string of a list with the file's
+  entry from the original message, with these changes: `fileInfo.itemId`, `fileChicletState.state`, `state`,
+  `altText`, `progressComplete`, `sharepointIds`, `publication` and `site` are null, `isUploadError` is false, and
+  `permissionScope` is the link's scope (`anonymous`). Nothing else is written: no grant, no new link (the file's
+  link reaches anyone).
+- **After the send** the dialog closes and a toast at the bottom left says "You've shared <file name>" with a check
+  mark and a close button. The page stays in the chat it was in.
+- **Copy link** closes the dialog and opens SharePoint's "Link created" box: the link in a field, Copy, the link's
+  permission words, and Settings.
+- **The recipient's read** has the entry as it was sent (`state` null) and the message's `atp`. Teams draws the
+  message's text over the file's card.
+- **The native client** offers the same dialog (`crates/teams-ui/src/share_file.rs`) from Share on a file card and
+  from "More options > Share". It reads the permission with `HttpTransport::sharing_link_permission` on the file's
+  personal site (`<site>_api/v2.0/shares/u!<link>/permission`, the same SharePoint token and service), builds the entry
+  with `teams_proto::chat::share_entry`, and sends one `Action::Send` for each recipient with the entry
+  (`MessageText::with_shared`): the outbox's ordinary post. A person with no 1:1 chat yet gets one first
+  (`Action::CreateChat`, as New message does). An entry with `state` null reads as a file. Copy link puts the link
+  on the clipboard and says so.
+- **The own server** takes the same post. A message that names a file of the server, sent by someone with access to
+  the file, gives each member of the chat access to it (`docs/server.md`). It answers the link's permission on the
+  file's site for anyone with access (`scope` `users`).
+
 ## Messages a policy blocked
 
 Seen in the user's own debug log (2026-11-13, a 1:1 message with a `.deb` file, blocked by the tenant's file type

@@ -275,6 +275,27 @@ impl<C: Credentials> HttpTransport<C> {
         Ok(answer)
     }
 
+    /// The permission of a file's sharing link, read on the file's personal site with that site's token, as Teams'
+    /// "Share this file" reads it (`<site>_api/v2.0/shares/u!<link>/permission`): what the link lets people do. The
+    /// site is the one `object_url` (the file's own address) is on; the link must be on this account's file service.
+    ///
+    /// # Errors
+    /// Refused for a link or an address not on this account's file service or not on a personal site; else transport,
+    /// credentials, or unsuccessful service responses.
+    pub async fn sharing_link_permission(&self, object_url: &str, share_url: &str) -> Result<Response, HttpError> {
+        let site =
+            DriveSite::from_web_url_in(&self.cloud, object_url).ok_or(HttpError::Refused(Refusal::NotAllowed))?;
+        if !crate::chat::is_file_link_in(&self.cloud, share_url) {
+            return Err(HttpError::Refused(Refusal::NotAllowed));
+        }
+        let url = format!(
+            "{}_api/v2.0/shares/{}/permission",
+            site.base(),
+            crate::chat::share_token(share_url)
+        );
+        self.drive_read(&site, &url).await
+    }
+
     /// Reads the authoritative effective grants after an explicit direct share; never follows a response link.
     ///
     /// # Errors

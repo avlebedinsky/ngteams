@@ -768,7 +768,8 @@ enum Request {
     RecordingSegment(teams_proto::MediaSegmentLink, Responder<Vec<u8>>),
     /// What a meeting recording's file is to the account, by its item ([`crate::recap`]).
     RecordingFile(teams_proto::RecordingFile, Responder<teams_proto::RecordingAccess>),
-    Write(Action, Responder<OutboxEntry>),
+    /// Boxed: an action (a message's text) is many times the size of any other request.
+    Write(Box<Action>, Responder<OutboxEntry>),
     /// A read receipt already queued while the engine waited on the service.
     SendQueued(i64, Responder<OutboxEntry>),
     Resend(i64, Responder<OutboxEntry>),
@@ -818,6 +819,11 @@ enum Request {
         reply: Responder<FileStream>,
     },
     FileSize(String, Responder<u64>),
+    LinkPermission {
+        object_url: String,
+        share_url: String,
+        reply: Responder<Option<teams_proto::chat::LinkPermission>>,
+    },
     Teams(Responder<Option<Vec<Team>>>),
     ChatListing(Responder<ChatListing>),
     Calendar {
@@ -1099,7 +1105,7 @@ impl EngineRequests {
     /// A read receipt advances the shared local horizon when queued, before the service answers; only the exact
     /// stored target is read, and the service reconciles it by the horizon timestamp as usual.
     pub fn write(&self, action: Action) -> Reply<OutboxEntry> {
-        self.ask(|reply| Request::Write(action, reply))
+        self.ask(|reply| Request::Write(Box::new(action), reply))
     }
 
     /// Sends an outbox row again, by its id: the explicit resend ([`Store::resend`]) of a row an earlier run left
@@ -1946,6 +1952,23 @@ impl EngineRequests {
         self.ask(|reply| Request::FileSize(share_url, reply))
     }
 
+    /// What the sharing link `share_url` of the file at `object_url` (its own address on a personal site) lets people
+    /// do, read on the file's site as Teams' "Share this file" reads it ([`teams_proto::chat::LinkPermission`]);
+    /// `None` when the answer names no link of a known scope. [`EngineError::FileUnavailable`] when it can't be read
+    /// here (another service, a refusal), [`EngineError::FileUnread`] when the read failed on the way.
+    pub fn link_permission(
+        &self,
+        object_url: impl Into<String>,
+        share_url: impl Into<String>,
+    ) -> Reply<Option<teams_proto::chat::LinkPermission>> {
+        let (object_url, share_url) = (object_url.into(), share_url.into());
+        self.ask(|reply| Request::LinkPermission {
+            object_url,
+            share_url,
+            reply,
+        })
+    }
+
     /// The account's activity feed as stored: its newest items, their read state, and what is new since the Activity
     /// pane was last opened ([`crate::activity`]).
     pub fn activity(&self) -> Reply<ActivityFeed> {
@@ -2465,7 +2488,7 @@ where
             Request::RecordingSegment(part, reply) => self.recaps.segment(part, reply),
             Request::RecordingFile(file, reply) => self.recaps.file(file, reply),
             Request::Write(action, reply) => {
-                let _ = reply.send(on_heap(|| self.logged_write(action)).await);
+                let _ = reply.send(on_heap(|| self.logged_write(*action)).await);
             }
             Request::SendQueued(id, reply) => {
                 let _ = reply.send(on_heap(|| self.send_row(id)).await);
@@ -2618,6 +2641,28 @@ where
                     let _ = reply.send(Err(EngineError::Store(error)));
                 }
             },
+            request @ (Request::FileRange { .. }
+            | Request::FileStream { .. }
+            | Request::FileSize(..)
+            | Request::LinkPermission { .. }) => self.on_file(request),
+            Request::Presence(mri, reply) => self.presence_asked(&mri, reply),
+            Request::Teams(reply) => {
+                let teams = self.inbox.teams().teams(&self.store);
+                let _ = reply.send(teams.map_err(EngineError::from));
+            }
+            Request::ChatListing(reply) => {
+                let listing = self.inbox.teams().chat_listing(&self.store);
+                let _ = reply.send(listing.map_err(EngineError::from));
+            }
+            // the engine's own: `on_request` takes them
+            _ => {}
+        }
+    }
+
+    /// A request about a file a message carries (its bytes, its size, its link's permission): handed to the file
+    /// reads.
+    fn on_file(&self, request: Request) {
+        match request {
             Request::FileRange {
                 share_url,
                 offset,
@@ -2631,16 +2676,13 @@ where
                 reply,
             } => self.files.stream(&share_url, offset, len, reply),
             Request::FileSize(share_url, reply) => self.files.size(&share_url, reply),
-            Request::Presence(mri, reply) => self.presence_asked(&mri, reply),
-            Request::Teams(reply) => {
-                let teams = self.inbox.teams().teams(&self.store);
-                let _ = reply.send(teams.map_err(EngineError::from));
+            Request::LinkPermission {
+                object_url,
+                share_url,
+                reply,
+            } => {
+                self.files.link_permission(object_url, share_url, reply);
             }
-            Request::ChatListing(reply) => {
-                let listing = self.inbox.teams().chat_listing(&self.store);
-                let _ = reply.send(listing.map_err(EngineError::from));
-            }
-            // the engine's own: `on_request` takes them
             _ => {}
         }
     }

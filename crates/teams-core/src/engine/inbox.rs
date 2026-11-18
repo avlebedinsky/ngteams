@@ -284,18 +284,18 @@ impl<C: Credentials + 'static> Inbox<C> {
     /// Answers a request from the store alone when it can be (see the module docs); the request to keep, if any.
     fn meanwhile(&self, store: &mut Store, request: Request) -> Option<Request> {
         match request {
-            Request::Write(
+            Request::Write(action, reply) => match *action {
                 Action::Read {
                     conversation,
                     message_id,
+                } => match self.queue_read(store, conversation, message_id) {
+                    Ok(row) => Some(Request::SendQueued(row.id, reply)),
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        None
+                    }
                 },
-                reply,
-            ) => match self.queue_read(store, conversation, message_id) {
-                Ok(row) => Some(Request::SendQueued(row.id, reply)),
-                Err(error) => {
-                    let _ = reply.send(Err(error));
-                    None
-                }
+                other => Some(Request::Write(Box::new(other), reply)),
             },
             Request::Query(query) => {
                 self.answer(store, query);
