@@ -921,25 +921,44 @@ fn many_apps(qa: &mut Qa<'_>, _: &mut Tally) -> SandboxResult {
     qa.state_until("closed", |state| state["dialog"].is_null()).map(|_| ())
 }
 
-fn list_freshness(qa: &mut Qa<'_>, tally: &mut Tally) -> SandboxResult {
+/// What another administrator (here the server's command line) adds while a page is open shows when the page opens
+/// again: Manage apps, then Manage users.
+fn list_freshness(qa: &mut Qa<'_>, _: &mut Tally) -> SandboxResult {
+    const LATE_APP: &str = "Synthetic late app";
+    const LATE_USER: &str = "fay.qa@own.example.test";
     let before = qa.ask("state")?["apps"].as_array().map_or(0, Vec::len);
-    qa.server.run(
-        &["app", "add", "--name", "Synthetic late app", "--endpoint", ENDPOINT],
-        None,
-    )?;
+    qa.server
+        .run(&["app", "add", "--name", LATE_APP, "--endpoint", ENDPOINT], None)?;
     qa.act("leave")?;
     qa.act("settings")?;
-    let fresh = qa.state_within(Duration::from_secs(8), "the list read again", |state| {
+    qa.state_within(Duration::from_secs(8), "the apps read again", |state| {
         state["apps"].as_array().is_some_and(|apps| apps.len() == before + 1)
-    });
-    if fresh.is_err() {
-        tally.note(
-            "an app another administrator (or the operator's command line) added does not show when the \
-             administrator opens Manage apps again; only a restart of the app reads the list again"
-                .to_owned(),
-        );
-    }
-    Ok(())
+            && state["shown"]
+                .as_array()
+                .is_some_and(|shown| shown.contains(&json!(LATE_APP)))
+    })?;
+    // the long list holds the new app below the fold: the search brings it into the shot
+    qa.act("find synthetic late")?;
+    qa.state_until("the new app found", |state| state["shown"] == json!([LATE_APP]))?;
+    qa.shots("reopened-apps")?;
+    qa.act("find")?;
+
+    qa.act("users")?;
+    qa.state_until("the users", |state| {
+        state["page"] == "users" && state["users"].as_array().is_some_and(|users| !users.is_empty())
+    })?;
+    qa.server.add_user(LATE_USER, "Fay Late (synthetic)")?;
+    qa.act("leave")?;
+    qa.act("users")?;
+    qa.state_within(Duration::from_secs(8), "the users read again", |state| {
+        state["users"]
+            .as_array()
+            .is_some_and(|users| users.contains(&json!(LATE_USER)))
+    })?;
+    qa.shots("reopened-users")?;
+    qa.act("settings")?;
+    qa.state_until("Manage apps again", |state| state["page"] == "apps")
+        .map(|_| ())
 }
 
 /// No secret the window showed is in a file the app wrote, its stderr, or the server's log.
@@ -1375,8 +1394,12 @@ fn state_of(shell: &Entity<Shell>, cx: &App) -> Value {
         .as_ref()
         .and_then(|page| page.read(cx).problem().map(teams_ui::app_admin::AppProblem::kind));
     let dialog = dialog_of(shell, cx).map_or(Value::Null, |dialog| dialog_json(&dialog, cx));
+    let users: Vec<String> = view
+        .users()
+        .map(|users| users.read(cx).users().iter().map(|user| user.upn.clone()).collect())
+        .unwrap_or_default();
     json!({"pages": pages, "page": view.page().key(), "apps": apps, "shown": shown, "loaded": loaded,
-           "list_problem": list_problem, "dialog": dialog})
+           "list_problem": list_problem, "dialog": dialog, "users": users})
 }
 
 fn reply_to(verb: &str, rest: &str, shell: &Entity<Shell>, window: &mut Window, cx: &mut App) -> Value {
@@ -1429,6 +1452,10 @@ fn act(what: &str, arg: &str, shell: &Entity<Shell>, window: &mut Window, cx: &m
         }
         "leave" => {
             shell.update(cx, |shell, cx| shell.open_settings_page(Page::General, window, cx));
+            return Ok(());
+        }
+        "users" => {
+            shell.update(cx, |shell, cx| shell.open_settings_page(Page::Users, window, cx));
             return Ok(());
         }
         _ => {}

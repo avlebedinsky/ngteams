@@ -778,3 +778,65 @@ fn typing_in_a_dialog_doesnt_draw_the_list_again(cx: &mut TestAppContext) {
     let after = opened.cx.read(|cx| users.read(cx).drawn());
     assert_eq!(after, before, "the page drew again while the dialog was typed in");
 }
+
+#[gpui::test]
+fn the_list_is_read_again_each_time_the_page_opens_and_keeps_the_cursor(cx: &mut TestAppContext) {
+    let (server, mut opened) = page_opened(2, cx);
+    opened.click("users-more");
+    opened.click("users-search");
+    opened.keys("tab tab");
+    opened.keys("down");
+    opened.click("settings-page-general");
+    // another administrator adds an account while the page is out of sight
+    server
+        .users
+        .lock()
+        .unwrap()
+        .insert(0, user(4, "aaron@example.test", "Aaron Doe", false));
+    let view = opened.view.clone();
+    opened
+        .cx
+        .update(|_, cx| view.update(cx, |view, cx| view.show_page(Page::Users, cx)));
+    // the list read before shows while it is read again: no "Loading users…" in its place
+    assert!(opened.shows("users-list"));
+    assert!(!opened.shows("users-loading"));
+    opened.settle();
+    // as many pages as showed before are read again
+    assert_eq!(
+        opened.listed(),
+        [
+            "aaron@example.test",
+            "ada@example.test",
+            "dana@example.test",
+            "evan@example.test"
+        ]
+    );
+    assert_eq!(
+        server.asked()[2..],
+        ["list q= after=-", "list q= after=ada@example.test"]
+    );
+    // the cursor stays on the account it was on
+    opened.click("users-search");
+    opened.keys("tab tab");
+    opened.keys("enter");
+    let dialog = opened.dialog().expect("a dialog");
+    let upn = opened.cx.read(|cx| dialog.read(cx).user().map(|user| user.upn.clone()));
+    assert_eq!(upn.as_deref(), Some("dana@example.test"));
+}
+
+#[gpui::test]
+fn the_list_is_read_again_when_the_settings_open_again(cx: &mut TestAppContext) {
+    let (server, mut opened) = page_opened(50, cx);
+    let view = opened.view.clone();
+    // the app shows a chat, then the settings again, on the same page
+    opened.cx.update(|_, cx| view.update(cx, |view, cx| view.put_away(cx)));
+    server
+        .users
+        .lock()
+        .unwrap()
+        .push(user(4, "zoe@example.test", "Zoe Roe", false));
+    opened.cx.update(|_, cx| view.update(cx, |_, cx| cx.notify()));
+    opened.settle();
+    assert_eq!(opened.listed().len(), 4);
+    assert_eq!(server.asked(), ["list q= after=-", "list q= after=-"]);
+}

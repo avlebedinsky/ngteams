@@ -718,3 +718,50 @@ fn the_page_goes_once_the_account_is_no_administrator(cx: &mut TestAppContext) {
     opened.click("settings-page-general");
     assert!(!opened.shows("settings-apps-gone"));
 }
+
+#[gpui::test]
+fn the_list_is_read_again_each_time_the_page_opens_and_keeps_the_cursor(cx: &mut TestAppContext) {
+    let (server, mut opened) = page_opened(cx);
+    opened.keys("tab tab tab tab");
+    opened.keys("down");
+    opened.click("settings-page-general");
+    // another administrator adds an app while the page is out of sight
+    server
+        .apps
+        .lock()
+        .unwrap()
+        .insert(0, app("00000000-0000-4000-8000-0000000000b0", "Made-up Alpha", true));
+    let view = opened.view.clone();
+    opened
+        .cx
+        .update(|_, cx| view.update(cx, |view, cx| view.show_page(Page::Apps, cx)));
+    // the list read before shows while it is read again: no "Loading apps…" in its place
+    assert!(opened.shows("apps-list"));
+    assert!(!opened.shows("apps-loading"));
+    opened.settle();
+    assert_eq!(opened.listed(), ["Made-up Alpha", "Made-up Notes", "Made-up Tab"]);
+    assert_eq!(server.asked(), ["apps", "apps"]);
+    // the cursor stays on the app it was on
+    opened.keys("tab tab tab tab");
+    opened.keys("enter");
+    let dialog = opened.dialog().expect("a dialog");
+    let name = opened.cx.read(|cx| dialog.read(cx).app().map(|app| app.name.clone()));
+    assert_eq!(name.as_deref(), Some("Made-up Tab"));
+}
+
+#[gpui::test]
+fn the_list_is_read_again_when_the_settings_open_again(cx: &mut TestAppContext) {
+    let (server, mut opened) = page_opened(cx);
+    let view = opened.view.clone();
+    // the app shows a chat, then the settings again, on the same page
+    opened.cx.update(|_, cx| view.update(cx, |view, cx| view.put_away(cx)));
+    server
+        .apps
+        .lock()
+        .unwrap()
+        .push(app("00000000-0000-4000-8000-0000000000b3", "Made-up Zed", false));
+    opened.cx.update(|_, cx| view.update(cx, |_, cx| cx.notify()));
+    opened.settle();
+    assert_eq!(opened.listed(), ["Made-up Notes", "Made-up Tab", "Made-up Zed"]);
+    assert_eq!(server.asked(), ["apps", "apps"]);
+}

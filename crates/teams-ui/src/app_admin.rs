@@ -369,11 +369,19 @@ impl ManageApps {
         &self.search
     }
 
-    /// The page shows: its list is read when it wasn't yet.
+    /// The page shows: its list is read again each time it comes into sight, as Teams' admin pages do. The list
+    /// read before stays until the answer replaces it.
     pub fn show(&mut self, cx: &mut Context<Self>) {
         if !std::mem::replace(&mut self.shown, true) {
             self.trace.record(&TraceLine::new("app-admin", "shown"));
             self.reload(cx);
+        }
+    }
+
+    /// The page went out of sight: it reads its list again when it shows again.
+    pub fn hide(&mut self, cx: &mut Context<Self>) {
+        if std::mem::replace(&mut self.shown, false) {
+            cx.notify();
         }
     }
 
@@ -400,9 +408,14 @@ impl ManageApps {
             Ok(apps) => {
                 self.trace
                     .record(&TraceLine::new("app-admin", "listed").kind(if apps.is_empty() { "none" } else { "some" }));
+                let cursor = self.shown_apps(cx).get(self.at).map(|app| app.id.clone());
                 self.apps = apps;
                 self.problem = None;
-                self.at = self.at.min(self.apps.len().saturating_sub(1));
+                let shown = self.shown_apps(cx);
+                self.at = cursor
+                    .and_then(|id| shown.iter().position(|app| app.id == id))
+                    .unwrap_or(self.at)
+                    .min(shown.len().saturating_sub(1));
             }
             Err(problem) => {
                 self.trace

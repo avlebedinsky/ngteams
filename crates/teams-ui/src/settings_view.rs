@@ -640,13 +640,25 @@ impl SettingsView {
             self.page = page;
             self.admin_gone = false;
             self.apps_gone = false;
+            self.hide_admin_pages(cx);
             cx.notify();
         }
     }
 
-    /// The settings went out of sight: the video effects' picker goes, and its preview with it.
-    pub fn put_away(&mut self) {
+    /// The settings went out of sight: the video effects' picker goes, and its preview with it. Manage users and
+    /// Manage apps read their lists again when they show again.
+    pub fn put_away(&mut self, cx: &mut App) {
         self.effects = None;
+        self.hide_admin_pages(cx);
+    }
+
+    fn hide_admin_pages(&self, cx: &mut App) {
+        if let Some(users) = &self.users {
+            users.update(cx, ManageUsers::hide);
+        }
+        if let Some(apps) = &self.apps {
+            apps.update(cx, ManageApps::hide);
+        }
     }
 
     /// The video effects' picker, while the Calls page shows it.
@@ -1976,7 +1988,7 @@ impl Render for SettingsView {
             self.page = Page::General;
         }
         if self.page != Page::Calls {
-            self.put_away();
+            self.effects = None;
         }
         if self.user_admin(cx).is_none() {
             // the account is no administrator (any more): its page and what it listed go, and why is said
