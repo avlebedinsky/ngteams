@@ -570,17 +570,23 @@ impl Walk<'_> {
                 && content.contains("InputExtension"),
             || format!("the message with the card sent {message}"),
         );
-        let state = self.run.until_chat("the box emptied", |state| {
+        self.run.until_chat("the box emptied", |state| {
             state["compose"]["cards"].as_array().is_some_and(Vec::is_empty) && state["compose"]["value"] == ""
         })?;
-        expect(
+        // the sent message can come into the list a moment after the box empties
+        let shown = self.run.until_chat("the sent message's card", |state| {
             state["items"].as_array().is_some_and(|items| {
                 items
                     .iter()
                     .any(|item| item["own"] == true && item["app_cards"].as_u64() == Some(1))
-            }),
-            || format!("the sent message shows no app card: {}", state["items"]),
-        );
+            })
+        });
+        expect(shown.is_ok(), || {
+            format!(
+                "the sent message shows no app card: {}",
+                shown.as_ref().err().map(ToString::to_string).unwrap_or_default()
+            )
+        });
         self.shots("card-sent")?;
         self.card_alone()?;
         self.card_removed()
@@ -740,18 +746,20 @@ impl Walk<'_> {
         let before = self.invokes().len();
         self.run.click(create.centre().0, create.centre().1)?;
         self.no_invoke(before, "Create with the required name empty");
-        let shot = self.shot("dialog-required")?;
-        let after = danger_in(&load(&shot)?, dialog);
+        let required_shot = self.shot("dialog-required")?;
+        let required = load(&required_shot)?;
+        let after = danger_in(&required, dialog);
         expect(after > red + 20, || {
             format!(
                 "Create with the required name empty shows no error ({red} -> {after} red px, {})",
-                shot.display()
+                required_shot.display()
             )
         });
         self.run.click(name.centre().0, name.centre().1)?;
         self.type_text(NAME_TYPED)?;
-        let shot = load(&self.shot("dialog-typed")?)?;
-        let typed = changed_box(&load(&self.shot("dialog-required")?)?, &shot, name).is_some();
+        thread::sleep(SETTLE);
+        let shot = load(&self.shots("dialog-typed")?)?;
+        let typed = changed_box(&required, &shot, name).is_some();
         let mut dialog = dialog;
         if !typed {
             let state = self.state()?;
@@ -886,6 +894,12 @@ impl Walk<'_> {
             message.as_ref().is_some_and(|message| sent_cards(message).len() == 1),
             || format!("the dialog's card was not sent: {message:?}"),
         );
+        self.dialog_closes()
+    }
+
+    /// Escape, the app's Cancel and the head's Close end the dialog.
+    fn dialog_closes(&mut self) -> SandboxResult {
+        let service = self.service;
         // Escape
         let before = self.invokes().len();
         self.open_new_record("escape")?;
