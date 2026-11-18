@@ -150,7 +150,7 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) {
         self.options = None;
-        self.more_actions = None;
+        self.side_list = None;
         if !app.installed {
             cx.emit(ChatViewEvent::AppDetails(Box::new(app.store.clone())));
             return cx.notify();

@@ -72,6 +72,8 @@ pub enum ChannelViewEvent {
     AppDialog(Box<crate::app_dialog::DialogSeed>),
     /// An app the account hasn't added was chosen in "More actions": its details open, to add it.
     AppDetails(Box<teams_proto::StoreApp>),
+    /// A post's "Translation" → "Settings".
+    TranslationSettings,
 }
 
 /// A post's thread, open beside the posts.
@@ -161,6 +163,7 @@ impl ChannelView {
             ChatViewEvent::CreateWorkflows(message) => cx.emit(ChannelViewEvent::CreateWorkflows(message.clone())),
             ChatViewEvent::AppDialog(seed) => cx.emit(ChannelViewEvent::AppDialog(seed.clone())),
             ChatViewEvent::AppDetails(store) => cx.emit(ChannelViewEvent::AppDetails(store.clone())),
+            ChatViewEvent::TranslationSettings => cx.emit(ChannelViewEvent::TranslationSettings),
             ChatViewEvent::Action { .. }
             | ChatViewEvent::OpenRecap { .. }
             | ChatViewEvent::OpenSavedTranscript(_)

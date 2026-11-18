@@ -160,6 +160,7 @@ mod email;
 mod events;
 pub mod reactors;
 mod saved;
+mod translate;
 
 use channel::{ChannelLooks, THREAD_EVENT};
 pub use channel::{MeetingCall, MeetingCard, Place, Replies};
@@ -183,7 +184,8 @@ actions!(
         PickThird,
         PickFourth,
         PickMore,
-        CopySelected
+        CopySelected,
+        TranslateSelected
     ]
 );
 
@@ -302,6 +304,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("4", PickFourth, context),
         KeyBinding::new("5", PickMore, context),
         KeyBinding::new("secondary-c", CopySelected, context),
+        KeyBinding::new("t", TranslateSelected, context),
         KeyBinding::new("right", reactors::NextReaction, context),
         KeyBinding::new("left", reactors::PreviousReaction, context),
         KeyBinding::new("space", reactors::PressReaction, context),
@@ -310,7 +313,8 @@ pub fn init(cx: &mut App) {
     let input = Some(crate::card_view::INPUT_CONTEXT);
     cx.bind_keys(
         [
-            "up", "down", "r", "a", "e", "delete", "escape", "enter", "1", "2", "3", "4", "5", "right", "left", "space",
+            "up", "down", "r", "a", "e", "t", "delete", "escape", "enter", "1", "2", "3", "4", "5", "right", "left",
+            "space",
         ]
         .map(|key| KeyBinding::new(key, gpui::NoAction, input)),
     );
@@ -383,6 +387,14 @@ impl MessageAction {
     }
 }
 
+/// A list a message's more-options menu shows beside it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SideList {
+    MoreActions,
+    /// Its "Translation" list ([`translate`]).
+    Translation,
+}
+
 /// What a meeting chat's recap card asks the Recap tab to show.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecapOpen {
@@ -417,6 +429,8 @@ pub enum ChatViewEvent {
     ShowStore,
     /// An app the account hasn't added was chosen in a message's "More actions": its details open, to add it.
     AppDetails(Box<teams_proto::StoreApp>),
+    /// A message's "Translation" → "Settings": the settings' page that holds the "Translate to" language.
+    TranslationSettings,
     /// A recap card's View recap, Transcript or thumbnail: the chat's Recap tab, at the card's recording (its sharing
     /// link) when the meeting was recorded, showing `open`. A call transcribed alone names its transcript's item's
     /// sharing link as `recording`, and `transcribed` is the part it stands for, shown when the recap's read lists none
@@ -627,8 +641,11 @@ pub struct MessageItem {
     pub thread: Threaded,
     /// A channel post's replies, summed up under it ([`Place::Channel`]); none without any.
     pub replies: Option<Box<Replies>>,
-    /// How its translation is marked beside its time, while the chat is translated ([`crate::chat_translate`]).
+    /// How its translation is marked beside its time, while it is read in a language ([`crate::chat_translate`]).
     pub translation: Option<chat_translate::Mark>,
+    /// What its "More options" menu offers for its translation: "Translate", "See original message" or "See
+    /// translation".
+    pub translate: Option<chat_translate::Offer>,
 }
 
 /// Where a message stands in a channel's threads.
@@ -1115,9 +1132,10 @@ pub struct ChatView {
     options: Option<String>,
     /// Where the open more-options menu's button was last drawn, in the window: the menu opens under it.
     options_at: Rc<Cell<Option<Bounds<Pixels>>>>,
-    /// The message whose more-options menu shows its "More actions" list.
-    more_actions: Option<String>,
-    /// Where that list was last drawn: a click in it is not a click outside the menu.
+    /// The list the open more-options menu shows beside it ("More actions" or "Translation"), and its message.
+    side_list: Option<(SideList, String)>,
+    /// Where the open list ("More actions" or "Translation") was last drawn: a click in it is not a click outside
+    /// the menu.
     more_at: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The account's workflows that run from a message, read each time a message's menu opens.
     workflows: Option<Entity<crate::workflow_run::menu::MessageWorkflows>>,
@@ -1298,7 +1316,7 @@ impl ChatView {
             text_selection: TextSelection::default(),
             options: None,
             options_at: Rc::default(),
-            more_actions: None,
+            side_list: None,
             more_at: Rc::default(),
             workflows: None,
             deleting: None,
@@ -2216,7 +2234,7 @@ impl ChatView {
         } else {
             Some(message.to_owned())
         };
-        self.more_actions = None;
+        self.side_list = None;
         if self.options.is_some() && !self.core.read_only() && self.core.capabilities().workflows {
             self.read_workflows(cx);
         }
@@ -2255,7 +2273,7 @@ impl ChatView {
     /// Runs `flow` on `message`, as a workflow chosen in its menu.
     pub fn run_workflow(&mut self, flow: crate::workflow_dialog::FlowRef, message: &str, cx: &mut Context<Self>) {
         self.options = None;
-        self.more_actions = None;
+        self.side_list = None;
         let message = self.message_ref(message);
         cx.emit(ChatViewEvent::RunWorkflow { flow, message });
         cx.notify();
@@ -2264,7 +2282,7 @@ impl ChatView {
     /// "Create workflows" on `message`.
     pub fn create_workflows(&mut self, message: &str, cx: &mut Context<Self>) {
         self.options = None;
-        self.more_actions = None;
+        self.side_list = None;
         let message = self.message_ref(message);
         cx.emit(ChatViewEvent::CreateWorkflows(message));
         cx.notify();
@@ -2273,7 +2291,7 @@ impl ChatView {
     /// Shows the open menu's "More actions" list, as its row does.
     pub fn open_more_actions(&mut self, cx: &mut Context<Self>) {
         if self.options.is_some() {
-            self.more_actions.clone_from(&self.options);
+            self.side_list = self.options.clone().map(|message| (SideList::MoreActions, message));
             cx.notify();
         }
     }
@@ -3096,6 +3114,9 @@ impl ChatView {
         let translation = matches!(body, Body::Text(_))
             .then(|| self.translated.0.mark_of(message))
             .flatten();
+        let translate = matches!(body, Body::Text(_))
+            .then(|| self.translated.0.offer_of(message))
+            .flatten();
         let own = message.sender.as_deref() == Some(me.as_str());
         let policy = matches!(body, Body::Text(_))
             .then(|| policy_notice::of(message.properties.as_deref(), own))
@@ -3122,13 +3143,7 @@ impl ChatView {
             email,
             app_cards,
             unshown,
-            writes: if self.core.read_only() {
-                ChatWrites::AppReadOnly
-            } else if self.conversation == NOTES {
-                ChatWrites::ReadOnly
-            } else {
-                ChatWrites::Taken
-            },
+            writes: self.writes(),
             forwarded,
             thread: match self.place {
                 Place::Chat => Threaded::No,
@@ -3137,7 +3152,19 @@ impl ChatView {
             },
             replies: None,
             translation,
+            translate,
         })
+    }
+
+    /// Which writes the chat's messages take.
+    fn writes(&self) -> ChatWrites {
+        if self.core.read_only() {
+            ChatWrites::AppReadOnly
+        } else if self.conversation == NOTES {
+            ChatWrites::ReadOnly
+        } else {
+            ChatWrites::Taken
+        }
     }
 
     /// A channel post's subject and the email it came from ([`email`]); none in a chat, or for what isn't a text.
@@ -4132,6 +4159,8 @@ impl ChatView {
             .filter(|action| actions.contains(action))
             .map(|action| menu_entry(&message, action, palette, window, cx))
             .collect::<Vec<_>>();
+        entries.extend(self.translation_entry(&message, palette, cx));
+        let translation_menu = self.translation_menu(&message, palette, window, cx);
         entries.extend(self.refresh_entry(&message, palette, cx));
         // Teams' workflows run on any message of a chat that takes the account's writes
         let offers_workflows = self.core.capabilities().workflows
@@ -4175,8 +4204,8 @@ impl ChatView {
             .occlude()
             .on_mouse_down_out(cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
                 // a click on its own button toggles it there; one in "More actions"' list is the menu's own
-                let in_list = this.more_actions.is_some()
-                    && this.more_at.get().is_some_and(|list| list.contains(&event.position));
+                let in_list =
+                    this.side_list.is_some() && this.more_at.get().is_some_and(|list| list.contains(&event.position));
                 if !at.contains(&event.position) && !in_list {
                     this.options = None;
                     cx.notify();
@@ -4196,6 +4225,7 @@ impl ChatView {
                             .items_end()
                             .gap_1()
                             .children(more.flatten())
+                            .children(translation_menu)
                             .child(menu),
                     ),
             )
@@ -4235,17 +4265,10 @@ impl ChatView {
     /// "More actions", which opens and closes its list beside the menu.
     fn more_actions_entry(&self, message: &str, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let view = cx.entity().downgrade();
-        let open = self.more_actions.as_deref() == Some(message);
+        let open = self.side_open(SideList::MoreActions, message);
         let shown = message.to_owned();
         crate::workflow_run::menu::more_actions_row(open, palette, move |_, _, cx| {
-            let _ = view.update(cx, |this, cx| {
-                this.more_actions = if this.more_actions.is_some() {
-                    None
-                } else {
-                    Some(shown.clone())
-                };
-                cx.notify();
-            });
+            let _ = view.update(cx, |this, cx| this.toggle_side_list(SideList::MoreActions, &shown, cx));
         })
     }
 
@@ -4260,7 +4283,7 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         use crate::workflow_run::menu;
-        if self.more_actions.as_deref() != Some(message) {
+        if !self.side_open(SideList::MoreActions, message) {
             return None;
         }
         let mut list = menu::panel("message-more-actions-menu", palette)
@@ -5013,11 +5036,21 @@ fn translation_mark(item: &MessageItem, palette: Palette, cx: &mut Context<ChatV
     use chat_translate::Mark;
     let mark = item.translation.as_ref()?;
     let id = item.id.clone();
+    let offer = match mark {
+        Mark::Stopped { .. } => chat_translate::Offer::Translate,
+        Mark::Original { .. } => chat_translate::Offer::SeeTranslation,
+        _ => chat_translate::Offer::SeeOriginal(None),
+    };
     let (tip, color, toggles): (SharedString, u32, bool) = match mark {
         Mark::Translated { tip } => (tip.clone(), palette.muted_foreground, true),
         Mark::Original { tip } => (tip.clone(), palette.brand, true),
         Mark::Waiting => return Some(translating_mark(&id, palette, cx)),
         Mark::Failed => ("This message couldn't be translated".into(), theme::DANGER, false),
+        Mark::Stopped { why } => (
+            format!("This message wasn't translated. {why} Select to try again.").into(),
+            theme::DANGER,
+            true,
+        ),
     };
     let selector = format!("translation-mark-{id}");
     let glyph = Glyph::LANGUAGES.icon().size(px(14.0)).text_color(rgb(color));
@@ -5036,7 +5069,7 @@ fn translation_mark(item: &MessageItem, palette: Palette, cx: &mut Context<ChatV
             .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
                 cx.stop_propagation();
                 this.translation
-                    .update(cx, |translation, cx| translation.toggle_original(&id, cx));
+                    .update(cx, |translation, cx| translation.offered(offer, &id, cx));
             }))
     } else {
         face
@@ -5563,6 +5596,7 @@ impl ChatView {
             .on_action(cx.listener(|this, _: &DeleteSelected, window, cx| {
                 this.act_on_selected(MessageAction::Delete, window, cx);
             }))
+            .on_action(cx.listener(|this, _: &TranslateSelected, _, cx| this.translate_selected(cx)))
             .on_action(cx.listener(|this, _: &ClearSelection, window, cx| this.escape(window, cx)))
             .on_action(cx.listener(|this, _: &ConfirmDelete, _, cx| this.confirm_delete(cx)))
     }

@@ -2616,6 +2616,7 @@ impl Shell {
             ChatViewEvent::AppDialog(seed) => this.open_app_dialog(seed.as_ref().clone(), window, cx),
             ChatViewEvent::ShowStore => this.open_apps(window, cx),
             ChatViewEvent::AppDetails(store) => this.open_app_details(store.as_ref().clone(), window, cx),
+            ChatViewEvent::TranslationSettings => this.open_settings_page(Page::General, window, cx),
             // a chat has no channel's thread or meeting card
             ChatViewEvent::Action { .. }
             | ChatViewEvent::OpenThread { .. }
@@ -2649,6 +2650,7 @@ impl Shell {
             ChannelViewEvent::CreateWorkflows(message) => this.open_message_workflows(message.clone(), window, cx),
             ChannelViewEvent::AppDialog(seed) => this.open_app_dialog(seed.as_ref().clone(), window, cx),
             ChannelViewEvent::AppDetails(store) => this.open_app_details(store.as_ref().clone(), window, cx),
+            ChannelViewEvent::TranslationSettings => this.open_settings_page(Page::General, window, cx),
         })
     }
 

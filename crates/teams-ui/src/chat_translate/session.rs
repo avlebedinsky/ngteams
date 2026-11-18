@@ -83,7 +83,7 @@ pub struct Spec {
     pub target: Target,
     pub model: Model,
     /// The chat's language's English name, as the instructions name it.
-    pub language: &'static str,
+    pub language: gpui::SharedString,
     pub limits: Limits,
 }
 
@@ -316,12 +316,12 @@ impl Worker {
     fn batch(&mut self, id: u64, brief: &Brief, context: &[Said], items: &[Item]) -> Outcome {
         let out = self.out.clone();
         let stop = Arc::clone(&self.stop);
-        let reading = self.spec.language;
+        let reading = self.spec.language.clone();
         let echoed = self.echoed.clone();
         let mut told = HashMap::new();
         let mut partial = |so_far: &str| {
             let fresh = fresh_answers(so_far, &mut told);
-            let (fresh, _) = judge_echoes(fresh, &told, items, reading, &echoed);
+            let (fresh, _) = judge_echoes(fresh, &told, items, &reading, &echoed);
             if !fresh.is_empty() && !stop.load(Ordering::Relaxed) {
                 let _ = out.try_send(Outcome::Partial { id, answers: fresh });
             }
@@ -332,7 +332,7 @@ impl Worker {
         match answer {
             Ok((text, terms)) => {
                 let all = prompt::read_batch(&text);
-                let (answers, held) = judge_echoes(all.clone(), &all, items, reading, &self.echoed);
+                let (answers, held) = judge_echoes(all.clone(), &all, items, &reading, &self.echoed);
                 // one left out keeps its echo: asked again, its next echo is taken
                 for item in items.iter().filter(|item| answers.contains_key(&item.n)) {
                     self.echoed.remove(&item.key);
@@ -419,7 +419,7 @@ impl Worker {
                     target: self.spec.target.clone(),
                     work: Work::Chat,
                     model: self.spec.model.clone(),
-                    instructions: prompt::instructions(self.spec.language),
+                    instructions: prompt::instructions(&self.spec.language),
                     first: limits.first,
                 },
                 &self.stop,

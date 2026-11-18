@@ -190,7 +190,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 320 + 8 + 5 + 15] = [
+const STEPS: [Step; 5 + 320 + 8 + 5 + 15 + 6] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -499,6 +499,38 @@ const STEPS: [Step; 5 + 320 + 8 + 5 + 15] = [
         translate_another_chat(shell, None, cx);
         cx.set_global(teams_ui::local_ai::Tools::default());
         clear_compose(shell, window, cx);
+    }),
+    // one message translated alone: the chat's last, its More options open on Translation's list
+    ("message-translate-menu", |shell, _, cx| {
+        staged_chat_tools(cx);
+        translation_list_of_last(shell, cx);
+    }),
+    // Translate chosen, the made-up tool not answering yet: "Translating…" beside its time, faded
+    ("message-translating", |shell, _, cx| {
+        if let Some((chat, id)) = translatable_last_message(shell, cx) {
+            chat.update(cx, |chat, cx| chat.translate(&id, cx));
+        }
+    }),
+    // its translation in the "Translate to" language, with Teams' mark; the other messages as written
+    ("message-translated", |_, _, _| {
+        release_staged(1);
+        release_staged(2);
+    }),
+    // in Teams Dark, its Translation list now offers "See original message"
+    ("message-translated-menu-dark", |shell, window, cx| {
+        show_chat_in_theme(shell, teams_ui::theme::DARK_KEY, window, cx);
+        translation_list_of_last(shell, cx);
+    }),
+    // "See original message": as written again, unmarked
+    ("message-translated-original-dark", |shell, _, cx| {
+        if let Some((chat, id)) = translatable_last_message(shell, cx) {
+            chat.update(cx, |chat, cx| chat.translate(&id, cx));
+        }
+    }),
+    // the same in Teams Light
+    ("message-translated-original", |shell, window, cx| {
+        show_chat_in_theme(shell, teams_ui::theme::LIGHT_KEY, window, cx);
+        cx.set_global(teams_ui::local_ai::Tools::default());
     }),
     // a draft being corrected by the AI: the line over the box, Correct lit in the toolbar
     ("compose-correcting", |shell, window, cx| {
@@ -4270,6 +4302,30 @@ fn type_in_compose(shell: &Entity<Shell>, text: &str, window: &mut Window, cx: &
             editor.insert(text, cx);
         });
     });
+}
+
+/// The last message that offers its translation (Teams offers it on the account's own too), and its chat.
+fn translatable_last_message(
+    shell: &Entity<Shell>,
+    cx: &App,
+) -> Option<(Entity<teams_ui::chat_view::ChatView>, String)> {
+    let chat = shell.read(cx).chat()?.clone();
+    let message = chat.read(cx).items().iter().rev().find_map(|item| match item {
+        Item::Message(message) if message.translate.is_some() => Some(message.id.clone()),
+        _ => None,
+    })?;
+    Some((chat, message))
+}
+
+/// That message selected (its hover bar shows), its More options open on Translation's list.
+fn translation_list_of_last(shell: &Entity<Shell>, cx: &mut App) {
+    if let Some((chat, id)) = translatable_last_message(shell, cx) {
+        chat.update(cx, |chat, cx| {
+            chat.select(Some(id.clone()), cx);
+            chat.toggle_options(&id, cx);
+            chat.open_translation_list(cx);
+        });
+    }
 }
 
 fn select_last_message(shell: &Entity<Shell>, _: &mut Window, cx: &mut App) {

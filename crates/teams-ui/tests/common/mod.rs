@@ -280,6 +280,8 @@ pub struct FakeCore {
     pub translations: Mutex<Vec<StoredTranslation>>,
     /// The account's own messages as written, kept when they were sent translated.
     pub sent_originals: Mutex<Vec<SentOriginal>>,
+    /// The messages translated one at a time, by conversation and message id.
+    pub translated_messages: Mutex<Vec<(String, String)>>,
     /// Translated chats' glossaries, as the store keeps them (the newest named last).
     pub glossary: Mutex<Vec<GlossaryTerm>>,
     /// The calls' captions saved on this computer, as the store keeps them.
@@ -1225,6 +1227,26 @@ impl Core for FakeCore {
                 .filter(|kept| kept.conversation_id == conversation && keys.contains(&kept.key))
                 .cloned()
                 .collect()
+        })
+    }
+
+    fn translated_messages(&self, conversation: String, ids: Vec<String>) -> Reply<Vec<String>> {
+        self.answer("translated_messages", || {
+            locked(&self.translated_messages)
+                .iter()
+                .filter(|(chat, id)| *chat == conversation && ids.contains(id))
+                .map(|(_, id)| id.clone())
+                .collect()
+        })
+    }
+
+    fn keep_translated_message(&self, conversation: String, message: String, translated: bool) -> Reply<()> {
+        self.answer("keep_translated_message", || {
+            let mut kept = locked(&self.translated_messages);
+            kept.retain(|(chat, id)| !(*chat == conversation && *id == message));
+            if translated {
+                kept.push((conversation, message));
+            }
         })
     }
 

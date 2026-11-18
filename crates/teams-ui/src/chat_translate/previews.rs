@@ -688,7 +688,7 @@ impl Previews {
             backend,
             target,
             model: self.choice.model.clone(),
-            language: name,
+            language: name.into(),
             limits: self.limits,
         });
         let outcomes = session.outcomes();

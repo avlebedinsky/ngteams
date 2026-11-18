@@ -402,7 +402,7 @@ fn start(language: &'static str) -> Session {
         backend,
         target: crate::local_ai::Target::Program(program),
         model: Model::Recommended,
-        language,
+        language: language.into(),
         limits: Limits::default(),
     })
 }

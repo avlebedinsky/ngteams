@@ -221,6 +221,18 @@ pub trait Core: Send + Sync + 'static {
         let _ = (conversation, keys);
         Reply::ready(Ok(Vec::new()))
     }
+    /// Which of the messages `ids` of `conversation` the user translated one at a time ([`crate::chat_translate`]).
+    /// A fake keeps none.
+    fn translated_messages(&self, conversation: String, ids: Vec<String>) -> Reply<Vec<String>> {
+        let _ = (conversation, ids);
+        Reply::ready(Ok(Vec::new()))
+    }
+    /// Keeps that the user translated the message `message` one at a time, or shows it as written again: no service
+    /// write. A fake keeps nothing.
+    fn keep_translated_message(&self, conversation: String, message: String, translated: bool) -> Reply<()> {
+        let _ = (conversation, message, translated);
+        Reply::ready(Ok(()))
+    }
     /// Keeps the account's own message as written, sent translated: no service write. A fake keeps nothing.
     fn keep_sent_original(&self, original: SentOriginal) -> Reply<()> {
         let _ = original;
@@ -626,6 +638,14 @@ impl Core for EngineRequests {
 
     fn keep_sent_original(&self, original: SentOriginal) -> Reply<()> {
         EngineRequests::keep_sent_original(self, original)
+    }
+
+    fn translated_messages(&self, conversation: String, ids: Vec<String>) -> Reply<Vec<String>> {
+        EngineRequests::translated_messages(self, conversation, ids)
+    }
+
+    fn keep_translated_message(&self, conversation: String, message: String, translated: bool) -> Reply<()> {
+        EngineRequests::keep_translated_message(self, conversation, message, translated)
     }
 
     fn conversation(&self, id: String) -> Reply<Option<Conversation>> {
