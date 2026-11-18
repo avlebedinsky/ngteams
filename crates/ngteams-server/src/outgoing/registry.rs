@@ -427,7 +427,7 @@ async fn change(
     }
     change_picture(&app, &mut hook, form.picture).await?;
     hook.updated_at = at;
-    let updated = update(&app.db, &hook, previous.picture_etag.as_deref()).await;
+    let updated = update(&app.db, &hook, &previous).await;
     if !matches!(updated, Ok(true)) {
         if hook.picture_etag != previous.picture_etag && hook.picture_etag.is_some() {
             drop_picture(&app, &hook).await;
@@ -453,17 +453,23 @@ async fn change_picture(app: &App, hook: &mut Hook, picture: Picture) -> Answer<
     Ok(())
 }
 
-async fn update(db: &Db, hook: &Hook, previous: Option<&str>) -> Result<bool, DbError> {
+async fn update(db: &Db, hook: &Hook, previous: &Hook) -> Result<bool, DbError> {
     with_conn!(db, |conn| conn
         .transaction::<_, DbError, _>(async |conn| {
             let changed = diesel::update(
-                outgoing_webhooks::table.find(&hook.id).filter(
-                    outgoing_webhooks::picture_etag
-                        .eq(previous)
-                        .or(outgoing_webhooks::picture_etag
-                            .is_null()
-                            .and(previous.is_none().into_sql::<diesel::sql_types::Bool>())),
-                ),
+                outgoing_webhooks::table
+                    .find(&hook.id)
+                    .filter(outgoing_webhooks::name.eq(&previous.name))
+                    .filter(outgoing_webhooks::description.eq(&previous.description))
+                    .filter(outgoing_webhooks::callback_url.eq(&previous.callback_url))
+                    .filter(outgoing_webhooks::updated_at.eq(previous.updated_at))
+                    .filter(
+                        outgoing_webhooks::picture_etag.eq(previous.picture_etag.as_deref()).or(
+                            outgoing_webhooks::picture_etag
+                                .is_null()
+                                .and(previous.picture_etag.is_none().into_sql::<diesel::sql_types::Bool>()),
+                        ),
+                    ),
             )
             .set((
                 outgoing_webhooks::name.eq(&hook.name),
@@ -499,7 +505,9 @@ async fn remove(
     let team = access(&app.db, &actor.id, &team).await?.manager()?;
     let hook = of_team(&app.db, &team.id, &id).await?;
     let at = crate::chatsvc::now();
-    delete(&app.db, &hook.id, at).await?;
+    if !delete(&app.db, &hook, at).await? {
+        return Err(Refusal::CHANGED);
+    }
     if hook.picture_etag.is_some() {
         drop_picture(&app, &hook).await;
     }
@@ -507,15 +515,28 @@ async fn remove(
 }
 
 /// Drops webhook `id`; its account stays, deleted, for the replies it posted.
-async fn delete(db: &Db, id: &str, at: i64) -> Result<(), DbError> {
+async fn delete(db: &Db, hook: &Hook, at: i64) -> Result<bool, DbError> {
     with_conn!(db, |conn| conn
         .transaction::<_, DbError, _>(async |conn| {
-            diesel::delete(outgoing_webhooks::table.find(id)).execute(conn).await?;
-            diesel::update(users::table.find(id))
+            let changed = diesel::delete(
+                outgoing_webhooks::table.find(&hook.id).filter(
+                    outgoing_webhooks::picture_etag.eq(hook.picture_etag.as_deref()).or(
+                        outgoing_webhooks::picture_etag
+                            .is_null()
+                            .and(hook.picture_etag.is_none().into_sql::<diesel::sql_types::Bool>()),
+                    ),
+                ),
+            )
+            .execute(conn)
+            .await?;
+            if changed == 0 {
+                return Ok(false);
+            }
+            diesel::update(users::table.find(&hook.id))
                 .set((users::deleted_at.eq(Some(at)), users::updated_at.eq(at)))
                 .execute(conn)
                 .await?;
-            Ok(())
+            Ok(true)
         })
         .await)
 }
@@ -572,12 +593,13 @@ mod tests {
         let mut current = synthetic_hook();
         insert(&db, &current).await?;
         for picture in [Some("first"), Some("second"), None] {
-            let mut stale = current.clone();
+            let previous = current.clone();
+            let mut stale = previous.clone();
             current.picture_etag = picture.map(str::to_owned);
-            assert!(update(&db, &current, stale.picture_etag.as_deref()).await?);
+            assert!(update(&db, &current, &previous).await?);
             stale.name = "Stale name".to_owned();
             stale.description = "Stale description".to_owned();
-            assert!(!update(&db, &stale, stale.picture_etag.as_deref()).await?);
+            assert!(!update(&db, &stale, &previous).await?);
             let kept = hook(&db, &current.id).await?.unwrap();
             assert_eq!(kept.picture_etag, current.picture_etag);
             assert_eq!(kept.description, current.description);
@@ -586,6 +608,74 @@ mod tests {
                 current.name
             );
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_stale_update_cannot_restore_other_webhook_fields() -> Result<(), Box<dyn std::error::Error>> {
+        use diesel_async::SimpleAsyncConnection as _;
+        let dir = tempfile::tempdir()?;
+        let db = Db::connect(&format!("sqlite://{}", dir.path().join("server.sqlite").display()), 1).await?;
+        with_conn!(&db, |conn| conn.batch_execute("PRAGMA foreign_keys = OFF").await?);
+        let mut current = synthetic_hook();
+        insert(&db, &current).await?;
+        for field in ["name", "description", "callback_url"] {
+            let previous = current.clone();
+            let mut stale = previous.clone();
+            match field {
+                "name" => {
+                    current.name = "Current name".to_owned();
+                    current.name_key = current.name.to_lowercase();
+                }
+                "description" => current.description = "Current description".to_owned(),
+                _ => current.callback_url = "https://example.test/current".to_owned(),
+            }
+            assert!(update(&db, &current, &previous).await?);
+            stale.description = "Stale description".to_owned();
+            assert!(!update(&db, &stale, &previous).await?);
+            let kept = hook(&db, &current.id).await?.unwrap();
+            assert_eq!(kept.name, current.name);
+            assert_eq!(kept.description, current.description);
+            assert_eq!(kept.callback_url, current.callback_url);
+            assert_eq!(
+                crate::db::users::by_id(&db, &current.id).await?.unwrap().display_name,
+                current.name
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_stale_delete_keeps_the_current_picture_and_account() -> Result<(), Box<dyn std::error::Error>> {
+        use diesel_async::SimpleAsyncConnection as _;
+        let dir = tempfile::tempdir()?;
+        let db = Db::connect(&format!("sqlite://{}", dir.path().join("server.sqlite").display()), 1).await?;
+        with_conn!(&db, |conn| conn.batch_execute("PRAGMA foreign_keys = OFF").await?);
+        let mut current = synthetic_hook();
+        insert(&db, &current).await?;
+        for picture in [Some("first"), Some("second"), None] {
+            let previous = current.clone();
+            current.picture_etag = picture.map(str::to_owned);
+            assert!(update(&db, &current, &previous).await?);
+            assert!(!delete(&db, &previous, 1).await?);
+            let kept = hook(&db, &current.id).await?.unwrap();
+            assert_eq!(kept.picture_etag, current.picture_etag);
+            assert_eq!(
+                crate::db::users::by_id(&db, &current.id).await?.unwrap().deleted_at,
+                None
+            );
+        }
+        assert!(delete(&db, &current, 2).await?);
+        assert!(hook(&db, &current.id).await?.is_none());
+        assert_eq!(
+            crate::db::users::by_id(&db, &current.id).await?.unwrap().deleted_at,
+            Some(2)
+        );
+        assert!(!delete(&db, &current, 3).await?);
+        assert_eq!(
+            crate::db::users::by_id(&db, &current.id).await?.unwrap().deleted_at,
+            Some(2)
+        );
         Ok(())
     }
 }

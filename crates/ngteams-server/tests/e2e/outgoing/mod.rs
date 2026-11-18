@@ -3,6 +3,7 @@
 //! back to the real engine as the webhook's reply in the post's thread. Teams, people, webhooks and messages are
 //! synthetic.
 
+mod concurrency;
 mod delivery;
 mod receiver;
 mod registry;
@@ -57,6 +58,10 @@ impl Crew {
             configure(config);
         })
         .await;
+        Self::over(registry).await
+    }
+
+    async fn over(registry: Registry) -> Self {
         let server = &registry.server;
         let ada = Seat::new(server, "ada@own.test", "Ada Lovelace").await;
         let bert = Seat::new(server, "bert@own.test", "Bert Sample").await;
