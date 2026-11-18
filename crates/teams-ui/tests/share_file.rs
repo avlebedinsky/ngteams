@@ -2,7 +2,7 @@
 //! Share off; the recipients found as Teams finds them (people, chats, channels, "We couldn't find any matches."),
 //! picked as chips; Share sends the file to each recipient as Teams does (one post each, the file's entry again, the
 //! message as its text), making a person's 1:1 chat first when there is none; a recipient not reached stays picked;
-//! Copy link; the keys. Synthetic accounts, chats and files only (`tests/fixtures/chatsvc/files.json`).
+//! Copy link and its "Link created", Share outside Teams, the format bar and emoji; the keys. Synthetic accounts, chats and files only (`tests/fixtures/chatsvc/files.json`).
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -295,7 +295,7 @@ fn two_recipients_and_a_message_get_the_file_as_teams_shares_it() {
     pick(cx, "Releases");
     assert_eq!(picked(&dialog, cx), [LAB_B, CHANNEL]);
     assert!(bounds(cx, "share-file-chip-1").is_some());
-    cx.update(|window, cx| dialog.update(cx, |dialog, cx| dialog.set_message("Made-up note", window, cx)));
+    cx.update(|_, cx| dialog.update(cx, |dialog, cx| dialog.set_message("Made-up note", cx)));
     rig.core.write_answers.lock().unwrap().extend([
         sent(1, OutboxKind::Send, OutboxState::Sent, None),
         sent(2, OutboxKind::Send, OutboxState::Sent, None),
@@ -375,18 +375,129 @@ fn a_recipient_not_reached_stays_picked_and_the_dialog_says_so() {
     assert!(bounds(cx, "share-file-problem").is_some());
 }
 
+/// What the clipboard holds.
+fn copied(cx: &mut VisualTestContext) -> Option<String> {
+    cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+}
+
+/// The file's OneDrive page, where SharePoint shares it, as the fixture's first file has it.
+const ONEDRIVE_PAGE: &str = "https://contoso-my.sharepoint.com/personal/made_up_user_contoso_test/_layouts/15/onedrive.aspx?id=%2Fpersonal%2Fmade_up_user_contoso_test%2FDocuments%2FMicrosoft%20Teams%20Chat%20Files%2F02-made-up-rehearsal-cut-v3.mp4&parent=%2Fpersonal%2Fmade_up_user_contoso_test%2FDocuments%2FMicrosoft%20Teams%20Chat%20Files";
+
 #[test]
-fn copy_link_puts_the_files_link_on_the_clipboard_and_closes() {
+fn copy_link_copies_the_link_and_shows_link_created() {
     let (_rig, shell, dialog, cx) = opened();
     let link = cx.update(|_, cx| dialog.read(cx).file().share_url.clone()).unwrap();
     click(cx, "share-file-copy-link");
-    let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
-    assert_eq!(copied, Some(link));
-    assert!(shown_dialog(&shell, cx).is_none());
-    assert_eq!(
-        cx.update(|_, cx| shell.read(cx).toast().cloned()).as_deref(),
-        Some("Link copied")
+    assert_eq!(copied(cx), Some(link.clone()));
+    assert!(cx.update(|_, cx| dialog.read(cx).link_created()));
+    for selector in [
+        "share-file-link-created",
+        "share-file-link-field",
+        "share-file-link-copy",
+        "share-file-link-permission",
+        "share-file-link-settings",
+    ] {
+        assert!(bounds(cx, selector).is_some(), "{selector}");
+    }
+    assert!(bounds(cx, "share-file-title").is_none(), "in the dialog's place");
+    // Copy copies it again
+    cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new())));
+    click(cx, "share-file-link-copy");
+    assert_eq!(copied(cx), Some(link));
+    // Settings opens SharePoint's page of the file, where its links are set
+    click(cx, "share-file-link-settings");
+    assert_eq!(cx.opened_url().as_deref(), Some(ONEDRIVE_PAGE));
+    click(cx, "share-file-link-close");
+    assert!(shown_dialog(&shell, cx).is_none(), "Close closes it");
+}
+
+#[test]
+fn more_actions_shares_outside_teams_on_the_files_onedrive_page() {
+    let (_rig, _shell, dialog, cx) = opened();
+    click(cx, "share-file-more");
+    assert!(cx.update(|_, cx| dialog.read(cx).more_open()));
+    click(cx, "share-file-outside");
+    assert_eq!(cx.opened_url().as_deref(), Some(ONEDRIVE_PAGE));
+    assert!(!cx.update(|_, cx| dialog.read(cx).more_open()), "the menu closed");
+    // Escape closes the menu first, the dialog stays
+    click(cx, "share-file-more");
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    assert!(!cx.update(|_, cx| dialog.read(cx).more_open()));
+    assert!(bounds(cx, "share-file-dialog").is_some());
+}
+
+#[test]
+fn an_own_servers_file_has_no_share_outside_teams() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig);
+    let link = "https://chat.example:8443/sp/personal/0000000000004000800000000000000A/Documents/Microsoft%20Teams%20Chat%20Files/plan.pdf";
+    let entry = serde_json::json!({"@type": "http://schema.skype.com/File", "fileName": "plan.pdf", "fileType": "pdf",
+        "objectUrl": link, "fileInfo": {"shareUrl": link, "fileUrl": link}});
+    let file = teams_proto::chat::shared_files_any(Some(&serde_json::json!([entry])))
+        .files
+        .remove(0);
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_share_file(file, window, cx)));
+    draw(cx);
+    assert!(bounds(cx, "share-file-dialog").is_some());
+    assert!(
+        bounds(cx, "share-file-more").is_none(),
+        "no page outside the app to share it on"
     );
+    click(cx, "share-file-copy-link");
+    assert!(bounds(cx, "share-file-link-created").is_some());
+    assert!(
+        bounds(cx, "share-file-link-settings").is_none(),
+        "no page to set its link on"
+    );
+}
+
+#[test]
+fn the_message_is_formatted_as_the_compose_box_formats_it_and_sent_as_its_rich_text() {
+    let (rig, _shell, dialog, cx) = opened();
+    pick(cx, "Bee");
+    click(cx, "share-file-format");
+    assert!(cx.update(|_, cx| dialog.read(cx).formatting()));
+    assert!(
+        bounds(cx, "share-file-format-bar").is_some(),
+        "the compose box's format bar"
+    );
+    click(cx, "share-file-format");
+    assert!(bounds(cx, "share-file-format-bar").is_none());
+    // Format left the keyboard in the message
+    cx.simulate_input("see ");
+    cx.simulate_keystrokes("ctrl-b");
+    cx.simulate_input("this");
+    draw(cx);
+    rig.core
+        .write_answers
+        .lock()
+        .unwrap()
+        .push_back(sent(1, OutboxKind::Send, OutboxState::Sent, None));
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    let sends = sends(&rig);
+    let [(_, text)] = &sends[..] else {
+        panic!("one send: {sends:?}");
+    };
+    assert_eq!(text.html(), "<p>see <strong>this</strong></p>");
+    assert_eq!(text.shared().len(), 1);
+}
+
+#[test]
+fn the_emoji_button_puts_the_emoji_picked_in_the_message() {
+    let (_rig, _shell, dialog, cx) = opened();
+    click(cx, "share-file-emoji");
+    assert!(cx.update(|_, cx| dialog.read(cx).emoji_open()));
+    click(cx, "emoji-1f440_eyes");
+    assert!(!cx.update(|_, cx| dialog.read(cx).emoji_open()), "a pick closes it");
+    assert_eq!(cx.update(|_, cx| dialog.read(cx).message_text(cx)), "\u{1f440}");
+    // Escape closes an open picker, the dialog stays
+    click(cx, "share-file-emoji");
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    assert!(!cx.update(|_, cx| dialog.read(cx).emoji_open()));
+    assert!(bounds(cx, "share-file-dialog").is_some());
 }
 
 #[test]

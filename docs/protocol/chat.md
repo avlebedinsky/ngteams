@@ -940,6 +940,13 @@ chat) as the recipient, typed a message and pressed Share. c read the result in 
   mark and a close button. The page stays in the chat it was in.
 - **Copy link** closes the dialog and opens SharePoint's "Link created" box: the link in a field, Copy, the link's
   permission words, and Settings.
+- **Share outside Teams** opens SharePoint's share page in a frame: a form `POST` of
+  `<site>/_layouts/15/sharedialog.aspx?clientId=teams&…` whose `context` holds a SharePoint token, the item's address,
+  `uniqueId` and `shareId`. The same page opened by its address with the browser's own sign-in (`listId` and
+  `listItemId`, or `uniqueId`) answers "Unable to share right now" (401, access denied), for the file's owner too.
+  The file's sharing link opens Stream's player with Download only. OneDrive's page of the file
+  (`<site>/_layouts/15/onedrive.aspx?id=<its path>&parent=<its folder>`) gives the owner SharePoint's Share menu
+  (Share, Copy link, Manage access).
 - **The recipient's read** has the entry as it was sent (`state` null) and the message's `atp`. Teams draws the
   message's text over the file's card.
 - **The native client** offers the same dialog (`crates/teams-ui/src/share_file.rs`) from Share on a file card and
@@ -947,11 +954,15 @@ chat) as the recipient, typed a message and pressed Share. c read the result in 
   personal site (`<site>_api/v2.0/shares/u!<link>/permission`, the same SharePoint token and service), builds the entry
   with `teams_proto::chat::share_entry`, and sends one `Action::Send` for each recipient with the entry
   (`MessageText::with_shared`): the outbox's ordinary post. A person with no 1:1 chat yet gets one first
-  (`Action::CreateChat`, as New message does). An entry with `state` null reads as a file. Copy link puts the link
-  on the clipboard and says so.
+  (`Action::CreateChat`, as New message does). The message is the compose box's rich-text editor, with its format bar
+  and emoji picker, and is sent as the compose box sends a message. An entry with `state` null reads as a file. Copy
+  link puts the link on the clipboard and shows "Link created" (the link, Copy, the permission words, Settings).
+  "Share outside Teams" and Settings open OneDrive's page of the file in the browser
+  (`teams_proto::chat::onedrive_page`): no token can go to a browser, so the app can't open Teams' framed page.
 - **The own server** takes the same post. A message that names a file of the server, sent by someone with access to
   the file, gives each member of the chat access to it (`docs/server.md`). It answers the link's permission on the
-  file's site for anyone with access (`scope` `users`).
+  file's site for anyone with access (`scope` `users`). It has no web page for a file, so the dialog offers no "Share
+  outside Teams" and "Link created" no Settings for its files.
 
 ## Messages a policy blocked
 

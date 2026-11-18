@@ -2,10 +2,16 @@
 //! accounts on 2026-11-18, `docs/protocol/chat.md`, "Files: shared on"): the file sent on to any chat or channel, with
 //! an optional message.
 //!
-//! - **The dialog**: the title, "You can share to any chat or channel.", Close; "Add recipients" (marked as necessary)
-//!   with its box; "Message preview": a box with "Add a message (optional)" over the file's card (its type's icon, its
-//!   name, what its link lets people do as the file's site says it, and its picture); then Copy link and Share. Share
-//!   stays off until a recipient is picked, and while the file is being shared.
+//! - **The dialog**: the title, "You can share to any chat or channel.", "More actions" (…) and Close; "Add recipients"
+//!   (marked as necessary) with its box; "Message preview": a box with "Add a message (optional)" over the file's card
+//!   (its type's icon, its name, what its link lets people do as the file's site says it, and its picture), and Teams'
+//!   format and emoji buttons; then Copy link and Share. Share stays off until a recipient is picked, and while the
+//!   file is being shared.
+//! - **More actions** offers "Share outside Teams": SharePoint's own sharing of the file, its OneDrive page opened in
+//!   the browser ([`teams_proto::chat::onedrive_page`]). An own server's file has no such page: the menu isn't drawn.
+//! - **The message** is the app's rich-text editor, as the compose box's ([`message`]): Format shows the compose box's
+//!   format bar over it, Emoji the app's emoji picker; it is sent as the compose box sends a message
+//!   ([`crate::compose::message_of`]).
 //! - **The recipients** are found as Teams' picker finds them, as the box's text changes: people (the account's 1:1
 //!   chats' partners, then the people the directory finds, never the account itself), group and meeting chats by
 //!   their names and their people's, and the teams' channels by their names and their team's, each with its own face.
@@ -16,14 +22,22 @@
 //!   [`MessageText::with_shared`]). A person with no 1:1 chat yet gets one first ([`Action::CreateChat`], as New
 //!   message makes one). When all went out the dialog closes and the shell says "You've shared <name>"; a recipient
 //!   it couldn't reach stays picked, the others go, and the dialog says so.
-//! - **Copy link** puts the file's sharing link on the clipboard and closes the dialog; the shell says so.
+//! - **Copy link** puts the file's sharing link on the clipboard, and the dialog becomes Teams' "Link created" box
+//!   ([`link`]): the link in its field, Copy, what the link lets people do, and Settings (the file's OneDrive page,
+//!   where SharePoint sets its links), then Close.
 //! - **Keys**: the box has the keyboard when the dialog opens; Up and Down move in the suggestions, Enter takes the
-//!   one highlighted (else the first); Escape closes the suggestions and clears the box, else closes the dialog; Enter
-//!   in the message (Shift+Enter: a new line) shares; Tab goes from the box to the message, then to the buttons.
+//!   one highlighted (else the first); Escape closes an open menu or picker, then the suggestions (clearing the box),
+//!   else the dialog; Enter in the message (Shift+Enter: a new line) shares; Tab goes from the box to the message,
+//!   then to the buttons.
 //!
 //! Nothing here writes but through [`Core`]; the read-only app offers no Share. Traced: `share-file opened`,
 //! `shared`, `closed`, the conversations by id, never a name or a text.
 
+mod link;
+mod message;
+
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,21 +49,22 @@ use gpui::{
     Window, actions, div, img, px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::input::{
-    Backspace, Escape, Input, InputEvent, InputState, MoveDown, MoveUp, Textarea, TextareaState,
-};
+use gpui_component::input::{Backspace, Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
 use gpui_component::{Disableable as _, FocusTrapElement as _, Size};
 use teams_core::{Action, SearchScope};
 use teams_proto::Mri;
-use teams_proto::chat::{LinkPermission, MessageText, Node, RichText, SharedFile, share_entry_any};
+use teams_proto::chat::{LinkPermission, MessageText, RichText, SharedFile, share_entry_any};
 use teams_store::OutboxState;
 
 use crate::bridge::Core;
 use crate::chat_list::{self, ChatList, ChatRow, RowKind};
+use crate::editor::toolbar::FormatBar;
+use crate::editor::{Editor, EditorEvent};
 use crate::files::{PICTURE_RATIO, header_colour, kind_icon, no_picture, picture_colour};
 use crate::icons::{Glyph, Spinning as _, icon_button, selected_by};
 use crate::inline::{PictureSource, PictureState, thumbnail};
 use crate::people::{self, Picture};
+use crate::reaction_picker::ReactionPicker;
 use crate::sending::settled_row;
 use crate::switcher::matches;
 use crate::teams_list::TeamsList;
@@ -98,8 +113,6 @@ pub enum ShareFileEvent {
     Closed,
     /// The file (by its name) went to every recipient.
     Shared(SharedString),
-    /// Copy link: the file's sharing link, for the clipboard.
-    CopyLink(String),
 }
 
 /// A recipient, picked or suggested.
@@ -151,6 +164,8 @@ enum Step {
     Sharing,
     /// Some recipients weren't reached: what to tell.
     Failed(SharedString),
+    /// Copy link pressed: Teams' "Link created" box in the dialog's place.
+    LinkCreated,
 }
 
 /// "Share this file" (see the module docs).
@@ -163,7 +178,15 @@ pub struct ShareFileDialog {
     source: PictureSource,
     permission: Option<LinkPermission>,
     to: Entity<InputState>,
-    message: Entity<TextareaState>,
+    message: Entity<Editor>,
+    /// The compose box's format bar over the message, while Format is on.
+    format_bar: Entity<FormatBar>,
+    formatting: bool,
+    /// The emoji picker over the message, while it is open, and where its button was last drawn.
+    emoji: Option<(Entity<ReactionPicker>, Subscription)>,
+    emoji_at: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    /// "More actions" is open.
+    more_open: bool,
     picked: Vec<Target>,
     suggestions: Vec<Target>,
     suggesting: bool,
@@ -189,13 +212,8 @@ impl ShareFileDialog {
     ) -> Self {
         trace.record(&TraceLine::new("share-file", "opened"));
         let to = cx.new(|cx| InputState::new(window, cx).placeholder(RECIPIENTS_HINT));
-        let message = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .placeholder(MESSAGE_HINT)
-                .soft_wrap(true)
-                .auto_grow(1, 6)
-                .submit_on_enter(true)
-        });
+        let message = cx.new(|cx| Editor::new(window, cx).placeholder(MESSAGE_HINT));
+        let format_bar = cx.new(|cx| FormatBar::new(message.clone(), cx).without_discard());
         let subscriptions = vec![
             cx.subscribe_in(&to, window, |this: &mut Self, _, event: &InputEvent, window, cx| {
                 this.on_to(event, window, cx);
@@ -203,8 +221,8 @@ impl ShareFileDialog {
             cx.subscribe_in(
                 &message,
                 window,
-                |this: &mut Self, _, event: &InputEvent, window, cx| {
-                    if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
+                |this: &mut Self, _, event: &EditorEvent, window, cx| {
+                    if *event == EditorEvent::Submit {
                         this.share(window, cx);
                     }
                 },
@@ -221,6 +239,11 @@ impl ShareFileDialog {
             permission: None,
             to,
             message,
+            format_bar,
+            formatting: false,
+            emoji: None,
+            emoji_at: Rc::default(),
+            more_open: false,
             picked: Vec::new(),
             suggestions: Vec::new(),
             suggesting: false,
@@ -337,10 +360,10 @@ impl ShareFileDialog {
         self.refresh_suggestions(cx);
     }
 
-    /// Puts `text` in the message box.
-    pub fn set_message(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.message
-            .update(cx, |message, cx| message.set_value(text.to_owned(), window, cx));
+    /// Puts `text` in the message box, a paragraph per line.
+    pub fn set_message(&mut self, text: &str, cx: &mut Context<Self>) {
+        let doc = crate::editor::doc::Doc::new(text.lines().map(crate::editor::doc::Block::paragraph).collect());
+        self.message.update(cx, |message, cx| message.set_doc(doc, cx));
     }
 
     /// Asks the directory for the people the box names, a moment after the typing stops; an answer to what the box
@@ -532,8 +555,15 @@ impl ShareFileDialog {
         true
     }
 
-    /// Escape: the suggestions close and the box is cleared, else the dialog closes.
+    /// Escape: an open menu or picker closes, then the suggestions close and the box is cleared, else the dialog
+    /// closes.
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.more_open || self.emoji.is_some() {
+            self.more_open = false;
+            self.emoji = None;
+            cx.notify();
+            return;
+        }
         if self.suggesting && !self.to.read(cx).value().is_empty() {
             self.to.update(cx, |to, cx| to.set_value("", window, cx));
             self.suggesting = false;
@@ -549,31 +579,36 @@ impl ShareFileDialog {
         cx.emit(ShareFileEvent::Closed);
     }
 
-    /// Copy link: the file's sharing link, for the shell to put on the clipboard.
+    /// Copy link: the file's sharing link on the clipboard, and "Link created" in the dialog's place ([`link`]).
     pub fn copy_link(&mut self, cx: &mut Context<Self>) {
-        if let Some(link) = self.file.open_link() {
-            cx.emit(ShareFileEvent::CopyLink(link.to_owned()));
-        }
+        let Some(link) = self.file.open_link() else {
+            return;
+        };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(link.to_owned()));
+        self.trace.record(&TraceLine::new("share-file", "link copied"));
+        self.step = Step::LinkCreated;
+        self.more_open = false;
+        self.emoji = None;
+        self.suggesting = false;
+        cx.notify();
+    }
+
+    /// Whether "Link created" shows.
+    #[must_use]
+    pub fn link_created(&self) -> bool {
+        self.step == Step::LinkCreated
     }
 
     // --- sharing ---
 
-    /// The message as it is sent: each line a paragraph, nothing when it says nothing.
+    /// The message as it is sent: the editor's text as the compose box sends it, none when it says nothing; `None`
+    /// when it can't be sent (too long) or the file has no entry to share.
     fn text(&self, cx: &gpui::App) -> Option<MessageText> {
-        let typed = self.message.read(cx).value().to_string();
-        let nodes = typed
-            .trim()
-            .lines()
-            .map(|line| Node::Paragraph(RichText::plain(line).nodes))
-            .collect();
-        let text = MessageText::new(
-            RichText {
-                nodes,
-                truncated: false,
-            },
-            [],
-        )
-        .ok()?;
+        let text = match crate::compose::message_of(self.message.read(cx).doc(), &[]) {
+            Ok(Some(text)) => text,
+            Ok(None) => MessageText::new(RichText::default(), []).ok()?,
+            Err(_) => return None,
+        };
         let entry = share_entry_any(
             &self.file,
             self.permission.as_ref().map(|permission| permission.scope.as_str()),
@@ -587,7 +622,7 @@ impl ShareFileDialog {
             return;
         }
         let Some(text) = self.text(cx) else {
-            self.step = Step::Failed("This file can't be shared from here.".into());
+            self.step = Step::Failed("This message or file can't be shared. Shorten the message and try again.".into());
             cx.notify();
             return;
         };
@@ -688,7 +723,7 @@ fn searchable_name(row: &ChatRow) -> SharedString {
 // --- drawing ---
 
 impl ShareFileDialog {
-    fn header(palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn header(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let close = selected_by(
             "share-file-close",
             icon_button("share-file-close", Glyph::X, "Close").on_click(cx.listener(|this, _, _, cx| this.close(cx))),
@@ -718,6 +753,7 @@ impl ShareFileDialog {
                             .child(SUBTITLE),
                     ),
             )
+            .children(self.more_button(cx))
             .child(close)
             .into_any_element()
     }
@@ -812,7 +848,8 @@ impl ShareFileDialog {
             .key_context(TO_CONTEXT)
             .on_action(cx.listener(|this, _: &ToMessage, window, cx| {
                 this.suggesting = false;
-                this.message.update(cx, |message, cx| message.focus(window, cx));
+                let focus = this.message.read(cx).focus_handle(cx);
+                window.focus(&focus, cx);
                 cx.notify();
             }))
             .min_h(px(34.0))
@@ -1019,7 +1056,8 @@ impl ShareFileDialog {
             .into_any_element()
     }
 
-    /// "Message preview": the message's box over the file's card.
+    /// "Message preview": the message's box (the format bar over it while Format is on) over the file's card, and the
+    /// box's format and emoji buttons.
     fn preview(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         div()
             .debug_selector(|| "share-file-preview".to_owned())
@@ -1031,12 +1069,17 @@ impl ShareFileDialog {
             .border_1()
             .border_color(rgb(palette.border))
             .bg(rgb(field(palette)))
+            .children(self.format_line(palette))
             .child(
                 div()
+                    .id("share-file-message")
                     .debug_selector(|| "share-file-message".to_owned())
-                    .child(Textarea::new(&self.message).appearance(false)),
+                    .max_h(px(160.0))
+                    .overflow_y_scroll()
+                    .child(self.message.clone()),
             )
             .child(self.file_card(palette, cx))
+            .child(self.message_tools(cx))
             .into_any_element()
     }
 
@@ -1095,6 +1138,9 @@ impl Focusable for ShareFileDialog {
 impl Render for ShareFileDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::current(cx);
+        if self.step == Step::LinkCreated {
+            return self.link_created_view(palette, cx);
+        }
         let suggestions = self.suggestions_panel(palette, cx);
         div()
             .debug_selector(|| "share-file-dialog".to_owned())
@@ -1102,6 +1148,7 @@ impl Render for ShareFileDialog {
             .key_context("ShareFileDialog")
             .track_focus(&self.focus)
             .occlude()
+            .relative()
             .w(px(WIDTH))
             .max_w_full()
             .max_h(window.viewport_size().height - px(48.0))
@@ -1117,7 +1164,7 @@ impl Render for ShareFileDialog {
             .shadow_lg()
             .on_click(|_, _, cx| cx.stop_propagation())
             .on_key_down(cx.listener(Self::on_key))
-            .child(Self::header(palette, cx))
+            .child(self.header(palette, cx))
             .child(
                 div()
                     .flex()
@@ -1136,6 +1183,9 @@ impl Render for ShareFileDialog {
                     .child(self.preview(palette, cx)),
             )
             .child(self.buttons(palette, cx))
+            .children(self.more_menu(palette, cx))
+            .children(self.emoji_overlay())
             .focus_trap("share-file-trap", &self.focus)
+            .into_any_element()
     }
 }

@@ -18,8 +18,8 @@ use teams_proto::chat::{
     AppConsumptionHorizon, ChatReadError, ChatReads, Code, CodeRun, Conversation, ConversationKind, ConversationList,
     Field, FileKind, FilePreview, LinkPermission, List, MAX_CONTENT, MAX_DEPTH, Marks, MemberList, MentionKind,
     Message, MessagePage, MessageText, MessageType, Node, Quote, RichText, SharedFile, SharedFiles, Table, TableCell,
-    Thread, Token, Unshown, WEB_CLIENT, forwarded, link_endpoint, parse_html, read_link_permission, share_entry,
-    share_token, shared_files, unshown_parts, web_chat_link,
+    Thread, Token, Unshown, WEB_CLIENT, forwarded, link_endpoint, onedrive_page, parse_html, read_link_permission,
+    share_entry, share_token, shared_files, unshown_parts, web_chat_link,
 };
 use teams_proto::{Client, Cloud, Credentials, HttpError, HttpTransport};
 use wiremock::matchers::{method, path_regex};
@@ -2439,4 +2439,29 @@ fn regex_escape(text: &str) -> String {
             escaped.then_some('\\').into_iter().chain([c])
         })
         .collect()
+}
+
+#[test]
+fn share_outside_teams_opens_onedrives_page_of_the_file() {
+    let file = shared_files(Some(&Value::Array(grid_entries().unwrap())))
+        .files
+        .remove(1);
+    assert_eq!(
+        onedrive_page(&file).as_deref(),
+        Some(
+            "https://contoso-my.sharepoint.com/personal/made_up_user_contoso_test/_layouts/15/onedrive.aspx?id=%2Fpersonal%2Fmade_up_user_contoso_test%2FDocuments%2FMicrosoft%20Teams%20Chat%20Files%2Fmade-up-camera-take-1.mp4&parent=%2Fpersonal%2Fmade_up_user_contoso_test%2FDocuments%2FMicrosoft%20Teams%20Chat%20Files"
+        )
+    );
+    // an own server's file, a team site's or one with no address of its own has none
+    for object in [
+        Some("https://chat.example:8443/sp/personal/0000000000004000800000000000000B/Documents/plan.pdf"),
+        Some("https://contoso.sharepoint.com/sites/made-up/Shared%20Documents/plan.pdf"),
+        None,
+    ] {
+        let other = SharedFile {
+            object_url: object.map(str::to_owned),
+            ..file.clone()
+        };
+        assert_eq!(onedrive_page(&other), None, "{object:?}");
+    }
 }

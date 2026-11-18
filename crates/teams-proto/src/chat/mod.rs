@@ -38,7 +38,7 @@ pub use event::{
     meeting_times,
 };
 pub use file_share::{
-    LinkPermission, is_share_entry_in, read_link_permission, share_entry, share_entry_any, share_token,
+    LinkPermission, is_share_entry_in, onedrive_page, read_link_permission, share_entry, share_entry_any, share_token,
 };
 pub use files::{
     FILE_TYPE, FileKind, FilePreview, SharedFile, SharedFiles, is_file_link, is_file_link_in, is_sharepoint_host,

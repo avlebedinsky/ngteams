@@ -6,6 +6,10 @@
 //! - **The entry** is the received one with what Teams resets in a share: `fileInfo.itemId`, `fileChicletState.state`,
 //!   `state`, `altText`, `progressComplete`, `sharepointIds`, `publication` and `site` null, `isUploadError` false,
 //!   and `permissionScope` the scope of the file's sharing link as the dialog read it ([`LinkPermission`]).
+//! - **Share outside Teams** (the dialog's "…") and the Settings of "Link created" open SharePoint's own sharing
+//!   for the file in the browser: OneDrive's page of the file ([`onedrive_page`]), whose Share offers Share, Copy link
+//!   and Manage access. Teams opens SharePoint's share page in a frame with a token it posts, which a browser can't be
+//!   given (lab, 2026-11-18: the same page opened by its address refuses even the file's owner).
 //! - **The link's permission** is read on the file's site (`<site>_api/v2.0/shares/u!<link>/permission`, the sharing
 //!   token as Graph's: [`share_token`]). The dialog shows its words under the file's name ("Anyone with the link can
 //!   edit"); its scope goes into the entry.
@@ -62,6 +66,35 @@ pub fn share_entry_any(file: &SharedFile, scope: Option<&str>) -> Option<Value> 
         share_entry(&own_cloud_of(&entry)?, file, scope)
     })
 }
+
+/// OneDrive's page of `file` (see the module docs): `<site>_layouts/15/onedrive.aspx?id=<its path>&parent=<its
+/// folder's>`, its path the one of its own address on a personal site of Microsoft's file service; `None` for any
+/// other file (an own server's has no such page).
+#[must_use]
+pub fn onedrive_page(file: &SharedFile) -> Option<String> {
+    let object = file.object_url.as_deref()?;
+    let site = crate::DriveSite::from_web_url(object)?;
+    let url = url::Url::parse(object).ok()?;
+    let path = percent_encoding::percent_decode_str(url.path()).decode_utf8().ok()?;
+    let (folder, name) = path.rsplit_once('/')?;
+    if name.is_empty() || folder.is_empty() {
+        return None;
+    }
+    // as OneDrive writes them: every character but a letter, a digit, `-`, `_` and `.` escaped, a space as `%20`
+    let escaped = |text: &str| percent_encoding::utf8_percent_encode(text, &PAGE_QUERY).to_string();
+    Some(format!(
+        "{}_layouts/15/onedrive.aspx?id={}&parent={}",
+        site.base(),
+        escaped(&path),
+        escaped(folder)
+    ))
+}
+
+/// What [`onedrive_page`] escapes in its query.
+const PAGE_QUERY: percent_encoding::AsciiSet = percent_encoding::NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.');
 
 /// Whether `entry` is one a share posts on `cloud`: one file's entry, read with a link on that cloud's file service.
 #[must_use]

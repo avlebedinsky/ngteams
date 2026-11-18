@@ -2359,10 +2359,6 @@ impl Shell {
             match event {
                 ShareFileEvent::Closed => {}
                 ShareFileEvent::Shared(name) => this.show_done_toast(format!("You've shared {name}").into(), cx),
-                ShareFileEvent::CopyLink(link) => {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(link.clone()));
-                    this.show_toast("Link copied", cx);
-                }
             }
             cx.notify();
         });
