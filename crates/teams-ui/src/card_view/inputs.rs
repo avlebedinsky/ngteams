@@ -3,8 +3,8 @@
 //! message's [`CardBot`].
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, Entity, HighlightStyle, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
-    Styled, StyledText, div, px, rgb,
+    AnyElement, App, Entity, Focusable, HighlightStyle, InteractiveElement as _, IntoElement, MouseButton,
+    ParentElement as _, SharedString, Styled, StyledText, div, px, rgb,
 };
 use gpui_component::Disableable as _;
 use gpui_component::button::Button;
@@ -105,13 +105,23 @@ fn label_text(label: &str, required: bool) -> StyledText {
 fn control(place: &Place<'_>, input: &Input, field: Option<&Field>) -> AnyElement {
     let selector = place.selector.clone();
     match (&input.kind, field) {
-        (InputKind::Time { .. }, Some(Field::Text(state))) => time_field(place, state),
-        (_, Some(Field::Text(state))) => selected_by(selector, TextInput::new(state).disabled(place.off))
-            .w_full()
-            .into_any_element(),
-        (_, Some(Field::Multiline(state))) => selected_by(
-            selector,
-            Textarea::new(state).h(px(MULTILINE_HEIGHT)).disabled(place.off),
+        (InputKind::Time { .. }, Some(Field::Text(state))) => {
+            keys_to(time_field(place, state), state, place.off).into_any_element()
+        }
+        (_, Some(Field::Text(state))) => keys_to(
+            selected_by(selector, TextInput::new(state).disabled(place.off)),
+            state,
+            place.off,
+        )
+        .w_full()
+        .into_any_element(),
+        (_, Some(Field::Multiline(state))) => keys_to(
+            selected_by(
+                selector,
+                Textarea::new(state).h(px(MULTILINE_HEIGHT)).disabled(place.off),
+            ),
+            state,
+            place.off,
         )
         .w_full()
         .into_any_element(),
@@ -299,14 +309,27 @@ fn face_of(face: String, faint: bool, palette: Palette) -> gpui::Div {
         )
 }
 
+/// `control`, the field of text `state`, with the keys going to its text after any press on it.
+fn keys_to<T: Focusable>(control: gpui::Div, state: &Entity<T>, off: bool) -> gpui::Div {
+    let state = state.clone();
+    control.when(!off, |control| {
+        control.on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            // a press beside the text focuses the kit's frame, which shows the ring but takes no text
+            let focus = state.read(cx).focus_handle(cx);
+            if !focus.is_focused(window) {
+                focus.focus(window, cx);
+            }
+        })
+    })
+}
+
 /// A time: typed, or chosen from the half hours under its chevron, as Teams' time picker offers them. A chosen time
 /// clears the field's error mark.
-fn time_field(place: &Place<'_>, state: &Entity<InputState>) -> AnyElement {
+fn time_field(place: &Place<'_>, state: &Entity<InputState>) -> gpui::Div {
     let (bot, key) = (place.bot.clone(), place.key.clone());
     let rows = format!("{}-times", place.selector);
     crate::time_picker::time_field(state, &place.selector, &rows, place.off, move |cx| {
         bot.update(cx, |bot, cx| bot.picked(&key, cx));
     })
     .w_full()
-    .into_any_element()
 }
