@@ -363,6 +363,11 @@ impl Sandbox {
     /// Starts weston, then niri nested in it, then the bus and its fakes, and installs the opener; then the private
     /// PipeWire, its session manager and its camera and recording when [`SandboxOptions::pipewire`] asks.
     ///
+    /// For desktop-shell outputs larger than 1280×800 on either axis, startup does not wait for weston's pointer.
+    /// weston can still send a late enter when both window offsets are at most 100 pixels.
+    /// This can move an immediate virtual click to that enter point.
+    /// Set [`SandboxOptions::fill_output`] to `true` for reliable clicks immediately after start.
+    ///
     /// # Errors
     /// A compositor or the bus fails to start or make its sockets in time, or (when asked for) the PipeWire tools
     /// aren't here or the private PipeWire fails to start (see [`PrivatePipeWire::start`]).
@@ -559,13 +564,14 @@ impl Sandbox {
     /// If niri starts at the output's corner, waits until weston's own pointer enters its window.
     /// weston sends that enter, at [`HOST_POINTER`], after niri's first frame reaches its output.
     /// niri moves its cursor there, so a virtual click sent before the enter lands there instead.
+    /// Larger desktop-shell outputs skip this wait and retain the click risk (see [`Self::start`]).
     ///
     /// # Errors
     /// niri's cursor isn't there in time.
     fn wait_for_host_pointer(&self) -> SandboxResult {
         let default = SandboxOptions::default();
         if !self.options.fill_output && (self.options.width > default.width || self.options.height > default.height) {
-            // A larger desktop-shell output can place niri away from weston's pointer.
+            // A larger output can miss the pointer or get a late enter that moves a click (see `Self::start`).
             return Ok(());
         }
         let png = self.path("host-pointer.png");
