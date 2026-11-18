@@ -864,6 +864,9 @@ impl Editor {
 
     /// Undoes the last step.
     pub fn undo(&mut self, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         let Some(snapshot) = self.undo.pop() else { return };
         self.redo.push(Snapshot {
             doc: std::mem::replace(&mut self.doc, snapshot.doc),
@@ -874,6 +877,9 @@ impl Editor {
 
     /// Does again the step undone last.
     pub fn redo(&mut self, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         let Some(snapshot) = self.redo.pop() else { return };
         self.undo.push(Snapshot {
             doc: std::mem::replace(&mut self.doc, snapshot.doc),

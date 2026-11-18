@@ -153,6 +153,7 @@ pub struct FakeCore {
     pub own_answers: Mutex<VecDeque<Result<TransientSent, EngineError>>>,
     /// Every row resent, by id, in order.
     pub resent: Mutex<Vec<i64>>,
+    pub resend_errors: Mutex<VecDeque<EngineError>>,
     /// The outbox rows that aren't sent, of any conversation, the oldest first.
     pub unsettled: Mutex<Vec<OutboxEntry>>,
     /// While set, `outbox_unsettled` isn't answered (as the engine's loop doesn't while it sends): its answers are kept
@@ -873,6 +874,9 @@ impl Core for FakeCore {
 
     fn resend(&self, id: i64) -> Reply<OutboxEntry> {
         locked(&self.resent).push(id);
+        if let Some(error) = locked(&self.resend_errors).pop_front() {
+            return Reply::ready(Err(error));
+        }
         self.answer("resend", || outbox_row(id, OutboxKind::Send, OutboxState::Pending))
     }
 

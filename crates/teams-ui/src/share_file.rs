@@ -24,7 +24,8 @@
 //!   A recipient that the send cannot reach stays picked. The dialog removes successful recipients and shows an error.
 //! - **Access**: Microsoft links must have the `anonymous` scope. Other scopes and unknown permissions show an
 //!   access error. An own server grants access with the message.
-//! - **Retries** keep each recipient's outbox row and use [`Core::resend`]. An unknown outcome shows a warning first.
+//! - **Retries** read each recipient's current outbox row and use [`Core::resend`]. An unknown outcome shows a warning first.
+//!   A file post keeps the message editor read-only until the dialog closes.
 //!   Close, Escape and Copy link cannot stop an active share.
 //! - **Copy link** puts the file's sharing link on the clipboard, and the dialog becomes Teams' "Link created" box
 //!   ([`link`]): the link in its field, Copy, what the link lets people do, and Settings (the file's OneDrive page,
@@ -59,7 +60,7 @@ use gpui_component::input::{Backspace, Escape, Input, InputEvent, InputState, Mo
 use gpui_component::{Disableable as _, FocusTrapElement as _, Size};
 use teams_core::SearchScope;
 use teams_proto::chat::{LinkPermission, MessageText, RichText, SharedFile, share_entry_any};
-use teams_store::{OutboxEntry, OutboxState};
+use teams_store::{OutboxEntry, OutboxKind, OutboxState};
 
 use crate::bridge::Core;
 use crate::chat_list::{self, ChatList, ChatRow, RowKind};
@@ -371,6 +372,9 @@ impl ShareFileDialog {
 
     /// Puts `text` in the message box, a paragraph per line.
     pub fn set_message(&mut self, text: &str, cx: &mut Context<Self>) {
+        if self.message_locked() {
+            return;
+        }
         let doc = crate::editor::doc::Doc::new(text.lines().map(crate::editor::doc::Block::paragraph).collect());
         self.message.update(cx, |message, cx| message.set_doc(doc, cx));
     }
@@ -652,15 +656,15 @@ impl ShareFileDialog {
             cx.notify();
             return;
         }
-        if self.warn_before_retry(cx) {
-            return;
-        }
         let Some(text) = self.text(cx) else {
             self.step = Step::Failed("This message or file can't be shared. Shorten the message and try again.".into());
             cx.notify();
             return;
         };
+        let confirmed = matches!(self.step, Step::ConfirmRetry(_));
         self.step = Step::Sharing;
+        self.lock_message(cx);
+        self.emoji = None;
         self.suggesting = false;
         let targets = self.picked.clone();
         let mut retries = self.retries.clone();
@@ -674,11 +678,20 @@ impl ShareFileDialog {
             .collect();
         self.tasks
             .push(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let refreshed = send::refresh(core.as_ref(), &targets, &mut retries).await;
+                let proceed = this.update(cx, |this, cx| {
+                    this.retries.clone_from(&retries);
+                    this.ready_to_retry(refreshed, confirmed, cx)
+                });
+                if !proceed.unwrap_or(false) {
+                    return;
+                }
                 let mut missed = Vec::new();
                 for target in targets {
-                    let previous = retries.remove(target.key());
+                    let previous = retries.get(target.key()).cloned();
                     let row = send::send_to(&core, &target, &chats, text.clone(), previous, cx).await;
                     if row.as_ref().is_some_and(|row| row.state == OutboxState::Sent) {
+                        retries.remove(target.key());
                         continue;
                     }
                     retries.extend(row.map(|row| (target.key().to_owned(), row)));
@@ -689,26 +702,42 @@ impl ShareFileDialog {
         cx.notify();
     }
 
-    fn warn_before_retry(&mut self, cx: &mut Context<Self>) -> bool {
-        if matches!(self.step, Step::ConfirmRetry(_))
-            || !self
-                .picked
-                .iter()
-                .filter_map(|target| self.retries.get(target.key()))
-                .any(|row| teams_core::outcome_unknown(row) || Again::of(row, false) == Again::AfterWarning)
-        {
-            return false;
+    fn ready_to_retry(&mut self, refreshed: bool, confirmed: bool, cx: &mut Context<Self>) -> bool {
+        if !refreshed {
+            self.step = Step::Failed("We could not check the share. Try again.".into());
+        } else if confirmed || !self.warn_before_retry() {
+            return true;
         }
-        self.step = Step::ConfirmRetry(crate::chat_view::MAY_HAVE_ARRIVED.into());
+        self.lock_message(cx);
         cx.notify();
+        false
+    }
+
+    fn warn_before_retry(&mut self) -> bool {
+        let Some(row) = self
+            .picked
+            .iter()
+            .filter_map(|target| self.retries.get(target.key()))
+            .filter(|row| teams_core::outcome_unknown(row) || Again::of(row, false) == Again::AfterWarning)
+            .min_by_key(|row| row.kind != OutboxKind::Send)
+        else {
+            return false;
+        };
+        let question = if row.kind == OutboxKind::Send {
+            crate::chat_view::MAY_HAVE_ARRIVED
+        } else {
+            "The chat may already exist. Try to create it again?"
+        };
+        self.step = Step::ConfirmRetry(question.into());
         true
     }
 
     /// The share's end: every recipient reached closes the dialog, else those missed stay picked.
     fn shared(&mut self, missed: Vec<Target>, retries: HashMap<String, OutboxEntry>, cx: &mut Context<Self>) {
         self.retries = retries;
+        self.step = Step::Ready;
+        self.lock_message(cx);
         if missed.is_empty() {
-            self.step = Step::Ready;
             self.trace.record(&TraceLine::new("share-file", "shared"));
             cx.emit(ShareFileEvent::Shared(self.file.name.clone().into()));
             return;

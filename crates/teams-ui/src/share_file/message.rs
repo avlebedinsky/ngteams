@@ -9,7 +9,8 @@ use gpui::{
     AnyElement, AppContext as _, Context, Focusable as _, InteractiveElement as _, IntoElement, ParentElement as _,
     Styled as _, anchored, deferred, div, px, rgb,
 };
-use gpui_component::{Selectable as _, Sizable as _};
+use gpui_component::{Disableable as _, Selectable as _, Sizable as _};
+use teams_store::OutboxKind;
 
 use super::ShareFileDialog;
 use crate::chat_view::measured;
@@ -25,8 +26,20 @@ pub const HIDE_FORMATTING: &str = "Hide formatting options";
 pub const EMOJI: &str = "Emoji, GIFs and Stickers";
 
 impl ShareFileDialog {
+    pub(super) fn message_locked(&self) -> bool {
+        self.step == super::Step::Sharing || self.retries.values().any(|row| row.kind == OutboxKind::Send)
+    }
+
+    pub(super) fn lock_message(&self, cx: &mut Context<Self>) {
+        self.message
+            .update(cx, |editor, cx| editor.set_read_only(self.message_locked(), cx));
+    }
+
     /// Format: shows or hides the format bar over the message, the message keeping the keyboard.
     pub fn toggle_formatting(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        if self.message_locked() {
+            return;
+        }
         self.formatting = !self.formatting;
         let focus = self.message.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
@@ -41,6 +54,9 @@ impl ShareFileDialog {
 
     /// Emoji: opens the emoji picker over the message, or closes it.
     pub fn toggle_emoji(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        if self.message_locked() {
+            return;
+        }
         if self.emoji.take().is_some() {
             cx.notify();
             return;
@@ -97,6 +113,7 @@ impl ShareFileDialog {
             "share-file-format",
             icon_button("share-file-format", Glyph::TEXT_FORMAT, tip)
                 .small()
+                .disabled(self.message_locked())
                 .selected(self.formatting)
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_formatting(window, cx))),
         );
@@ -104,6 +121,7 @@ impl ShareFileDialog {
             "share-file-emoji",
             icon_button("share-file-emoji", Glyph::EMOJI, EMOJI)
                 .small()
+                .disabled(self.message_locked())
                 .selected(self.emoji.is_some())
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_emoji(window, cx))),
         )
