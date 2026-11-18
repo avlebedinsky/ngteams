@@ -204,6 +204,11 @@ name = "qa_ai_providers_window"
 harness = false
 
 [[test]]
+# QA of task 575: one message translated from its More options menu, over the mock and an own server, in the UI sandbox
+name = "qa_translate_message_window"
+harness = false
+
+[[test]]
 # QA of task 420: a channel meeting's title, its post's Join and its end in the app's window over the mock
 name = "qa_channel_meeting_window"
 harness = false
