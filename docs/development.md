@@ -1048,7 +1048,7 @@ ulimit -n 4096
 export DYLD_FALLBACK_LIBRARY_PATH=~/ngteams-agent/gstreamer/lib
 cargo test -p teams-media --test share & pid=$!
 ( sleep 1200; pkill -TERM -P $pid; kill $pid ) & watchdog=$!
-wait $pid; kill $watchdog 2>/dev/null
+wait $pid; rc=$?; kill $watchdog 2>/dev/null; (exit $rc)
 ```
 
 What macOS has of its own: data and config under `~/Library/Application Support/ngteams/{data,config}` (the lab's
