@@ -74,6 +74,8 @@ pub enum ChannelViewEvent {
     AppDetails(Box<teams_proto::StoreApp>),
     /// A post's "Translation" → "Settings".
     TranslationSettings,
+    /// A file card's Share: "Share this file" for that file, as a chat's ([`ChatViewEvent::ShareFile`]).
+    ShareFile(Box<teams_proto::chat::SharedFile>),
 }
 
 /// A post's thread, open beside the posts.
@@ -161,6 +163,7 @@ impl ChannelView {
                 message: message.clone(),
             }),
             ChatViewEvent::CreateWorkflows(message) => cx.emit(ChannelViewEvent::CreateWorkflows(message.clone())),
+            ChatViewEvent::ShareFile(file) => cx.emit(ChannelViewEvent::ShareFile(file.clone())),
             ChatViewEvent::AppDialog(seed) => cx.emit(ChannelViewEvent::AppDialog(seed.clone())),
             ChatViewEvent::AppDetails(store) => cx.emit(ChannelViewEvent::AppDetails(store.clone())),
             ChatViewEvent::TranslationSettings => cx.emit(ChannelViewEvent::TranslationSettings),

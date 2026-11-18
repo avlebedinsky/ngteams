@@ -90,6 +90,7 @@ use crate::presence;
 use crate::search::HitTarget;
 use crate::settings::{ManualStatus, SettingsModel};
 use crate::settings_view::{self, Page, SettingsView, SettingsViewEvent, TestCallOffer, TestCallState};
+use crate::share_file::{ShareFileDialog, ShareFileEvent};
 use crate::sidebar::Sidebar;
 use crate::switcher::{CallCommand, Switcher, SwitcherEvent};
 use crate::team_app_dialogs::{AddAppDialog, TeamPictureDialog};
@@ -207,6 +208,7 @@ pub fn init(cx: &mut App) {
     global_search::init(cx);
     crate::activity_view::init(cx);
     crate::new_chat::init(cx);
+    crate::share_file::init(cx);
     cx.bind_keys([
         KeyBinding::new("secondary-k", ToggleSwitcher, None),
         // Teams' desktop key for New message
@@ -298,6 +300,15 @@ pub struct ShellParts {
     pub trace: Arc<ViewTrace>,
 }
 
+/// How a toast looks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToastLook {
+    /// Its words alone, at the bottom in the middle.
+    Plain,
+    /// Something was done, as Teams says a share went: its check, the words and a close button, at the bottom left.
+    Done,
+}
+
 /// The shell (see the module docs).
 pub struct Shell {
     core: Arc<dyn Core>,
@@ -334,6 +345,8 @@ pub struct Shell {
     switcher: Option<(Entity<Switcher>, Subscription)>,
     /// A team's "Create a channel" dialog, while it is open.
     channel_dialog: Option<(Entity<ChannelDialog>, Subscription)>,
+    /// "Share this file", while it is open.
+    share_dialog: Option<(Entity<ShareFileDialog>, Subscription)>,
     /// "Your teams and channels", once it was opened.
     teams_page: Option<(Entity<TeamsPage>, Subscription)>,
     /// Manage team, while it is shown.
@@ -353,6 +366,8 @@ pub struct Shell {
     dialog_return: crate::keyboard::Return,
     /// A toast, while one shows.
     toast: Option<(SharedString, Task<()>)>,
+    /// How the toast looks.
+    toast_look: ToastLook,
     activity_undo: Option<i64>,
     /// The title bar's search: its box, its suggestions and its results.
     search_box: Entity<GlobalSearch>,
@@ -469,6 +484,7 @@ impl Shell {
             ai_notice,
             switcher: None,
             channel_dialog: None,
+            share_dialog: None,
             teams_page: None,
             manage_team: None,
             join_team: None,
@@ -479,6 +495,7 @@ impl Shell {
             team_dialog: None,
             dialog_return: crate::keyboard::Return::default(),
             toast: None,
+            toast_look: ToastLook::Plain,
             activity_undo: None,
             search_box,
             history: History::default(),
@@ -2089,7 +2106,18 @@ impl Shell {
         if words.is_empty() {
             return;
         }
+        self.show_toast_words(words.into(), ToastLook::Plain, cx);
+    }
+
+    /// A toast that says something was done (`words`): Teams' check, the words and a close button, at the bottom
+    /// left, for a few seconds.
+    pub fn show_done_toast(&mut self, words: SharedString, cx: &mut Context<Self>) {
+        self.show_toast_words(words, ToastLook::Done, cx);
+    }
+
+    fn show_toast_words(&mut self, words: SharedString, look: ToastLook, cx: &mut Context<Self>) {
         self.activity_undo = None;
+        self.toast_look = look;
         let task = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             cx.background_executor().timer(std::time::Duration::from_secs(4)).await;
             let _ = this.update(cx, |this, cx| {
@@ -2202,8 +2230,8 @@ impl Shell {
     /// The toast, at the bottom of the window.
     fn toast_view(&self, palette: Palette, cx: &mut Context<Self>) -> Option<gpui::Div> {
         self.toast.as_ref().map(|(words, _)| {
-            if self.activity_undo.is_some() {
-                return Self::activity_app_toast(words.clone(), palette, cx);
+            if self.activity_undo.is_some() || self.toast_look == ToastLook::Done {
+                return self.activity_app_toast(words.clone(), palette, cx);
             }
             div()
                 .absolute()
@@ -2228,7 +2256,7 @@ impl Shell {
         })
     }
 
-    fn activity_app_toast(words: SharedString, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
+    fn activity_app_toast(&self, words: SharedString, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
         let close = selected_by(
             "activity-dismiss-app-toast",
             icon_button("activity-dismiss-app-toast", Glyph::X, "Dismiss")
@@ -2284,7 +2312,9 @@ impl Shell {
                     )
                     .child(close),
             )
-            .child(div().ml_6().child(undo))
+            .when(self.activity_undo.is_some(), |toast| {
+                toast.child(div().ml_6().child(undo))
+            })
     }
 
     /// Opens the team's "Create a channel" dialog over everything; it tells when it closes, and on which channel.
@@ -2304,6 +2334,64 @@ impl Shell {
         });
         self.channel_dialog = Some((dialog, closes));
         cx.notify();
+    }
+
+    /// Opens "Share this file" for `file` over everything; it tells when it closes, and whether the file went out.
+    pub fn open_share_file(
+        &mut self,
+        file: teams_proto::chat::SharedFile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.core.read_only() {
+            return;
+        }
+        self.close_switcher(window, cx);
+        self.dialog_return.keep(window, cx);
+        let parts = (Arc::clone(&self.core), Arc::clone(&self.trace));
+        let lists = (self.list.clone(), self.teams.clone());
+        let dialog = cx.new(|cx| ShareFileDialog::new(parts, lists, file, window, cx));
+        dialog.update(cx, |dialog, cx| dialog.focus(window, cx));
+        let events = cx.subscribe_in(&dialog, window, |this: &mut Self, _, event, window, cx| {
+            this.share_dialog = None;
+            this.focus.focus(window, cx);
+            this.dialog_return.give_back(window, cx);
+            match event {
+                ShareFileEvent::Closed => {}
+                ShareFileEvent::Shared(name) => this.show_done_toast(format!("You've shared {name}").into(), cx),
+                ShareFileEvent::CopyLink(link) => {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(link.clone()));
+                    this.show_toast("Link copied", cx);
+                }
+            }
+            cx.notify();
+        });
+        self.share_dialog = Some((dialog, events));
+        cx.notify();
+    }
+
+    /// "Share this file", while it is open.
+    #[must_use]
+    pub fn share_dialog(&self) -> Option<&Entity<ShareFileDialog>> {
+        self.share_dialog.as_ref().map(|(dialog, _)| dialog)
+    }
+
+    /// "Share this file" over everything, while it is open.
+    fn share_dialog_view(&self) -> Option<gpui::Stateful<gpui::Div>> {
+        self.share_dialog().cloned().map(|dialog| {
+            div()
+                .id("share-file-backdrop")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .occlude()
+                .bg(gpui::rgba(0x0000_0080))
+                .child(dialog)
+        })
     }
 
     /// The team's "Create a channel" dialog, while it is open.
@@ -2635,6 +2723,7 @@ impl Shell {
                 open,
             } => this.open_recap(recording.clone(), transcribed.clone(), *open, window, cx),
             ChatViewEvent::OpenSavedTranscript(id) => this.open_saved_transcript(*id, window, cx),
+            ChatViewEvent::ShareFile(file) => this.open_share_file(file.as_ref().clone(), window, cx),
             ChatViewEvent::AppDialog(seed) => this.open_app_dialog(seed.as_ref().clone(), window, cx),
             ChatViewEvent::ShowStore => this.open_apps(window, cx),
             ChatViewEvent::AppDetails(store) => this.open_app_details(store.as_ref().clone(), window, cx),
@@ -2673,6 +2762,7 @@ impl Shell {
             ChannelViewEvent::AppDialog(seed) => this.open_app_dialog(seed.as_ref().clone(), window, cx),
             ChannelViewEvent::AppDetails(store) => this.open_app_details(store.as_ref().clone(), window, cx),
             ChannelViewEvent::TranslationSettings => this.open_settings_page(Page::General, window, cx),
+            ChannelViewEvent::ShareFile(file) => this.open_share_file(file.as_ref().clone(), window, cx),
         })
     }
 
@@ -3597,6 +3687,7 @@ impl Render for Shell {
         let switcher = self.switcher().map(|switcher| overlay(switcher.clone().into()));
         let status_menu = self.status_menu.then(|| self.status_menu_view(palette, cx));
         let channel_dialog = self.channel_dialog_view();
+        let share_dialog = self.share_dialog_view();
         let team_dialog = self.team_dialog_view();
         let toast = self.toast_view(palette, cx);
         let more_apps = self.more_apps_view(palette, cx);
@@ -3636,6 +3727,7 @@ impl Render for Shell {
             .children(switcher)
             .children(status_menu)
             .children(channel_dialog)
+            .children(share_dialog)
             .children(team_dialog)
             .children(more_apps)
             .children(card)

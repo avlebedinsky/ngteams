@@ -169,6 +169,7 @@ pub mod selection;
 pub mod sending;
 pub mod settings;
 pub mod settings_view;
+pub mod share_file;
 pub mod shared_view;
 pub mod sheet;
 pub mod shell;

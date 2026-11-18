@@ -265,6 +265,8 @@ pub struct FakeCore {
     pub meeting_options: Mutex<Option<teams_proto::MeetingOptions>>,
     /// The app's read-only mode, as `Core::read_only` answers it.
     pub read_only: Mutex<bool>,
+    /// What `link_permission` answers for any file (none: the answer named no link).
+    pub link_permission: Mutex<Option<teams_proto::chat::LinkPermission>>,
     /// The optional services the account's cloud serves, as `Core::capabilities` answers them: all when `None`.
     pub capabilities: Mutex<Option<teams_core::Capabilities>>,
     /// Every bot ask, in order; each answered from `bot_answers`, else `Done`; with `hold_bot_answers` set, each
@@ -1127,6 +1129,11 @@ impl Core for FakeCore {
 
     fn file_size(&self, _: String) -> Reply<u64> {
         Reply::ready(Err(teams_core::EngineError::FileUnavailable))
+    }
+
+    fn link_permission(&self, _: String, _: String) -> Reply<Option<teams_proto::chat::LinkPermission>> {
+        let permission = locked(&self.link_permission).clone();
+        self.answer("link_permission", || permission)
     }
 
     fn profile_card(&self, mri: String) -> Reply<teams_core::ProfileCard> {

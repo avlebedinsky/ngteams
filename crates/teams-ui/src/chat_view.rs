@@ -453,6 +453,9 @@ pub enum ChatViewEvent {
     /// A call's end row's Transcript chip: the chat's call captions saved on this computer by that id
     /// ([`crate::call_transcript`]), shown in the chat's Recap tab.
     OpenSavedTranscript(i64),
+    /// A file card's Share, or its "More options > Share": "Share this file" for that file (`crate::share_file`, the
+    /// shell's to open, as it knows the account's chats and channels).
+    ShareFile(Box<SharedFile>),
     /// A channel post's "Reply in thread" or its replies' summary: its thread, opened beside the channel.
     OpenThread { post: String },
     /// A channel meeting card's Edit: the meeting's details, read from the team's calendar by its id (`ical_uid`),
@@ -1655,6 +1658,18 @@ impl ChatView {
         OpenPicture::new(move |src, _, cx| {
             let _ = view.update(cx, |this, cx| this.open_picture(&id, src, cx));
         })
+    }
+
+    /// What a file card's Share calls: "Share this file" for its file, through the shell; none in the read-only app,
+    /// which shares nothing.
+    fn file_sharer(&self, cx: &Context<Self>) -> Option<files::ShareFile> {
+        if self.core.read_only() {
+            return None;
+        }
+        let view = cx.entity().downgrade();
+        Some(files::ShareFile::new(move |file, _, cx| {
+            let _ = view.update(cx, |_, cx| cx.emit(ChatViewEvent::ShareFile(Box::new(file.clone()))));
+        }))
     }
 
     /// What a click on a reply's quote calls: the view going to the quoted message ([`Self::go_to_quoted`]).
@@ -3835,6 +3850,7 @@ impl ChatView {
                     bots: self.core.capabilities().apps,
                     head,
                     foot,
+                    share: self.file_sharer(cx),
                 },
                 highlighted,
                 palette,
@@ -4573,6 +4589,7 @@ fn pending_row(
             &format!("pending-{row}"),
             &pending.files,
             None,
+            None,
             palette,
         ))
         .child(note_line(&pending.note, palette, cx))
@@ -5246,6 +5263,8 @@ struct InChat<'a> {
     head: Option<AnyElement>,
     /// An email post's foot, drawn at the bottom of its card ([`ChatView::email_foot`]).
     foot: Option<AnyElement>,
+    /// What its file cards' Share calls ([`ChatView::file_sharer`]).
+    share: Option<files::ShareFile>,
 }
 
 impl InChat<'_> {
@@ -5344,7 +5363,13 @@ fn bubble(
     let id: SharedString = format!("message-text-{}", item.id).into();
     let (files, links) = match &item.body {
         Body::Text(text) => (
-            files::file_cards(&item.id, &item.files, text.0.source.as_ref(), palette),
+            files::file_cards(
+                &item.id,
+                &item.files,
+                text.0.source.as_ref(),
+                chat.share.as_ref(),
+                palette,
+            ),
             link_preview::cards(&item.id, &item.links, text.0.source.as_ref(), palette),
         ),
         _ => (None, None),

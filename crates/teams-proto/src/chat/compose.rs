@@ -283,7 +283,6 @@ impl MessageText {
         Value::Array(self.cards().iter().map(AppCard::entry).collect()).to_string()
     }
 
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     /// Files shared on from other messages, each its entry as a share posts it ([`crate::chat::share_entry`]): the
     /// post names them as they are, with no upload and no grant.
     #[must_use]

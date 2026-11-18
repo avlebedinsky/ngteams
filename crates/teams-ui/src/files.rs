@@ -19,9 +19,10 @@
 //! - **A click** on the name or the picture opens the file the way the web client does, at its sharing link in the
 //!   browser (GPUI's `open_url`); "More options" offers what Teams on the web offers: "Open in browser" (not on a
 //!   video's card), "Download" (the sharing link with `download=1`: the browser downloads it), "Share" and "Copy link".
-//!   Share (the video card's button, and the item) offers the file's link to copy, the way to share it that reaches
-//!   nobody by itself; Teams' "Share this file" dialog, which posts the file to a chat or a channel, is not here yet.
-//!   Teams' "Favorite" (the file in the user's OneDrive favorites) is not offered: the app has no favorite files.
+//!   Share (the video card's button, and the item) opens Teams' "Share this file" dialog through the view that drew
+//!   the card ([`ShareFile`], `crate::share_file`); a card drawn with no such view (a message still being sent, the
+//!   read-only app) offers no Share. Teams' "Favorite" (the file in the user's OneDrive favorites) is not offered: the
+//!   app has no favorite files.
 //! - **An own server's file** ([`OwnFile`]) is read through its account's engine, never in a browser: the server has
 //!   no page that shows a file, and a browser holds no token for it. A click and "Open in desktop app" save it in a
 //!   new folder in a folder of the user's alone and open it in the system's app for it (its `file://` link; not on a
@@ -32,6 +33,7 @@
 //! - Colours come from the palette but for the file types' own, fixed in every theme as Teams' file icons are.
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
 use gpui::{
@@ -41,7 +43,7 @@ use gpui::{
 };
 use gpui_component::Sizable as _;
 use gpui_component::button::Button;
-use gpui_component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::tooltip::Tooltip;
 use teams_proto::chat::{FileKind, SharedFile};
 
@@ -186,13 +188,32 @@ pub const fn kind_glyph(kind: FileKind) -> Glyph {
     }
 }
 
+/// What a card's Share calls with its file: the view that drew it opening "Share this file" (`crate::share_file`).
+#[derive(Clone)]
+pub struct ShareFile(Rc<Share>);
+
+/// What [`ShareFile`] calls.
+type Share = dyn Fn(&SharedFile, &mut Window, &mut App);
+
+impl ShareFile {
+    pub fn new(share: impl Fn(&SharedFile, &mut Window, &mut App) + 'static) -> Self {
+        Self(Rc::new(share))
+    }
+
+    fn open(&self, file: &SharedFile, window: &mut Window, cx: &mut App) {
+        (self.0)(file, window, cx);
+    }
+}
+
 /// The cards of `files`, carried by the message `message`, in a row that wraps; `None` without files. `source` is the
-/// engine their thumbnails are asked of (none: no thumbnail, each picture its placeholder).
+/// engine their thumbnails are asked of (none: no thumbnail, each picture its placeholder); `share` what their Share
+/// calls (none: no Share).
 #[must_use]
 pub fn file_cards(
     message: &str,
     files: &[SharedFile],
     source: Option<&PictureSource>,
+    share: Option<&ShareFile>,
     palette: Palette,
 ) -> Option<AnyElement> {
     if files.is_empty() {
@@ -203,6 +224,7 @@ pub fn file_cards(
         id: format!("{message}-{at}"),
         file: file.clone(),
         source: source.cloned(),
+        share: share.cloned(),
         palette,
     });
     let cards: Vec<FileCard> = cards.collect();
@@ -226,6 +248,7 @@ pub struct FileCard {
     id: String,
     file: SharedFile,
     source: Option<PictureSource>,
+    share: Option<ShareFile>,
     palette: Palette,
 }
 
@@ -407,18 +430,20 @@ impl FileCard {
             .into_any_element()
     }
 
-    /// Share: the file's link to copy ([`share_menu`]); Teams' "Share this file" dialog isn't here yet.
+    /// Share: "Share this file" for the file ([`ShareFile`]); none without a link or a view to open it.
     fn share(&self) -> Option<AnyElement> {
-        let link = self.file.open_link()?.to_owned();
-        let id = self.id.clone();
-        let button = header_button(format!("file-share-{id}"), Glyph::SHARE, SHARE)
-            .dropdown_menu(move |menu, _, _| share_menu(menu, &id, &link));
+        self.file.open_link()?;
+        let share = self.share.clone()?;
+        let file = self.file.clone();
+        let button = header_button(format!("file-share-{}", self.id), Glyph::SHARE, SHARE)
+            .on_click(move |_, window, cx| share.open(&file, window, cx));
         Some(selected_by(format!("file-share-{}", self.id), button).into_any_element())
     }
 
     /// "More options": the file's actions, as Teams on the web offers them, when it has a link to act on: "Open in
-    /// browser" (not on a video's card), "Download", "Share" (its menu, [`share_menu`]) and "Copy link". An own
-    /// server's file is opened and downloaded through its engine (see the module docs).
+    /// browser" (not on a video's card), "Download", "Share" ("Share this file", [`ShareFile`]; not without a view to
+    /// open it) and "Copy link". An own server's file is opened and downloaded through its engine (see the module
+    /// docs).
     fn more(&self, kind: FileKind) -> Option<AnyElement> {
         let link = self.file.open_link()?.to_owned();
         let opens = kind != FileKind::Video;
@@ -429,8 +454,9 @@ impl FileCard {
             },
         };
         let id = self.id.clone();
-        let button = header_button(format!("file-more-{id}"), Glyph::MORE, "More options").dropdown_menu(
-            move |menu, window, cx| {
+        let (share, file) = (self.share.clone(), self.file.clone());
+        let button =
+            header_button(format!("file-more-{id}"), Glyph::MORE, "More options").dropdown_menu(move |menu, _, _| {
                 let menu = match &actions {
                     _ if !opens => menu,
                     Actions::Own(own) => {
@@ -467,17 +493,22 @@ impl FileCard {
                     }
                     Actions::Browser { download: None } => menu,
                 };
-                let (shared, copied) = (link.clone(), link.clone());
-                let share_id = id.clone();
-                menu.submenu_with_icon(Some(menu_icon(Glyph::SHARE)), SHARE, window, cx, move |menu, _, _| {
-                    share_menu(menu, &share_id, &shared)
-                })
-                .item(
+                let copied = link.clone();
+                let menu = match &share {
+                    Some(share) => {
+                        let (share, file) = (share.clone(), file.clone());
+                        menu.item(
+                            menu_item(&id, "share", Glyph::SHARE, SHARE)
+                                .on_click(move |_, window, cx| share.open(&file, window, cx)),
+                        )
+                    }
+                    None => menu,
+                };
+                menu.item(
                     menu_item(&id, "copy", Glyph::LINK, COPY_LINK)
                         .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))),
                 )
-            },
-        );
+            });
         Some(selected_by(format!("file-more-{}", self.id), button).into_any_element())
     }
 
@@ -563,15 +594,6 @@ enum Actions {
 /// A header's button: `glyph` at Teams' size ([`HEADER_BUTTON`]), `tip` its tooltip.
 fn header_button(id: String, glyph: Glyph, tip: &'static str) -> Button {
     icon_button(SharedString::from(id), glyph, tip).with_size(px(HEADER_BUTTON))
-}
-
-/// Share's menu (the video card's button, and the item in "More options"): "Copy link", the file's `link`.
-fn share_menu(menu: PopupMenu, card: &str, link: &str) -> PopupMenu {
-    let link = link.to_owned();
-    menu.item(
-        menu_item(card, "share-copy", Glyph::LINK, COPY_LINK)
-            .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(link.clone()))),
-    )
 }
 
 /// `element` opening `file` when clicked, with the pointer's hand: an own server's through its engine ([`OwnFile::open`]),
@@ -747,7 +769,7 @@ pub fn safe_name(name: &str) -> String {
 }
 
 /// A "More options" row: its icon and words, its test selector `file-menu-<what>-<card>`. The icon is in the menu's
-/// own column, as Share's (a menu of its own, which the kit draws with its icon there) is, so the rows line up.
+/// own column, so the rows line up.
 fn menu_item(card: &str, what: &str, glyph: Glyph, label: &'static str) -> PopupMenuItem {
     let selector = format!("file-menu-{what}-{card}");
     PopupMenuItem::element(move |_, _| {

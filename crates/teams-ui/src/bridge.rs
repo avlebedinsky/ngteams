@@ -150,6 +150,16 @@ pub trait Core: Send + Sync + 'static {
     /// The size of a file a message carries, by its sharing link: asked for when a video's card is drawn, so the
     /// engine knows its download link before Play is pressed.
     fn file_size(&self, share_url: String) -> Reply<u64>;
+    /// What the sharing link `share_url` of the file at `object_url` lets people do, read on the file's site as
+    /// Teams' "Share this file" reads it; `None` when its answer names no link. A fake answers none.
+    fn link_permission(
+        &self,
+        object_url: String,
+        share_url: String,
+    ) -> Reply<Option<teams_proto::chat::LinkPermission>> {
+        let _ = (object_url, share_url);
+        Reply::ready(Ok(None))
+    }
     /// What the meeting whose chat is `thread` left (its recordings and transcripts), as its recap lists it. A fake
     /// without recaps answers that it can't be read.
     fn meeting_contents(&self, thread: String) -> Reply<Vec<teams_proto::MeetingContent>> {
@@ -998,6 +1008,14 @@ impl Core for EngineRequests {
 
     fn file_size(&self, share_url: String) -> Reply<u64> {
         EngineRequests::file_size(self, share_url)
+    }
+
+    fn link_permission(
+        &self,
+        object_url: String,
+        share_url: String,
+    ) -> Reply<Option<teams_proto::chat::LinkPermission>> {
+        EngineRequests::link_permission(self, object_url, share_url)
     }
 
     fn meeting_contents(&self, thread: String) -> Reply<Vec<teams_proto::MeetingContent>> {

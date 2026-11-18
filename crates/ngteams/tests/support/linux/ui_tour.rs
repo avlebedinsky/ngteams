@@ -7,7 +7,8 @@
 //! walks the views one step at a time (no chat open; the a–b chat with a message selected and its actions shown; a
 //! reply begun; the account menu; every page of the settings, Calls with made-up devices; the appearance and the chat
 //! again in Teams Dark; messages with files (text with three, then one, two, and five in a grid), their cards and
-//! thumbnails, in Teams Dark and Light, its first video played in its card and paused; a message of lines, small
+//! thumbnails, in Teams Dark and Light, its first video played in its card and paused, "Share this file" from a
+//! video's card (empty, then two recipients and a message, then shared); a message of lines, small
 //! pictures and a block of code, in Teams Dark and Light; a picture opened in the picture viewer, fitted and zoomed;
 //! the 12-hour time format and a chat's times on it; a group chat's presence; the "Chats" section's See more, what it
 //! brings and a chat opened from below the rows shown; New message, its To: line's suggestions, the chat two people
@@ -192,7 +193,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 324 + 8 + 5 + 15 + 6 + 10] = [
+const STEPS: [Step; 5 + 325 + 8 + 5 + 15 + 6 + 10] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -1289,6 +1290,15 @@ const STEPS: [Step; 5 + 324 + 8 + 5 + 15 + 6 + 10] = [
     ("chat-files-few-dark", |shell, _, cx| show_message(shell, 1, cx)),
     // its fourth from its top: the grid of five
     ("chat-files-grid-dark", |shell, _, cx| show_message(shell, 3, cx)),
+    // "Share this file" from the grid's first video's Share (`share_file`), in Teams Dark: empty with Share off, what
+    // the link lets people do under the file's name; then Lab B and the team's General picked, with a message; then
+    // shared, the dialog closed and Teams' toast at the bottom left
+    ("share-file-dark", |shell, window, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
+        open_share_file(shell, window, cx);
+    }),
+    ("share-file-ready-dark", fill_share_file),
+    ("share-file-sent-dark", send_share_file),
     // x's message of text, two small pictures and a block of code (`seed_mixed`), in Teams Dark: the a–x chat opened
     // (at its newest, the forwards), then scrolled to its first message, each picture at its own size in the flow and
     // the code in Teams' code card
@@ -1500,6 +1510,13 @@ const STEPS: [Step; 5 + 324 + 8 + 5 + 15 + 6 + 10] = [
     ("chat-files-first", |shell, _, cx| show_first_message(shell, cx)),
     ("chat-files-few", |shell, _, cx| show_message(shell, 1, cx)),
     ("chat-files-grid", |shell, _, cx| show_message(shell, 3, cx)),
+    // "Share this file" again, in Teams Light
+    ("share-file", |shell, window, cx| {
+        fixed_theme(shell, None, cx);
+        open_share_file(shell, window, cx);
+    }),
+    ("share-file-ready", fill_share_file),
+    ("share-file-sent", send_share_file),
     // the a–b–c chat: its senders' presence as the view asked the engine and the mock's UPS answered (`seed_group`),
     // b's and c's badges on their avatars
     ("chat-group-presence", |shell, window, cx| {
@@ -4379,6 +4396,49 @@ fn open_kept_new_chat(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) 
 }
 
 /// Changes New message, while it is open.
+/// "Share this file" for the grid's first video (the a–c chat's fourth message, its second file), as its Share opens
+/// it.
+fn open_share_file(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) {
+    show_message(shell, 3, cx);
+    let Some(chat) = shell.read(cx).chat().cloned() else {
+        return;
+    };
+    let file = chat
+        .read(cx)
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            Item::Message(message) => Some(message),
+            _ => None,
+        })
+        .nth(3)
+        .and_then(|message| message.files.get(1).cloned());
+    if let Some(file) = file {
+        shell.update(cx, |shell, cx| shell.open_share_file(file, window, cx));
+    }
+}
+
+/// The open "Share this file" with Lab B and the team's General picked, and a message.
+fn fill_share_file(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) {
+    let Some(dialog) = shell.read(cx).share_dialog().cloned() else {
+        return;
+    };
+    dialog.update(cx, |dialog, cx| {
+        for query in ["Lab B", "General"] {
+            dialog.set_query(query, window, cx);
+            dialog.choose(0, window, cx);
+        }
+        dialog.set_message("Made-up take for the review, have a look", window, cx);
+    });
+}
+
+/// Share pressed on the open "Share this file": the mock takes the posts, the dialog closes and the toast shows.
+fn send_share_file(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) {
+    if let Some(dialog) = shell.read(cx).share_dialog().cloned() {
+        dialog.update(cx, |dialog, cx| dialog.share(window, cx));
+    }
+}
+
 fn with_new_chat(shell: &Entity<Shell>, cx: &mut App, change: impl FnOnce(&mut NewChat, &mut Context<NewChat>)) {
     if let Some(view) = shell.read(cx).new_chat().cloned() {
         view.update(cx, change);
@@ -5331,6 +5391,15 @@ fn seed_files(mock: &ChatServiceMock, runtime: &tokio::runtime::Runtime) -> Sand
     }
     for (at, file) in MADE_UP_FILES.iter().chain(&MORE_MADE_UP_FILES).enumerate() {
         serve_file(mock, runtime, file, at)?;
+        // what its link lets people do, as "Share this file" reads it on the sharer's site
+        let token = teams_proto::chat::share_token(&share_url(file));
+        let permission = serde_json::json!({"id": format!("made-up-permission-{at}"), "roles": ["write"],
+            "link": {"scope": "anonymous", "type": "edit", "localizedDescription": "Anyone with the link can edit"}});
+        runtime.block_on(mock.serve_bytes(
+            &format!("/personal/made_up_user_contoso_test/_api/v2.0/shares/{token}/permission"),
+            "application/json",
+            permission.to_string().into_bytes(),
+        ));
     }
     Ok(())
 }
