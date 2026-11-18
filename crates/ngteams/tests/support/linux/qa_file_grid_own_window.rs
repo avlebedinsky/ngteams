@@ -769,9 +769,27 @@ impl Walk<'_> {
         if let Err(error) = shown {
             note(format!("share on: {error}"));
         }
+        self.check_owner_named(crowd.name);
         thread::sleep(SETTLE);
         self.run.shot(self.sandbox, "qa543-own-shown-light.png")?;
         Ok(())
+    }
+
+    /// The card of `file` in the open chat names b as its owner: b sends nothing in that chat, and the card names b
+    /// as it does in b's chat.
+    fn check_owner_named(&mut self, file: &str) {
+        let owner = format!("personal > {}", B.1);
+        let named = self.run.until("the owner's name on the shared video's card", |state| {
+            state.items.iter().any(|item| {
+                item.files
+                    .iter()
+                    .zip(&item.locations)
+                    .any(|(name, location)| name == file && *location == owner)
+            })
+        });
+        if let Err(error) = named {
+            note(format!("share on: {error}"));
+        }
     }
 }
 

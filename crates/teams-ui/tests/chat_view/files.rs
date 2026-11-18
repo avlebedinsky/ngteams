@@ -19,7 +19,7 @@ use teams_proto::chat::shared_files;
 use teams_store::Message;
 use teams_ui::chat_view::{ChatView, ChatViewEvent, UnshownParts};
 
-use super::common::{LAB_B, Rig};
+use super::common::{LAB_A, LAB_B, Rig};
 use super::{NOON, chat_window, draw, items, message, rig_with, trace};
 
 const FIXTURE: &str = include_str!("../../../../tests/fixtures/chatsvc/files.json");
@@ -366,14 +366,26 @@ const OWN_SITE: &str = "https://chat.example:8443/sp/personal/000000000000400080
 
 /// A message from b of one document in an own server's drive: `owner` the id of the drive's account (in its path).
 fn own_drive_message(owner: &str) -> Message {
+    own_drive_message_from(LAB_B, owner)
+}
+
+/// A message from `sender` of one document in an own server's drive: `owner` as [`own_drive_message`] takes it.
+fn own_drive_message_from(sender: &str, owner: &str) -> Message {
     let site = OWN_SITE.replace("0000000000004000800000000000000b", owner);
     let share = format!("{site}Documents/Microsoft%20Teams%20Chat%20Files/made-up%20plan.pdf");
     let entry = serde_json::json!({"@type": teams_proto::chat::FILE_TYPE, "fileName": "made-up plan.pdf",
         "fileType": "pdf", "state": "active", "objectUrl": share,
         "fileInfo": {"shareUrl": share, "fileUrl": share, "siteUrl": site}, "baseUrl": site});
-    let mut stored = message(ID, LAB_B, "", NOON);
+    let mut stored = message(ID, sender, "", NOON);
     stored.properties = Some(serde_json::json!({"files": Value::Array(vec![entry]).to_string()}).to_string());
     stored
+}
+
+#[test]
+fn an_own_servers_file_shared_on_names_its_owner_who_sent_nothing_in_the_chat() {
+    let (view, cx) = grid_chat(own_drive_message_from(LAB_A, "0000000000004000800000000000000b"));
+    let item = items(&view, cx).remove(0);
+    assert_eq!(item.files[0].location.as_deref(), Some("personal > Lab Bee"));
 }
 
 #[test]

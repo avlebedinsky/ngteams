@@ -2677,7 +2677,8 @@ impl ChatView {
     /// members (the account too in a meeting chat, whose events name it by its name, and as a recording's owner),
     /// forwarded messages' original senders (the account too: a forward names it, never "You"), everyone who gave a
     /// reaction on a message held (the account too: the who-reacted card names it, never "You"; asked when the chat
-    /// loads, so the names are there once a card opens) and who is typing.
+    /// loads, so the names are there once a card opens), the owners of files kept on an own server (the account too)
+    /// and who is typing.
     fn want_names(&mut self, cx: &mut Context<Self>) {
         let mut wanted: Vec<String> = Vec::new();
         let mut originals: Vec<String> = Vec::new();
@@ -2702,6 +2703,16 @@ impl ChatView {
                     forwarded::forwarded_from(message.properties.as_deref()).and_then(|from| from.sender)
             {
                 originals.push(sender);
+            }
+            // a file shared on from another chat names a site owner who may never post here
+            if is_text_type(&message.message_type)
+                && message.delete_time.is_none()
+                && message
+                    .properties
+                    .as_deref()
+                    .is_some_and(|text| text.contains("personal"))
+            {
+                originals.extend(files_of(message).iter().filter_map(SharedFile::site_owner));
             }
         }
         // an email post's "Reply in thread" shows the account's own face
