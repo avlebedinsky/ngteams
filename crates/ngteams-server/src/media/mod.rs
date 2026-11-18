@@ -44,6 +44,46 @@ const LONG: Duration = Duration::from_secs(600);
 /// The chat service's audience, which AMS takes too.
 const IC3: &str = <crate::auth::extract::Ic3 as crate::auth::extract::Audience>::AUDIENCE;
 
+/// Gives `readers` access to each file of this server that `files` (a message's `properties.files`) names, when
+/// `sharer` has access to it: a file shared on to a chat reaches its people, as an anyone link does on Microsoft's
+/// service. Any other entry, and a file `sharer` can't read, is left as it is.
+pub(crate) async fn share_on(
+    app: &App,
+    sharer: &str,
+    files: Option<&serde_json::Value>,
+    readers: &[String],
+) -> Result<(), DbError> {
+    for link in file_links(files) {
+        let Ok(item) = drive::shared(app, &link).await else {
+            continue;
+        };
+        if repo::grants(&app.db, &item.id).await?.iter().any(|user| user == sharer) {
+            repo::grant(&app.db, &item.id, readers).await?;
+        }
+    }
+    Ok(())
+}
+
+/// The sharing links (else the addresses) of the entries of a message's `properties.files`: a list, or a JSON
+/// string of one.
+fn file_links(files: Option<&serde_json::Value>) -> Vec<String> {
+    let list = match files {
+        Some(serde_json::Value::String(text)) => serde_json::from_str(text).unwrap_or_default(),
+        Some(other) => other.clone(),
+        None => return Vec::new(),
+    };
+    let link = |entry: &serde_json::Value| {
+        entry
+            .pointer("/fileInfo/shareUrl")
+            .or_else(|| entry.get("objectUrl"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    list.as_array()
+        .map(|entries| entries.iter().filter_map(link).collect())
+        .unwrap_or_default()
+}
+
 /// Where a file of `owner`'s drive named `name` opens: its sharing link.
 pub(crate) fn file_url(app: &App, owner: &str, name: &str) -> Option<String> {
     drive::web_url(app, owner, name).ok()

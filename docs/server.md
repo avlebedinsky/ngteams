@@ -1077,6 +1077,14 @@ The client sends a file the way it sends one to OneDrive, and the server keeps o
    `GET /graph/v1.0/shares/u!<link, base64url>/driveItem` (the item with `@microsoft.graph.downloadUrl`) and
    `…/driveItem/thumbnails` (Graph's `small`, `medium` and `large`, 96, 176 and 800 pixels). 403 for an account
    the file isn't shared with.
+4. **A file shared on** ("Share this file", `docs/protocol/chat.md`, "Files: shared on"): the client posts the file's
+   entry again in another chat or channel. When a post names a file of this server and its sender has access to
+   the file, the server gives each reader of that chat or channel access too (the readers the post's push goes to),
+   as an anyone link reaches them on Microsoft's service. A post by someone without access gives nobody access.
+   Anyone with access reads what the link lets people do:
+   `GET /sp/personal/<owner>/_api/v2.0/shares/u!<link, base64url>/permission` answers the link with `scope`
+   `users`, `type` `edit` and the words "People you choose can edit". 403 for an account without access, 404 for a
+   link to another drive.
 
 Download and thumbnail links are `<origin>/sp/download/<item>?tempauth=…` and
 `<origin>/sp/thumbnail/<item>/<size>?tempauth=…`. The `tempauth` is a JWT the server signs for that one item and

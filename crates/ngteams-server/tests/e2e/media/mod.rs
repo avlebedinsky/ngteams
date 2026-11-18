@@ -7,6 +7,7 @@ mod freeing;
 mod limits;
 mod pictures;
 mod previews;
+mod share_on;
 mod storage;
 
 use std::collections::BTreeSet;

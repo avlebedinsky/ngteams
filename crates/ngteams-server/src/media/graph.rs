@@ -36,14 +36,19 @@ async fn own_drive(State(app): State<Arc<App>>, headers: HeaderMap) -> Result<Js
     Ok(Json(drive::drive(&app, &caller)))
 }
 
-/// The file a sharing token (`u!<the link, base64url>`) names, when `caller` may read it.
-async fn shared(app: &App, caller: &User, share: &str) -> Result<repo::Item, Error> {
-    let link = share
+/// The sharing link a sharing token (`u!<the link, base64url>`) names.
+pub(super) fn link_of(share: &str) -> Result<String, Error> {
+    share
         .strip_prefix("u!")
         .filter(|encoded| encoded.len() <= MAX_SHARE)
         .and_then(|encoded| URL_SAFE_NO_PAD.decode(encoded).ok())
         .and_then(|link| String::from_utf8(link).ok())
-        .ok_or(Error::Invalid("The sharing token can't be read."))?;
+        .ok_or(Error::Invalid("The sharing token can't be read."))
+}
+
+/// The file a sharing token (`u!<the link, base64url>`) names, when `caller` may read it.
+async fn shared(app: &App, caller: &User, share: &str) -> Result<repo::Item, Error> {
+    let link = link_of(share)?;
     let item = drive::shared(app, &link).await?;
     if !repo::grants(&app.db, &item.id).await?.contains(&caller.id) {
         return Err(Error::Forbidden);

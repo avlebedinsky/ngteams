@@ -58,6 +58,8 @@ pub(super) async fn post(
     let row = &posted.row;
     wake(&app, &posted).await;
     if posted.inserted {
+        let files = body.get("properties").and_then(|properties| properties.get("files"));
+        crate::media::share_on(&app, &caller.id, files, &posted.readers).await?;
         events::tell(&app, "NewMessage", &row.value()?, &posted.readers, &posted.told).await;
     }
     Ok((

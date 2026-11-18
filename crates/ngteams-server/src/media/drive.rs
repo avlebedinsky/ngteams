@@ -1,8 +1,9 @@
 //! An account's drive under `/sp/personal/<account>/`, in the SharePoint v2.0 shapes the client's file sending uses
 //! (`docs/protocol/chat.md`, "Chat-file upload and specific-recipient sharing"): the drive and its chat-files folder
 //! with their grants, a file's upload, its direct share with named accounts, and its grants read back. Only a
-//! drive's owner reaches it here; the people a file is shared with read it through Graph ([`super::graph`]) and the
-//! signed links below.
+//! drive's owner reaches it here, but for a file's sharing link's permission (`shares/<token>/permission`, what
+//! "Share this file" shows), which anyone with access reads; the people a file is shared with read it through Graph
+//! ([`super::graph`]) and the signed links below.
 //!
 //! `/sp/download/<item>` and `/sp/thumbnail/<item>/<size>` take no token of an account: the link's `tempauth` is the
 //! credential ([`crate::auth::tokens::Issuer::link`]), for that one item, for `media.link_lifetime` seconds, and only
@@ -37,6 +38,8 @@ pub(super) const FOLDER: &str = "Microsoft Teams Chat Files";
 /// What a download link's credential is for, and a thumbnail link's.
 const CONTENT_LINK: &str = "urn:ngteams-server:file-content";
 const THUMBNAIL_LINK: &str = "urn:ngteams-server:file-thumbnail";
+/// What a file's sharing link lets people do, in the words "Share this file" shows.
+const LINK_WORDS: &str = "People you choose can edit";
 /// The largest share request.
 const INVITE_BODY: usize = 64 * 1024;
 /// The accounts one request shares a file with.
@@ -172,6 +175,11 @@ async fn api(
     body: Body,
 ) -> Result<Response, Error> {
     let caller = account(&app, &headers, &app.config.origin()).await?;
+    if method == Method::GET
+        && let ["shares", share, "permission"] = rest.split('/').collect::<Vec<_>>().as_slice()
+    {
+        return link_permission(&app, &caller, &user, share).await;
+    }
     if site_owner(&user).as_deref() != Some(caller.id.as_str()) {
         return Err(Error::Forbidden);
     }
@@ -222,6 +230,25 @@ async fn api(
         }
         _ => Err(Error::Missing),
     }
+}
+
+/// What a file's sharing link (its token `share`) on `user`'s site lets people do, for anyone with access: a file of
+/// this server is shared only with named accounts, so its link reaches the people it was shared with.
+async fn link_permission(app: &App, caller: &User, user: &str, share: &str) -> Result<Response, Error> {
+    let link = super::graph::link_of(share)?;
+    let item = shared(app, &link).await?;
+    if site_owner(user).as_deref() != Some(item.owner_id.as_str()) {
+        return Err(Error::Missing);
+    }
+    if !repo::grants(&app.db, &item.id).await?.contains(&caller.id) {
+        return Err(Error::Forbidden);
+    }
+    Ok(Json(json!({
+        "id": item.id,
+        "roles": ["write"],
+        "link": {"scope": "users", "type": "edit", "localizedDescription": LINK_WORDS, "webUrl": link},
+    }))
+    .into_response())
 }
 
 /// The drive, its chat-files folder with its files, and their grants, as their owner reads them; `None` for
