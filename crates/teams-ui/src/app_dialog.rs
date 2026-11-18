@@ -303,6 +303,7 @@ impl AppDialog {
             }
             Ok(InvokeAnswer::Message(text)) => {
                 self.stage = Stage::Note(text);
+                self.error = None;
                 None
             }
             Ok(InvokeAnswer::Error { message, .. }) if !message.trim().is_empty() => Some(message),

@@ -1399,3 +1399,34 @@ fn a_task_fetch_button_in_a_dialog_opens_the_next_dialog_in_its_place() {
     };
     assert_eq!(card.data["step"], "check");
 }
+
+#[test]
+fn an_apps_message_after_its_error_shows_alone() {
+    let rig = Rig::start();
+    let (shell, cx) = shell_window(&rig, true);
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(GROUP_CHAT.to_owned(), window, cx)));
+    cx.run_until_parked();
+    let error = teams_proto::InvokeAnswer::Error {
+        code: Some("Conflict".to_owned()),
+        message: "Made-up error.".to_owned(),
+    };
+    submit_dialog(&rig, &shell, polls_dialog(GROUP_CHAT), 0, error, cx);
+    let dialog = app_dialog(&shell, cx);
+    assert_eq!(
+        cx.update(|_, cx| dialog.read(cx).error().map(str::to_owned)).as_deref(),
+        Some("Made-up error.")
+    );
+    rig.core
+        .bot_answers
+        .lock()
+        .unwrap()
+        .push_back(Ok(teams_proto::InvokeAnswer::Message("Made-up thanks.".to_owned())));
+    cx.update(|_, cx| dialog.update(cx, |dialog, cx| dialog.press(0, cx)));
+    cx.run_until_parked();
+    assert_eq!(cx.update(|_, cx| dialog.read(cx).stage_name()), "note");
+    assert_eq!(cx.update(|_, cx| dialog.read(cx).error().map(str::to_owned)), None);
+    assert!(
+        bounds(cx, "app-dialog-error").is_none(),
+        "no old error under the message"
+    );
+}
