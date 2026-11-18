@@ -229,6 +229,11 @@ name = "qa_translate_message_window"
 harness = false
 
 [[test]]
+# QA of task 543: "Share this file" on file cards, its recipients, message, keys, Copy link and errors, in the UI sandbox
+name = "qa_share_file_window"
+harness = false
+
+[[test]]
 # QA of task 420: a channel meeting's title, its post's Join and its end in the app's window over the mock
 name = "qa_channel_meeting_window"
 harness = false
