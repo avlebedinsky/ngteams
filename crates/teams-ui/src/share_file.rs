@@ -1221,7 +1221,12 @@ impl Render for ShareFileDialog {
                     .gap_1()
                     .child(Self::label(RECIPIENTS, true, palette))
                     .child(self.recipients(window, palette, cx))
-                    .child(div().relative().children(suggestions)),
+                    // deferred: the list is drawn over "Message preview", which comes after it, as Teams draws it
+                    .child(
+                        div()
+                            .relative()
+                            .children(suggestions.map(|list| gpui::deferred(list).with_priority(1))),
+                    ),
             )
             .child(
                 div()

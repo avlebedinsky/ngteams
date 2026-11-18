@@ -656,6 +656,11 @@ impl Walk<'_> {
             note(format!("\"zzqxw\" finds {:?}", dialog.suggestions));
         }
         self.run.shot(self.sandbox, "qa543-no-match-light.png")?;
+        self.run.theme(true)?;
+        thread::sleep(SETTLE);
+        self.run.shot(self.sandbox, "qa543-no-match-dark.png")?;
+        self.run.theme(false)?;
+        thread::sleep(SETTLE);
         self.run.input.key(keys::ESC)?;
         self.run.input.key(keys::ESC)?;
         self.run.dialog_until("the dialog closed", |d| !d.open)?;

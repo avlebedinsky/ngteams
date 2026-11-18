@@ -289,6 +289,36 @@ fn recipients_are_found_as_teams_finds_them() {
 }
 
 #[test]
+fn the_suggestions_are_over_the_message_preview() {
+    let (_rig, _shell, dialog, cx) = opened();
+    cx.simulate_input("Lab");
+    draw(cx);
+    let preview = bounds(cx, "share-file-preview").expect("the preview is drawn");
+    let last = bounds(cx, "share-file-suggestion-2").expect("the third suggestion is drawn");
+    assert!(
+        preview.contains(&last.center()),
+        "the list reaches over the preview: {last:?} in {preview:?}"
+    );
+    // the row takes the press, not the message's box under it: the keyboard stays in the recipients' box
+    click(cx, "share-file-suggestion-2");
+    assert_eq!(picked(&dialog, cx), [TALK]);
+    cx.simulate_input("Sea");
+    draw(cx);
+    let found: Vec<String> = cx.update(|_, cx| {
+        dialog
+            .read(cx)
+            .suggestions()
+            .iter()
+            .map(|target| target.key().to_owned())
+            .collect()
+    });
+    assert!(
+        found.iter().any(|key| key == LAB_C),
+        "the next name typed goes to the recipients' box: {found:?}"
+    );
+}
+
+#[test]
 fn two_recipients_and_a_message_get_the_file_as_teams_shares_it() {
     let (rig, shell, dialog, cx) = opened();
     pick(cx, "Bee");
