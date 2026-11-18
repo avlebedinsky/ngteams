@@ -199,6 +199,11 @@ name = "qa_file_grid_own_window"
 harness = false
 
 [[test]]
+# QA of task 516: the AI providers (Anthropic, OpenAI, OpenAI-compatible APIs beside the CLIs) in the UI sandbox
+name = "qa_ai_providers_window"
+harness = false
+
+[[test]]
 # QA of task 420: a channel meeting's title, its post's Join and its end in the app's window over the mock
 name = "qa_channel_meeting_window"
 harness = false
