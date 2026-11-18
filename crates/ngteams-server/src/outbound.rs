@@ -1,4 +1,5 @@
-//! Requests the server makes to an address an administrator set: a bot's messaging endpoint. The address guard
+//! Requests the server makes to an address an administrator or a team set: a bot's messaging endpoint, an outgoing
+//! webhook's callback URL. The address guard
 //! (server-side request forgery) holds for every one:
 //!
 //! - `https` only, unless `bots.allow_http_endpoints`; no user info;
@@ -144,11 +145,46 @@ impl Outbound {
         })
     }
 
+    /// Whether `url` may be sent to, as far as the URL alone tells: its scheme, its form and an address written in
+    /// it. A name is checked when it is resolved.
+    ///
+    /// # Errors
+    /// [`OutboundError::Url`] or [`OutboundError::Refused`].
+    pub fn check(&self, url: &Url) -> Result<(), OutboundError> {
+        self.guard.check(url)
+    }
+
     /// Posts `body` as JSON to `url`, with `bearer` when given.
     ///
     /// # Errors
     /// See [`OutboundError`].
     pub async fn post_json(&self, url: &str, bearer: Option<&str>, body: Vec<u8>) -> Result<Answer, OutboundError> {
+        let authorization = bearer.map(|bearer| format!("Bearer {bearer}"));
+        self.post(url, authorization.as_deref(), body, self.deadline).await
+    }
+
+    /// Posts `body` as JSON to `url` with `authorization` as its `Authorization` (an outgoing webhook's HMAC), and
+    /// `deadline` for the whole exchange.
+    ///
+    /// # Errors
+    /// See [`OutboundError`].
+    pub async fn post_signed(
+        &self,
+        url: &str,
+        authorization: &str,
+        body: Vec<u8>,
+        deadline: Duration,
+    ) -> Result<Answer, OutboundError> {
+        self.post(url, Some(authorization), body, deadline).await
+    }
+
+    async fn post(
+        &self,
+        url: &str,
+        authorization: Option<&str>,
+        body: Vec<u8>,
+        deadline: Duration,
+    ) -> Result<Answer, OutboundError> {
         let url = Url::parse(url).map_err(|_| OutboundError::Url)?;
         self.guard.check(&url)?;
         let mut request = self
@@ -156,8 +192,8 @@ impl Outbound {
             .post(url)
             .header(reqwest::header::CONTENT_TYPE, "application/json; charset=utf-8")
             .body(body);
-        if let Some(bearer) = bearer {
-            request = request.bearer_auth(bearer);
+        if let Some(authorization) = authorization {
+            request = request.header(reqwest::header::AUTHORIZATION, authorization);
         }
         let exchange = async {
             let mut answer = request.send().await.map_err(|error| refusal(&error))?;
@@ -174,7 +210,7 @@ impl Outbound {
                 body: body.into(),
             })
         };
-        tokio::time::timeout(self.deadline, exchange)
+        tokio::time::timeout(deadline, exchange)
             .await
             .map_err(|_| OutboundError::Timeout)?
     }

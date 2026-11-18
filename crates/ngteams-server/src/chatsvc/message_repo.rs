@@ -51,6 +51,8 @@ pub(super) struct Posted {
     pub told: Vec<Told>,
     /// It put an activity in the bots' outbox: the senders are woken after the commit.
     pub queued: bool,
+    /// It put a mention in the outgoing webhooks' outbox: their senders are woken after the commit.
+    pub hooked: bool,
 }
 
 /// Whether `$draft`'s owner may post it as `$poster`: a member is in its thread, an app's thread is there.
@@ -116,6 +118,7 @@ pub(super) async fn insert_by(db: &Db, draft: &Message, base: &str, poster: Post
                         readers: Vec::new(),
                         told: Vec::new(),
                         queued: false,
+                        hooked: false,
                     }));
                 }
             }
@@ -152,12 +155,15 @@ pub(super) async fn insert_by(db: &Db, draft: &Message, base: &str, poster: Post
                 body: &body,
             };
             let queued = crate::bots::outbox::enqueue!(conn, &row.chat_id, &row.owner_id, event, version);
+            let root = row.root_id.unwrap_or(row.id);
+            let hooked = crate::outgoing::enqueue!(conn, &row.chat_id, &row.owner_id, row.id, root, &body, at);
             Ok(Some(Posted {
                 readers: scene.readers(row.id),
                 row,
                 inserted: true,
                 told,
                 queued,
+                hooked,
             }))
         })
         .await)

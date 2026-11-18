@@ -235,6 +235,7 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(crate::workflows::hook::router(&app.config))
         // after the trace too: an unsigned bot's service URL carries its credential
         .merge(crate::bots::router(&app.config))
+        .merge(crate::outgoing::router(&app.config))
         .layer(axum::middleware::from_fn(crate::serve::drain_unread_body))
         .with_state(app)
 }
@@ -297,6 +298,7 @@ async fn purge(app: &App) {
     }
     purge_registrations(app).await;
     crate::bots::purge(app).await;
+    crate::outgoing::purge(app).await;
 }
 
 async fn purge_registrations(app: &App) {

@@ -106,6 +106,17 @@ pub(crate) struct AppPost<'a> {
 /// Posts it (a new post of its own in a channel) and tells the thread's people; its id, or `None` when the thread
 /// isn't there.
 pub(crate) async fn post_as_app(app: &App, post: AppPost<'_>) -> Result<Option<i64>, DbError> {
+    let in_channel = super::channels::place(&app.db, post.thread).await?.is_some();
+    keep_as_app(app, post, in_channel.then_some(0)).await
+}
+
+/// Posts it in the thread of the channel's post `root` (an outgoing webhook's reply) and tells the thread's people;
+/// its id, or `None` when the thread isn't there.
+pub(crate) async fn reply_as_app(app: &App, post: AppPost<'_>, root: i64) -> Result<Option<i64>, DbError> {
+    keep_as_app(app, post, Some(root)).await
+}
+
+async fn keep_as_app(app: &App, post: AppPost<'_>, root_id: Option<i64>) -> Result<Option<i64>, DbError> {
     let base = wire::base(app);
     let body = json!({
         "type": "Message", "conversationid": post.thread,
@@ -115,7 +126,6 @@ pub(crate) async fn post_as_app(app: &App, post: AppPost<'_>) -> Result<Option<i
         "messagetype": post.kind, "contenttype": "Text", "content": post.content,
         "properties": post.properties,
     });
-    let in_channel = super::channels::place(&app.db, post.thread).await?.is_some();
     let draft = message_repo::Message {
         chat_id: post.thread.to_owned(),
         id: 0,
@@ -123,7 +133,7 @@ pub(crate) async fn post_as_app(app: &App, post: AppPost<'_>) -> Result<Option<i
         client_id: None,
         version: 0,
         body: body.to_string(),
-        root_id: in_channel.then_some(0),
+        root_id,
     };
     let Some(posted) = message_repo::insert_by(&app.db, &draft, &base, message_repo::Poster::App).await? else {
         return Ok(None);

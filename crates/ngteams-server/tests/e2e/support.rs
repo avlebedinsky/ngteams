@@ -96,6 +96,7 @@ pub struct TestServer {
     task: Option<tokio::task::JoinHandle<()>>,
     sweeper: tokio::task::JoinHandle<()>,
     _senders: ngteams_server::bots::Senders,
+    _hooks: ngteams_server::outgoing::Senders,
     _dir: TempDir,
 }
 
@@ -137,6 +138,7 @@ impl TestServer {
         });
         let sweeper = tokio::spawn(ngteams_server::calling::keep_sweeping(Arc::clone(&app)));
         let senders = ngteams_server::bots::Senders::start(Arc::clone(&app));
+        let hooks = ngteams_server::outgoing::Senders::start(Arc::clone(&app));
         Self {
             origin,
             app,
@@ -144,6 +146,7 @@ impl TestServer {
             task: Some(task),
             sweeper,
             _senders: senders,
+            _hooks: hooks,
             _dir: dir,
         }
     }
