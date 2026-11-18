@@ -787,6 +787,13 @@ enum Request {
     KeepTranslations(Vec<StoredTranslation>, Responder<()>),
     /// The account's own message as written, kept when it was sent translated: no service write.
     KeepSentOriginal(SentOriginal, Responder<()>),
+    /// A message the user translated one at a time (`true`), or shows as written again: no service write.
+    KeepTranslatedMessage {
+        conversation: String,
+        message: String,
+        translated: bool,
+        reply: Responder<()>,
+    },
     /// A translated chat's glossary, kept in the store: no service write.
     KeepGlossary(Vec<GlossaryTerm>, Responder<()>),
     /// A call's saved captions ([`TranscriptWrite`]), kept in the store: no service write.
@@ -959,6 +966,12 @@ enum Query {
         conversation: String,
         language: String,
         reply: Responder<Vec<GlossaryTerm>>,
+    },
+    /// Which of a conversation's messages the user translated one at a time.
+    TranslatedMessages {
+        conversation: String,
+        ids: Vec<String>,
+        reply: Responder<Vec<String>>,
     },
     /// The account's own messages of a conversation as written, by their keys.
     SentOriginals {
@@ -1366,6 +1379,27 @@ impl EngineRequests {
     /// changes.
     pub fn keep_sent_original(&self, original: SentOriginal) -> Reply<()> {
         self.ask(|reply| Request::KeepSentOriginal(original, reply))
+    }
+
+    /// Which of the messages `ids` of `conversation` the user translated one at a time
+    /// ([`Store::translated_messages`]). Answered meanwhile too.
+    pub fn translated_messages(&self, conversation: String, ids: Vec<String>) -> Reply<Vec<String>> {
+        self.query(|reply| Query::TranslatedMessages {
+            conversation,
+            ids,
+            reply,
+        })
+    }
+
+    /// Keeps that the user translated the message `message` of `conversation` one at a time, or shows it as written
+    /// again ([`Store::set_translated_message`]): only the store changes.
+    pub fn keep_translated_message(&self, conversation: String, message: String, translated: bool) -> Reply<()> {
+        self.ask(|reply| Request::KeepTranslatedMessage {
+            conversation,
+            message,
+            translated,
+            reply,
+        })
     }
 
     /// The glossary of `conversation` translated into `language` (the app's code), the newest named first
@@ -2468,6 +2502,15 @@ where
             }
             Request::KeepSentOriginal(original, reply) => {
                 let _ = reply.send(self.store.put_sent_original(&original).map_err(EngineError::from));
+            }
+            Request::KeepTranslatedMessage {
+                conversation,
+                message,
+                translated,
+                reply,
+            } => {
+                let kept = self.store.set_translated_message(&conversation, &message, translated);
+                let _ = reply.send(kept.map_err(EngineError::from));
             }
             Request::KeepGlossary(terms, reply) => {
                 let _ = reply.send(self.store.put_glossary(&terms).map_err(EngineError::from));

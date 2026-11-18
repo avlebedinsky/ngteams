@@ -166,3 +166,29 @@ async fn kept_translations_are_read_back_by_a_later_engine() {
     // nothing of it went to the service
     assert!(server.received_requests().await.unwrap_or_default().is_empty());
 }
+
+#[tokio::test]
+async fn messages_translated_alone_are_read_back_by_a_later_engine() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("translations.sqlite");
+    seeded(&path);
+    let server = MockServer::start().await;
+    {
+        let handle = engine_on(&server, &path);
+        for (message, translated) in [("1001", true), ("1002", true), ("1002", false)] {
+            handle
+                .keep_translated_message(CHAT.to_owned(), message.to_owned(), translated)
+                .await
+                .unwrap();
+        }
+        handle.shutdown();
+    }
+    let handle = engine_on(&server, &path);
+    let ids = vec!["1001".to_owned(), "1002".to_owned()];
+    assert_eq!(
+        handle.translated_messages(CHAT.to_owned(), ids).await.unwrap(),
+        ["1001"]
+    );
+    handle.shutdown();
+    assert!(server.received_requests().await.unwrap_or_default().is_empty());
+}

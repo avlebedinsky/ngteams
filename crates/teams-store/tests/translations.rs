@@ -1,7 +1,8 @@
 //! Chats translated on this computer in the store (schema 20), on a real file in a temporary directory: a message's
 //! translation kept by its id, version and language across a reopen, an older version's dropped when a newer one is
 //! kept, the account's own messages as written by their key, a chat's glossary by its terms, newest first and trimmed,
-//! and all of them gone with their conversation. Every id and text here is made up.
+//! the messages translated one at a time, and all of them gone with their conversation. Every id and text here is
+//! made up.
 
 use std::path::PathBuf;
 
@@ -194,12 +195,12 @@ fn the_translations_migration_starts_with_none() -> Result<(), StoreError> {
     drop(with_chats(&dir)?);
     // the store as schema 19 left it
     let raw = rusqlite::Connection::open(store_path(&dir)).expect("open directly");
-    raw.execute_batch("DROP TABLE message_translations; DROP TABLE sent_originals; DROP TABLE call_transcript_lines; DROP TABLE call_transcripts; DROP TABLE translation_glossary; DROP TABLE blocked_copies; DROP TABLE horizon_bookmarks; DROP VIEW pending_conversation_previews; DROP TABLE conversation_previews; PRAGMA user_version = 19;")
+    raw.execute_batch("DROP TABLE message_translations; DROP TABLE sent_originals; DROP TABLE call_transcript_lines; DROP TABLE call_transcripts; DROP TABLE translation_glossary; DROP TABLE translated_messages; DROP TABLE blocked_copies; DROP TABLE horizon_bookmarks; DROP VIEW pending_conversation_previews; DROP TABLE conversation_previews; PRAGMA user_version = 19;")
         .expect("back to schema 19");
     drop(raw);
     let store = Store::open(&store_path(&dir))?;
     assert_eq!(store.schema_version()?, SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 25);
+    assert_eq!(SCHEMA_VERSION, 26);
     assert!(store.translations(CHAT, "de", &["1".to_owned()])?.is_empty());
     assert!(store.sent_originals(CHAT, &["client-1".to_owned()])?.is_empty());
     Ok(())
@@ -328,6 +329,53 @@ fn the_glossary_gone_answers_an_error_never_a_panic() -> Result<(), StoreError> 
     assert!(matches!(store.glossary(CHAT, "en"), Err(StoreError::Sqlite(_))));
     assert!(matches!(
         store.put_glossary(&[term(CHAT, "en", "a", "b", 1)]),
+        Err(StoreError::Sqlite(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn messages_translated_alone_are_kept_until_shown_as_written_and_go_with_their_message() -> Result<(), StoreError> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = with_chats(&dir)?;
+    let wanted = ["1".to_owned(), "2".to_owned(), "unknown".to_owned()];
+    assert!(store.translated_messages(CHAT, &wanted)?.is_empty());
+    store.set_translated_message(CHAT, "1", true)?;
+    store.set_translated_message(CHAT, "1", true)?;
+    store.set_translated_message(OTHER, "1", true)?;
+    // one the store doesn't hold is left out
+    store.set_translated_message(CHAT, "unknown", true)?;
+    drop(store);
+    let mut store = Store::open(&store_path(&dir))?;
+    assert_eq!(store.translated_messages(CHAT, &wanted)?, ["1"]);
+    store.set_translated_message(CHAT, "1", false)?;
+    assert!(store.translated_messages(CHAT, &wanted)?.is_empty());
+    assert_eq!(store.translated_messages(OTHER, &["1".to_owned()])?, ["1"]);
+    // a long list is read in parts
+    let mut many: Vec<String> = (0..1000).map(|n| format!("unknown-{n}")).collect();
+    many.push("1".to_owned());
+    assert_eq!(store.translated_messages(OTHER, &many)?, ["1"]);
+    // gone with its conversation
+    store.forget_conversation(OTHER)?;
+    assert!(store.translated_messages(OTHER, &["1".to_owned()])?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn messages_translated_alone_gone_answer_an_error_never_a_panic() -> Result<(), StoreError> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    drop(with_chats(&dir)?);
+    let raw = rusqlite::Connection::open(store_path(&dir)).expect("open directly");
+    raw.execute_batch("DROP TABLE translated_messages;")
+        .expect("drop the table");
+    drop(raw);
+    let mut store = Store::open(&store_path(&dir))?;
+    assert!(matches!(
+        store.translated_messages(CHAT, &["1".to_owned()]),
+        Err(StoreError::Sqlite(_))
+    ));
+    assert!(matches!(
+        store.set_translated_message(CHAT, "1", true),
         Err(StoreError::Sqlite(_))
     ));
     Ok(())

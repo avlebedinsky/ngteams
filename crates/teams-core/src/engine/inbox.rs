@@ -397,9 +397,6 @@ impl<C: Credentials + 'static> Inbox<C> {
 
     /// Answers a query from the store.
     pub(super) fn answer(&self, store: &Store, query: Query) {
-        fn give<T>(reply: Responder<T>, answer: Result<T, StoreError>) {
-            let _ = reply.send(answer.map_err(EngineError::from));
-        }
         let me = self.me.as_str();
         match query {
             Query::Conversations(limit, reply) => give(reply, store.conversations_by_activity(limit)),
@@ -441,22 +438,10 @@ impl<C: Credentials + 'static> Inbox<C> {
             Query::OutboxUnsettled(conversation, reply) => give(reply, store.outbox_unsettled(&conversation)),
             Query::LeftByEarlierRuns(reply) => give(reply, store.outbox_left_by_earlier_runs()),
             Query::ReplyRoots(conversation, reply) => give(reply, store.reply_roots(&conversation)),
-            Query::Translations {
-                conversation,
-                language,
-                ids,
-                reply,
-            } => give(reply, store.translations(&conversation, &language, &ids)),
-            Query::Glossary {
-                conversation,
-                language,
-                reply,
-            } => give(reply, store.glossary(&conversation, &language)),
-            Query::SentOriginals {
-                conversation,
-                keys,
-                reply,
-            } => give(reply, store.sent_originals(&conversation, &keys)),
+            query @ (Query::Translations { .. }
+            | Query::Glossary { .. }
+            | Query::SentOriginals { .. }
+            | Query::TranslatedMessages { .. }) => answer_translation(store, query),
             Query::CallTranscripts(conversation, reply) => give(reply, store.call_transcripts(&conversation)),
             Query::TranscriptLines(id, reply) => give(reply, store.transcript_lines(id)),
             Query::CalendarEvents {
@@ -477,6 +462,39 @@ impl<C: Credentials + 'static> Inbox<C> {
                 },
             ),
         }
+    }
+}
+
+fn give<T>(reply: Responder<T>, answer: Result<T, StoreError>) {
+    let _ = reply.send(answer.map_err(EngineError::from));
+}
+
+/// Answers a query about the chats translated on this computer from the store.
+fn answer_translation(store: &Store, query: Query) {
+    match query {
+        Query::Translations {
+            conversation,
+            language,
+            ids,
+            reply,
+        } => give(reply, store.translations(&conversation, &language, &ids)),
+        Query::Glossary {
+            conversation,
+            language,
+            reply,
+        } => give(reply, store.glossary(&conversation, &language)),
+        Query::SentOriginals {
+            conversation,
+            keys,
+            reply,
+        } => give(reply, store.sent_originals(&conversation, &keys)),
+        Query::TranslatedMessages {
+            conversation,
+            ids,
+            reply,
+        } => give(reply, store.translated_messages(&conversation, &ids)),
+        // the caller hands only those over
+        _ => {}
     }
 }
 
