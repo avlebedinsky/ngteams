@@ -384,8 +384,15 @@ fn close_escape_and_copy_cannot_stop_a_share_before_all_recipients_finish() {
         sent(1, OutboxKind::Send, OutboxState::Pending, None),
         sent(2, OutboxKind::Send, OutboxState::Sent, None),
     ]);
+    cx.update(|_, cx| dialog.update(cx, |dialog, cx| dialog.set_message("Original note", cx)));
     click(cx, "share-file-share");
     assert_eq!(sends(&rig).len(), 1);
+    cx.update(|_, cx| dialog.update(cx, |dialog, cx| dialog.set_message("Changed note", cx)));
+    click(cx, "share-file-format");
+    click(cx, "share-file-emoji");
+    assert_eq!(cx.update(|_, cx| dialog.read(cx).message_text(cx)), "Original note");
+    assert!(!cx.update(|_, cx| dialog.read(cx).formatting()));
+    assert!(!cx.update(|_, cx| dialog.read(cx).emoji_open()));
     click(cx, "share-file-close");
     cx.simulate_keystrokes("escape");
     cx.update(|_, cx| {
@@ -469,6 +476,7 @@ fn a_failed_share_resends_its_row_without_a_new_command() {
 #[test]
 fn a_failed_chat_creation_resends_its_row_before_the_file_post() {
     let (rig, shell, dialog, cx) = opened();
+    pick(cx, "Bee");
     rig.core.service_answer.lock().unwrap().people = vec![FoundPerson {
         mri: Some(LAB_D.to_owned()),
         name: "Lab Dee".to_owned(),
@@ -482,10 +490,17 @@ fn a_failed_chat_creation_resends_its_row_before_the_file_post() {
     cx.simulate_keystrokes("enter");
     draw(cx);
     rig.core.write_answers.lock().unwrap().extend([
+        sent(98, OutboxKind::Send, OutboxState::Sent, None),
         sent(99, OutboxKind::CreateChat, OutboxState::Failed, None),
         sent(100, OutboxKind::Send, OutboxState::Sent, None),
     ]);
     click(cx, "share-file-share");
+    assert_eq!(picked(&dialog, cx), [LAB_D]);
+    cx.update(|_, cx| dialog.update(cx, |dialog, cx| dialog.set_message("Changed note", cx)));
+    assert_eq!(cx.update(|_, cx| dialog.read(cx).message_text(cx)), "Changed note");
+    click(cx, "share-file-format");
+    assert!(cx.update(|_, cx| dialog.read(cx).formatting()));
+    click(cx, "share-file-format");
     let failed = sent(99, OutboxKind::CreateChat, OutboxState::Failed, None);
     rig.core.outbox_answers.lock().unwrap().push_back(failed.clone());
     click(cx, "share-file-share");
@@ -507,9 +522,73 @@ fn a_failed_chat_creation_resends_its_row_before_the_file_post() {
         .push_back(sent(99, OutboxKind::CreateChat, OutboxState::Sent, Some(MADE)));
     cx.executor().advance_clock(std::time::Duration::from_millis(600));
     draw(cx);
-    assert_eq!(rig.core.actions.lock().unwrap().len(), 2);
-    assert_eq!(sends(&rig)[0].0, MADE);
+    assert_eq!(rig.core.actions.lock().unwrap().len(), 3);
+    assert_eq!(sends(&rig)[1].0, MADE);
+    assert_eq!(sends(&rig)[1].1.html(), "<p>Changed note</p>");
     assert!(shown_dialog(&shell, cx).is_none());
+}
+
+fn mixed_retries(rig: &Rig, cx: &mut VisualTestContext) -> (teams_store::OutboxEntry, teams_store::OutboxEntry) {
+    pick(cx, "Bee");
+    rig.core.service_answer.lock().unwrap().people = vec![FoundPerson {
+        mri: Some(LAB_D.to_owned()),
+        name: "Lab Dee".to_owned(),
+        email: None,
+        job_title: None,
+        department: None,
+    }];
+    cx.simulate_input("Dee");
+    cx.executor().advance_clock(std::time::Duration::from_millis(400));
+    draw(cx);
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    let mut post = sent(77, OutboxKind::Send, OutboxState::Failed, None);
+    post.last_error = Some("whether it arrived is unknown".to_owned());
+    let chat = sent(99, OutboxKind::CreateChat, OutboxState::Failed, None);
+    rig.core
+        .write_answers
+        .lock()
+        .unwrap()
+        .extend([post.clone(), chat.clone()]);
+    click(cx, "share-file-share");
+    (post, chat)
+}
+
+#[test]
+fn mixed_retries_show_both_cautions_before_any_resend() {
+    let (rig, _shell, dialog, cx) = opened();
+    let (post, chat) = mixed_retries(&rig, cx);
+    rig.core.outbox_answers.lock().unwrap().extend([post, chat]);
+    click(cx, "share-file-share");
+    let question = cx.update(|_, cx| dialog.read(cx).problem().cloned()).unwrap();
+    assert!(question.contains(teams_ui::chat_view::MAY_HAVE_ARRIVED));
+    assert!(question.contains("The chat may already exist. Try to create it again?"));
+    assert!(rig.core.resent.lock().unwrap().is_empty());
+    assert_eq!(rig.core.actions.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn a_new_recipient_clears_confirmation_and_gets_both_cautions_before_retry() {
+    let (rig, _shell, dialog, cx) = opened();
+    let (post, chat) = mixed_retries(&rig, cx);
+    cx.update(|_, cx| dialog.update(cx, |dialog, cx| dialog.remove(0, cx)));
+    rig.core.outbox_answers.lock().unwrap().push_back(chat.clone());
+    click(cx, "share-file-share");
+    assert_eq!(
+        cx.update(|_, cx| dialog.read(cx).problem().cloned()).as_deref(),
+        Some("The chat may already exist. Try to create it again?")
+    );
+    cx.update(|window, cx| dialog.update(cx, |dialog, cx| dialog.focus(window, cx)));
+    pick(cx, "Bee");
+    assert_eq!(picked(&dialog, cx), [LAB_D, LAB_B]);
+    assert!(cx.update(|_, cx| dialog.read(cx).problem().is_none()));
+    rig.core.outbox_answers.lock().unwrap().extend([chat, post]);
+    click(cx, "share-file-share");
+    let question = cx.update(|_, cx| dialog.read(cx).problem().cloned()).unwrap();
+    assert!(question.contains(teams_ui::chat_view::MAY_HAVE_ARRIVED));
+    assert!(question.contains("The chat may already exist. Try to create it again?"));
+    assert!(rig.core.resent.lock().unwrap().is_empty());
+    assert_eq!(rig.core.actions.lock().unwrap().len(), 2);
 }
 
 #[test]
@@ -575,12 +654,16 @@ fn a_resend_error_reads_the_row_again_and_accepts_a_share_that_arrived() {
 
 #[test]
 fn an_unread_retry_keeps_its_row_and_does_not_post_a_new_message() {
-    let (rig, shell, _dialog, cx) = opened();
+    let (rig, shell, dialog, cx) = opened();
     pick(cx, "Bee");
     let failed = sent(77, OutboxKind::Send, OutboxState::Failed, None);
     rig.core.write_answers.lock().unwrap().push_back(failed.clone());
     click(cx, "share-file-share");
     click(cx, "share-file-share");
+    assert_eq!(
+        cx.update(|_, cx| dialog.read(cx).problem().cloned()).as_deref(),
+        Some("We could not check the share. Try again.")
+    );
     assert!(shown_dialog(&shell, cx).is_some());
     assert!(rig.core.resent.lock().unwrap().is_empty());
     assert_eq!(sends(&rig).len(), 1);

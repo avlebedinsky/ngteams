@@ -25,7 +25,7 @@
 //! - **Access**: Microsoft links must have the `anonymous` scope. Other scopes and unknown permissions show an
 //!   access error. An own server grants access with the message.
 //! - **Retries** read each recipient's current outbox row and use [`Core::resend`]. An unknown outcome shows a warning first.
-//!   A file post keeps the message editor read-only until the dialog closes.
+//!   The message stays read-only while a share runs or a recipient keeps a Send row for retry.
 //!   Close, Escape and Copy link cannot stop an active share.
 //! - **Copy link** puts the file's sharing link on the clipboard, and the dialog becomes Teams' "Link created" box
 //!   ([`link`]): the link in its field, Copy, what the link lets people do, and Settings (the file's OneDrive page,
@@ -543,6 +543,9 @@ impl ShareFileDialog {
             return;
         };
         self.picked.push(chosen);
+        if matches!(self.step, Step::ConfirmRetry(_)) {
+            self.step = Step::Ready;
+        }
         self.to.update(cx, |to, cx| to.set_value("", window, cx));
         self.found_people.clear();
         self.highlighted = None;
@@ -714,21 +717,25 @@ impl ShareFileDialog {
     }
 
     fn warn_before_retry(&mut self) -> bool {
-        let Some(row) = self
+        let (post, chat) = self
             .picked
             .iter()
             .filter_map(|target| self.retries.get(target.key()))
             .filter(|row| teams_core::outcome_unknown(row) || Again::of(row, false) == Again::AfterWarning)
-            .min_by_key(|row| row.kind != OutboxKind::Send)
-        else {
-            return false;
+            .fold((false, false), |(post, chat), row| {
+                (
+                    post || row.kind == OutboxKind::Send,
+                    chat || row.kind == OutboxKind::CreateChat,
+                )
+            });
+        let chat_question = "The chat may already exist. Try to create it again?";
+        let question = match (post, chat) {
+            (false, false) => return false,
+            (true, false) => crate::chat_view::MAY_HAVE_ARRIVED.into(),
+            (false, true) => chat_question.into(),
+            (true, true) => format!("{} {chat_question}", crate::chat_view::MAY_HAVE_ARRIVED).into(),
         };
-        let question = if row.kind == OutboxKind::Send {
-            crate::chat_view::MAY_HAVE_ARRIVED
-        } else {
-            "The chat may already exist. Try to create it again?"
-        };
-        self.step = Step::ConfirmRetry(question.into());
+        self.step = Step::ConfirmRetry(question);
         true
     }
 
