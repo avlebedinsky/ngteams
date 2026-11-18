@@ -535,6 +535,12 @@ pub(crate) enum MediaDone {
         result: Result<Box<dyn VideoSource>, String>,
         reply: super::Waiting,
     },
+    /// The screen the account shared on the session that the call's media replaced, given back by it (none once its
+    /// stream ended): it goes on in the new session.
+    ScreenKept {
+        call: CallId,
+        screen: Option<Box<dyn VideoSource>>,
+    },
     /// The account's screen shared (`on`) or no longer on a group call's sharing line (or why not): its lines are
     /// described again next.
     GroupShared {
@@ -574,6 +580,8 @@ pub(super) struct LiveMedia {
     closed: Option<Instant>,
     /// Its devices were asked to open ([`open_devices`]).
     pub(super) devices_opened: bool,
+    /// The screen the old session shared is on its way to this one ([`MediaDone::ScreenKept`]).
+    pub(super) screen_coming: bool,
     pub(super) speaker_retry: Option<SpeakerRetry>,
     /// Its camera, as the account last turned it, when it takes video (its video started); `None`: no
     /// video.
@@ -671,6 +679,7 @@ impl LiveMedia {
             lost: None,
             closed: None,
             devices_opened: false,
+            screen_coming: false,
             speaker_retry: None,
         }
     }

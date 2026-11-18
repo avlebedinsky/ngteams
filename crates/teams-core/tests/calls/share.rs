@@ -217,8 +217,14 @@ async fn descriptions(lab: &Lab) -> Vec<Value> {
 }
 
 /// The last `updateMediaDescriptions` describes the sharing line going `direction` (labelled while it sends), tagged
-/// as a share's; waits for it up to five seconds.
+/// as the account's first share; waits for it up to five seconds.
 async fn shares_described(lab: &Lab, direction: &str) -> Value {
+    shares_described_as(lab, direction, 1).await
+}
+
+/// [`shares_described`], tagged as the account's share number `share`.
+async fn shares_described_as(lab: &Lab, direction: &str, share: u32) -> Value {
+    let tag = format!(";ss_{share}");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         let last = descriptions(lab).await.pop().unwrap_or_default();
@@ -230,7 +236,7 @@ async fn shares_described(lab: &Lab, direction: &str) -> Value {
         let labelled = sharing.get("label").and_then(Value::as_str);
         let tagged = last["negotiationTag"]
             .as_str()
-            .is_some_and(|tag| tag.ends_with(";ss_1"));
+            .is_some_and(|written| written.ends_with(&tag));
         let wanted_label = (direction == "sendonly").then_some("applicationsharing-video");
         if sharing["direction"] == direction && labelled == wanted_label && tagged {
             return last;
@@ -669,6 +675,37 @@ async fn a_share_waiting_while_the_media_is_set_up_again_goes_on_the_new_session
         .filter(|event| matches!(event, Event::CallSharing { call: of, on: false } if *of == call))
         .collect();
     assert!(flipped.is_empty(), "the share stays told as on: {flipped:?}");
+    held.hang_up().await;
+}
+
+/// a shares in the 1:1 call, and the service sets the call's media up again (as it does when someone is added): as in
+/// Teams the share goes on, its screen out on the new session's sharing line, described `sendonly` as a group call's
+/// share is (told to the conversation again, as share 2), and a is never told it stopped. Before, the share ended with
+/// the old session, and the one added saw none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_share_going_while_the_media_is_set_up_again_goes_on_the_new_session() {
+    let mut held = HeldCall::answered_by_a().await;
+    let call = held.call;
+    assert_eq!(held.act(CallAction::Share { call, on: true }).await.unwrap(), call);
+    assert!(share_told(&mut held.a, call, true).await, "a shares");
+    held.renegotiated(1).await;
+
+    let on = held.camera_held_on().await;
+    let (_mixer, _) = new_session(&held, on).await;
+    shares_described_as(&held.lab, "sendonly", 2).await;
+    let flipped: Vec<_> = held
+        .a
+        .events_within(Duration::from_millis(500))
+        .await
+        .into_iter()
+        .filter(|event| matches!(event, Event::CallSharing { call: of, on: false } if *of == call))
+        .collect();
+    assert!(flipped.is_empty(), "the share stays told as on: {flipped:?}");
+
+    // Stop sharing ends it on the new session
+    assert_eq!(held.act(CallAction::Share { call, on: false }).await.unwrap(), call);
+    assert!(!share_told(&mut held.a, call, true).await, "a no longer shares");
+    shares_described_as(&held.lab, "recvonly", 2).await;
     held.hang_up().await;
 }
 
