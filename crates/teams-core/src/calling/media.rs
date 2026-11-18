@@ -621,8 +621,9 @@ pub(super) enum Reoffer {
 pub(super) struct Shares {
     pub(super) own: bool,
     pub(super) theirs: bool,
-    /// A share step of the account's that began and is not done yet: whether it shares. A 1:1 call's, or a group
-    /// session's screen that waited for the media to be set up again (`Calling::share_after_rebuild`).
+    /// A share step of the account's that began and is not done yet: whether it shares. A 1:1 call's, a group call's
+    /// Stop sharing, or a group session's screen that waited for the media to be set up again
+    /// (`Calling::share_after_rebuild`); a Stop sharing while that screen starts sets it to stop.
     pub(super) turning: Option<bool>,
     /// How the share was last told ([`crate::Event::CallSharing`]): as it goes once the switches made are done.
     pub(super) told: bool,

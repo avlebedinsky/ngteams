@@ -24,7 +24,8 @@
 //! - **The media set up again** (a new mixer session, as when someone is added to a 1:1 call): as in Teams, a share
 //!   goes on. The old session gives its screen back ([`MediaDone::ScreenKept`]), and the screen goes out on the new
 //!   session's sharing line as a group call's share does ([`Calling::screen_kept`]). The share stays told as on
-//!   meanwhile, and a Stop sharing before the screen came drops it.
+//!   meanwhile. A Stop sharing before the screen came drops it, and one while it starts to go out stops it once it
+//!   went ([`Calling::group_shared`]).
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -46,6 +47,8 @@ pub(super) struct OldShares {
     /// A share switch that waited for the old session's renegotiation: it goes on the new session.
     pub(super) waits: Option<media::ShareWait>,
     shared: bool,
+    /// The old session's share step not done yet: a Stop sharing made keeps nothing.
+    turning: Option<bool>,
     told: bool,
     shown: bool,
 }
@@ -56,6 +59,7 @@ impl OldShares {
         Self {
             waits: old.share_waits.take(),
             shared: old.shares.own,
+            turning: old.shares.turning,
             told: old.shares.told,
             shown: old.shares.theirs,
         }
@@ -63,7 +67,7 @@ impl OldShares {
 
     /// As in Teams, a screen the old session shared goes on in the new one, unless a switch waits.
     fn kept(&self) -> bool {
-        self.shared && self.waits.is_none()
+        self.shared && self.turning != Some(false) && self.waits.is_none()
     }
 
     /// The new session `live` starts as the share was told; a kept screen stays told as on while it comes.
@@ -117,9 +121,7 @@ where
             return;
         }
         if live.is_group() {
-            let step = media::share_group(live, None, reply);
-            self.media_steps.spawn_blocking(step);
-            return;
+            return self.stop_group_share(call, reply);
         }
         match self.calls.begin_renegotiation(call) {
             Ok(()) => {
@@ -134,6 +136,24 @@ where
             }
             Err(error) => refuse(reply, error.into()),
         }
+    }
+
+    /// Stop sharing in the group call `call`. A screen that still starts to go out stops once it went
+    /// ([`Self::group_shared`]), as the two steps run in no fixed order.
+    fn stop_group_share(&mut self, call: CallId, reply: Waiting) {
+        let Some(live) = self.live.as_mut().filter(|live| live.call == call) else {
+            return refuse(reply, CallActionError::NoMedia);
+        };
+        let starting = live.shares.turning == Some(true);
+        live.shares.turning = Some(false);
+        if starting {
+            log::info!("call {}: its screen stops once it went out", call.get());
+            self.tell_sharing(call);
+            let _ = reply.send(Ok(call));
+            return;
+        }
+        let step = media::share_group(live, None, reply);
+        self.media_steps.spawn_blocking(step);
     }
 
     /// A share's media step done: the screen picked, or shared (or no longer) on a line of its own or a group call's.
@@ -401,12 +421,21 @@ where
         let Some(live) = self.live.as_mut().filter(|live| live.call == call) else {
             return refuse(reply, CallActionError::NoMedia);
         };
-        // the share step of a screen that waited for the media to be set up again is done
-        live.shares.turning = None;
+        // the share step is done; a Stop sharing that came while it started the screen stops it now
+        let stopped = live.shares.turning.take() == Some(false) && on;
         if let Err(why) = result {
             log::info!("call {}: its screen isn't shared: {why}", call.get());
             self.tell_sharing(call);
             return refuse(reply, CallActionError::Media(why));
+        }
+        if stopped {
+            // nothing was told or described yet
+            log::info!("call {}: its screen stopped as it went out", call.get());
+            let session = Arc::clone(&live.session);
+            tokio::task::spawn_blocking(move || session.stop_group_screen());
+            self.tell_sharing(call);
+            let _ = reply.send(Ok(call));
+            return;
         }
         if on && let Err(error) = self.calls.tell_screen_shared(call) {
             log::info!(

@@ -709,6 +709,31 @@ async fn a_share_going_while_the_media_is_set_up_again_goes_on_the_new_session()
     held.hang_up().await;
 }
 
+/// a shares in the 1:1 call, the service sets the call's media up again, and a stops sharing at once, while the kept
+/// screen comes or starts to go out on the new session: the share ends, and the new session's sharing line does not
+/// stay described `sendonly`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_while_the_kept_screen_comes_ends_the_share() {
+    let mut held = HeldCall::answered_by_a().await;
+    let call = held.call;
+    assert_eq!(held.act(CallAction::Share { call, on: true }).await.unwrap(), call);
+    assert!(share_told(&mut held.a, call, true).await, "a shares");
+    held.renegotiated(1).await;
+
+    let on = held.camera_held_on().await;
+    let (_mixer, _) = new_session(&held, on).await;
+    assert_eq!(held.act(CallAction::Share { call, on: false }).await.unwrap(), call);
+    assert!(!share_told(&mut held.a, call, true).await, "a no longer shares");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let last = descriptions(&held.lab).await.pop().unwrap_or_default();
+    let sharing = last["descriptions"].as_array().and_then(|lines| lines.last());
+    assert!(
+        sharing.is_none_or(|line| line["direction"] != "sendonly"),
+        "the stopped share is still described: {last}"
+    );
+    held.hang_up().await;
+}
+
 /// Stop sharing while the call's camera renegotiation is open, and the service sets the call's media up again
 /// meanwhile: the new session shares nothing, so a is told it no longer shares and its answer names no
 /// `ScreenSharer`. Share then goes again, on the new session's sharing line.

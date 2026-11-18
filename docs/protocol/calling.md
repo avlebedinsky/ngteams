@@ -262,8 +262,10 @@ A 1:1 call's video in the native client (M3 Task 18), as the web client's camera
   the camera as asked, and Stop sharing (or Share) as the share will end. When a camera switch and a share both wait, they go in
   turn, the camera first, each offer once the one before settled. The later switch of each sets how it ends. When the
   service sets the call's media up again for a new mixer session meanwhile, a waiting Share goes out on the new
-  session's sharing line, as a group call's share does; the new session shares nothing else, so a screen shared on the
-  old one is told stopped. The far end's screen shown on the old session is told gone; the new session's sharing
+  session's sharing line, as a group call's share does. A screen shared on the old session goes on in the new one
+  the same way, on the new sharing line described `sendonly`, and stays told as shared; only a switch that still
+  waits decides otherwise. A Stop sharing before the kept screen comes drops it, and one while it starts to go out
+  stops it once it went. The far end's screen shown on the old session is told gone; the new session's sharing
   line shows it again when the roster names the sharer. A renegotiation of the far end's delivered while ours is being made or waits for
   its answer is held until ours settles: after our answer is applied it is answered; when ours is then turned away
   (the controller took the far end's first, as when both cameras went on together) ours gives way to it, and so it
