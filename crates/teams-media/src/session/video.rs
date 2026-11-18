@@ -7,8 +7,11 @@
 //!   allows. A camera that fails (`DeviceClosed(Camera)`) ends the thread and turns the camera off; the rest of the
 //!   session goes on.
 //! - **The screen thread** runs while the account shares its screen ([`super::MediaSession::share_screen`]): each
-//!   frame turned into I420 at most [`SCREEN_MAX`] and handed to the sharing line's source. A screen whose stream ends
-//!   (the user stopped it at the desktop) ends the thread, told as `DeviceClosed(Screen)`.
+//!   frame turned into I420 at most [`SCREEN_MAX`] and handed to the sharing line's source. A screen cast sends a frame
+//!   only when the screen changes, and the encoder makes a keyframe only of a frame it gets: so while no new frame
+//!   comes, the last picture goes again every [`SCREEN_REPEAT`], and a viewer that asks for a keyframe (one that joins,
+//!   the viewers of a share that starts again, a loss) gets one of a screen that holds still. A screen whose stream
+//!   ends (the user stopped it at the desktop) ends the thread, told as `DeviceClosed(Screen)`.
 //! - **A decoding thread** runs for each video track the far end sends on: libwebrtc decodes, and each picture goes to
 //!   its video line's sink (made the first time the line brings a frame, [`RemoteSinks`]) once the session's video
 //!   started; a sharing line's to [`crate::rtc::SHARING_LINE`]'s; a line the negotiated SDP doesn't name (a group
@@ -26,7 +29,7 @@ use libwebrtc::video_source::native::NativeVideoSource;
 use libwebrtc::video_stream::native::NativeVideoStream;
 use libwebrtc::video_track::RtcVideoTrack;
 
-use crate::devices::{VideoFrame, VideoSink, VideoSource};
+use crate::devices::{DeviceError, VideoFrame, VideoSink, VideoSource};
 use crate::rtc::{LineMap, Next, Peer, next_within};
 use crate::video::codec::EncoderSettings;
 use crate::video::convert::{MaxSize, from_buffer, to_buffer, to_i420};
@@ -36,6 +39,8 @@ use super::{SessionDevice, SessionEvent, Shared};
 
 /// How long the camera and decoding threads wait for a frame before they check whether to stop.
 const FRAME_WAIT: Duration = Duration::from_millis(100);
+/// How long a shared screen goes without a new frame before its last picture goes again (see the module docs).
+pub const SCREEN_REPEAT: Duration = Duration::from_millis(200);
 /// The largest picture of a screen sent: a bigger screen is scaled down to fit.
 pub const SCREEN_MAX: MaxSize = MaxSize {
     width: 1920,
@@ -141,6 +146,9 @@ impl VideoShared {
     }
 }
 
+/// The screen thread: it gives the screen back when it stops, unless the screen's stream ended.
+pub(super) type ScreenThread = JoinHandle<Option<Box<dyn VideoSource>>>;
+
 /// The session's camera: what it runs with once the video started, and the camera thread running now.
 #[derive(Default)]
 pub(super) struct SessionVideo {
@@ -149,7 +157,7 @@ pub(super) struct SessionVideo {
     preview: SelfView,
     pub(super) camera: Option<(Arc<AtomicBool>, JoinHandle<()>)>,
     /// The screen thread, while the account shares its screen.
-    pub(super) screen: Option<(Arc<AtomicBool>, JoinHandle<()>)>,
+    pub(super) screen: Option<(Arc<AtomicBool>, ScreenThread)>,
     shared: Option<Arc<Shared>>,
 }
 
@@ -180,10 +188,14 @@ impl SessionVideo {
 
     /// Stops the screen thread, if one runs, and waits for it.
     pub(super) fn stop_screen(&mut self) {
-        if let Some((stop, handle)) = self.screen.take() {
-            stop.store(true, Ordering::Relaxed);
-            let _ = handle.join();
-        }
+        drop(self.take_screen());
+    }
+
+    /// Stops the screen thread, if one runs, waits for it, and gives back its screen (none once its stream ended).
+    pub(super) fn take_screen(&mut self) -> Option<Box<dyn VideoSource>> {
+        let (stop, handle) = self.screen.take()?;
+        stop.store(true, Ordering::Relaxed);
+        handle.join().ok().flatten()
     }
 
     /// Waits for the decoding threads (the session is stopping).
@@ -259,16 +271,25 @@ pub(super) struct ScreenLoop {
 }
 
 impl ScreenLoop {
-    pub(super) fn run(mut self) {
+    /// Sends the screen's frames until the thread is stopped; the screen, unless its stream ended.
+    pub(super) fn run(mut self) -> Option<Box<dyn VideoSource>> {
         let mut first = true;
+        // the last picture sent, and when it last went
+        let mut last: Option<(VideoFrame, Instant)> = None;
         while !self.stop.load(Ordering::Relaxed) && !self.shared.stopping() {
             let frame = match self.screen.next_frame(FRAME_WAIT) {
                 Ok(Some(frame)) => frame,
-                Ok(None) => continue,
+                Ok(None) => {
+                    if let Some((picture, at)) = last.as_mut().filter(|(_, at)| at.elapsed() >= SCREEN_REPEAT) {
+                        self.send(picture);
+                        *at = Instant::now();
+                    }
+                    continue;
+                }
                 Err(error) => {
                     log::warn!("the shared screen stopped: {error}");
                     self.shared.report(SessionEvent::DeviceClosed(SessionDevice::Screen));
-                    return;
+                    return None;
                 }
             };
             if std::mem::take(&mut first) {
@@ -283,14 +304,43 @@ impl ScreenLoop {
                 log::debug!("a frame of the shared screen doesn't convert");
                 continue;
             };
-            // stamped by the bindings on the wall clock, as the source's black keep-alive frames are: a frame stamped
-            // earlier than the last one the encoder saw is dropped, and a group call's sharing line has sent those
-            // keep-alive frames since the call began
-            let sent = RtcVideoFrame::new(VideoRotation::VideoRotation0, to_buffer(&i420));
-            if self.source.capture_frame(&sent) {
-                VideoShared::count(&self.shared.video.screen_sent);
-            }
+            self.send(&i420);
+            last = Some((i420, Instant::now()));
         }
+        Some(match last {
+            Some((picture, _)) => Box::new(Resumed {
+                last: Some(picture),
+                screen: self.screen,
+            }),
+            None => self.screen,
+        })
+    }
+
+    /// Hands `picture` (I420) to the sharing line's source.
+    fn send(&self, picture: &VideoFrame) {
+        // stamped by the bindings on the wall clock, as the source's black keep-alive frames are: a frame stamped
+        // earlier than the last one the encoder saw is dropped, and a group call's sharing line has sent those
+        // keep-alive frames since the call began
+        let sent = RtcVideoFrame::new(VideoRotation::VideoRotation0, to_buffer(picture));
+        if self.source.capture_frame(&sent) {
+            VideoShared::count(&self.shared.video.screen_sent);
+        }
+    }
+}
+
+/// A screen that a session stopped sending and gave back: its last picture comes first, so that a screen that holds
+/// still goes on at once in the next session, then the screen's own frames.
+struct Resumed {
+    last: Option<VideoFrame>,
+    screen: Box<dyn VideoSource>,
+}
+
+impl VideoSource for Resumed {
+    fn next_frame(&mut self, timeout: Duration) -> Result<Option<VideoFrame>, DeviceError> {
+        if let Some(picture) = self.last.take() {
+            return Ok(Some(picture));
+        }
+        self.screen.next_frame(timeout)
     }
 }
 

@@ -22,8 +22,8 @@ mod support;
 use std::time::{Duration, Instant};
 
 use support::{A_TONE, B_TONE, CONNECT_WAIT, file_devices, recording, start, wait_for};
-use teams_media::devices::file::FrameCounter;
-use teams_media::devices::{Devices as _, VideoSink};
+use teams_media::devices::file::{FrameCounter, StillSource};
+use teams_media::devices::{Devices as _, VideoSink, VideoSource};
 use teams_media::sdp::{NgcSdp, NgcSession, SharingLine, VideoLines};
 use teams_media::session::{MediaSession, SHARING_LINE, SessionEvent, VideoParts};
 use teams_media::test_turn::TurnServer;
@@ -182,6 +182,107 @@ fn share_again(a: &mut End, b: &mut End) {
         let offer = a.dialect.write_offer(&offer).unwrap();
         exchange(a, b, &offer);
     }
+}
+
+/// A screen that holds still: the pattern's first three frames, then none, as a desktop's screen cast sends while
+/// nothing on the screen changes.
+fn still_screen() -> Box<dyn VideoSource> {
+    let screen = file_devices(A_TONE, std::path::Path::new("/dev/null"))
+        .screen()
+        .unwrap();
+    Box::new(StillSource::new(screen, 3))
+}
+
+/// Waits up to 15 s until `counter` counted `frames` frames (a still picture's repeats too); the count then.
+fn wait_any_frames(counter: &FrameCounter, frames: u64) -> u64 {
+    let limit = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < limit && counter.counts().frames < frames {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    counter.counts().frames
+}
+
+/// How many frames of a still screen the far end must show of each share: more than the screen gave.
+const STILL_SHOWN: u64 = 10;
+
+/// A still screen shared, stopped and shared again in a 1:1 call reaches the far end each time: the screen thread sends
+/// its last picture again while no new one comes. Without that, the far end showed at most the few frames that came
+/// before the share's line was set up, and nothing for a keyframe it asked for.
+#[test]
+fn a_still_screen_shared_again_reaches_the_far_end() {
+    let turn = TurnServer::start().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (mut a, mut b) = (end(&turn, "a", dir.path()), end(&turn, "b", dir.path()));
+    let offer = a.session.offer_audio().unwrap();
+    let offer = a.dialect.write_offer(&offer).unwrap();
+    exchange(&mut a, &mut b, &offer);
+    wait_for(&a.session, &SessionEvent::Connected, CONNECT_WAIT);
+    for round in 1..=2 {
+        let before = b.share.counts().frames;
+        let (offer, mid) = a.session.share_screen(still_screen()).unwrap();
+        a.dialect.mark_sharing(&mid);
+        let offer = a.dialect.write_offer(&offer).unwrap();
+        exchange(&mut a, &mut b, &offer);
+        let shown = wait_any_frames(&b.share, before + STILL_SHOWN);
+        assert!(
+            shown >= before + STILL_SHOWN,
+            "B shows A's still screen on share {round}: {} frames",
+            shown - before
+        );
+        let offer = a.session.stop_screen().unwrap().unwrap();
+        let offer = a.dialect.write_offer(&offer).unwrap();
+        exchange(&mut a, &mut b, &offer);
+    }
+}
+
+/// A still screen shared, stopped and shared again on a group call's sharing line reaches the far end each time, as in
+/// a 1:1 call.
+#[test]
+fn a_still_screen_shared_again_on_a_group_call_s_sharing_line_reaches_the_far_end() {
+    let turn = TurnServer::start().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (mut mixer, mut a) = (end(&turn, "b", dir.path()), end(&turn, "a", dir.path()));
+    mixer.dialect.set_video(VideoLines::Group { slots: 2 });
+    a.dialect.set_video(VideoLines::Group { slots: 2 });
+    let offer = mixer.session.offer_group(2).unwrap();
+    let offer = mixer.dialect.write_offer(&offer).unwrap();
+    let read = a.dialect.read_offer(&offer).unwrap();
+    a.session.set_sharing_lines(a.dialect.sharing_mids());
+    a.session
+        .set_group_sharing(a.dialect.sharing_slot().map(|(mid, _)| mid));
+    let answer = a.session.accept_offer(read).unwrap();
+    let answer = a.dialect.write_answer(&answer).unwrap();
+    let read = mixer.dialect.read_answer(&answer).unwrap();
+    mixer.session.set_sharing_lines(mixer.dialect.sharing_mids());
+    mixer.session.accept_answer(read).unwrap();
+    wait_for(&a.session, &SessionEvent::Connected, CONNECT_WAIT);
+    for round in 1..=2 {
+        let before = mixer.share.counts().frames;
+        a.session.share_group_screen(still_screen()).unwrap();
+        let shown = wait_any_frames(&mixer.share, before + STILL_SHOWN);
+        assert!(
+            shown >= before + STILL_SHOWN,
+            "the far end shows A's still screen on share {round}: {} frames",
+            shown - before
+        );
+        assert!(a.session.stop_group_screen());
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    // a screen one session gives back goes on in another, as the session that replaces a call's media takes it: a
+    // still screen at once, from its last picture
+    assert!(a.session.take_screen().is_none(), "nothing is shared");
+    a.session.share_group_screen(still_screen()).unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    let screen = a.session.take_screen().expect("the shared screen comes back");
+    let before = a.share.counts().frames;
+    mixer.session.share_group_screen(screen).unwrap();
+    let shown = wait_any_frames(&a.share, before + STILL_SHOWN);
+    assert!(
+        shown >= before + STILL_SHOWN,
+        "the still screen goes on in the other session: {} frames",
+        shown - before
+    );
 }
 
 /// The value of attribute `name` in `section`.

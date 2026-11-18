@@ -689,6 +689,14 @@ impl MediaSession {
         Ok(())
     }
 
+    /// Stops sending the shared screen and gives it back, so that it goes on in the session that replaces this one (the
+    /// call's media set up again); `None` when no screen is shared or its stream ended. Nothing is negotiated: the
+    /// session is let go next.
+    #[must_use]
+    pub fn take_screen(&self) -> Option<Box<dyn VideoSource>> {
+        self.video.lock().unwrap_or_else(PoisonError::into_inner).take_screen()
+    }
+
     /// Stops sharing the screen in a group call: its thread stopped, the sharing line's encoding off (the line still
     /// receives). Whether it was shared.
     pub fn stop_group_screen(&self) -> bool {

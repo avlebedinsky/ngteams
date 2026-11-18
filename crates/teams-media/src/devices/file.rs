@@ -222,6 +222,35 @@ impl VideoSource for PatternSource {
     }
 }
 
+/// A source that holds still after its first frames, as a desktop's screen does: its screen cast sends a frame only
+/// when something on the screen changes.
+pub struct StillSource {
+    source: Box<dyn VideoSource>,
+    left: u32,
+}
+
+impl StillSource {
+    /// `source`'s first `frames` frames, then none.
+    #[must_use]
+    pub fn new(source: Box<dyn VideoSource>, frames: u32) -> Self {
+        Self { source, left: frames }
+    }
+}
+
+impl VideoSource for StillSource {
+    fn next_frame(&mut self, timeout: Duration) -> Result<Option<VideoFrame>, DeviceError> {
+        if self.left == 0 {
+            thread::sleep(timeout);
+            return Ok(None);
+        }
+        let frame = self.source.next_frame(timeout)?;
+        if frame.is_some() {
+            self.left -= 1;
+        }
+        Ok(frame)
+    }
+}
+
 /// What a [`FrameCounter`] saw.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FrameCounts {
