@@ -141,6 +141,10 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     if cli.prepare {
+        #[cfg(windows)]
+        if let Err(error) = ngteams::prepare::end_children_with_this_run() {
+            eprintln!("teams: prepare: {error}");
+        }
         return prepare(ngteams::prepare::steps());
     }
     if let Some(archive) = &cli.install_web_engine {

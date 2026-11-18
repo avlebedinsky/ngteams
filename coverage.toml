@@ -206,7 +206,7 @@ sha256 = "94a7d873ea44696e94a01687b1cdc7d6777a90debf73b79a3743a00282a7f2d6"
 reason = "Windows-only app restart with explicit handle transfer and rewritten descriptor arguments; actual app_descriptors subprocess tests exercise success and failure on Windows, pending whole-app integration."
 
 [unmapped_sources."crates/teams-platform/src/windows_job.rs"]
-sha256 = "a2cd8de50eb53c0a437fa5d5824ab9a736ba6e3fd3620ec7f6418c0eb8df9ea5"
+sha256 = "5aa1e03698bdc84abc802e1cb46eddbcdefcdad24a3240e011af47d165275b02"
 reason = "Windows-only native runner/job implementation; measured by the Windows portability gate with synthetic subprocesses, no live client or GUI."
 
 [unmapped_sources."crates/teams-runner/src/windows.rs"]

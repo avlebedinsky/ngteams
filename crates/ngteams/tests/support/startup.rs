@@ -648,7 +648,8 @@ fn a_restart_leaves_out_only_the_link_it_opened() {
     );
 }
 
-/// The installer's `--prepare` run exits with success only when each step passed; it opens no account or window.
+/// The installer's `--prepare` run exits with success only when each step passed. `--prepare` parses with no command
+/// and no account, and it does not go with `--build-identity`.
 #[test]
 fn the_installers_run_tells_a_failed_step_by_its_exit_code() {
     let step = |result: Result<(), String>| ngteams::prepare::Step {

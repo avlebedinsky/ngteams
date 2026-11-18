@@ -185,6 +185,10 @@ class WindowsInstallerScript(unittest.TestCase):
         self.assertIn("pub prepare: bool", cli)
         install = (REPO / "packaging/windows/Install.ps1").read_text(encoding="utf-8")
         self.assertLess(install.index("'--prepare'"), install.index("Installed ngteams"))
+        guarded = install.split("\ntry {\n", 1)[1].split("\n} catch {", 1)[0]
+        self.assertIn("'--prepare'", guarded, "a prepare run that cannot start does not stop the setup")
+        self.assertIn(".WaitForExit(180000)", guarded, "the setup does not wait for it without a limit")
+        self.assertLess(install.index("} catch {"), install.index("ngteams.msteams"))
 
     def test_the_compiler_is_pinned_by_version_and_hash(self):
         pins = json.loads((REPO / "packaging/windows/installer-pins.json").read_text(encoding="utf-8"))

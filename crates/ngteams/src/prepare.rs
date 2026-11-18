@@ -38,8 +38,8 @@ pub fn steps() -> Vec<Step> {
     steps
 }
 
-/// Does `steps` in order on a thread of their own, also the steps after one that failed, and stops waiting after
-/// `limit`.
+/// Does `steps` in order on a thread of their own, also the steps after one that failed or panicked, and stops
+/// waiting after `limit`.
 ///
 /// # Errors
 /// The steps that failed, or that the steps were not done after `limit`.
@@ -50,7 +50,11 @@ pub fn run(steps: Vec<Step>, limit: Duration) -> Result<(), String> {
         .spawn(move || {
             let failed: Vec<String> = steps
                 .into_iter()
-                .filter_map(|step| (step.work)().err().map(|error| format!("{}: {error}", step.name)))
+                .filter_map(|step| {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(step.work))
+                        .unwrap_or_else(|_| Err("it panicked".into()));
+                    result.err().map(|error| format!("{}: {error}", step.name))
+                })
                 .collect();
             let _ = done.send(failed);
         })
@@ -58,8 +62,24 @@ pub fn run(steps: Vec<Step>, limit: Duration) -> Result<(), String> {
     match finished.recv_timeout(limit) {
         Ok(failed) if failed.is_empty() => Ok(()),
         Ok(failed) => Err(failed.join("; ")),
-        Err(_) => Err(format!("not done after {} s", limit.as_secs())),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(format!("not done after {} s", limit.as_secs())),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err("the steps stopped before their end".into()),
     }
+}
+
+/// Puts this process in a job that Windows stops when this process ends. Thus a program that a step started (the
+/// sign-in worker, the `GStreamer` plugin scanner) does not stay after the run, also when the run stops at its limit:
+/// a program that stays in the app's folder stops a later update and the uninstall.
+///
+/// # Errors
+/// Windows cannot make the job or put this process in it.
+#[cfg(windows)]
+pub fn end_children_with_this_run() -> Result<(), String> {
+    let job = teams_platform::windows_job::Job::new().map_err(|error| error.to_string())?;
+    job.add_this_process().map_err(|error| error.to_string())?;
+    // the last handle closes only when this process ends: then Windows stops the programs that are still in the job
+    std::mem::forget(job);
+    Ok(())
 }
 
 /// Runs `program` with no arguments, input or output, and waits for it to end; its exit code does not matter.

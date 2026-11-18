@@ -5,10 +5,11 @@ use std::io;
 use std::os::windows::io::{AsHandle as _, AsRawHandle as _, BorrowedHandle, FromRawHandle as _, OwnedHandle};
 use std::ptr::null;
 use windows_sys::Win32::System::JobObjects::{
-    CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
-    QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAccountingInformation,
+    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
 };
+use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
 /// An unnamed job. Its handle is private and must never be duplicated into one of its children.
 #[derive(Debug)]
@@ -42,6 +43,21 @@ impl Job {
             return Err(io::Error::last_os_error());
         }
         Ok(job)
+    }
+
+    /// Put this process in the job. The processes that it starts after this are also in the job. When the last
+    /// handle of the job closes (also when this process ends), Windows stops all of them.
+    ///
+    /// # Errors
+    /// The native call fails.
+    pub fn add_this_process(&self) -> io::Result<()> {
+        // SAFETY: no arguments; it returns a pseudo handle of this process, which needs no close.
+        let this = unsafe { GetCurrentProcess() };
+        // SAFETY: the job is owned and live, and `this` is always valid in this process.
+        if unsafe { AssignProcessToJobObject(self.0.as_raw_handle(), this) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     pub(super) fn handle(&self) -> BorrowedHandle<'_> {

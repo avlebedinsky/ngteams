@@ -31,6 +31,23 @@ fn steps_run_in_order_and_a_failure_does_not_stop_the_next() {
 }
 
 #[test]
+fn a_step_that_panics_is_a_failure_and_the_next_step_runs() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let result = run(
+        vec![
+            Step {
+                name: "panics",
+                work: Box::new(|| std::panic::resume_unwind(Box::new("synthetic"))),
+            },
+            step("next", &log, Ok(())),
+        ],
+        LIMIT,
+    );
+    assert_eq!(result, Err("panics: it panicked".into()));
+    assert_eq!(*log.lock().unwrap(), ["next"]);
+}
+
+#[test]
 fn steps_that_all_pass_pass() {
     let log = Arc::new(Mutex::new(Vec::new()));
     assert_eq!(run(vec![step("only", &log, Ok(()))], LIMIT), Ok(()));
