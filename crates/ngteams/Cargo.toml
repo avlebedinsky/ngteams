@@ -139,6 +139,11 @@ name = "qa_ring_cancel_window"
 harness = false
 
 [[test]]
+# QA of task 577: a still screen shared, shared again and set up again in a 1:1 call on the mock, in the UI sandbox
+name = "qa_share_still_window"
+harness = false
+
+[[test]]
 # QA of task 405: a YouTube link's app card in the app's window over the mock, in the UI sandbox
 name = "qa_app_card_window"
 harness = false
@@ -281,6 +286,11 @@ harness = false
 
 [[test]]
 name = "own_server_nodes_window"
+harness = false
+
+[[test]]
+# QA of task 577: a still screen shared before a late join, again and by another, on the own server, in the UI sandbox
+name = "qa_share_still_own_window"
 harness = false
 
 [build-dependencies]
