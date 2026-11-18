@@ -514,7 +514,8 @@ async fn remove(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Drops webhook `id`; its account stays, deleted, for the replies it posted.
+/// Deletes `hook` only if its stored picture etag still matches, then marks its account deleted but keeps it for replies.
+/// Returns `Ok(false)` without changes if the row is absent or its picture etag changed.
 async fn delete(db: &Db, hook: &Hook, at: i64) -> Result<bool, DbError> {
     with_conn!(db, |conn| conn
         .transaction::<_, DbError, _>(async |conn| {
