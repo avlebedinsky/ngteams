@@ -105,7 +105,14 @@ repeated native code across executables, with four compression threads. Extracti
 restores up to four independent archives in parallel. Every shard uses `/workspace`, so compile-time fixture paths
 and source maps stay valid.
 
-Docker Buildx uses a shared GHA image cache (`mode=min`); only the build job exports it. Cargo registry/Git sources
+Docker Buildx uses a shared GHA image cache (`mode=min`); only the build job exports it.
+The build job deletes the local Buildx cache after the image export and load. It keeps the loaded image.
+It deletes bootstrap build files except `proto-lab` before it compiles the instrumented targets.
+After each shard archive succeeds, the bundle script deletes that shard's source executables.
+The common files and dependency artifacts stay for the dependency cache. Each archive keeps the executable's coverage maps.
+The build job reports disk space before and after the bundle step, including when the bundle step fails.
+
+Cargo registry/Git sources
 and the pinned Linux x64 libwebrtc SDK have separate caches. A shard whose source cache is missing fetches the
 locked sources itself, because several tests run Cargo offline. Instrumented third-party dependencies are saved only
 when their compressed archive fits 1 GiB; larger archives are discarded without saving an empty cache entry.

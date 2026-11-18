@@ -26,6 +26,11 @@ PY
             name=${list#target/bundle-}
             name=${name%-files}
             tar -I 'zstd --long=30 -T4 -3' -cf "target/coverage-$name.tar.zst" -T "$list"
+            if [[ "$name" == shard-* ]]; then
+                while IFS= read -r executable; do
+                    rm -- "${executable:?}"
+                done < "$list"
+            fi
         done
         du -h target/coverage-*.tar.zst
         ;;

@@ -272,18 +272,33 @@ class TargetTests(unittest.TestCase):
             self.assertEqual(files("shard-0"), set())
             self.assertEqual(files("shard-1"), {paths[1]})
             self.assertEqual(files("common"), {paths[0], *paths[2:], "target/test-shards.json", fingerprint})
+            self.assertFalse((root / paths[1]).exists())
+            self.assertTrue(excluded.exists())
+            for name in [paths[0], *paths[2:], fingerprint]:
+                self.assertTrue((root / name).exists())
             metadata.unlink()
             subprocess.run(["tar", "-I", "zstd --long=30", "-xf", "target/coverage-common.tar.zst",
                             fingerprint], cwd=root, capture_output=True, text=True, check=True)
             self.assertEqual(json.loads(json.loads(metadata.read_text())["features"]), ["test-support"])
 
             for name in [*paths, fingerprint, "target/test-shards.json"]:
-                (root / name).unlink()
+                (root / name).unlink(missing_ok=True)
             unpack = ["bash", str(ROOT / ".github/ci/unpack.sh"), "target"]
             subprocess.run(unpack, cwd=root, capture_output=True, text=True, check=True)
             for name in paths:
                 self.assertEqual((root / name).read_text(), "synthetic executable\n")
             self.assertEqual(json.loads(json.loads(metadata.read_text())["features"]), ["test-support"])
+            tools = root / "tools"
+            tools.mkdir()
+            tar = tools / "tar"
+            tar.write_text('#!/bin/sh\ncase "$*" in *coverage-shard-*) exit 78;; esac\n'
+                           f'exec "{shutil.which("tar")}" "$@"\n')
+            tar.chmod(0o755)
+            result = subprocess.run(["bash", str(ROOT / ".github/ci/bundle.sh"), "pack"], cwd=root,
+                                    env=dict(os.environ, PATH=f"{tools}{os.pathsep}{os.environ['PATH']}"),
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 78)
+            self.assertTrue((root / paths[1]).exists())
             (root / "target/corrupt.tar.zst").write_text("synthetic corrupt archive\n")
             self.assertNotEqual(subprocess.run(unpack, cwd=root, capture_output=True).returncode, 0)
             for path in (root / "target").glob("*.tar.zst"):

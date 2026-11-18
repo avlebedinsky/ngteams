@@ -59,6 +59,10 @@ jobs:
         id: environment
         with:
           save-cache: 'true'
+      - name: Release the local image build cache
+        run: |
+          docker buildx prune --all --force
+          docker system df
       - name: Restore registry and Git sources
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -100,7 +104,13 @@ jobs:
           retention-days: 14
           if-no-files-found: error
       - name: Bundle the shared executables and coverage maps
-        run: .github/ci/bundle.sh pack
+        run: |
+          df -h .
+          du -h -d 2 target .ci-cache
+          .github/ci/bundle.sh pack
+      - name: Disk space after the bundle step
+        if: always()
+        run: df -h .
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: coverage-common

@@ -10,6 +10,7 @@ case "${1:-}" in
         chrome_path=$(target/ci-bootstrap-build/debug/proto-lab chrome path)
         coverage-ci-smoke "$chrome_path"
         CARGO_TARGET_DIR=target/ci-bootstrap-build cargo test --locked -p gpui-pre-linux --lib local_selection_tests
+        find target/ci-bootstrap-build -type f ! -path target/ci-bootstrap-build/debug/proto-lab -delete
         package_args=()
         while read -r package; do package_args+=(-p "$package"); done < <(python3 scripts/coverage-report.py list)
         cargo llvm-cov clean --workspace
