@@ -169,6 +169,11 @@ name = "qa_bot_connector_window"
 harness = false
 
 [[test]]
+# QA of task 232: Manage apps as an administrator uses it, against the real ngteams-server binary, in the UI sandbox
+name = "qa_apps_admin_window"
+harness = false
+
+[[test]]
 # QA of task 429: the message box in a narrow call chat, a narrow window and a thread, in the UI sandbox
 name = "qa_narrow_compose_window"
 harness = false
