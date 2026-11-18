@@ -12,8 +12,8 @@
 //! - **A result** chosen: its card goes into the compose box, as Teams puts it there; one whose preview names an
 //!   `invoke` asks the app for its card first (`composeExtension/selectItem`).
 //!
-//! The flyout asks the engine; it builds no request ([`crate::bridge::Core`]). Up, Down and Enter move in its lists
-//! and choose, Escape goes back or closes it.
+//! The flyout asks the engine; it builds no request ([`crate::bridge::Core`]). Up and Down move in its lists, which
+//! scroll to keep the lit row in view; Enter chooses, Escape goes back or closes it.
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,8 +21,8 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, AppContext as _, AsyncApp, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _,
-    IntoElement, KeyDownEvent, ParentElement as _, Render, RenderImage, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, WeakEntity, Window, div, px, rgb,
+    IntoElement, KeyDownEvent, ParentElement as _, Render, RenderImage, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, div, px, rgb,
 };
 use gpui_component::Sizable as _;
 use gpui_component::button::Button;
@@ -113,6 +113,8 @@ pub struct AppsFlyout {
     pane: Option<Pane>,
     /// The row Up and Down stand on.
     highlight: usize,
+    /// The shown list's scroll: the app list's or the results'.
+    rows: ScrollHandle,
     _search: Subscription,
 }
 
@@ -124,7 +126,7 @@ impl AppsFlyout {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder(SEARCH_APPS));
         let watch = cx.subscribe(&search, |this: &mut Self, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
-                this.highlight = 0;
+                this.light(0);
             }
             cx.notify();
         });
@@ -148,6 +150,7 @@ impl AppsFlyout {
             pictures: BTreeMap::new(),
             pane: None,
             highlight: 0,
+            rows: ScrollHandle::new(),
             _search: watch,
         }
     }
@@ -251,7 +254,7 @@ impl AppsFlyout {
             waiting: None,
             _words: words,
         });
-        self.highlight = 0;
+        self.light(0);
         self.choose_command(chosen, window, cx);
     }
 
@@ -357,7 +360,7 @@ impl AppsFlyout {
             let _ = this.update(cx, |this, cx| {
                 if let Some(pane) = this.pane.as_mut().filter(|pane| pane.asked == asked) {
                     pane.results = results;
-                    this.highlight = 0;
+                    this.light(0);
                     cx.notify();
                 }
             });
@@ -427,12 +430,18 @@ impl AppsFlyout {
     /// Back from an app's pane to the list; from the list, closed.
     pub fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.pane.take().is_some() {
-            self.highlight = 0;
+            self.light(0);
             self.search.update(cx, |search, cx| search.focus(window, cx));
             cx.notify();
         } else {
             cx.emit(FlyoutEvent::Close);
         }
+    }
+
+    /// Row `at` lit, and the list scrolled to show it.
+    fn light(&mut self, at: usize) {
+        self.highlight = at;
+        self.rows.scroll_to_item(at);
     }
 
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -445,8 +454,8 @@ impl AppsFlyout {
         };
         match event.keystroke.key.as_str() {
             "escape" => self.back(window, cx),
-            "down" if rows > 0 => self.highlight = (self.highlight + 1).min(rows - 1),
-            "up" => self.highlight = self.highlight.saturating_sub(1),
+            "down" if rows > 0 => self.light((self.highlight + 1).min(rows - 1)),
+            "up" => self.light(self.highlight.saturating_sub(1)),
             "enter" if rows > 0 => {
                 let at = self.highlight.min(rows - 1);
                 if self.pane.is_some() {
@@ -553,8 +562,10 @@ impl AppsFlyout {
             .child(
                 div()
                     .id("apps-flyout-list")
+                    .debug_selector(|| "apps-flyout-list".to_owned())
                     .max_h(px(LIST_HEIGHT))
                     .overflow_y_scroll()
+                    .track_scroll(&self.rows)
                     .flex()
                     .flex_col()
                     .children(rows),
@@ -684,8 +695,10 @@ impl AppsFlyout {
         };
         div()
             .id("apps-flyout-results")
+            .debug_selector(|| "apps-flyout-results".to_owned())
             .max_h(px(LIST_HEIGHT))
             .overflow_y_scroll()
+            .track_scroll(&self.rows)
             .flex()
             .flex_col()
             .children(rows)

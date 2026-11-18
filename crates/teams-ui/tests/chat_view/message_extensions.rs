@@ -115,6 +115,51 @@ fn the_plus_lists_the_apps_for_the_box_and_its_search_and_keys_work() {
     assert!(!found(cx, "apps-flyout"));
 }
 
+/// The Finder again as made-up app `n`.
+fn more_finder(rig: &Rig, n: usize) -> String {
+    let mut apps = rig.core.extension_apps.lock().unwrap();
+    let mut app = apps.iter().find(|app| app.id() == FINDER).cloned().expect("the Finder");
+    let id = format!("00000000-0000-4000-8000-0000000f{n:04}");
+    app.store.app.id.clone_from(&id);
+    app.store.app.name = format!("Made-up Extra {n}");
+    apps.push(app);
+    id
+}
+
+fn inside(cx: &mut VisualTestContext, selector: &str, list: &str) -> bool {
+    draw(cx);
+    let row = cx.debug_bounds(Box::leak(selector.to_owned().into_boxed_str()));
+    let list = cx.debug_bounds(Box::leak(list.to_owned().into_boxed_str()));
+    row.zip(list)
+        .is_some_and(|(row, list)| row.top() >= list.top() && row.bottom() <= list.bottom())
+}
+
+#[test]
+fn the_lit_row_of_a_long_flyout_stays_in_view() {
+    let rig = apps_rig(true);
+    let extra: Vec<String> = (1..=12).map(|n| more_finder(&rig, n)).collect();
+    let (_view, cx) = window(&rig);
+    click(cx, "compose-apps");
+    let row = |id: &str| format!("apps-flyout-app-{id}");
+    let last = row(extra.last().expect("an extra app"));
+    assert!(
+        !inside(cx, &last, "apps-flyout-list"),
+        "the list is longer than its view"
+    );
+    for _ in 0..14 {
+        cx.simulate_keystrokes("down");
+    }
+    assert!(inside(cx, &last, "apps-flyout-list"), "Down keeps the lit row in view");
+    assert!(!inside(cx, &row(FINDER), "apps-flyout-list"), "the list scrolled");
+    for _ in 0..14 {
+        cx.simulate_keystrokes("up");
+    }
+    assert!(
+        inside(cx, &row(FINDER), "apps-flyout-list"),
+        "Up keeps the lit row in view"
+    );
+}
+
 /// The search ran at once, with no words, as its command says.
 fn the_search_ran_at_once(rig: &Rig) {
     let asks = rig.core.bot_asks.lock().unwrap();
