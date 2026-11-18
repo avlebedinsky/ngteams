@@ -11,7 +11,8 @@
 //! - **Actions and apps** (the compose box's "+"): the account's apps that work in messages, many of them, a long
 //!   name, the search for apps, no match, Up, Down, Enter and Escape, "Get more apps".
 //! - **A search app**: its results at once, a search with words, a result chosen into the box (one asks the app with
-//!   `selectItem`), the card sent with a message and alone, the card's close mark, a search with no results.
+//!   `selectItem`), the card sent with a message and alone, the card's close mark, a search with no results, a late
+//!   answer (a search's and a `selectItem`'s) after its pane is gone and a different app's pane is open.
 //! - **An action app**: its card dialog; a required field; Submit and a next dialog, an error, the app's message, a
 //!   card into the box; Escape, Cancel and Close; a dialog that is a web page and its link.
 //! - **A message's "More actions"**: the apps' message actions, a store offer in italics that opens its details, a
@@ -243,6 +244,7 @@ fn walk(sandbox: &Sandbox, runtime: &tokio::runtime::Runtime, service: &Service,
         ctx.search()?;
         ctx.card_sends()?;
         ctx.no_results()?;
+        ctx.late_answers()?;
         ctx.action_dialog()?;
         ctx.dialog_ends()?;
         ctx.web_dialog()?;
@@ -276,6 +278,22 @@ impl Walk<'_> {
         self.run.theme(false)?;
         thread::sleep(SETTLE);
         Ok(light)
+    }
+
+    /// A shot of `name` once `region` stops changing (a caret's blink aside), so that keys still on their way show.
+    fn steady_shot(&mut self, name: &str, region: Rect) -> SandboxResult<PathBuf> {
+        let until = Instant::now() + WAIT;
+        let mut last = load(&self.shot(name)?)?;
+        loop {
+            thread::sleep(SETTLE);
+            let path = self.shot(name)?;
+            let next = load(&path)?;
+            let steady = changed_box(&last, &next, region).is_none_or(|changed| changed.width() <= 3);
+            if steady || Instant::now() > until {
+                return Ok(path);
+            }
+            last = next;
+        }
     }
 
     /// The invokes the mock got so far (each request to `v1/agents/<bot>/invoke`, the refused ones too).
@@ -684,7 +702,105 @@ impl Walk<'_> {
         step("a search with no results");
         Ok(())
     }
+
+    /// The Finder's next invoke is answered with `body` only after [`LATE`].
+    fn hold_finder_answer(&self, body: &Value) {
+        self.runtime.block_on(
+            self.service
+                .mock
+                .answer_next_after_with("POST", FINDER_INVOKE_END, 200, body, LATE),
+        );
+    }
+
+    /// From the open Finder pane back to the list, then into the long app's pane; the time its pane shows.
+    fn leave_for_long_app(&mut self, what: &str) -> SandboxResult<Instant> {
+        self.key(keys::ESC)?;
+        self.clear_field()?;
+        self.type_text("retrospective")?;
+        self.key(keys::ENTER)?;
+        self.run.until_chat(&format!("{what}: the long app's pane"), |state| {
+            state["compose"]["flyout"]["pane"][0] == LONG_NAME
+        })?;
+        Ok(Instant::now())
+    }
+
+    /// Waits until the held answer that went at `sent` came back, and a moment more.
+    fn after_held_answer(sent: Instant, opened: Instant, what: &str) {
+        expect(opened < sent + LATE, || {
+            format!(
+                "{what}: the long app's pane opened {:?} after the held ask, not before its answer came ({LATE:?})",
+                opened.duration_since(sent)
+            )
+        });
+        thread::sleep((sent + LATE + QUIET).saturating_duration_since(Instant::now()));
+    }
+
+    /// An app's answer that comes after its pane is gone (Escape, then a different app) changes nothing in the pane
+    /// that is open now: a late search fills no results, a late `selectItem` puts no card into the box.
+    fn late_answers(&mut self) -> SandboxResult {
+        self.hold_finder_answer(&results(&[("Late record 9001", None)]));
+        let before = self.invokes().len();
+        self.open_app("finder", "late-search-flyout")?;
+        self.next_invoke(before, "the Finder's held search")?;
+        let sent = Instant::now();
+        let opened = self.leave_for_long_app("a late search")?;
+        Self::after_held_answer(sent, opened, "a late search");
+        let state = self.state()?;
+        let pane = &state["compose"]["flyout"]["pane"];
+        let shot = self.shots("late-search")?;
+        expect(pane[0] == LONG_NAME && strings(&pane[2]).is_empty(), || {
+            format!(
+                "the Finder's late search answer fills the long app's pane: {pane} ({})",
+                shot.display()
+            )
+        });
+        self.key(keys::ESC)?;
+        self.key(keys::ESC)?;
+
+        self.open_app("finder", "late-select-flyout")?;
+        self.run.until_chat("the Finder's results", |state| {
+            state["compose"]["flyout"]["pane"][2]
+                .as_array()
+                .is_some_and(|found| found.len() == 3)
+        })?;
+        let selected = teams_mock::bot_answer("selected").ok_or("no fixture answer selected")?;
+        self.hold_finder_answer(&selected);
+        let before = self.invokes().len();
+        self.key(keys::DOWN)?;
+        self.key(keys::DOWN)?;
+        self.key(keys::ENTER)?;
+        let invoke = self.next_invoke(before, "the held selectItem")?;
+        let sent = Instant::now();
+        expect(invoke["body"]["name"] == "composeExtension/selectItem", || {
+            format!("the third result sent {}", invoke["body"])
+        });
+        let opened = self.leave_for_long_app("a late selectItem")?;
+        Self::after_held_answer(sent, opened, "a late selectItem");
+        let state = self.state()?;
+        let shot = self.shots("late-select")?;
+        expect(
+            state["compose"]["cards"].as_array().is_some_and(Vec::is_empty)
+                && state["compose"]["flyout"]["pane"][0] == LONG_NAME,
+            || {
+                format!(
+                    "the Finder's late selectItem answer changes the box or the pane: cards {}, pane {} ({})",
+                    state["compose"]["cards"],
+                    state["compose"]["flyout"]["pane"],
+                    shot.display()
+                )
+            },
+        );
+        self.key(keys::ESC)?;
+        self.key(keys::ESC)?;
+        step("late answers: an app's answer after its pane is gone changes nothing");
+        Ok(())
+    }
 }
+
+/// How long the mock holds back an app's answer in [`Walk::late_answers`].
+const LATE: Duration = Duration::from_secs(6);
+/// The end of the path of an invoke of the Finder's bot.
+const FINDER_INVOKE_END: &str = "00000000eb01/invoke";
 
 // --- an action app's dialog ---
 
@@ -757,7 +873,7 @@ impl Walk<'_> {
         });
         self.run.click(name.centre().0, name.centre().1)?;
         self.type_text(NAME_TYPED)?;
-        thread::sleep(SETTLE);
+        self.steady_shot("dialog-typed", name)?;
         let shot = load(&self.shots("dialog-typed")?)?;
         let typed = changed_box(&required, &shot, name).is_some();
         let mut dialog = dialog;
