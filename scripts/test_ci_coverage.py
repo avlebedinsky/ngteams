@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import subprocess
 import shutil
+import sys
 import tempfile
 import types
 import unittest
@@ -291,7 +292,7 @@ class TargetTests(unittest.TestCase):
             tools = root / "tools"
             tools.mkdir()
             tar = tools / "tar"
-            tar.write_text('#!/bin/sh\ncase "$*" in *coverage-shard-*) exit 78;; esac\n'
+            tar.write_text('#!/bin/sh\ncase "$*" in *coverage-shard-1.tar.zst*) exit 78;; esac\n'
                            f'exec "{shutil.which("tar")}" "$@"\n')
             tar.chmod(0o755)
             result = subprocess.run(["bash", str(ROOT / ".github/ci/bundle.sh"), "pack"], cwd=root,
@@ -362,6 +363,19 @@ class TargetTests(unittest.TestCase):
             self.assertEqual([unit["totals"] for unit in full["data"]],
                              [unit["totals"] for unit in compact["data"]])
             merged = counts(json.dumps(compact))
+            if sys.platform == "linux":
+                command("bash", str(ROOT / ".github/ci/bundle.sh"), "strip", str(manifest))
+                for path in (root / "target/build").rglob("*.profraw"):
+                    path.unlink()
+                for index in range(2):
+                    child = dict(environment, LLVM_PROFILE_FILE_NAME=f"stripped-{index}-%p-%m%c.profraw")
+                    command("bash", "-c", 'eval "$(cargo llvm-cov show-env --sh)"; '
+                            'exec python3 "$1" run "$2" "$3"', "test", str(Path(TARGETS.__file__)),
+                            str(manifest), str(index), env=child)
+                stripped = json.loads(command("cargo", "llvm-cov", "report", "--json", "--summary-only"))
+                self.assertEqual(summaries(compact), summaries(stripped))
+                self.assertEqual([unit["totals"] for unit in compact["data"]],
+                                 [unit["totals"] for unit in stripped["data"]])
             for path in (root / "target/build").rglob("*.profraw"):
                 path.unlink()
             serial = counts(command("cargo", "llvm-cov", "--no-clean", "--json"))

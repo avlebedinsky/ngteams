@@ -17,6 +17,7 @@ case "${1:-}" in
         eval "$(cargo llvm-cov show-env --sh)"
         cargo test --locked --tests --no-run "${package_args[@]}" --message-format=json > target/test-artifacts.json
         python3 .github/ci/targets.py inventory target/test-artifacts.json target/test-shards.json
+        .github/ci/bundle.sh strip
         ;;
     test)
         # Without these the server's Postgres, Redis and S3 cases skip themselves and still pass.

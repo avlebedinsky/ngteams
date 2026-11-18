@@ -108,6 +108,8 @@ and source maps stay valid.
 Docker Buildx uses a shared GHA image cache (`mode=min`); only the build job exports it.
 The build job deletes the local Buildx cache after the image export and load. It keeps the loaded image.
 It deletes bootstrap build files except `proto-lab` before it compiles the instrumented targets.
+It removes static symbol tables from the test executables and keeps the LLVM coverage sections.
+These executables lose symbol names in backtraces. Their tests and coverage counts stay the same.
 After each shard archive succeeds, the bundle script deletes that shard's source executables.
 The common files and dependency artifacts stay for the dependency cache. Each archive keeps the executable's coverage maps.
 The build job reports disk space before and after the bundle step, including when the bundle step fails.
