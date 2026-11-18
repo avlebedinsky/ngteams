@@ -1029,6 +1029,25 @@ NGTEAMS_KEYCHAIN_TESTS=1 cargo test -p teams-auth --lib keychain   # needs an un
 scripts/run-lab-macos.py --build-only                     # lab-marked ngteams and ngteams-webview in target/lab
 ```
 
+The call tests (`teams-media`, and `teams-core --test calls`) open many sockets and load GStreamer. Run them so:
+
+- Set `ulimit -n 4096` first. An SSH shell starts at 256. At that limit the share and group tests fail with
+  "no relayed candidate" or "Too many open files".
+- Do not use `/usr/bin/timeout`. SIP protects it, so macOS removes `DYLD_FALLBACK_LIBRARY_PATH` from what it starts,
+  and the test cannot load GStreamer. Use a watchdog of the shell: start `cargo test` in the background, then kill
+  it after the limit if it did not stop.
+- Every macOS link must have `-ObjC` (`.cargo/config.toml`). Without it, the first libwebrtc factory aborts with
+  `+[NSString stringForStdString:]: unrecognized selector`. If you set `RUSTFLAGS`, add `-C link-arg=-ObjC` to it:
+  the build script of `teams-media` stops a macOS build without it.
+
+```sh
+ulimit -n 4096
+export DYLD_FALLBACK_LIBRARY_PATH=~/ngteams-agent/gstreamer/lib
+cargo test -p teams-media --test share & pid=$!
+( sleep 1200; pkill -TERM -P $pid; kill $pid ) & watchdog=$!
+wait $pid; kill $watchdog 2>/dev/null
+```
+
 What macOS has of its own: data and config under `~/Library/Application Support/ngteams/{data,config}` (the lab's
 aliases in `ngteams-lab/<alias>/` beside it), the control socket under `$TMPDIR/ngteams/`, credentials as Keychain
 generic passwords (service `<namespace>: <audience>`, account the UPN; `crates/teams-auth/src/secrets/macos.rs`), the
