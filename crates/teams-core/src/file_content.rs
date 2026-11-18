@@ -203,13 +203,7 @@ impl<C: Credentials + 'static> FileContents<C> {
                 Ok(answer) => Ok(teams_proto::chat::read_link_permission(answer.body())),
                 Err(error) => {
                     log::info!("a shared file's link permission couldn't be read: {error}");
-                    Err(match error {
-                        HttpError::Status(answer) if !matches!(answer.status(), 408 | 429 | 500..=599) => {
-                            EngineError::FileUnavailable
-                        }
-                        HttpError::Refused(_) | HttpError::BodyTooLarge => EngineError::FileUnavailable,
-                        _ => EngineError::FileUnread,
-                    })
+                    Err(crate::recap::file_error(&error))
                 }
             };
             let _ = reply.send(answer);

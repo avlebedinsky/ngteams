@@ -1619,6 +1619,32 @@ fn a_message_sharing_a_file_on_posts_its_entry_and_keeps_it_when_stored() -> Tes
 }
 
 #[test]
+fn a_share_refuses_any_link_that_the_file_reader_discarded() -> TestResult {
+    let file = shared_files(Some(&Value::Array(grid_entries()?))).files.remove(1);
+    let good = share_entry(&Cloud::Microsoft, &file, Some("anonymous")).ok_or("an entry")?;
+    for path in [
+        "/objectUrl",
+        "/fileInfo/shareUrl",
+        "/fileInfo/fileUrl",
+        "/filePreview/previewUrl",
+    ] {
+        for link in [
+            "https://outside.example/secret.txt",
+            "https://x@contoso-my.sharepoint.com/secret.txt",
+        ] {
+            let mut mixed = good.clone();
+            *mixed.pointer_mut(path).ok_or("link field")? = json!(link);
+            let read = shared_files(Some(&json!([mixed.clone()])));
+            assert_eq!(read.files.len(), 1, "the other valid link still draws a card");
+            assert!(share_entry(&Cloud::Microsoft, &read.files[0], Some("anonymous")).is_none());
+            let text = MessageText::plain("test")?.with_shared(vec![mixed]);
+            assert!(text.for_cloud(&Cloud::Microsoft).is_err());
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn a_sharing_links_permission_is_read_by_its_scope_and_words() {
     let body = json!({"@odata.context": "made-up", "hasPassword": false, "id": "made-up-permission", "roles": ["write"],
         "link": {"scope": "anonymous", "type": "edit", "localizedDescription": "Anyone with the link can edit",

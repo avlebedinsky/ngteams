@@ -375,6 +375,151 @@ fn a_recipient_not_reached_stays_picked_and_the_dialog_says_so() {
     assert!(bounds(cx, "share-file-problem").is_some());
 }
 
+#[test]
+fn close_escape_and_copy_cannot_stop_a_share_before_all_recipients_finish() {
+    let (rig, shell, dialog, cx) = opened();
+    pick(cx, "Bee");
+    pick(cx, "Sea");
+    rig.core.write_answers.lock().unwrap().extend([
+        sent(1, OutboxKind::Send, OutboxState::Pending, None),
+        sent(2, OutboxKind::Send, OutboxState::Sent, None),
+    ]);
+    click(cx, "share-file-share");
+    assert_eq!(sends(&rig).len(), 1);
+    click(cx, "share-file-close");
+    cx.simulate_keystrokes("escape");
+    cx.update(|_, cx| {
+        dialog.update(cx, |dialog, cx| {
+            dialog.close(cx);
+            dialog.copy_link(cx);
+        });
+    });
+    assert!(shown_dialog(&shell, cx).is_some());
+    assert!(!cx.update(|_, cx| dialog.read(cx).link_created()));
+    rig.core
+        .outbox_answers
+        .lock()
+        .unwrap()
+        .push_back(sent(1, OutboxKind::Send, OutboxState::Sent, None));
+    cx.executor().advance_clock(std::time::Duration::from_millis(600));
+    draw(cx);
+    assert_eq!(sends(&rig).len(), 2);
+    assert!(shown_dialog(&shell, cx).is_none());
+    assert!(cx.update(|_, cx| shell.read(cx).toast().is_some()));
+}
+
+#[test]
+fn an_uncertain_share_warns_then_resends_the_same_row() {
+    let (rig, shell, dialog, cx) = opened();
+    pick(cx, "Bee");
+    let mut failed = sent(77, OutboxKind::Send, OutboxState::Failed, None);
+    failed.last_error = Some("whether it arrived is unknown".to_owned());
+    rig.core.write_answers.lock().unwrap().push_back(failed);
+    click(cx, "share-file-share");
+    cx.update(|_, cx| dialog.update(cx, |dialog, cx| dialog.remove(0, cx)));
+    pick(cx, "Bee");
+    click(cx, "share-file-share");
+    assert_eq!(
+        cx.update(|_, cx| dialog.read(cx).problem().cloned()).as_deref(),
+        Some(teams_ui::chat_view::MAY_HAVE_ARRIVED)
+    );
+    assert!(rig.core.resent.lock().unwrap().is_empty());
+    click(cx, "share-file-share");
+    assert_eq!(*rig.core.resent.lock().unwrap(), [77]);
+    assert_eq!(sends(&rig).len(), 1);
+    rig.core
+        .outbox_answers
+        .lock()
+        .unwrap()
+        .push_back(sent(77, OutboxKind::Send, OutboxState::Sent, None));
+    cx.executor().advance_clock(std::time::Duration::from_millis(600));
+    draw(cx);
+    assert!(shown_dialog(&shell, cx).is_none());
+}
+
+#[test]
+fn a_failed_share_resends_its_row_without_a_new_command() {
+    let (rig, shell, _dialog, cx) = opened();
+    pick(cx, "Bee");
+    rig.core
+        .write_answers
+        .lock()
+        .unwrap()
+        .push_back(sent(88, OutboxKind::Send, OutboxState::Failed, None));
+    click(cx, "share-file-share");
+    click(cx, "share-file-share");
+    assert_eq!(*rig.core.resent.lock().unwrap(), [88]);
+    assert_eq!(sends(&rig).len(), 1);
+    rig.core
+        .outbox_answers
+        .lock()
+        .unwrap()
+        .push_back(sent(88, OutboxKind::Send, OutboxState::Sent, None));
+    cx.executor().advance_clock(std::time::Duration::from_millis(600));
+    draw(cx);
+    assert!(shown_dialog(&shell, cx).is_none());
+}
+
+#[test]
+fn a_failed_chat_creation_resends_its_row_before_the_file_post() {
+    let (rig, shell, _dialog, cx) = opened();
+    rig.core.service_answer.lock().unwrap().people = vec![FoundPerson {
+        mri: Some(LAB_D.to_owned()),
+        name: "Lab Dee".to_owned(),
+        email: None,
+        job_title: None,
+        department: None,
+    }];
+    cx.simulate_input("Dee");
+    cx.executor().advance_clock(std::time::Duration::from_millis(400));
+    draw(cx);
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    rig.core.write_answers.lock().unwrap().extend([
+        sent(99, OutboxKind::CreateChat, OutboxState::Failed, None),
+        sent(100, OutboxKind::Send, OutboxState::Sent, None),
+    ]);
+    click(cx, "share-file-share");
+    click(cx, "share-file-share");
+    assert!(
+        rig.core.resent.lock().unwrap().is_empty(),
+        "chat creation needs confirmation"
+    );
+    click(cx, "share-file-share");
+    assert_eq!(*rig.core.resent.lock().unwrap(), [99]);
+    rig.core
+        .outbox_answers
+        .lock()
+        .unwrap()
+        .push_back(sent(99, OutboxKind::CreateChat, OutboxState::Sent, Some(MADE)));
+    cx.executor().advance_clock(std::time::Duration::from_millis(600));
+    draw(cx);
+    assert_eq!(rig.core.actions.lock().unwrap().len(), 2);
+    assert_eq!(sends(&rig)[0].0, MADE);
+    assert!(shown_dialog(&shell, cx).is_none());
+}
+
+#[test]
+fn restricted_and_unknown_microsoft_permissions_send_nothing() {
+    for scope in [Some("users"), Some("existingAccess"), Some("organization"), None] {
+        let rig = seeded();
+        *rig.core.link_permission.lock().unwrap() = scope.map(|scope| LinkPermission {
+            scope: scope.to_owned(),
+            description: None,
+        });
+        let (shell, cx) = shell_window(&rig);
+        cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(AB.to_owned(), window, cx)));
+        draw(cx);
+        click(cx, &format!("file-share-{ID}-0"));
+        pick(cx, "Bee");
+        click(cx, "share-file-share");
+        let dialog = shown_dialog(&shell, cx).unwrap();
+        assert!(cx.update(|_, cx| dialog.read(cx).problem().is_some()));
+        assert!(sends(&rig).is_empty());
+        assert!(cx.update(|_, cx| shell.read(cx).toast().is_none()));
+    }
+}
+
 /// What the clipboard holds.
 fn copied(cx: &mut VisualTestContext) -> Option<String> {
     cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))

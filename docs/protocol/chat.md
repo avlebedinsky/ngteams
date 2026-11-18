@@ -959,8 +959,12 @@ chat) as the recipient, typed a message and pressed Share. c read the result in 
   link puts the link on the clipboard and shows "Link created" (the link, Copy, the permission words, Settings).
   "Share outside Teams" and Settings open OneDrive's page of the file in the browser
   (`teams_proto::chat::onedrive_page`): no token can go to a browser, so the app can't open Teams' framed page.
+- **Restricted Microsoft links**: the capture covers only `anonymous` links. The native dialog refuses other scopes
+  and a permission read that fails. It directs the user to Share outside Teams to set access. It sends no message
+  and shows no success toast in these cases.
 - **The own server** takes the same post. A message that names a file of the server, sent by someone with access to
-  the file, gives each member of the chat access to it (`docs/server.md`). It answers the link's permission on the
+  the file, gives each member of the chat access to it (`docs/server.md`). The message and its grants commit in one
+  transaction. A grant error rolls both back. The server checks at most ten file entries per post. It answers the link's permission on the
   file's site for anyone with access (`scope` `users`). It has no web page for a file, so the dialog offers no "Share
   outside Teams" and "Link created" no Settings for its files.
 

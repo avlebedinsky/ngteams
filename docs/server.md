@@ -1081,6 +1081,8 @@ The client sends a file the way it sends one to OneDrive, and the server keeps o
    entry again in another chat or channel. When a post names a file of this server and its sender has access to
    the file, the server gives each reader of that chat or channel access too (the readers the post's push goes to),
    as an anyone link reaches them on Microsoft's service. A post by someone without access gives nobody access.
+   The message and its file grants commit in one transaction. A grant error rolls both back. A post checks at most
+   ten file entries. A link with userinfo or a different origin gives no access.
    Anyone with access reads what the link lets people do:
    `GET /sp/personal/<owner>/_api/v2.0/shares/u!<link, base64url>/permission` answers the link with `scope`
    `users`, `type` `edit` and the words "People you choose can edit". 403 for an account without access, 404 for a

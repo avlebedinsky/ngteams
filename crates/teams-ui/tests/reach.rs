@@ -760,10 +760,11 @@ fn creates_a_chat_as_offered(path: &Path, text: &str) -> bool {
 
 /// [`creates_a_chat_as_offered`] for a profile card's quick message and "Share this file".
 fn creates_a_chat_from_a_card_or_a_share(path: &Path, text: &str) -> bool {
-    if path.ends_with("teams-ui/src/share_file.rs") {
-        // made only by "Share this file" for a person picked who has no 1:1 chat yet, never in the read-only mode
+    if path.ends_with("teams-ui/src/share_file/send.rs") {
         assert_eq!(text.matches("core.write(Action::CreateChat").count(), 1);
-        assert!(text.contains("if !self.can_share() || self.core.read_only()"));
+        assert!(text.contains("if core.read_only()"));
+        let dialog = fs::read_to_string(workspace_root().join("crates/teams-ui/src/share_file.rs")).expect("UTF-8");
+        assert!(dialog.contains("if !self.can_share() || self.core.read_only()"));
         return true;
     }
     if path.ends_with("teams-ui/src/profile_card.rs") {

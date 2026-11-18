@@ -68,6 +68,11 @@ async fn settle(
     Some(row)
 }
 
+/// The chat id from a completed chat creation.
+pub(crate) fn chat_id(row: OutboxEntry) -> Option<String> {
+    row.message_id.filter(|_| row.state == OutboxState::Sent)
+}
+
 /// Where an outbox row stands, as the view shows it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowState {

@@ -945,7 +945,7 @@ async fn made_chat(core: &Arc<dyn Core>, mri: &str, executor: &BackgroundExecuto
         topic: None,
     });
     let row = settled_row_unowned(core.as_ref(), made, executor).await?;
-    row.message_id.filter(|_| row.state == OutboxState::Sent)
+    crate::sending::chat_id(row)
 }
 
 impl Focusable for ProfileCard {

@@ -58,7 +58,6 @@ use gpui_component::{Sizable as _, Size};
 use teams_core::{Action, SearchScope};
 use teams_proto::Mri;
 use teams_proto::chat::MessageText;
-use teams_store::OutboxState;
 
 use crate::bridge::Core;
 use crate::chat_list::{self, ChatList, ChatRow, RowKind};
@@ -1194,7 +1193,7 @@ fn person_of(row: &ChatRow) -> Suggested {
 
 /// What a group chat is found by: its name, and the names of the members its avatar shows (a named chat is found by
 /// its people too, as Teams finds one).
-fn searchable_name(row: &ChatRow) -> SharedString {
+pub(crate) fn searchable_name(row: &ChatRow) -> SharedString {
     let mut name = row.name.to_string();
     for face in &row.faces {
         if let Some(person) = &face.name {
@@ -1213,7 +1212,7 @@ async fn settled_chat(
     cx: &mut AsyncWindowContext,
 ) -> Option<String> {
     let row = settled_row(core.as_ref(), reply, cx.background_executor()).await?;
-    (row.state == OutboxState::Sent).then_some(row.message_id).flatten()
+    crate::sending::chat_id(row)
 }
 
 impl gpui::Focusable for NewChat {

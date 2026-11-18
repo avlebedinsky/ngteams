@@ -41,3 +41,5 @@ diesel::table! {
         bytes -> BigInt,
     }
 }
+
+diesel::allow_tables_to_appear_in_same_query!(drive_items, drive_grants);

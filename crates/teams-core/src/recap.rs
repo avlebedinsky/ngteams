@@ -165,8 +165,8 @@ impl<C: Credentials + 'static> Recaps<C> {
     }
 }
 
-/// A recording's read that failed: refused or too large (it can't be had) or failed on the way (it may be read again).
-fn file_error(error: &HttpError) -> EngineError {
+/// A file read that failed: refused or too large, or a transport error that a later read can resolve.
+pub(crate) fn file_error(error: &HttpError) -> EngineError {
     match error {
         HttpError::Status(answer) if !matches!(answer.status(), 408 | 429 | 500..=599) => EngineError::FileUnavailable,
         HttpError::Refused(_) | HttpError::BodyTooLarge => EngineError::FileUnavailable,

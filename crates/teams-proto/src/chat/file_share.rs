@@ -1,7 +1,7 @@
 //! A file shared on to another chat or channel, as Teams' "Share this file" does it (`docs/protocol/chat.md`, "Files:
 //! shared on"): one ordinary post to each recipient's conversation, its text the optional message and its
-//! `properties.files` the file's entry again ([`share_entry`]). The post is all that is written: Teams makes no grant
-//! and no new link for it, and the recipients open the file by its sharing link.
+//! `properties.files` the file's entry again ([`share_entry`]). The captured anonymous link needs no new grant or link.
+//! The recipients open the file by its sharing link.
 //!
 //! - **The entry** is the received one with what Teams resets in a share: `fileInfo.itemId`, `fileChicletState.state`,
 //!   `state`, `altText`, `progressComplete`, `sharepointIds`, `publication` and `site` null, `isUploadError` false,
@@ -18,7 +18,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::{Map, Value};
 
-use super::files::{SharedFile, own_cloud_of, shared_files_in};
+use super::files::{SharedFile, is_file_link_in, own_cloud_of, shared_files_in};
 
 /// The longest permission description kept, in characters.
 const MAX_DESCRIPTION: usize = 200;
@@ -99,11 +99,26 @@ const PAGE_QUERY: percent_encoding::AsciiSet = percent_encoding::NON_ALPHANUMERI
 /// Whether `entry` is one a share posts on `cloud`: one file's entry, read with a link on that cloud's file service.
 #[must_use]
 pub fn is_share_entry_in(cloud: &crate::Cloud, entry: &Value) -> bool {
-    if !entry.is_object() {
+    if !entry.is_object() || !checked_links(cloud, entry) {
         return false;
     }
     let read = shared_files_in(cloud, Some(&Value::Array(vec![entry.clone()])));
     read.unread.is_none() && read.files.len() == 1
+}
+
+fn checked_links(cloud: &crate::Cloud, entry: &Value) -> bool {
+    let links = ["/objectUrl", "/fileInfo/shareUrl", "/fileInfo/fileUrl"];
+    let valid = |value: Option<&Value>, check: &dyn Fn(&str) -> bool| match value {
+        None | Some(Value::Null) => true,
+        Some(Value::String(link)) => link.is_empty() || (link.trim() == link && check(link)),
+        Some(_) => false,
+    };
+    links
+        .iter()
+        .all(|path| valid(entry.pointer(path), &|link| is_file_link_in(cloud, link)))
+        && valid(entry.pointer("/filePreview/previewUrl"), &|link| {
+            crate::MessagePicture::of_in(cloud, link).is_some()
+        })
 }
 
 /// The sharing token of a sharing link: `u!` and the link in base64url without padding, as Graph and SharePoint name

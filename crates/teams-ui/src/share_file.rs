@@ -19,9 +19,13 @@
 //!   mark; Backspace in the empty box takes the last one off.
 //! - **Share** sends the file to each recipient as Teams does: one ordinary message to the recipient's chat or channel,
 //!   its text the message, its `properties.files` the file's entry again ([`teams_proto::chat::share_entry_any`],
-//!   [`MessageText::with_shared`]). A person with no 1:1 chat yet gets one first ([`Action::CreateChat`], as New
-//!   message makes one). When all went out the dialog closes and the shell says "You've shared <name>"; a recipient
-//!   it couldn't reach stays picked, the others go, and the dialog says so.
+//!   [`MessageText::with_shared`]). A person with no 1:1 chat gets one through the engine, as New message does.
+//!   When all sends succeed, the dialog closes and the shell says "You've shared <name>".
+//!   A recipient that the send cannot reach stays picked. The dialog removes successful recipients and shows an error.
+//! - **Access**: Microsoft links must have the `anonymous` scope. Other scopes and unknown permissions show an
+//!   access error. An own server grants access with the message.
+//! - **Retries** keep each recipient's outbox row and use [`Core::resend`]. An unknown outcome shows a warning first.
+//!   Close, Escape and Copy link cannot stop an active share.
 //! - **Copy link** puts the file's sharing link on the clipboard, and the dialog becomes Teams' "Link created" box
 //!   ([`link`]): the link in its field, Copy, what the link lets people do, and Settings (the file's OneDrive page,
 //!   where SharePoint sets its links), then Close.
@@ -31,12 +35,14 @@
 //!   then to the buttons.
 //!
 //! Nothing here writes but through [`Core`]; the read-only app offers no Share. Traced: `share-file opened`,
-//! `shared`, `closed`, the conversations by id, never a name or a text.
+//! `link copied`, `outside`, `shared`, `closed`; never a conversation, a name or a text.
 
 mod link;
 mod message;
+mod send;
 
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -51,10 +57,9 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Backspace, Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
 use gpui_component::{Disableable as _, FocusTrapElement as _, Size};
-use teams_core::{Action, SearchScope};
-use teams_proto::Mri;
+use teams_core::SearchScope;
 use teams_proto::chat::{LinkPermission, MessageText, RichText, SharedFile, share_entry_any};
-use teams_store::OutboxState;
+use teams_store::{OutboxEntry, OutboxState};
 
 use crate::bridge::Core;
 use crate::chat_list::{self, ChatList, ChatRow, RowKind};
@@ -63,9 +68,10 @@ use crate::editor::{Editor, EditorEvent};
 use crate::files::{PICTURE_RATIO, header_colour, kind_icon, no_picture, picture_colour};
 use crate::icons::{Glyph, Spinning as _, icon_button, selected_by};
 use crate::inline::{PictureSource, PictureState, thumbnail};
+use crate::new_chat::searchable_name;
 use crate::people::{self, Picture};
 use crate::reaction_picker::ReactionPicker;
-use crate::sending::settled_row;
+use crate::sending::Again;
 use crate::switcher::matches;
 use crate::teams_list::TeamsList;
 use crate::theme::{self, Palette};
@@ -164,6 +170,7 @@ enum Step {
     Sharing,
     /// Some recipients weren't reached: what to tell.
     Failed(SharedString),
+    ConfirmRetry(SharedString),
     /// Copy link pressed: Teams' "Link created" box in the dialog's place.
     LinkCreated,
 }
@@ -195,6 +202,7 @@ pub struct ShareFileDialog {
     found_people: Vec<Target>,
     asking: Option<Task<()>>,
     step: Step,
+    retries: HashMap<String, OutboxEntry>,
     tasks: Vec<Task<()>>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -251,6 +259,7 @@ impl ShareFileDialog {
             found_people: Vec::new(),
             asking: None,
             step: Step::Ready,
+            retries: HashMap::new(),
             tasks: Vec::new(),
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
@@ -298,7 +307,7 @@ impl ShareFileDialog {
     #[must_use]
     pub fn problem(&self) -> Option<&SharedString> {
         match &self.step {
-            Step::Failed(words) => Some(words),
+            Step::Failed(words) | Step::ConfirmRetry(words) => Some(words),
             _ => None,
         }
     }
@@ -480,31 +489,29 @@ impl ShareFileDialog {
     /// The channels `query` finds by their names and their team's.
     fn channels(&self, query: &str, cx: &gpui::App) -> Vec<Target> {
         let teams = self.teams.read(cx).teams().unwrap_or_default();
-        let channels: Vec<Target> = teams
+        let channels: Vec<(Target, (String, SharedString))> = teams
             .iter()
             .filter(|team| !team.archived)
             .flat_map(|team| {
-                team.channels.iter().map(|channel| Target::Channel {
-                    id: channel.id.clone(),
-                    name: channel.name.clone().into(),
-                    team: team.name.clone().into(),
-                    team_id: team.id.clone(),
+                team.channels.iter().map(|channel| {
+                    let target = Target::Channel {
+                        id: channel.id.clone(),
+                        name: channel.name.clone().into(),
+                        team: team.name.clone().into(),
+                        team_id: team.id.clone(),
+                    };
+                    let named = (channel.id.clone(), format!("{} {}", channel.name, team.name).into());
+                    (target, named)
                 })
             })
-            .filter(|channel| !self.is_picked(channel.key()))
+            .filter(|(channel, _)| !self.is_picked(channel.key()))
             .collect();
-        let named: Vec<(String, SharedString)> = channels
-            .iter()
-            .map(|channel| match channel {
-                Target::Channel { id, name, team, .. } => (id.clone(), format!("{name} {team}").into()),
-                other => (other.key().to_owned(), other.name()),
-            })
-            .collect();
+        let named: Vec<(String, SharedString)> = channels.iter().map(|(_, named)| named.clone()).collect();
         matches(query, &named)
             .into_iter()
-            .filter_map(|(id, _)| channels.iter().find(|channel| channel.key() == id))
+            .filter_map(|(id, _)| channels.iter().find(|(channel, _)| channel.key() == id))
             .take(MOST)
-            .cloned()
+            .map(|(channel, _)| channel.clone())
             .collect()
     }
 
@@ -542,6 +549,9 @@ impl ShareFileDialog {
     pub fn remove(&mut self, at: usize, cx: &mut Context<Self>) {
         if at < self.picked.len() && self.step != Step::Sharing {
             self.picked.remove(at);
+            if matches!(self.step, Step::ConfirmRetry(_)) {
+                self.step = Step::Ready;
+            }
             self.refresh_suggestions(cx);
         }
     }
@@ -558,6 +568,9 @@ impl ShareFileDialog {
     /// Escape: an open menu or picker closes, then the suggestions close and the box is cleared, else the dialog
     /// closes.
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.step == Step::Sharing {
+            return;
+        }
         if self.more_open || self.emoji.is_some() {
             self.more_open = false;
             self.emoji = None;
@@ -575,12 +588,18 @@ impl ShareFileDialog {
 
     /// Closes the dialog with nothing more shared.
     pub fn close(&mut self, cx: &mut Context<Self>) {
+        if self.step == Step::Sharing {
+            return;
+        }
         self.trace.record(&TraceLine::new("share-file", "closed"));
         cx.emit(ShareFileEvent::Closed);
     }
 
     /// Copy link: the file's sharing link on the clipboard, and "Link created" in the dialog's place ([`link`]).
     pub fn copy_link(&mut self, cx: &mut Context<Self>) {
+        if self.step == Step::Sharing {
+            return;
+        }
         let Some(link) = self.file.open_link() else {
             return;
         };
@@ -621,6 +640,21 @@ impl ShareFileDialog {
         if !self.can_share() || self.core.read_only() {
             return;
         }
+        if self.file.open_link().is_some_and(teams_proto::chat::is_file_link)
+            && self
+                .permission
+                .as_ref()
+                .is_none_or(|permission| permission.scope != "anonymous")
+        {
+            self.step = Step::Failed(
+                "These recipients may not have access. Use Share outside Teams to give them access first.".into(),
+            );
+            cx.notify();
+            return;
+        }
+        if self.warn_before_retry(cx) {
+            return;
+        }
         let Some(text) = self.text(cx) else {
             self.step = Step::Failed("This message or file can't be shared. Shorten the message and try again.".into());
             cx.notify();
@@ -629,6 +663,7 @@ impl ShareFileDialog {
         self.step = Step::Sharing;
         self.suggesting = false;
         let targets = self.picked.clone();
+        let mut retries = self.retries.clone();
         let core = Arc::clone(&self.core);
         let chats: Vec<(String, String)> = self
             .list
@@ -641,17 +676,37 @@ impl ShareFileDialog {
             .push(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
                 let mut missed = Vec::new();
                 for target in targets {
-                    if !send_to(&core, &target, &chats, text.clone(), cx).await {
-                        missed.push(target);
+                    let previous = retries.remove(target.key());
+                    let row = send::send_to(&core, &target, &chats, text.clone(), previous, cx).await;
+                    if row.as_ref().is_some_and(|row| row.state == OutboxState::Sent) {
+                        continue;
                     }
+                    retries.extend(row.map(|row| (target.key().to_owned(), row)));
+                    missed.push(target);
                 }
-                let _ = this.update(cx, |this, cx| this.shared(missed, cx));
+                let _ = this.update(cx, |this, cx| this.shared(missed, retries, cx));
             }));
         cx.notify();
     }
 
+    fn warn_before_retry(&mut self, cx: &mut Context<Self>) -> bool {
+        if matches!(self.step, Step::ConfirmRetry(_))
+            || !self
+                .picked
+                .iter()
+                .filter_map(|target| self.retries.get(target.key()))
+                .any(|row| teams_core::outcome_unknown(row) || Again::of(row, false) == Again::AfterWarning)
+        {
+            return false;
+        }
+        self.step = Step::ConfirmRetry(crate::chat_view::MAY_HAVE_ARRIVED.into());
+        cx.notify();
+        true
+    }
+
     /// The share's end: every recipient reached closes the dialog, else those missed stay picked.
-    fn shared(&mut self, missed: Vec<Target>, cx: &mut Context<Self>) {
+    fn shared(&mut self, missed: Vec<Target>, retries: HashMap<String, OutboxEntry>, cx: &mut Context<Self>) {
+        self.retries = retries;
         if missed.is_empty() {
             self.step = Step::Ready;
             self.trace.record(&TraceLine::new("share-file", "shared"));
@@ -672,61 +727,15 @@ impl ShareFileDialog {
     }
 }
 
-/// Sends `text` to `target`'s conversation, making a person's 1:1 chat first when `chats` (partner, chat) has none;
-/// whether the outbox sent it.
-async fn send_to(
-    core: &Arc<dyn Core>,
-    target: &Target,
-    chats: &[(String, String)],
-    text: MessageText,
-    cx: &mut gpui::AsyncApp,
-) -> bool {
-    let conversation = match target {
-        Target::Chat(row) => row.id.clone(),
-        Target::Channel { id, .. } => id.clone(),
-        Target::Person { mri, .. } => {
-            if let Some((_, chat)) = chats.iter().find(|(partner, _)| partner == mri) {
-                chat.clone()
-            } else {
-                let reply = core.write(Action::CreateChat {
-                    others: vec![Mri::new(mri)],
-                    topic: None,
-                });
-                let Some(row) = settled_row(core.as_ref(), reply, cx.background_executor()).await else {
-                    return false;
-                };
-                match row.message_id.filter(|_| row.state == OutboxState::Sent) {
-                    Some(chat) => chat,
-                    None => return false,
-                }
-            }
-        }
-    };
-    let reply = core.write(Action::Send { conversation, text });
-    settled_row(core.as_ref(), reply, cx.background_executor())
-        .await
-        .is_some_and(|row| row.state == OutboxState::Sent)
-}
-
-/// What a group chat is found by: its name, and the names of the members its avatar shows.
-fn searchable_name(row: &ChatRow) -> SharedString {
-    let mut name = row.name.to_string();
-    for face in &row.faces {
-        if let Some(person) = &face.name {
-            name.push(' ');
-            name.push_str(person);
-        }
-    }
-    name.into()
-}
-
 // --- drawing ---
 
 impl ShareFileDialog {
     fn header(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let close = selected_by(
             "share-file-close",
-            icon_button("share-file-close", Glyph::X, "Close").on_click(cx.listener(|this, _, _, cx| this.close(cx))),
+            icon_button("share-file-close", Glyph::X, "Close")
+                .disabled(self.step == Step::Sharing)
+                .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
         );
         div()
             .flex()
@@ -1097,7 +1106,11 @@ impl ShareFileDialog {
             "share-file-share",
             Button::new("share-file-share")
                 .primary()
-                .label(SHARE)
+                .label(if matches!(self.step, Step::ConfirmRetry(_)) {
+                    "Send again"
+                } else {
+                    SHARE
+                })
                 .spinning(sharing)
                 .disabled(!self.can_share())
                 .on_click(cx.listener(|this, _, window, cx| this.share(window, cx))),

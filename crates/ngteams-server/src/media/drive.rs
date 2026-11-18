@@ -88,9 +88,19 @@ pub(super) fn web_url(app: &App, owner: &str, name: &str) -> Result<String, Erro
 
 /// The file a sharing link names: a link [`web_url`] made, on this server.
 pub(super) async fn shared(app: &App, link: &str) -> Result<repo::Item, Error> {
+    let (owner, name) = shared_name(&app.config.origin(), link)?;
+    repo::item_named(&app.db, &owner, &name).await?.ok_or(Error::Missing)
+}
+
+pub(super) fn shared_name(base: &str, link: &str) -> Result<(String, String), Error> {
     let url = Url::parse(link).map_err(|_| Error::Missing)?;
-    let own = Url::parse(&app.config.origin()).map_err(|_| Error::Missing)?;
-    if url.origin() != own.origin() || url.query().is_some() || url.fragment().is_some() {
+    let own = Url::parse(base).map_err(|_| Error::Missing)?;
+    if url.origin() != own.origin()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
         return Err(Error::Missing);
     }
     let segments: Vec<String> = url
@@ -109,7 +119,7 @@ pub(super) async fn shared(app: &App, link: &str) -> Result<repo::Item, Error> {
         return Err(Error::Missing);
     }
     let owner = site_owner(user).ok_or(Error::Missing)?;
-    repo::item_named(&app.db, &owner, name).await?.ok_or(Error::Missing)
+    Ok((owner, name.clone()))
 }
 
 pub(super) fn download_link(app: &App, holder: &User, item: &repo::Item) -> Result<String, Error> {

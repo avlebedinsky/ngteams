@@ -161,8 +161,11 @@ macro_rules! insert_in {
             let queued = crate::bots::outbox::enqueue!(conn, &row.chat_id, &row.owner_id, event, version);
             let root = row.root_id.unwrap_or(row.id);
             let hooked = crate::outgoing::enqueue!(conn, &row.chat_id, &row.owner_id, row.id, root, &body, at);
+            let readers = scene.readers(row.id);
+            let files = body.get("properties").and_then(|properties| properties.get("files"));
+            crate::media::share_on!(conn, base, &row.owner_id, files, &readers);
             Ok(Some(Posted {
-                readers: scene.readers(row.id),
+                readers,
                 row,
                 inserted: true,
                 told,
