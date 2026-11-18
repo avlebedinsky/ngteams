@@ -1275,6 +1275,19 @@ mod tests {
         assert!(line_sends(text, "2"));
         assert!(!line_sends(text, "3"));
     }
+
+    // On macOS, libwebrtc's H.264 codec list needs its Objective-C categories, which only `-ObjC` links.
+    #[test]
+    fn the_factory_starts_and_sends_h264() {
+        let codecs = factory().get_rtp_sender_capabilities(MediaType::Video).codecs;
+        assert!(
+            codecs
+                .iter()
+                .any(|codec| codec.mime_type.eq_ignore_ascii_case("video/H264")),
+            "{:?}",
+            codecs.iter().map(|codec| &codec.mime_type).collect::<Vec<_>>()
+        );
+    }
 }
 
 #[cfg(test)]

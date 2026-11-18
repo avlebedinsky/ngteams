@@ -71,9 +71,11 @@ jobs:
         run: cargo test --locked -p teams-signin --lib --test classify --test gate -- --test-threads=1
       - name: Notifications' tags and actions, and the Dock's badge server (no notification center reached)
         run: cargo test --locked -p teams-ui --lib desktop::macos
-      - name: Native device backend's catalog (no device opened)
+      # the factory's H.264 codec list aborts a binary linked without -ObjC (.cargo/config.toml)
+      - name: Native device backend's catalog (no device opened) and libwebrtc's factory (no network)
         run: >-
-          cargo test --locked -p teams-media --lib devices:: -- --test-threads=1
+          cargo test --locked -p teams-media --lib -- devices:: rtc::tests::the_factory_starts_and_sends_h264
+          --test-threads=1
       - name: Coverage tools
         run: |
           rustup component add llvm-tools-preview

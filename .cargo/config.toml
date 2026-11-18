@@ -3,3 +3,9 @@
 # remains a DLL with its own allocation/free API. This target-specific setting leaves Linux unchanged.
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# No binary refers to a symbol of the Objective-C categories of libwebrtc (its H.264 codec list uses them). Without
+# `-ObjC`, the linker drops them and the first call aborts. The `-ObjC` of webrtc-sys applies only to its own targets.
+# A RUSTFLAGS in the environment replaces this list: the build script of teams-media stops a macOS build without it.
+[target.'cfg(target_os = "macos")']
+rustflags = ["-C", "link-arg=-ObjC"]

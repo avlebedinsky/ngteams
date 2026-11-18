@@ -400,7 +400,8 @@ dir (`scripts/macos-gstreamer.sh`, no admin), then formats, checks and lints eve
 crates compile to nothing there) and runs the offline tests of the crates with macOS code of their own: files, logs,
 stores, authentication with the Keychain store's round trip against the runner's unlocked login keychain
 (`NGTEAMS_KEYCHAIN_TESTS=1`), the control socket and CLI, the runner, updates, the sign-in guard and the native device
-backend's catalog, the app's own and the lab's files (`ngteams`'s `accounts_file::paths` and `lab_mode` tests: the
+backend's catalog, libwebrtc's factory with its H.264 codec list (a binary linked without the `-ObjC` of
+`.cargo/config.toml` aborts there), the app's own and the lab's files (`ngteams`'s `accounts_file::paths` and `lab_mode` tests: the
 Application Support layout, case-only spellings, the console runner's marker), and the macOS notifications' tags and
 actions (`teams-ui`'s `desktop::macos`, no notification center reached). Builds use `CARGO_INCREMENTAL=0` and no debug info to fit the runner's disk.
 
