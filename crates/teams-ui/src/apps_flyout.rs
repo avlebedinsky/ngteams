@@ -96,7 +96,7 @@ struct Pane {
     chosen: usize,
     query: Entity<InputState>,
     results: Results,
-    /// Bumped each time a search goes: an older answer is dropped.
+    /// The flyout's `asked` when this pane's last search went: an answer of an older ask is dropped.
     asked: u64,
     waiting: Option<Task<()>>,
     _words: Subscription,
@@ -115,6 +115,9 @@ pub struct AppsFlyout {
     highlight: usize,
     /// The shown list's scroll: the app list's or the results'.
     rows: ScrollHandle,
+    /// Bumped by each app chosen and each search sent, and never reset, so that a late answer of an ask for a pane
+    /// that is gone (Back, then a different app) never matches an ask of the pane that is open now.
+    asked: u64,
     _search: Subscription,
 }
 
@@ -151,6 +154,7 @@ impl AppsFlyout {
             pane: None,
             highlight: 0,
             rows: ScrollHandle::new(),
+            asked: 0,
             _search: watch,
         }
     }
@@ -195,6 +199,8 @@ impl AppsFlyout {
             return;
         };
         let commands = app.commands_in(CommandContext::Compose);
+        self.asked += 1;
+        let asked = self.asked;
         if let Some(bot) = app.fetches_commands() {
             let reply = self.core.bot_invoke(BotAsk {
                 bot: bot.clone(),
@@ -213,7 +219,10 @@ impl AppsFlyout {
                         .collect(),
                     _ => fallback,
                 };
-                let _ = this.update_in(cx, |this, window, cx| this.open_pane(app, fetched, window, cx));
+                // a different app chosen meanwhile, or this one twice: only the last choice opens
+                let _ = this.update_in(cx, |this, window, cx| {
+                    (this.asked == asked && this.pane.is_none()).then(|| this.open_pane(app, fetched, window, cx))
+                });
             })
             .detach();
             return;
@@ -340,8 +349,9 @@ impl AppsFlyout {
             .first()
             .map(|parameter| vec![(parameter.name.clone(), words)])
             .unwrap_or_default();
-        pane.asked += 1;
-        let asked = pane.asked;
+        self.asked += 1;
+        let asked = self.asked;
+        pane.asked = asked;
         pane.results = Results::Searching;
         let reply = self.core.bot_invoke(BotAsk {
             bot: command.bot.clone(),
@@ -380,6 +390,7 @@ impl AppsFlyout {
             return;
         };
         let app = DialogApp::of(&pane.app.store);
+        let asked = pane.asked;
         let Some(tap) = item.tap.clone() else {
             if let Some(card) = app_card_of(&item.attachment, &app) {
                 cx.emit(FlyoutEvent::Card(Box::new(card)));
@@ -397,20 +408,25 @@ impl AppsFlyout {
         });
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let answer = reply.await.map_err(|error| error.to_string());
-            let _ = this.update(cx, |this, cx| this.selected(answer, &item, &app, cx));
+            let _ = this.update(cx, |this, cx| this.selected(answer, &item, &app, asked, cx));
         })
         .detach();
     }
 
     /// The app's answer to a result chosen: its card goes into the box (the result's own when the app gave none);
-    /// else what it said shows.
+    /// else what it said shows. The answer is dropped when the pane of the search that the result came from
+    /// (`asked`) is gone.
     fn selected(
         &mut self,
         answer: Result<InvokeAnswer, String>,
         item: &Found,
         app: &DialogApp,
+        asked: u64,
         cx: &mut Context<Self>,
     ) {
+        if self.pane.as_ref().is_none_or(|pane| pane.asked != asked) {
+            return;
+        }
         let chosen = match &answer {
             Ok(InvokeAnswer::Results { attachments, .. }) => {
                 attachments.iter().find_map(|attachment| app_card_of(attachment, app))

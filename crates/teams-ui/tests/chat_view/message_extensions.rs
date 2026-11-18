@@ -228,6 +228,43 @@ fn a_cards_close_mark_takes_it_out_of_the_box() {
     assert!(!found(cx, "compose-app-card-0"));
 }
 
+/// The search answer that the app holds back as `n`th, given now.
+fn answer_held(rig: &Rig, n: usize, answer: InvokeAnswer) {
+    let held = rig.core.held_bot_answers.lock().unwrap().remove(n);
+    held.send(Ok(answer));
+}
+
+#[test]
+fn a_late_answer_for_an_app_left_never_fills_the_next_apps_pane() {
+    let rig = apps_rig(true);
+    let other = more_finder(&rig, 1);
+    *rig.core.hold_bot_answers.lock().unwrap() = true;
+    let (_view, cx) = window(&rig);
+    click(cx, "compose-apps");
+    click(cx, &format!("apps-flyout-app-{FINDER}"));
+    cx.simulate_keystrokes("escape");
+    click(cx, &format!("apps-flyout-app-{other}"));
+    {
+        let asks = rig.core.bot_asks.lock().unwrap();
+        let apps: Vec<&str> = asks.iter().map(|ask| ask.app_id.as_str()).collect();
+        assert_eq!(apps, [FINDER, other.as_str()], "each app's search went");
+    }
+    // the first app's answer comes after its pane is gone: the open pane still waits for its own
+    answer_held(&rig, 0, results());
+    cx.run_until_parked();
+    assert!(found(cx, "apps-flyout-pane-name"));
+    assert!(!found(cx, "apps-flyout-result-0"));
+    let own = InvokeAnswer::Results {
+        grid: false,
+        attachments: vec![json!({"contentType": "application/vnd.microsoft.card.adaptive",
+            "content": {"type": "AdaptiveCard", "body": [{"type": "TextBlock", "text": "Own record"}]}})],
+    };
+    answer_held(&rig, 0, own);
+    cx.run_until_parked();
+    assert!(found(cx, "apps-flyout-result-0"));
+    assert!(!found(cx, "apps-flyout-result-1"), "the open app's one result only");
+}
+
 #[test]
 fn an_action_command_asks_for_its_dialog_and_a_web_page_asks_nothing() {
     let rig = apps_rig(true);
