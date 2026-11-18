@@ -263,7 +263,7 @@ async fn complete(
     let posted = with_conn!(&app.db, |conn| conn
         .transaction::<_, DbError, _>(async |conn| {
             if !finish_in!(conn, node, &row.id, state, error) {
-                return Ok(Vec::new());
+                return Ok(None);
             }
             let mut posted = Vec::new();
             if let Some(hook) = &hook {
@@ -281,13 +281,23 @@ async fn complete(
                     }
                 }
             }
-            Ok(posted)
+            Ok(Some(posted))
         })
         .await)?;
+    let Some(posted) = posted else {
+        return Ok(());
+    };
+    log_failure(row, error);
     for post in posted {
         crate::chatsvc::service::announce_posted(app, &post).await?;
     }
     Ok(())
+}
+
+fn log_failure(row: &Delivery, error: Option<&str>) {
+    if let Some(error) = error {
+        tracing::info!(webhook = %row.webhook_id, %error, "a request to an outgoing webhook failed");
+    }
 }
 
 fn unkept(error: &DbError) {
@@ -368,17 +378,16 @@ async fn sweep(app: &App) {
         }
     };
     for row in stuck {
-        fail_stuck(app, &row, now).await;
+        fail_stuck(app, &row).await;
     }
 }
 
-async fn fail_stuck(app: &App, row: &Delivery, now: i64) {
+async fn fail_stuck(app: &App, row: &Delivery) {
     let Some(node) = row.locked_by.as_deref() else {
+        tracing::warn!(delivery = %row.id, "an outgoing webhook delivery has no sender");
         return;
     };
-    if row.locked_until < now {
-        ended(app, node, row, &Outcome::Failed("the sender lease expired".to_owned())).await;
-    }
+    ended(app, node, row, &Outcome::Failed("the sender lease expired".to_owned())).await;
 }
 
 async fn stuck(db: &Db, now: i64) -> Result<Vec<Delivery>, DbError> {
@@ -451,22 +460,21 @@ mod tests {
         assert!(!finish(&db, "b", &row.id, DONE, None).await?);
         assert!(finish(&db, "a", &row.id, DONE, None).await?);
         assert_eq!(state(&db, &row.id).await?, DONE);
-        // a lease that ran out is swept to failed, never pending again
-        let lost = Delivery::new("w", "19:c@thread.tacv2", 6, &serde_json::json!({}));
-        put(&db, &lost).await?;
-        claim(&db, "a", -1).await?;
         let now = crate::chatsvc::now();
-        assert_eq!(stuck(&db, now).await?.len(), 1);
-        assert!(take(&db, &lost.id, SENDING, (FAILED, None, 0), now).await?);
-        assert!(!take(&db, &lost.id, SENDING, (FAILED, None, 0), now).await?);
-        assert!(!finish(&db, "a", &lost.id, DONE, None).await?);
-        assert_eq!(state(&db, &lost.id).await?, FAILED);
-        assert_eq!(purge(&db, now + 1).await?, 2);
+        assert_eq!(purge(&db, now + 1).await?, 1);
         Ok(())
     }
     #[tokio::test]
     async fn replies_and_the_terminal_state_commit_together() -> Result<(), Box<dyn std::error::Error>> {
         use diesel_async::SimpleAsyncConnection as _;
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = LogWriter(Arc::clone(&log));
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
         let dir = tempfile::tempdir()?;
         let config = crate::config::Config {
             database_url: format!("sqlite://{}", dir.path().join("server.sqlite").display()),
@@ -488,6 +496,9 @@ mod tests {
         let row = Delivery::new("hook", "channel", 1, &serde_json::json!({}));
         put(&app.db, &row).await?;
         claim(&app.db, "node", -1).await?;
+        let failure = Outcome::Failed("synthetic failure".to_owned());
+        complete(&app, "other", &row, FAILED, Some("synthetic failure"), &failure).await?;
+        assert_eq!(failure_logs(&log), 0);
         let answer = Outcome::Answered(Some(serde_json::json!({"type": "message", "text": "text before card",
             "attachments": [{"contentType": "application/vnd.microsoft.card.hero", "content": {"title": "card"}}]})));
         assert!(complete(&app, "node", &row, DONE, None, &answer).await.is_err());
@@ -497,6 +508,9 @@ mod tests {
         sweep(&app).await;
         assert_eq!(state(&app.db, &row.id).await?, FAILED);
         assert_eq!(message_count(&app.db).await?, 1);
+        assert_eq!(failure_logs(&log), 1);
+        complete(&app, "node", &row, FAILED, Some("synthetic failure"), &failure).await?;
+        assert_eq!(failure_logs(&log), 1);
         complete(&app, "node", &row, DONE, None, &answer).await?;
         assert_eq!(message_count(&app.db).await?, 1);
         let next = Delivery::new("hook", "channel", 1, &serde_json::json!({}));
@@ -506,6 +520,26 @@ mod tests {
         assert_eq!(state(&app.db, &next.id).await?, DONE);
         assert_eq!(message_count(&app.db).await?, 3);
         Ok(())
+    }
+
+    #[derive(Clone)]
+    struct LogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn failure_logs(log: &std::sync::Mutex<Vec<u8>>) -> usize {
+        String::from_utf8_lossy(&log.lock().unwrap())
+            .matches("a request to an outgoing webhook failed")
+            .count()
     }
 
     async fn message_count(db: &Db) -> Result<i64, DbError> {

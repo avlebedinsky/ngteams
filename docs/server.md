@@ -1027,7 +1027,9 @@ limits the whole of each request, a download too: none is set by default. These 
 
 Keys in the bucket: `ams/<object>/<version>` (pictures: each upload of an object's bytes gets a key of its own, and
 the database names the one the object reads from), `drive/<item>` (files), `drive-thumbnails/<item>/…` (thumbnails),
-`profile-pictures/<account>/<upload>` (an account's picture).
+`profile-pictures/<account>/<upload>` (an account's picture), and `outgoing-webhooks/<webhook>/pictures/<upload>`
+(a webhook's picture, with its etag as the upload name). Each upload of a webhook's picture gets its own key.
+Old webhook pictures use `outgoing-webhooks/<webhook>/picture` until a manager replaces or removes them.
 
 ## Pictures, files and link previews
 

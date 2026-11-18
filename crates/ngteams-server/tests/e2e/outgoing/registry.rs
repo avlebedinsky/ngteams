@@ -290,3 +290,51 @@ async fn a_refused_name_change_keeps_the_picture_and_its_url() {
         crew.stop().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_picture_from_the_old_file_layout_can_be_read_and_replaced() -> Result<(), Box<dyn std::error::Error>> {
+    use diesel::sql_types::Text;
+    use diesel_async::RunQueryDsl as _;
+    use ngteams_server::db::with_conn;
+
+    for backend in backends() {
+        let dir = tempfile::tempdir().unwrap();
+        let crew = Crew::open_with(backend, |config| {
+            config.storage_url = url::Url::from_directory_path(dir.path()).unwrap().to_string();
+        })
+        .await;
+        let made = crew
+            .create("Old picture (synthetic)", "https://hooks.example.test/old")
+            .await;
+        let id = made["id"].as_str().unwrap();
+        let app = &crew.registry.server.app;
+        let old_key = format!("outgoing-webhooks/{id}/picture");
+        let original = png(48, 48);
+        app.storage.put(&old_key, original.clone().into()).await.unwrap();
+        with_conn!(&app.db, |conn| diesel::sql_query(
+            "UPDATE outgoing_webhooks SET picture_etag = 'legacy' WHERE id = $1"
+        )
+        .bind::<Text, _>(id)
+        .execute(conn)
+        .await?);
+        let (status, bytes) = picture_bytes(&crew, id).await;
+        assert_eq!(status, 200);
+        assert_eq!(bytes, original);
+        let replacement = png(64, 64);
+        let (status, _) = crew
+            .mt(
+                ADA,
+                Method::PUT,
+                &hook_path(&crew.team, id),
+                Some(json!({"picture": base64::engine::general_purpose::STANDARD.encode(&replacement)})),
+            )
+            .await;
+        assert_eq!(status, 200);
+        let (status, bytes) = picture_bytes(&crew, id).await;
+        assert_eq!(status, 200);
+        assert_eq!(bytes, replacement);
+        assert!(app.storage.get(&old_key).await.unwrap().is_none());
+        crew.stop().await;
+    }
+    Ok(())
+}

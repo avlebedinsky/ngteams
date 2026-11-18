@@ -241,7 +241,7 @@ A webhook: `{"id", "mri": "28:<id>", "teamId", "name", "description", "canManage
 `picture` is a PNG or JPEG in base64. A refusal is `{"errorCode", "message"}`: 400 `BadRequest` (a form the server
 doesn't take, an address it doesn't send to), 403 `Forbidden` or `OperationNotAllowedOnArchivedTeam`, 404 `NotFound`
 (no such team or webhook for the caller), 409 `OutgoingWebhookNameAlreadyExists` (a name, in any letter case, that
-the team already has).
+the team already has), or 409 `OutgoingWebhookChanged` (a concurrent update changed the picture).
 
 A mention of a webhook is an ordinary mention in the message's `properties.mentions`, with `mri` `28:<id>`. Its
 replies come from `28:<id>`, with the webhook's name as `imdisplayname`, in the thread of the post.

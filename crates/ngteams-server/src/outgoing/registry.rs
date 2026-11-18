@@ -60,6 +60,7 @@ impl Refusal {
     const MISSING: Self = Self::Code(StatusCode::NOT_FOUND, "NotFound");
     const ARCHIVED: Self = Self::Code(StatusCode::FORBIDDEN, "OperationNotAllowedOnArchivedTeam");
     const TAKEN: Self = Self::Code(StatusCode::CONFLICT, "OutgoingWebhookNameAlreadyExists");
+    const CHANGED: Self = Self::Code(StatusCode::CONFLICT, "OutgoingWebhookChanged");
 }
 
 impl From<DbError> for Refusal {
@@ -301,7 +302,7 @@ fn picture_type(bytes: &[u8]) -> Option<&'static str> {
 
 fn picture_key(hook: &Hook) -> String {
     match &hook.picture_etag {
-        Some(etag) if uuid::Uuid::parse_str(etag).is_ok() => format!("outgoing-webhooks/{}/picture/{etag}", hook.id),
+        Some(etag) if uuid::Uuid::parse_str(etag).is_ok() => format!("outgoing-webhooks/{}/pictures/{etag}", hook.id),
         _ => format!("outgoing-webhooks/{}/picture", hook.id),
     }
 }
@@ -426,11 +427,13 @@ async fn change(
     }
     change_picture(&app, &mut hook, form.picture).await?;
     hook.updated_at = at;
-    if let Err(error) = update(&app.db, &hook).await {
+    let updated = update(&app.db, &hook, previous.picture_etag.as_deref()).await;
+    if !matches!(updated, Ok(true)) {
         if hook.picture_etag != previous.picture_etag && hook.picture_etag.is_some() {
             drop_picture(&app, &hook).await;
         }
-        return Err(error.into());
+        updated?;
+        return Err(Refusal::CHANGED);
     }
     if hook.picture_etag != previous.picture_etag && previous.picture_etag.is_some() {
         drop_picture(&app, &previous).await;
@@ -450,21 +453,32 @@ async fn change_picture(app: &App, hook: &mut Hook, picture: Picture) -> Answer<
     Ok(())
 }
 
-async fn update(db: &Db, hook: &Hook) -> Result<(), DbError> {
+async fn update(db: &Db, hook: &Hook, previous: Option<&str>) -> Result<bool, DbError> {
     with_conn!(db, |conn| conn
         .transaction::<_, DbError, _>(async |conn| {
-            diesel::update(outgoing_webhooks::table.find(&hook.id))
-                .set((
-                    outgoing_webhooks::name.eq(&hook.name),
-                    outgoing_webhooks::name_key.eq(&hook.name_key),
-                    outgoing_webhooks::description.eq(&hook.description),
-                    outgoing_webhooks::callback_url.eq(&hook.callback_url),
-                    outgoing_webhooks::picture_etag.eq(&hook.picture_etag),
-                    outgoing_webhooks::updated_at.eq(hook.updated_at),
-                ))
-                .execute(conn)
-                .await
-                .map_err(crate::db::conflict)?;
+            let changed = diesel::update(
+                outgoing_webhooks::table.find(&hook.id).filter(
+                    outgoing_webhooks::picture_etag
+                        .eq(previous)
+                        .or(outgoing_webhooks::picture_etag
+                            .is_null()
+                            .and(previous.is_none().into_sql::<diesel::sql_types::Bool>())),
+                ),
+            )
+            .set((
+                outgoing_webhooks::name.eq(&hook.name),
+                outgoing_webhooks::name_key.eq(&hook.name_key),
+                outgoing_webhooks::description.eq(&hook.description),
+                outgoing_webhooks::callback_url.eq(&hook.callback_url),
+                outgoing_webhooks::picture_etag.eq(&hook.picture_etag),
+                outgoing_webhooks::updated_at.eq(hook.updated_at),
+            ))
+            .execute(conn)
+            .await
+            .map_err(crate::db::conflict)?;
+            if changed == 0 {
+                return Ok(false);
+            }
             diesel::update(users::table.find(&hook.id))
                 .set((
                     users::display_name.eq(&hook.name),
@@ -472,7 +486,7 @@ async fn update(db: &Db, hook: &Hook) -> Result<(), DbError> {
                 ))
                 .execute(conn)
                 .await?;
-            Ok(())
+            Ok(true)
         })
         .await)
 }
@@ -524,9 +538,8 @@ async fn picture(State(app): State<Arc<App>>, actor: Me, Path((team, id)): Path<
 mod tests {
     use super::*;
 
-    #[test]
-    fn hook_debug_does_not_show_its_key_or_callback_url() {
-        let hook = Hook {
+    fn synthetic_hook() -> Hook {
+        Hook {
             id: "hook".to_owned(),
             team_id: "team".to_owned(),
             name: "Synthetic hook".to_owned(),
@@ -538,10 +551,41 @@ mod tests {
             created_by: "author".to_owned(),
             created_at: 0,
             updated_at: 0,
-        };
+        }
+    }
+
+    #[test]
+    fn hook_debug_does_not_show_its_key_or_callback_url() {
+        let hook = synthetic_hook();
         let text = format!("{hook:?}");
         assert!(text.contains("Synthetic hook"));
         assert!(!text.contains(&hook.security_key));
         assert!(!text.contains(&hook.callback_url));
+    }
+
+    #[tokio::test]
+    async fn a_stale_update_cannot_restore_a_previous_picture() -> Result<(), Box<dyn std::error::Error>> {
+        use diesel_async::SimpleAsyncConnection as _;
+        let dir = tempfile::tempdir()?;
+        let db = Db::connect(&format!("sqlite://{}", dir.path().join("server.sqlite").display()), 1).await?;
+        with_conn!(&db, |conn| conn.batch_execute("PRAGMA foreign_keys = OFF").await?);
+        let mut current = synthetic_hook();
+        insert(&db, &current).await?;
+        for picture in [Some("first"), Some("second"), None] {
+            let mut stale = current.clone();
+            current.picture_etag = picture.map(str::to_owned);
+            assert!(update(&db, &current, stale.picture_etag.as_deref()).await?);
+            stale.name = "Stale name".to_owned();
+            stale.description = "Stale description".to_owned();
+            assert!(!update(&db, &stale, stale.picture_etag.as_deref()).await?);
+            let kept = hook(&db, &current.id).await?.unwrap();
+            assert_eq!(kept.picture_etag, current.picture_etag);
+            assert_eq!(kept.description, current.description);
+            assert_eq!(
+                crate::db::users::by_id(&db, &current.id).await?.unwrap().display_name,
+                current.name
+            );
+        }
+        Ok(())
     }
 }
