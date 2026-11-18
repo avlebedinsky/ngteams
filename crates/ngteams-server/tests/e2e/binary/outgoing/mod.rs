@@ -76,25 +76,12 @@ impl Fixture {
     }
 
     async fn stop(self, secrets: &[String]) {
-        self.rig.stop().await;
-        Self::check_logs(secrets);
-    }
-
-    fn check_logs(secrets: &[String]) {
-        let Some(root) = std::env::var_os(super::teams::support::LOG_DIR) else {
-            return;
-        };
-        check_log_tree(std::path::Path::new(&root), secrets);
-    }
-}
-
-fn check_log_tree(path: &std::path::Path, secrets: &[String]) {
-    for entry in std::fs::read_dir(path).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            check_log_tree(&path, secrets);
-        } else if path.extension().is_some_and(|extension| extension == "log") {
-            let log = std::fs::read_to_string(&path).unwrap();
+        let logs = self.rig.stop_reading_logs().await;
+        assert!(
+            logs.iter().any(|(_, log)| !log.is_empty()),
+            "the nodes wrote no log to check"
+        );
+        for (path, log) in &logs {
             for secret in secrets {
                 assert!(!log.contains(secret), "a secret occurs in {}", path.display());
             }

@@ -271,20 +271,26 @@ fn transport(session: &Arc<Session<MemorySecretStore>>, origin: &str, endpoint: 
     .unwrap()
 }
 
-/// The nodes' logs, when [`LOG_DIR`] is set: one file a start.
+/// The nodes' logs: one file a start when [`LOG_DIR`] is set, else one file a node beside its configuration.
 struct Logs {
     dir: Option<PathBuf>,
     starts: u32,
+    paths: Vec<PathBuf>,
 }
 
 impl Logs {
     async fn start(&mut self, node: &mut Node, name: &str) {
         self.starts += 1;
         let Some(dir) = &self.dir else {
+            let log = node.config.with_extension("log");
+            if !self.paths.contains(&log) {
+                self.paths.push(log);
+            }
             return node.start().await;
         };
         std::fs::create_dir_all(dir).unwrap();
         let log = dir.join(format!("node-{name}-start-{}.log", self.starts));
+        self.paths.push(log.clone());
         node.start_logged(&log).await;
     }
 }
@@ -332,6 +338,7 @@ impl Rig {
         let mut logs = Logs {
             dir: std::env::var_os(LOG_DIR).map(|dir| Path::new(&dir).join(format!("{flow}-{backend:?}"))),
             starts: 0,
+            paths: Vec::new(),
         };
         logs.start(&mut first, "a").await;
         let mut second = (backend == Backend::Postgres).then(|| deployment.node("b"));
@@ -377,6 +384,20 @@ impl Rig {
     }
 
     pub async fn stop(mut self) {
+        self.stop_all().await;
+    }
+
+    /// Stops everything, then reads every log its nodes wrote, before the deployment's directory goes.
+    pub async fn stop_reading_logs(mut self) -> Vec<(PathBuf, String)> {
+        self.stop_all().await;
+        self.logs
+            .paths
+            .iter()
+            .map(|path| (path.clone(), std::fs::read_to_string(path).unwrap()))
+            .collect()
+    }
+
+    async fn stop_all(&mut self) {
         for seat in &mut self.seats {
             seat.engine.take().unwrap().shutdown();
         }
