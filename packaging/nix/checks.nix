@@ -101,6 +101,7 @@ in
         &&
           self.apps.${system}.default.program
           == lib.getExe (self.packages.${system}.ngteams.override { nixInstall = "other"; })
+        && self.apps.${system}.ngteams.program == self.apps.${system}.default.program
       )
       "the flake's package must be the release of release.json, marked as a profile install; nix run and the overlay name no install";
 }
