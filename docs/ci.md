@@ -473,7 +473,10 @@ version, and for each Nix system the archive's URL and its SRI hash. The package
 the release's binaries in a `buildFHSEnv`, because they and the downloaded WPE runtime expect FHS paths
 (`/lib64/ld-linux-x86-64.so.2`, `/usr/bin/bwrap`, `/usr/bin/xdg-dbus-proxy`), and nixpkgs has no WPE WebKit 2.54. The
 package writes `nix-profile`, `nix-nixos` or `nix-home-manager` into the tree's `update-format`, so that the app shows
-the right nix command in place of a download (`crates/teams-update`, `Format::Nix`).
+the right nix command in place of a download (`crates/teams-update`, `Format::Nix`). `nix run` and the overlay write
+`nix`: such a copy does not know how it was installed, so the app shows no command. Under Nix, the sign-in worker also
+gives WebKit's sandbox `/nix/store` (and `/run/opengl-driver`) read-only, because the FHS environment's libraries are
+links into the store (`crates/teams-wpe/src/engine/nix.rs`).
 
 After `publish`, the release workflow's `nix` job downloads the new release's `SHA256SUMS` and runs
 `scripts/release-nix.py`, which writes `release.json` from it. It does not replace a file of the same or a newer

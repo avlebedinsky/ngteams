@@ -46,6 +46,24 @@ let
     ];
   };
 
+  # Home Manager as a NixOS module gives its modules `osConfig`
+  homeInNixos = lib.evalModules {
+    specialArgs.osConfig = { };
+    modules = [
+      self.homeManagerModules.default
+      {
+        options.home.packages = lib.mkOption {
+          type = lib.types.listOf lib.types.package;
+          default = [ ];
+        };
+        config = {
+          _module.args.pkgs = pkgs;
+          programs.ngteams.enable = true;
+        };
+      }
+    ];
+  };
+
   homeOff = lib.evalModules {
     modules = [
       self.homeManagerModules.default
@@ -67,11 +85,22 @@ in
 
   home-manager-module =
     check "home-manager-module"
-      (installs home.config.home.packages == [ "home-manager" ] && homeOff.config.home.packages == [ ])
-      "the Home Manager module must install ngteams marked as a Home Manager install, and only when enabled";
+      (
+        installs home.config.home.packages == [ "home-manager" ]
+        && installs homeInNixos.config.home.packages == [ "nixos" ]
+        && homeOff.config.home.packages == [ ]
+      )
+      "the Home Manager module must install ngteams marked as a Home Manager install (a NixOS install inside NixOS), and only when enabled";
 
-  package = check "package" (
-    self.packages.${system}.ngteams.nixInstall == "profile"
-    && self.packages.${system}.ngteams.version == (lib.importJSON ./release.json).version
-  ) "the flake's package must be the release of release.json, marked as a profile install";
+  package =
+    check "package"
+      (
+        self.packages.${system}.ngteams.nixInstall == "profile"
+        && self.packages.${system}.ngteams.version == (lib.importJSON ./release.json).version
+        && (pkgs.extend self.overlays.default).ngteams.nixInstall == "other"
+        &&
+          self.apps.${system}.default.program
+          == lib.getExe (self.packages.${system}.ngteams.override { nixInstall = "other"; })
+      )
+      "the flake's package must be the release of release.json, marked as a profile install; nix run and the overlay name no install";
 }

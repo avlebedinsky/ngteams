@@ -14,15 +14,18 @@
       forSystems = f: lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
     in
     {
+      # `nix profile install` takes one of these packages; the other outputs give a copy that names no command
       packages = forSystems (pkgs: rec {
-        ngteams = pkgs.callPackage ./packaging/nix/package.nix { };
+        ngteams = pkgs.callPackage ./packaging/nix/package.nix { nixInstall = "profile"; };
         default = ngteams;
       });
 
       apps = forSystems (pkgs: {
         default = {
           type = "app";
-          program = lib.getExe self.packages.${pkgs.stdenv.hostPlatform.system}.ngteams;
+          program = lib.getExe (
+            self.packages.${pkgs.stdenv.hostPlatform.system}.ngteams.override { nixInstall = "other"; }
+          );
           meta.description = "Run ngteams";
         };
       });

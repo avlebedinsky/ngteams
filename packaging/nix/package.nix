@@ -10,13 +10,14 @@
   fetchurl,
   buildFHSEnv,
   patchelf,
-  nixInstall ? "profile",
+  nixInstall ? "other",
 }:
 
 assert lib.assertOneOf "nixInstall" nixInstall [
   "profile"
   "nixos"
   "home-manager"
+  "other"
 ];
 
 let
@@ -24,6 +25,8 @@ let
   system = stdenv.hostPlatform.system;
   asset = release.${system} or (throw "ngteams has no release archive for ${system}");
   inherit (release) version;
+  # `other` (`nix run`, the overlay): the copy does not know how it was installed, so the app names no command
+  marker = if nixInstall == "other" then "nix" else "nix-${nixInstall}";
 
   meta = {
     description = "Native Microsoft Teams client for Linux";
@@ -54,7 +57,7 @@ let
       mkdir -p $out/opt/ngteams $out/bin
       cp -a . $out/opt/ngteams/
       chmod u+w $out/opt/ngteams/usr/share/ngteams/update-format
-      echo "nix-${nixInstall}" > $out/opt/ngteams/usr/share/ngteams/update-format
+      echo "${marker}" > $out/opt/ngteams/usr/share/ngteams/update-format
       install -m 0755 usr/bin/ngteamsctl $out/bin/ngteamsctl
       patchelf --set-interpreter "$(cat $NIX_CC/nix-support/dynamic-linker)" \
         --set-rpath ${lib.makeLibraryPath [ stdenv.cc.cc.lib ]} $out/bin/ngteamsctl

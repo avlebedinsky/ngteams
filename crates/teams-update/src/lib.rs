@@ -39,7 +39,8 @@
 //! - **Nix** ([`Format::Nix`]): a copy that runs from the Nix store (the flake's package, `packaging/nix/`) cannot
 //!   replace its own files. The check still finds a newer release, but the app does not download it: it shows the
 //!   command that updates this kind of Nix install ([`NixInstall::command`]). The flake's package writes the kind into
-//!   the marker (`nix-profile`, `nix-nixos` or `nix-home-manager`).
+//!   the marker (`nix-profile`, `nix-nixos` or `nix-home-manager`; `nix` for a copy that does not know, which gets no
+//!   command).
 //!
 //! Every message is fit to show the user: no URL with a query, header or environment value is in one.
 
