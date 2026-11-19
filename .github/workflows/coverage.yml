@@ -7,6 +7,10 @@ on:
       - '**'
       - '!**/*.md'
       - '!docs/**'
+      # the Nix flake uses a release's binaries and builds nothing of the workspace
+      - '!flake.nix'
+      - '!flake.lock'
+      - '!packaging/nix/**'
       # These Markdown files are build/test inputs; docs/ is checked by fixtures.yml.
       - '**/tests/fixtures/**'
       - vendor/gpui-pre/README.md
@@ -15,6 +19,10 @@ on:
       - '**'
       - '!**/*.md'
       - '!docs/**'
+      # the Nix flake uses a release's binaries and builds nothing of the workspace
+      - '!flake.nix'
+      - '!flake.lock'
+      - '!packaging/nix/**'
       - '**/tests/fixtures/**'
       - vendor/gpui-pre/README.md
   merge_group:

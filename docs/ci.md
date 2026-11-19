@@ -465,6 +465,33 @@ from it doesn't update itself. The macOS bundle carries `Contents/Resources/ngte
 (`macos-app`): its update unpacks the next zip with `ditto` beside the installed bundle, checks its marker, version,
 programs and code signature (`codesign --verify --deep --strict`), and swaps the bundles by two renames.
 
+### The Nix flake
+
+`flake.nix` at the repository root packages the release's Linux archive for Nix (`packaging/nix/`): the package, a
+NixOS module and a Home Manager module. `packaging/nix/release.json` holds the release that the flake installs: its
+version, and for each Nix system the archive's URL and its SRI hash. The package does not build the workspace. It runs
+the release's binaries in a `buildFHSEnv`, because they and the downloaded WPE runtime expect FHS paths
+(`/lib64/ld-linux-x86-64.so.2`, `/usr/bin/bwrap`, `/usr/bin/xdg-dbus-proxy`), and nixpkgs has no WPE WebKit 2.54. The
+package writes `nix-profile`, `nix-nixos` or `nix-home-manager` into the tree's `update-format`, so that the app shows
+the right nix command in place of a download (`crates/teams-update`, `Format::Nix`).
+
+After `publish`, the release workflow's `nix` job downloads the new release's `SHA256SUMS` and runs
+`scripts/release-nix.py`, which writes `release.json` from it. It does not replace a file of the same or a newer
+release. The job commits the file to `main` as `github-actions[bot]` with `[skip ci]` and pushes with the workflow's
+own token (`contents: write`), so no new secret is necessary. If `main` moved, it rebases and tries again, three times.
+That commit cannot start a release loop:
+
+- a push with the workflow's own token starts no workflow;
+- `[skip ci]` skips the push workflows of that commit;
+- the release's `paths` leave out `packaging/nix/**`, and Coverage, macOS and Windows leave out `flake.nix`,
+  `flake.lock` and `packaging/nix/**`.
+
+If a newer push cancels the release workflow after `publish` and before `nix`, the flake keeps the previous release
+until the next one. To write the file by hand, run
+`python3 scripts/release-nix.py <version> SHA256SUMS packaging/nix/release.json` with that release's `SHA256SUMS`.
+`nix flake check` evaluates the two modules and the package (it builds nothing large). CI does not run Nix: check a
+change to `packaging/nix/` locally, for example in the `docker.io/nixos/nix` image.
+
 ### The Windows installer
 
 `packaging/windows/ngteams.iss` is an [Inno Setup](https://jrsoftware.org/isinfo.php) 7 script, compiled by
