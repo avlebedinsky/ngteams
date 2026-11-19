@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 
 use crate::{Error, Format, IDENTITY, MARKER, Version, error};
 
+/// The Nix store: a copy in it cannot replace its own files, and only Nix updates it.
+pub const NIX_STORE: &str = "/nix/store";
+
 /// What [`Installation::detect`] reads: the process's executable and its AppImage environment, where a package's
 /// download waits, and the user's directories an update must never replace.
 #[derive(Clone, Debug)]
@@ -67,6 +70,10 @@ impl Installation {
     #[cfg(unix)]
     pub fn detect(places: &Places) -> Result<Self, Error> {
         let executable = fs::canonicalize(executable_on_disk(places.executable.clone()))?;
+        #[cfg(not(target_os = "macos"))]
+        if let Some((root, install)) = nix_install(&executable, Path::new(NIX_STORE)) {
+            return Self::made(places, root, executable, Format::Nix(install));
+        }
         if let (Some(image), Some(appdir)) = (&places.appimage, &places.appdir)
             && executable.starts_with(Path::new(appdir))
         {
@@ -268,6 +275,27 @@ fn plain(path: PathBuf) -> PathBuf {
         Some(rest) if rest.as_bytes().get(1) == Some(&b':') && !rest.contains('?') => PathBuf::from(rest),
         _ => path,
     }
+}
+
+/// The folder and the kind of the Nix install that `executable` runs from, when it is in `store`: the release tree
+/// (the folder that holds `usr/bin`) and its marker, else the executable's folder and [`crate::NixInstall::Other`].
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(crate) fn nix_install(executable: &Path, store: &Path) -> Option<(PathBuf, crate::NixInstall)> {
+    if !executable.starts_with(store) {
+        return None;
+    }
+    let tree = executable
+        .parent()
+        .filter(|bin| bin.ends_with("usr/bin"))
+        .and_then(Path::parent)
+        .and_then(Path::parent);
+    let install = tree
+        .and_then(|tree| fs::read_to_string(tree.join(MARKER)).ok())
+        .and_then(|marker| Format::from_marker(&marker))
+        .and_then(Format::nix)
+        .unwrap_or(crate::NixInstall::Other);
+    let root = tree.or_else(|| executable.parent())?;
+    Some((root.to_path_buf(), install))
 }
 
 /// The app bundle `executable` runs from (`<name>.app/Contents/MacOS/<program>`), if it does.

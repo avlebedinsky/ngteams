@@ -12,6 +12,9 @@
 //!   this installation at once, in the background, the button showing how far. Offline or rate-limited, nothing is
 //!   shown and the next check tries again; another failure (a bad checksum, no permission, a full disk) shows Update
 //!   failed, and the next check or a press tries again.
+//! - **A Nix install** ([`teams_update::NixInstall`]): the check runs as for any release, but nothing is downloaded.
+//!   The button says Update available, its tooltip gives the command that updates this kind of Nix install, and its
+//!   press copies that command ([`teams_ui::update::UpdateStatus::Manual`]).
 //! - **The press** (Restart to update, once the download is verified): unless a call is up or ringing or a box holds a
 //!   message not sent yet ([`teams_ui::update::Waiting`]), the update is installed and the app restarts; else the
 //!   press says what holds it up. Only a system package asks for a password, at the press: a per-user copy replaces
@@ -202,7 +205,20 @@ fn found_release(found: Result<Option<Release>, Error>, cx: &mut App) {
         log::info!("updates: release {} is out", release.version);
     }
     flow.release = Some(release.clone());
+    if let Some(install) = flow.updater.installation.format().nix() {
+        button::set_status(manual(release.version, install), cx);
+        return;
+    }
     download(release, cx);
+}
+
+/// What the button shows of `version` for a Nix install: what to do, and the command that updates it.
+fn manual(version: Version, install: teams_update::NixInstall) -> UpdateStatus {
+    UpdateStatus::Manual {
+        version: self::version(version),
+        says: install.says().into(),
+        command: install.command().map(SharedString::from),
+    }
 }
 
 /// The button's press: the install of the download, or a new try of a download that failed.

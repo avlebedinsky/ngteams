@@ -9,7 +9,7 @@ use std::rc::Rc;
 use gpui::TestAppContext;
 use teams_ui::update::{self as button, UpdateStatus, Waiting};
 use teams_update::fakes::{Feed, Reply, archive_bytes, program, publish, tree};
-use teams_update::{Format, IDENTITY, Installation, Places, Restart, Source, Version};
+use teams_update::{Format, IDENTITY, Installation, NixInstall, Places, Restart, Source, Version};
 
 use super::{Started, Updater, check, percent, start, updating_build};
 
@@ -68,7 +68,7 @@ fn checked(cx: &mut TestAppContext) {
     cx.run_until_parked();
 }
 
-fn pressed(cx: &mut TestAppContext) -> Option<Waiting> {
+fn pressed(cx: &mut TestAppContext) -> Option<gpui::SharedString> {
     let waiting = cx.update(button::press);
     cx.run_until_parked();
     waiting
@@ -120,6 +120,43 @@ fn a_newer_release_downloads_by_itself_and_the_press_restarts_into_it(cx: &mut T
 }
 
 #[gpui::test]
+fn a_nix_install_downloads_nothing_and_its_press_copies_the_nix_command(cx: &mut TestAppContext) {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join("store/ngteams-unwrapped/opt/ngteams");
+    tree(&root, "0.1.0.5", Format::Nix(NixInstall::NixOs)).unwrap();
+    let installation = Installation::detect(&places(root.join("usr/bin/ngteams"), home.path())).unwrap();
+    let feed = Feed::start().unwrap();
+    let asset = Format::Archive.asset(version("0.1.0.7"));
+    publish(&feed, "v0.1.0.7", &asset, &archive_bytes("0.1.0.7", |_| {}).unwrap());
+    let app = started(cx, installation, &feed);
+    checked(cx);
+    let command = "nix flake update ngteams && sudo nixos-rebuild switch --flake .";
+    assert_eq!(
+        status(cx),
+        UpdateStatus::Manual {
+            version: "0.1.0.7".into(),
+            says: NixInstall::NixOs.says().into(),
+            command: Some(command.into()),
+        }
+    );
+    assert!(
+        !feed.requests().iter().any(|request| request.contains("/download/")),
+        "nothing downloaded"
+    );
+    assert_eq!(pressed(cx), Some(format!("Copied: {command}").into()));
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()),
+        Some(command.to_owned())
+    );
+    assert_eq!(app.quits.get(), 0);
+    assert!(app.restart.take().is_none());
+    // the next check finds the same release and shows the same
+    checked(cx);
+    assert!(matches!(status(cx), UpdateStatus::Manual { .. }));
+    assert_eq!(fs::read_to_string(root.join(IDENTITY)).unwrap(), "0.1.0.5\n");
+}
+
+#[gpui::test]
 fn a_call_or_an_unsent_message_holds_the_restart_until_the_press(cx: &mut TestAppContext) {
     let home = tempfile::tempdir().unwrap();
     let (installation, feed, _) = archive_case(home.path(), "0.1.0.7");
@@ -136,9 +173,9 @@ fn a_call_or_an_unsent_message_holds_the_restart_until_the_press(cx: &mut TestAp
     );
     assert!(cx.update(check).is_none(), "no check while a download waits");
     // pressed while the call is up: it says so, and nothing happens
-    assert_eq!(pressed(cx), Some(Waiting::Call));
+    assert_eq!(pressed(cx), Some(Waiting::Call.says().into()));
     app.holds.set(Some(Waiting::Unsent));
-    assert_eq!(pressed(cx), Some(Waiting::Unsent));
+    assert_eq!(pressed(cx), Some(Waiting::Unsent.says().into()));
     assert_eq!(app.quits.get(), 0);
     app.holds.set(None);
     assert_eq!(pressed(cx), None);
@@ -350,7 +387,7 @@ fn hold_arriving_during_the_package_prompt(hold: Waiting, cx: &mut TestAppContex
     assert_eq!(app.quits.get(), 0);
     assert!(app.restart.take().is_none(), "no restart armed while held");
     assert_eq!(status(cx), UpdateStatus::Ready("0.1.0.6".into()));
-    assert_eq!(pressed(cx), Some(hold));
+    assert_eq!(pressed(cx), Some(hold.says().into()));
     assert!(cx.update(check).is_none());
     // Neither download nor installation may run again on the later press.
     feed.serve(&format!("/download/v0.1.0.6/{asset}"), Reply::status("404 Not Found"));

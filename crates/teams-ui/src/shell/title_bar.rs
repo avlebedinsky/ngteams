@@ -278,8 +278,8 @@ impl Shell {
         crate::update::button(
             palette,
             move |_, _, cx| {
-                if let Some(waiting) = crate::update::press(cx) {
-                    let _ = shell.update(cx, |shell, cx| shell.show_toast(waiting.says(), cx));
+                if let Some(said) = crate::update::press(cx) {
+                    let _ = shell.update(cx, |shell, cx| shell.show_toast_text(said, cx));
                 }
             },
             cx,

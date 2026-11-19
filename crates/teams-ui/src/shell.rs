@@ -2064,6 +2064,11 @@ impl Shell {
 
     /// A word that shows for a few seconds at the bottom of the window.
     pub fn show_toast(&mut self, words: &'static str, cx: &mut Context<Self>) {
+        self.show_toast_text(words.into(), cx);
+    }
+
+    /// [`Self::show_toast`] of words made at run time.
+    pub fn show_toast_text(&mut self, words: SharedString, cx: &mut Context<Self>) {
         if words.is_empty() {
             return;
         }
@@ -2076,7 +2081,7 @@ impl Shell {
                 cx.notify();
             });
         });
-        self.toast = Some((words.into(), task));
+        self.toast = Some((words, task));
         cx.notify();
     }
 

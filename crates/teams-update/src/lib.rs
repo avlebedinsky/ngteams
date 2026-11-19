@@ -36,6 +36,10 @@
 //!   folder and checks it the same way; [`Prepared::install`] checks it again and hands back the installer, with its
 //!   silent-update arguments, as the program a restart runs. A running program's files can't be replaced on Windows,
 //!   so the installer waits for this process to exit, upgrades the folder in place and starts the new version.
+//! - **Nix** ([`Format::Nix`]): a copy that runs from the Nix store (the flake's package, `packaging/nix/`) cannot
+//!   replace its own files. The check still finds a newer release, but the app does not download it: it shows the
+//!   command that updates this kind of Nix install ([`NixInstall::command`]). The flake's package writes the kind into
+//!   the marker (`nix-profile`, `nix-nixos` or `nix-home-manager`).
 //!
 //! Every message is fit to show the user: no URL with a query, header or environment value is in one.
 
@@ -51,7 +55,7 @@ mod stage;
 
 pub use check::{Release, Source};
 pub use install::{Prepared, Restart};
-pub use installation::{Installation, Places};
+pub use installation::{Installation, NIX_STORE, Places};
 
 /// The release marker, relative to an installed tree's root (the folder holding `usr/`): how this copy was installed,
 /// one of [`Format::marker`]'s words.
@@ -138,6 +142,10 @@ pub enum Error {
     Io(#[from] std::io::Error),
 }
 
+/// Why a Nix install does not download an update.
+pub(crate) const NIX_UPDATES: &str =
+    "This copy runs from the Nix store, so it cannot update itself. Update it with Nix.";
+
 pub(crate) fn error(message: impl Into<String>) -> Error {
     Error::Message(message.into())
 }
@@ -190,6 +198,45 @@ pub enum Format {
     WindowsSetup,
     /// The macOS app bundle (`ngteams.app`, from the `-macos-arm64.zip`), wherever the user put it.
     MacApp,
+    /// The flake's package in the Nix store, which only Nix updates.
+    Nix(NixInstall),
+}
+
+/// How the flake's package was installed, which gives the command that updates it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NixInstall {
+    /// `nix profile install`.
+    Profile,
+    /// The flake's NixOS module, in the user's system flake.
+    NixOs,
+    /// The flake's Home Manager module, in the user's Home Manager flake.
+    HomeManager,
+    /// A copy in the Nix store that does not say how it was installed.
+    Other,
+}
+
+impl NixInstall {
+    /// The command that updates this install; `None` when the install does not say how it was made.
+    #[must_use]
+    pub fn command(self) -> Option<&'static str> {
+        match self {
+            Self::Profile => Some("nix profile upgrade ngteams"),
+            Self::NixOs => Some("nix flake update ngteams && sudo nixos-rebuild switch --flake ."),
+            Self::HomeManager => Some("nix flake update ngteams && home-manager switch --flake ."),
+            Self::Other => None,
+        }
+    }
+
+    /// Where to run [`Self::command`], or how to update when there is no command, fit to show the user.
+    #[must_use]
+    pub fn says(self) -> &'static str {
+        match self {
+            Self::Profile => "To update, run this command:",
+            Self::NixOs => "To update, run this command in the folder of your system flake:",
+            Self::HomeManager => "To update, run this command in the folder of your Home Manager flake:",
+            Self::Other => "This copy runs from the Nix store. Update it with Nix, as you installed it.",
+        }
+    }
 }
 
 impl Format {
@@ -197,7 +244,9 @@ impl Format {
     #[must_use]
     pub fn asset(self, version: Version) -> String {
         match self {
-            Self::Archive => format!("ngteams-{version}-linux-x86_64.tar.gz"),
+            // a Nix install takes the archive that the flake's package fetches: the flake has the release once CI
+            // writes it
+            Self::Archive | Self::Nix(_) => format!("ngteams-{version}-linux-x86_64.tar.gz"),
             Self::AppImage => format!("ngteams-{version}-linux-x86_64.AppImage"),
             Self::Deb => format!("ngteams_{version}-1_amd64.deb"),
             Self::Rpm => format!("ngteams-{version}-1.x86_64.rpm"),
@@ -218,6 +267,10 @@ impl Format {
             Self::Pacman => "linux-pacman",
             Self::WindowsSetup => "windows-setup",
             Self::MacApp => "macos-app",
+            Self::Nix(NixInstall::Profile) => "nix-profile",
+            Self::Nix(NixInstall::NixOs) => "nix-nixos",
+            Self::Nix(NixInstall::HomeManager) => "nix-home-manager",
+            Self::Nix(NixInstall::Other) => "nix",
         }
     }
 
@@ -230,6 +283,10 @@ impl Format {
             "linux-pacman" => Some(Self::Pacman),
             "windows-setup" => Some(Self::WindowsSetup),
             "macos-app" => Some(Self::MacApp),
+            "nix-profile" => Some(Self::Nix(NixInstall::Profile)),
+            "nix-nixos" => Some(Self::Nix(NixInstall::NixOs)),
+            "nix-home-manager" => Some(Self::Nix(NixInstall::HomeManager)),
+            "nix" => Some(Self::Nix(NixInstall::Other)),
             _ => None,
         }
     }
@@ -240,7 +297,7 @@ impl Format {
             Self::Deb => Some("deb"),
             Self::Rpm => Some("rpm"),
             Self::Pacman => Some("pacman"),
-            Self::Archive | Self::AppImage | Self::WindowsSetup | Self::MacApp => None,
+            Self::Archive | Self::AppImage | Self::WindowsSetup | Self::MacApp | Self::Nix(_) => None,
         }
     }
 
@@ -248,6 +305,15 @@ impl Format {
     /// package's folder isn't the user's to write, and an installer needs no rename beside what it replaces.
     pub(crate) fn stages_in_app_folder(self) -> bool {
         self.system_package().is_some() || self == Self::WindowsSetup
+    }
+
+    /// How the flake's package was installed, when this copy is one. The app does not download updates for it.
+    #[must_use]
+    pub fn nix(self) -> Option<NixInstall> {
+        match self {
+            Self::Nix(install) => Some(install),
+            _ => None,
+        }
     }
 }
 

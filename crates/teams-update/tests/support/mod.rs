@@ -5,6 +5,8 @@
 mod flows;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(all(unix, not(target_os = "macos")))]
+mod nix;
 #[cfg(unix)]
 mod parts;
 mod setup;
