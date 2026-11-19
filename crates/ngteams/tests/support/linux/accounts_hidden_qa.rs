@@ -412,7 +412,8 @@ fn search(run: &mut Run) -> SandboxResult {
     let start = Instant::now();
     let card = loop {
         let facts = run.step("facts")?;
-        if !facts.get("card").is_empty() || start.elapsed() > WAIT {
+        // the card opens before its person is read: wait for the read
+        if !matches!(facts.get("card"), "" | "loading") || start.elapsed() > WAIT {
             break facts;
         }
         std::thread::sleep(Duration::from_millis(500));
