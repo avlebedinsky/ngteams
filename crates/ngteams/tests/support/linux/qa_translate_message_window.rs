@@ -59,6 +59,7 @@ use teams_store::Store;
 use teams_trouter::{Options, Trouter, TrouterCredentials};
 use teams_ui::chat_translate::Mark;
 use teams_ui::chat_view::{Body, ChatView, Item};
+use teams_ui::compose::Mode;
 use teams_ui::rich_text::Block;
 use teams_ui::shell::{Main, Shell};
 use teams_ui::view::Root;
@@ -279,6 +280,7 @@ fn mock_runs(
         walk.see_original_and_again()?;
         walk.own_message_by_its_key()?;
         walk.keys_for_the_menu()?;
+        walk.other_keys()?;
         walk.already_in_english()?;
         walk.settings_row()?;
         walk.tool_fails()?;
@@ -724,6 +726,204 @@ impl Walk<'_> {
         self.run.input.key(keys::ESC)?;
         step(&format!("the keys that open the menu: {opened:?}"));
         self.menu_by_keys()
+    }
+
+    /// The chat's other keys still work with the menu keys there: Up and Down move the selection, also after the menu
+    /// closes; Tab leaves the list and opens no menu; Tab in the menu closes it; Escape with a reply or an edit open
+    /// in the box cancels it with one press, and with the menu open by a click, closes the menu first.
+    fn other_keys(&mut self) -> SandboxResult {
+        self.arrows_by_the_menu()?;
+        self.tab_keys()?;
+        self.escape_with_reply()?;
+        self.escape_with_edit()?;
+        step("the other keys: Up, Down, Tab, Escape with a reply or an edit");
+        Ok(())
+    }
+
+    /// Where the keys are in the chat: `list`, `box`, `other` or `none`.
+    fn focus(&mut self) -> SandboxResult<String> {
+        self.run.question("focus chat")
+    }
+
+    /// Up and Down move the selection, also after the menu opened by the keys closes with Escape.
+    fn arrows_by_the_menu(&mut self) -> SandboxResult {
+        let hello = self.ids().hello.clone();
+        self.select_by_keys(&hello)?;
+        self.run.input.key(keys::DOWN)?;
+        thread::sleep(SETTLE);
+        let below = self.run.state("chat")?["selected"].clone();
+        expect(below != hello.as_str() && !below.is_null(), || {
+            format!("Down on a selected message selects {below}")
+        });
+        self.run.input.key(keys::UP)?;
+        thread::sleep(SETTLE);
+        expect(self.run.state("chat")?["selected"] == hello.as_str(), || {
+            "Up after Down does not select the message again".to_owned()
+        });
+        // the menu by the keys, then Escape: the keys are back on the list, and Up and Down move the selection
+        self.menu_key_on("chat", &hello)?;
+        self.run.input.key(keys::ESC)?;
+        thread::sleep(SETTLE);
+        let (state, at) = (self.run.state("chat")?, self.focus()?);
+        expect(
+            state["options"].is_null() && state["selected"] == hello.as_str() && at == "list",
+            || {
+                format!(
+                    "Escape in the menu: options {}, selected {}, focus {at}",
+                    state["options"], state["selected"]
+                )
+            },
+        );
+        self.run.input.key(keys::DOWN)?;
+        thread::sleep(SETTLE);
+        expect(self.run.state("chat")?["selected"] == below, || {
+            "Down after the menu closed does not move the selection".to_owned()
+        });
+        self.run.input.key(keys::UP)?;
+        thread::sleep(SETTLE);
+        expect(self.run.state("chat")?["selected"] == hello.as_str(), || {
+            "Up after the menu closed does not move the selection".to_owned()
+        });
+        Ok(())
+    }
+
+    /// Tab in the menu closes it, the keys back on the list; Tab in the list leaves it and opens no menu.
+    fn tab_keys(&mut self) -> SandboxResult {
+        let hello = self.ids().hello.clone();
+        self.menu_key_on("chat", &hello)?;
+        self.run.input.key(keys::TAB)?;
+        thread::sleep(SETTLE);
+        let (state, at) = (self.run.state("chat")?, self.focus()?);
+        expect(state["options"].is_null() && at == "list", || {
+            format!("Tab in the menu: options {}, focus {at}", state["options"])
+        });
+        if !state["options"].is_null() {
+            self.key_shot("qa575-tab-in-menu-light.png")?;
+            self.run.input.key(keys::ESC)?;
+            thread::sleep(SETTLE);
+            let at = self.focus()?;
+            if at != "list" {
+                self.run.question(&format!("select chat {hello}"))?;
+                thread::sleep(SETTLE);
+            }
+        }
+        // Tab in the list: the focus leaves it, and no menu opens
+        self.run.input.key(keys::TAB)?;
+        thread::sleep(SETTLE);
+        let (state, at) = (self.run.state("chat")?, self.focus()?);
+        expect(state["options"].is_null() && at != "list", || {
+            format!("Tab in the list: options {}, focus {at}", state["options"])
+        });
+        self.key_shot("qa575-tab-out-light.png")?;
+        step(&format!("Tab out of the list: the focus goes to {at}"));
+        Ok(())
+    }
+
+    /// A reply: one Escape cancels it. With the menu open by a click, Escape closes the menu first, the next the
+    /// reply, the next moves the keys to the list.
+    fn escape_with_reply(&mut self) -> SandboxResult {
+        let hello = self.ids().hello.clone();
+        // the selected message shows its bar already: a click opens the menu of another one
+        let english = self.ids().english.clone();
+        let reply = self.run.letter('r')?;
+        self.select_by_keys(&hello)?;
+        self.run.input.key(reply)?;
+        self.run
+            .until("chat", "r opens a reply", |state| state["compose"] == "reply")?;
+        self.run.input.key(keys::ESC)?;
+        thread::sleep(SETTLE);
+        expect(self.run.state("chat")?["compose"] == "new", || {
+            "one Escape does not cancel the reply".to_owned()
+        });
+        self.let_selection_go()?;
+        // a reply and the menu open by a click: Escape closes the menu, the next the reply, the next moves the focus
+        self.select_by_keys(&hello)?;
+        self.run.input.key(reply)?;
+        self.run
+            .until("chat", "r opens a reply", |state| state["compose"] == "reply")?;
+        self.open_menu("chat", &english)?;
+        self.run.input.key(keys::ESC)?;
+        thread::sleep(SETTLE);
+        let state = self.run.state("chat")?;
+        expect(state["options"].is_null() && state["compose"] == "reply", || {
+            format!(
+                "Escape with a reply and the menu open: options {}, box {}",
+                state["options"], state["compose"]
+            )
+        });
+        self.shots("reply-kept")?;
+        self.run.input.key(keys::ESC)?;
+        thread::sleep(SETTLE);
+        let (state, at) = (self.run.state("chat")?, self.focus()?);
+        expect(state["compose"] == "new" && at == "box", || {
+            format!("the second Escape: box {}, focus {at}", state["compose"])
+        });
+        self.run.input.key(keys::ESC)?;
+        thread::sleep(SETTLE);
+        let at = self.focus()?;
+        expect(at == "list", || format!("the third Escape: focus {at}"));
+        self.let_selection_go()
+    }
+
+    /// An edit of the own message: one Escape cancels it. With the menu open by a click, Escape closes the menu first.
+    fn escape_with_edit(&mut self) -> SandboxResult {
+        let (own, english) = (self.ids().own.clone(), self.ids().english.clone());
+        let edit = self.run.letter('e')?;
+        self.select_by_keys(&own)?;
+        self.run.input.key(edit)?;
+        self.run
+            .until("chat", "e opens the edit", |state| state["compose"] == "edit")?;
+        self.run.input.key(keys::ESC)?;
+        thread::sleep(SETTLE);
+        expect(self.run.state("chat")?["compose"] == "new", || {
+            "one Escape does not cancel the edit".to_owned()
+        });
+        self.let_selection_go()?;
+        self.select_by_keys(&own)?;
+        self.run.input.key(edit)?;
+        self.run
+            .until("chat", "e opens the edit", |state| state["compose"] == "edit")?;
+        self.open_menu("chat", &english)?;
+        self.run.input.key(keys::ESC)?;
+        thread::sleep(SETTLE);
+        let state = self.run.state("chat")?;
+        expect(state["options"].is_null() && state["compose"] == "edit", || {
+            format!(
+                "Escape with an edit and the menu open: options {}, box {}",
+                state["options"], state["compose"]
+            )
+        });
+        self.shots("edit-kept")?;
+        self.run.input.key(keys::ESC)?;
+        thread::sleep(SETTLE);
+        let (state, at) = (self.run.state("chat")?, self.focus()?);
+        expect(state["compose"] == "new" && at == "box", || {
+            format!("the second Escape: box {}, focus {at}", state["compose"])
+        });
+        // let the message go and give the box its keys: the next steps find hover bars with the pointer
+        self.run.input.key(keys::ESC)?;
+        thread::sleep(SETTLE);
+        if !self.run.state("chat")?["selected"].is_null() {
+            self.run.input.key(keys::ESC)?;
+            thread::sleep(SETTLE);
+        }
+        self.run.click(COMPOSE.0, COMPOSE.1)?;
+        Ok(())
+    }
+
+    /// Lets the selected message go, with Escape in the message list, so that Up starts again from the newest message.
+    fn let_selection_go(&mut self) -> SandboxResult {
+        self.run.click(COMPOSE.0, COMPOSE.1)?;
+        self.run.input.key(keys::ESC)?;
+        thread::sleep(SETTLE);
+        for _ in 0..3 {
+            if self.run.state("chat")?["selected"].is_null() {
+                return Ok(());
+            }
+            self.run.input.key(keys::ESC)?;
+            thread::sleep(SETTLE);
+        }
+        Err("Escape in the message list never lets the selected message go".into())
     }
 
     /// The menu opened by Shift+F10 works with the keys: Down to "Translation", Right into its list, Enter on its
@@ -2045,6 +2245,22 @@ fn on_shell(shell: &Entity<Shell>, verb: &str, window: &mut Window, cx: &mut App
             });
             "ok".to_owned()
         }
+        // where the keys go: the message list, the compose box, another element or none
+        "focus" => {
+            let Some(chat) = view_of(shell, rest, cx) else {
+                return "no view".to_owned();
+            };
+            let chat = chat.read(cx);
+            if chat.focus_handle().is_focused(window) {
+                "list".to_owned()
+            } else if chat.compose().read(cx).focused(window, cx) {
+                "box".to_owned()
+            } else if window.focused(cx).is_some() {
+                "other".to_owned()
+            } else {
+                "none".to_owned()
+            }
+        }
         // the whole chat read in a language, as the header's picker sets it
         "language" => {
             let Some(chat) = view_of(shell, "chat", cx) else {
@@ -2104,6 +2320,11 @@ fn state_of(shell: &Entity<Shell>, view: &str, cx: &App) -> Value {
         "selected": chat.selected(),
         "hovered": chat.hovered(),
         "options": chat.options(),
+        "compose": match chat.compose().read(cx).mode() {
+            Mode::New => "new",
+            Mode::Reply(_) => "reply",
+            Mode::Edit { .. } => "edit",
+        },
         "notice": notice,
         "viewport": [
             pixels(viewport.origin.x),
