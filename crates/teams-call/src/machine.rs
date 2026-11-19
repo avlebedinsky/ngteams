@@ -1702,9 +1702,10 @@ impl Calls {
             return;
         };
         if matches!(observed, Observed::Renegotiation | Observed::VideoControl) {
-            // a renegotiation or its answer, at the call's own callback, gets its receipt at once, as the web client
-            // gives it (M3 Task 18): without one the service delivers it again every few seconds and holds the call's
-            // next negotiation (the acknowledgement answered after 22 s, a renegotiation meanwhile rejected)
+            // a renegotiation, its answer or the mixer's controlVideoStreaming notice gets its receipt at once, as the
+            // web client gives it: without one the service delivers it again every few seconds. An unanswered
+            // renegotiation also holds the next negotiation (M3 Task 18). An unanswered notice keeps late viewers
+            // without a picture.
             self.receipt(delivery);
         }
         match callback {
