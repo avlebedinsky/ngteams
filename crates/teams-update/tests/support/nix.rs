@@ -37,7 +37,7 @@ fn each_nix_install_says_the_command_that_updates_it() {
     assert_eq!(NixInstall::Profile.command(), Some("nix profile upgrade ngteams"));
     assert_eq!(
         NixInstall::NixOs.command(),
-        Some("nix flake update ngteams && sudo nixos-rebuild switch --flake .")
+        Some("sudo nix flake update ngteams --flake /etc/nixos && sudo nixos-rebuild switch --flake /etc/nixos")
     );
     assert_eq!(
         NixInstall::HomeManager.command(),
@@ -45,6 +45,14 @@ fn each_nix_install_says_the_command_that_updates_it() {
     );
     assert_eq!(NixInstall::Other.command(), None);
     assert!(NixInstall::NixOs.says().contains("system flake"));
+    // the usual system flake is root's /etc/nixos: each part needs root and names the folder, not the cwd
+    let nixos = NixInstall::NixOs.command().unwrap_or_default();
+    assert!(
+        nixos
+            .split(" && ")
+            .all(|part| part.starts_with("sudo ") && part.ends_with(" --flake /etc/nixos"))
+    );
+    assert!(NixInstall::NixOs.says().contains("/etc/nixos"));
     assert!(NixInstall::HomeManager.says().contains("Home Manager flake"));
     assert!(NixInstall::Profile.says().ends_with(':'));
     assert!(NixInstall::Other.says().contains("Update it with Nix"));

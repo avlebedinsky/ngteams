@@ -222,7 +222,9 @@ impl NixInstall {
     pub fn command(self) -> Option<&'static str> {
         match self {
             Self::Profile => Some("nix profile upgrade ngteams"),
-            Self::NixOs => Some("nix flake update ngteams && sudo nixos-rebuild switch --flake ."),
+            Self::NixOs => {
+                Some("sudo nix flake update ngteams --flake /etc/nixos && sudo nixos-rebuild switch --flake /etc/nixos")
+            }
             Self::HomeManager => Some("nix flake update ngteams && home-manager switch --flake ."),
             Self::Other => None,
         }
@@ -233,7 +235,7 @@ impl NixInstall {
     pub fn says(self) -> &'static str {
         match self {
             Self::Profile => "To update, run this command:",
-            Self::NixOs => "To update, run this command in the folder of your system flake:",
+            Self::NixOs => "To update, run this command. If your system flake is not in /etc/nixos, use its folder:",
             Self::HomeManager => "To update, run this command in the folder of your Home Manager flake:",
             Self::Other => "This copy runs from the Nix store. Update it with Nix, as you installed it.",
         }

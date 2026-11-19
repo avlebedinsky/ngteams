@@ -74,7 +74,9 @@ const KINDS: [Kind; 5] = [
     Kind {
         key: "nixos",
         format: Format::Nix(NixInstall::NixOs),
-        command: Some("nix flake update ngteams && sudo nixos-rebuild switch --flake ."),
+        command: Some(
+            "sudo nix flake update ngteams --flake /etc/nixos && sudo nixos-rebuild switch --flake /etc/nixos",
+        ),
     },
     Kind {
         key: "home-manager",

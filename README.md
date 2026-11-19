@@ -189,7 +189,7 @@ appears in its title bar. Its tooltip gives the command to run, and a click copi
 | Installed with | Update with |
 |---|---|
 | `nix profile install` | `nix profile upgrade ngteams` |
-| the NixOS module | `nix flake update ngteams && sudo nixos-rebuild switch --flake .`, in your system flake's folder |
+| the NixOS module | `sudo nix flake update ngteams --flake /etc/nixos && sudo nixos-rebuild switch --flake /etc/nixos`; if your system flake is not in `/etc/nixos`, use its folder |
 | the Home Manager module | `nix flake update ngteams && home-manager switch --flake .`, in your Home Manager flake's folder |
 | Home Manager as a NixOS module | the NixOS module's command |
 | `nix run`, or the flake's overlay | no command: the tooltip tells you to update with Nix as you installed it |

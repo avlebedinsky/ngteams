@@ -130,7 +130,7 @@ fn a_nix_install_downloads_nothing_and_its_press_copies_the_nix_command(cx: &mut
     publish(&feed, "v0.1.0.7", &asset, &archive_bytes("0.1.0.7", |_| {}).unwrap());
     let app = started(cx, installation, &feed);
     checked(cx);
-    let command = "nix flake update ngteams && sudo nixos-rebuild switch --flake .";
+    let command = "sudo nix flake update ngteams --flake /etc/nixos && sudo nixos-rebuild switch --flake /etc/nixos";
     assert_eq!(
         status(cx),
         UpdateStatus::Manual {

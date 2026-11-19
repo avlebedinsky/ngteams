@@ -398,16 +398,16 @@ mod tests {
             words(
                 UpdateStatus::Manual {
                     version: "0.1.0.7".into(),
-                    says: "To update, run this command in the folder of your system flake:".into(),
-                    command: Some("nix flake update ngteams && sudo nixos-rebuild switch --flake .".into()),
+                    says: "To update, run this command. If your system flake is not in /etc/nixos, use its folder:".into(),
+                    command: Some("sudo nix flake update ngteams --flake /etc/nixos && sudo nixos-rebuild switch --flake /etc/nixos".into()),
                 },
                 None
             ),
             (
                 true,
                 "Update available".into(),
-                "ngteams 0.1.0.7 is out. To update, run this command in the folder of your system flake:\n\
-                 nix flake update ngteams && sudo nixos-rebuild switch --flake .\nSelect to copy the command"
+                "ngteams 0.1.0.7 is out. To update, run this command. If your system flake is not in /etc/nixos, use its folder:\n\
+                 sudo nix flake update ngteams --flake /etc/nixos && sudo nixos-rebuild switch --flake /etc/nixos\nSelect to copy the command"
                     .into()
             )
         );
