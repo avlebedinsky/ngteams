@@ -188,6 +188,16 @@ fn click(cx: &mut VisualTestContext, selector: &'static str) {
     draw(cx);
 }
 
+/// The AI button's menu opened, then its row of `tool` (`compose-<tool>-row`) clicked.
+fn by_ai_menu(cx: &mut VisualTestContext, row: &'static str) {
+    click(cx, "compose-ai");
+    assert!(
+        cx.debug_bounds("compose-ai-menu").is_some(),
+        "the AI button opens its menu"
+    );
+    click(cx, row);
+}
+
 fn sent(rig: &Rig) -> usize {
     rig.core
         .actions
@@ -204,7 +214,7 @@ fn translate_replaces_the_draft_as_one_edit_and_undo_brings_it_back() {
     let fake = Fake::install(&rig);
     let (compose, cx) = chat(&rig);
     type_in(&compose, cx, "hello there");
-    click(cx, "compose-translate");
+    by_ai_menu(cx, "compose-translate-row");
     until(cx, |cx| value(&compose, cx) == "hallo there");
     assert_eq!(status(&compose, cx), DraftTranslationStatus::Idle);
     assert_eq!(sent(&rig), 0, "translating sends nothing");
@@ -281,9 +291,10 @@ fn the_language_is_one_setting_every_box_shares() {
     let (other_view, other_cx) = open_chat(&rig, OTHER, &model);
     let other = compose_of(&other_view, other_cx);
 
-    // the language button shows the language and opens the menu; any language can be typed
-    assert!(cx.debug_bounds("compose-language").is_some());
-    click(cx, "compose-language");
+    // the AI button's language row shows the language and opens the menu; any language can be typed
+    click(cx, "compose-ai");
+    assert!(cx.debug_bounds("compose-language-row").is_some());
+    click(cx, "compose-language-row");
     let menu = compose.read_with(cx, |compose, _| compose.language_menu().unwrap());
     assert!(menu.read_with(cx, |menu, _| menu.is_open()));
     cx.update(|window, cx| menu.update(cx, |menu, cx| menu.search("Klingon", window, cx)));
@@ -456,7 +467,7 @@ fn the_one_tool_chosen_missing_is_named_with_install_it() {
 }
 
 #[test]
-fn a_narrow_box_keeps_its_placeholder_on_one_line_and_its_language_an_icon() {
+fn a_narrow_box_keeps_its_placeholder_on_one_line_and_its_language_in_the_ai_menu() {
     let rig = Rig::start();
     let _fake = Fake::install(&rig);
     let (compose, cx) = chat(&rig);
@@ -464,21 +475,25 @@ fn a_narrow_box_keeps_its_placeholder_on_one_line_and_its_language_an_icon() {
         compose.in_channel(Writes::Channel, "Message in A made-up channel with a long name", cx);
     });
     draw(cx);
-    let wide = cx.debug_bounds("compose-language").unwrap();
     let one_line = cx.debug_bounds("compose-box").unwrap().size.height;
+    assert!(
+        cx.debug_bounds("compose-language").is_none(),
+        "no language button on the bar"
+    );
 
     // as wide as a thread's pane: narrow, with room for the text beside its tools on one line
     cx.simulate_resize(size(px(460.0), px(600.0)));
     draw(cx);
-    let narrow = cx.debug_bounds("compose-language").unwrap();
-    assert!(narrow.size.width < wide.size.width, "{narrow:?} vs {wide:?}");
-    assert!(narrow.size.width <= px(28.0), "{narrow:?}");
+    assert!(cx.debug_bounds("compose-ai").is_some());
     assert_eq!(cx.debug_bounds("compose-box").unwrap().size.height, one_line);
 
-    // the menu still opens from the icon
-    click(cx, "compose-language");
+    // the language menu opens from the AI button's menu, inside the window
+    by_ai_menu(cx, "compose-language-row");
     draw(cx);
-    assert!(cx.debug_bounds("compose-language-menu").is_some());
+    let menu = cx
+        .debug_bounds("compose-language-menu")
+        .expect("the language menu opens");
+    assert!(f32::from(menu.right()) <= 460.0, "{menu:?}");
 }
 
 #[test]
@@ -548,9 +563,8 @@ fn a_channels_box_translates_too() {
         compose.in_channel(Writes::Channel, "Message in General", cx);
     });
     draw(cx);
-    assert!(cx.debug_bounds("compose-translate").is_some());
-    assert!(cx.debug_bounds("compose-language").is_some());
+    assert!(cx.debug_bounds("compose-ai").is_some());
     type_in(&compose, cx, "hello");
-    click(cx, "compose-translate");
+    by_ai_menu(cx, "compose-translate-row");
     until(cx, |cx| value(&compose, cx) == "hallo");
 }

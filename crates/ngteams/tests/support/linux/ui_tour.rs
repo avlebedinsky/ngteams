@@ -62,11 +62,11 @@ use teams_ui::VideoFeed;
 use teams_ui::call_stage::CallStage;
 use teams_ui::chat_people::{ChatPeople, HistoryChoice, Picked};
 use teams_ui::chat_view::{Item, MessageAction};
-use teams_ui::compose::Compose;
+use teams_ui::compose::{Compose, MenuKind};
 use teams_ui::global_search::{Mode as SearchMode, Tab};
 use teams_ui::new_chat::{NewChat, Recipient, Suggested};
 use teams_ui::profile_card::{CardOf, CardTab, Form};
-use teams_ui::settings::VideoEffect;
+use teams_ui::settings::{ComposeTool, VideoEffect};
 use teams_ui::settings_view::Page;
 use teams_ui::shell::Shell;
 use teams_ui::sidebar::Sidebar;
@@ -194,7 +194,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 325 + 8 + 5 + 15 + 6 + 12 + 10] = [
+const STEPS: [Step; 5 + 325 + 8 + 5 + 15 + 6 + 12 + 10 + 5] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -642,6 +642,34 @@ const STEPS: [Step; 5 + 325 + 8 + 5 + 15 + 6 + 12 + 10] = [
         set_message_language(shell, teams_ui::draft_translate::DEFAULT_LANGUAGE, cx);
         teams_ui::draft_translate::set_engine(cx, std::sync::Arc::new(teams_ui::draft_translate::LocalTools));
         cx.set_global(teams_ui::local_ai::Tools::default());
+        show_chat_in_theme(shell, teams_ui::theme::LIGHT_KEY, window, cx);
+    }),
+    // the box's one AI button, its menu open: Correct, Translate and the language
+    ("compose-ai-menu", |shell, window, cx| {
+        type_in_compose(shell, TOUR_DRAFT, window, cx);
+        with_compose(shell, cx, |compose, cx| compose.open_menu(MenuKind::Ai, window, cx));
+    }),
+    // the customize list: each button that can hide with its check, "+" and Send always shown
+    ("compose-customize", |shell, window, cx| {
+        with_compose(shell, cx, |compose, cx| {
+            compose.close_more(window, cx);
+            compose.customize_toolbar(window, cx);
+        });
+    }),
+    // Format and Emoji hidden: their rows in "+", with their keys, over Customize toolbar
+    ("compose-hidden-plus", |shell, window, cx| {
+        with_compose(shell, cx, |compose, cx| compose.close_customize(window, cx));
+        hide_compose_tools(shell, &[ComposeTool::Format, ComposeTool::Emoji], cx);
+        with_compose(shell, cx, |compose, cx| compose.open_menu(MenuKind::Plus, window, cx));
+    }),
+    // the same in Teams Dark
+    ("compose-hidden-plus-dark", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
+    }),
+    ("compose-toolbar-over", |shell, window, cx| {
+        with_compose(shell, cx, |compose, cx| compose.close_more(window, cx));
+        hide_compose_tools(shell, &[], cx);
+        clear_compose(shell, window, cx);
         show_chat_in_theme(shell, teams_ui::theme::LIGHT_KEY, window, cx);
     }),
     // text selected with the mouse from the second-to-last message into the last, on the selection colour, then its
@@ -4499,6 +4527,14 @@ fn with_new_chat(shell: &Entity<Shell>, cx: &mut App, change: impl FnOnce(&mut N
     if let Some(view) = shell.read(cx).new_chat().cloned() {
         view.update(cx, change);
     }
+}
+
+/// Hides `tools` from every box's toolbar, and shows the others.
+fn hide_compose_tools(shell: &Entity<Shell>, tools: &[ComposeTool], cx: &mut App) {
+    let model = shell.read(cx).settings().clone();
+    model.update(cx, |model, cx| {
+        model.change(|settings| settings.compose_hidden = tools.to_vec(), cx)
+    });
 }
 
 fn with_compose(shell: &Entity<Shell>, cx: &mut App, change: impl FnOnce(&mut Compose, &mut Context<Compose>)) {

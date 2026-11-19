@@ -66,6 +66,7 @@ use crate::user_admin::{ManageUsers, UserAdmin};
 
 pub mod ai_picker;
 pub mod ai_providers;
+mod message_box;
 pub mod sounds;
 
 /// The font picker's first row: the system's UI font (no family named).
@@ -1546,7 +1547,11 @@ impl SettingsView {
                 }
                 boxes
             }
-            Page::Appearance => self.appearance(&settings.appearance, palette, window, cx),
+            Page::Appearance => {
+                let mut boxes = self.appearance(&settings.appearance, palette, window, cx);
+                boxes.push(self.message_box(settings, palette, cx));
+                boxes
+            }
             Page::Notifications => self.notifications(settings, palette, cx),
             Page::Privacy => self.privacy(settings, palette),
             Page::Calls => self.calls(settings, palette, cx),

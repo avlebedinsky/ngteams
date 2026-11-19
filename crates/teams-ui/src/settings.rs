@@ -60,6 +60,10 @@ use crate::sounds::{self, PackInfo, SoundPlayer, SoundSettings, SoundSource};
 use crate::theme::{self, Appearance};
 use crate::translate;
 
+mod toolbar;
+
+pub use toolbar::ComposeTool;
+
 /// The idle times the settings take, in minutes.
 pub const IDLE_MINUTES: RangeInclusive<u32> = 1..=240;
 /// The idle time by default, in minutes.
@@ -396,6 +400,8 @@ pub struct Settings {
     /// "Use AI features": `Some(false)` turns every AI feature off ([`crate::local_ai::enabled`]). `None`: the user
     /// was not asked yet, and the app shows the AI notice first ([`SettingsModel::awaiting_ai_notice`]).
     pub ai_features: Option<bool>,
+    /// The buttons the user hid from the message box's toolbar, in the toolbar's order ([`toolbar`]).
+    pub compose_hidden: Vec<ComposeTool>,
     /// Which sound plays for each event, how loud, and the pack they come from ([`crate::sounds`]).
     pub sounds: SoundSettings,
 }
@@ -430,6 +436,21 @@ pub struct AccountSettings {
 }
 
 impl Settings {
+    /// Whether the message box's toolbar shows `tool`.
+    #[must_use]
+    pub fn shows_compose_tool(&self, tool: ComposeTool) -> bool {
+        !self.compose_hidden.contains(&tool)
+    }
+
+    /// Shows `tool` on the message box's toolbar, or hides it there.
+    pub fn show_compose_tool(&mut self, tool: ComposeTool, shown: bool) {
+        self.compose_hidden.retain(|hidden| *hidden != tool);
+        if !shown {
+            self.compose_hidden.push(tool);
+            toolbar::tidy(&mut self.compose_hidden);
+        }
+    }
+
     /// Whether `account` is the first account, whose own settings are the top-level ones.
     fn is_first(&self, account: &str) -> bool {
         self.first_account.as_deref().is_none_or(|first| first == account)
@@ -621,6 +642,7 @@ impl Default for Settings {
             message_translator: AiChoice::default(),
             ai_providers: Vec::new(),
             ai_features: None,
+            compose_hidden: Vec::new(),
             sounds: SoundSettings::default(),
         }
     }
@@ -675,6 +697,8 @@ pub mod keys {
     /// The language a draft is translated into in its box, by its name.
     pub const MESSAGE_TRANSLATE_TO: &str = "message_translate_to";
     pub const MESSAGE_TRANSLATOR: &str = "message_translator";
+    /// The buttons hidden from the message box's toolbar: an array of their names.
+    pub const COMPOSE_HIDDEN: &str = "compose_hidden_tools";
     /// The sound pack chosen as a whole (`builtin/<key>` or `added/<id>`), "Play sounds when I'm busy", every sound's
     /// volume, and each event's sound: a table of tables, by the event's name.
     pub const SOUND_PACK: &str = "sound_pack";
@@ -788,6 +812,7 @@ fn take(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem
             take_chat_translation(settings, key, value)?;
         }
         keys::MESSAGE_TRANSLATE_TO | keys::MESSAGE_TRANSLATOR => take_message_translation(settings, key, value)?,
+        keys::COMPOSE_HIDDEN => settings.compose_hidden = toolbar::take(value)?,
         keys::FIRST_ACCOUNT => {
             settings.first_account = Some(chat_id(value).ok_or(bad(keys::FIRST_ACCOUNT, "not an account's MRI"))?);
         }
@@ -1200,6 +1225,7 @@ pub fn render(settings: &Settings) -> String {
     }
     render_people(settings, &mut table);
     render_chat_translation(settings, &mut table);
+    toolbar::render(&settings.compose_hidden, &mut table);
     sounds::render(&settings.sounds, &mut table);
     table.to_string()
 }

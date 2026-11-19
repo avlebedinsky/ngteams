@@ -383,9 +383,11 @@ fn a_channel_clicked_opens_with_its_posts_their_replies_summed_up_and_a_box_post
     }
     // the box writes to the channel, sends no typing and takes no file: a channel's files go to its team's site
     assert!(bounds(cx, "channel-read-only").is_none());
-    for absent in ["compose-attach", "compose-loop", "compose-apps"] {
+    for absent in ["compose-attach", "compose-loop"] {
         assert!(bounds(cx, absent).is_none(), "{absent} is drawn");
     }
+    // its "+" holds the hidden buttons and Customize toolbar, as every box's
+    assert!(bounds(cx, "compose-apps").is_some());
     assert!(bounds(cx, "replies-1760000400000").is_none());
     assert_nothing_written(&rig);
     assert_posts_traced(&written);

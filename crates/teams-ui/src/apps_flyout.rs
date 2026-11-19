@@ -4,7 +4,9 @@
 //! - **The list**: "Search for apps" over the account's apps that have a message extension command for the compose
 //!   box ([`Core::message_extensions`], read each time it opens), each its picture and name, then "Get more apps",
 //!   which opens the store. Teams lists its own actions (Schedule message, Set delivery options, Schedule meeting,
-//!   Record video clip) above the apps; this app has none of them for a chat, so it lists none.
+//!   Record video clip) above the apps; this app lists the box's own there ([`FlyoutAction`]: the tools the user hid
+//!   from the toolbar), while no search is typed, and Up and Down go through them first. "Customize toolbar" is at
+//!   its foot, beside "Get more apps".
 //! - **An app**: its commands come from its definition, or from the app itself when it asks for that
 //!   (`composeExtension/fetchCommands`). An app with one action command opens its dialog at once
 //!   ([`crate::app_dialog`]); else its pane shows a tab per command, the search commands' results under a search
@@ -25,8 +27,9 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, div, px, rgb,
 };
 use gpui_component::Sizable as _;
-use gpui_component::button::Button;
+use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::kbd::Kbd;
 use serde_json::Value;
 use teams_core::bots::BotAsk;
 use teams_proto::chat::AppCard;
@@ -68,6 +71,23 @@ pub enum FlyoutEvent {
     Dialog(Box<DialogSeed>),
     /// A result was chosen: its card goes into the box.
     Card(Box<AppCard>),
+    /// The action of its row at this place was chosen ([`AppsFlyout::with_actions`]).
+    Action(usize),
+    /// "Customize toolbar": the box lists its buttons to show or hide.
+    Customize,
+}
+
+/// An action the box lists over the apps, as Teams lists its own: the action of a tool the user hid from the toolbar.
+#[derive(Clone)]
+pub struct FlyoutAction {
+    /// Its row's test selector.
+    pub selector: SharedString,
+    pub label: SharedString,
+    pub glyph: Glyph,
+    /// Its key, as bound in the box.
+    pub key: Option<Kbd>,
+    /// It cannot be taken now.
+    pub disabled: bool,
 }
 
 /// A search's results, as they stand.
@@ -111,7 +131,9 @@ pub struct AppsFlyout {
     apps: Option<Vec<ExtensionApp>>,
     pictures: BTreeMap<String, Option<Arc<RenderImage>>>,
     pane: Option<Pane>,
-    /// The row Up and Down stand on.
+    /// The box's actions, over the apps while no search is typed.
+    actions: Vec<FlyoutAction>,
+    /// The row Up and Down stand on: the actions' rows, then the apps'.
     highlight: usize,
     /// The shown list's scroll: the app list's or the results'.
     rows: ScrollHandle,
@@ -152,10 +174,34 @@ impl AppsFlyout {
             apps: None,
             pictures: BTreeMap::new(),
             pane: None,
+            actions: Vec::new(),
             highlight: 0,
             rows: ScrollHandle::new(),
             asked: 0,
             _search: watch,
+        }
+    }
+
+    /// The flyout with `actions` over its apps.
+    #[must_use]
+    pub fn with_actions(mut self, actions: Vec<FlyoutAction>) -> Self {
+        self.actions = actions;
+        self
+    }
+
+    /// The actions it lists now: none while a search is typed.
+    fn shown_actions(&self, cx: &gpui::App) -> &[FlyoutAction] {
+        if self.search.read(cx).value().trim().is_empty() {
+            &self.actions
+        } else {
+            &[]
+        }
+    }
+
+    /// The action at `at` chosen, unless it cannot be taken now.
+    fn choose_action(&mut self, at: usize, cx: &mut Context<Self>) {
+        if self.actions.get(at).is_some_and(|action| !action.disabled) {
+            cx.emit(FlyoutEvent::Action(at));
         }
     }
 
@@ -461,12 +507,17 @@ impl AppsFlyout {
     }
 
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let actions = if self.pane.is_some() {
+            0
+        } else {
+            self.shown_actions(cx).len()
+        };
         let rows = match &self.pane {
             Some(pane) => match &pane.results {
                 Results::Found(found) => found.len(),
                 _ => 0,
             },
-            None => self.listed(cx).len(),
+            None => actions + self.listed(cx).len(),
         };
         match event.keystroke.key.as_str() {
             "escape" => self.back(window, cx),
@@ -476,8 +527,10 @@ impl AppsFlyout {
                 let at = self.highlight.min(rows - 1);
                 if self.pane.is_some() {
                     self.choose_result(at, cx);
+                } else if at < actions {
+                    self.choose_action(at, cx);
                 } else {
-                    let id = self.listed(cx)[at].id().to_owned();
+                    let id = self.listed(cx)[at - actions].id().to_owned();
                     self.choose_app(&id, window, cx);
                 }
             }
@@ -526,8 +579,84 @@ impl AppsFlyout {
         )
     }
 
+    /// The box's actions' rows, a line under the last, as Teams draws its own over the apps. Each is one child of the
+    /// list, so that the row Up and Down light is the child the list scrolls to.
+    fn action_rows(&self, palette: Palette, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let actions = self.shown_actions(cx).to_vec();
+        let last = actions.len().saturating_sub(1);
+        actions
+            .into_iter()
+            .enumerate()
+            .map(|(at, action)| {
+                div()
+                    .when(at == last, |row| {
+                        row.pb_1().mb_1().border_b_1().border_color(rgb(palette.border))
+                    })
+                    .child(self.action_row(at, action, palette, cx))
+                    .into_any_element()
+            })
+            .collect()
+    }
+
+    fn action_row(&self, at: usize, action: FlyoutAction, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let selector = action.selector.clone();
+        let tint = if action.disabled {
+            palette.muted_foreground
+        } else {
+            palette.foreground
+        };
+        div()
+            .id(action.selector.clone())
+            .debug_selector(move || selector.to_string())
+            .w_full()
+            .min_h(px(36.0))
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_3()
+            .rounded_md()
+            .text_sm()
+            .text_color(rgb(tint))
+            .when(!action.disabled, |row| {
+                row.cursor_pointer()
+                    .hover(move |row| row.bg(rgb(palette.hover)))
+                    .on_click(cx.listener(move |this, _, _, cx| this.choose_action(at, cx)))
+            })
+            .when(at == self.highlight, |row| row.bg(rgb(palette.hover)))
+            .child(action.glyph.icon().size(px(16.0)))
+            .child(div().flex_1().min_w_0().truncate().child(action.label))
+            .children(action.key)
+            .into_any_element()
+    }
+
+    /// The flyout's foot: "Customize toolbar" of the box, and "Get more apps".
+    fn foot(cx: &mut Context<Self>) -> gpui::Div {
+        div()
+            .flex()
+            .justify_between()
+            .child(selected_by(
+                "compose-customize-row",
+                Button::new("apps-flyout-customize")
+                    .ghost()
+                    .small()
+                    .icon(Glyph::SETTINGS.icon())
+                    .label(crate::compose::CUSTOMIZE)
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(FlyoutEvent::Customize))),
+            ))
+            .child(selected_by(
+                "apps-flyout-more",
+                Button::new("apps-flyout-more")
+                    .outline()
+                    .small()
+                    .icon(Glyph::PLUS.icon())
+                    .label(GET_MORE_APPS)
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(FlyoutEvent::GetMoreApps))),
+            ))
+    }
+
     fn list(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let listed = self.listed(cx);
+        let actions = self.shown_actions(cx).len();
         let note = |selector: &'static str, words: &'static str| {
             div()
                 .debug_selector(move || selector.to_owned())
@@ -555,7 +684,7 @@ impl AppsFlyout {
                     let id = app.id().to_owned();
                     row(
                         format!("apps-flyout-app-{id}"),
-                        at == self.highlight,
+                        actions + at == self.highlight,
                         palette,
                         self.picture(app, 20.0, palette),
                         app.name().to_owned(),
@@ -584,20 +713,11 @@ impl AppsFlyout {
                     .track_scroll(&self.rows)
                     .flex()
                     .flex_col()
+                    .children(self.action_rows(palette, cx))
                     .children(rows),
             )
             .child(div().h(px(1.0)).bg(rgb(palette.border)))
-            .child(
-                div().flex().justify_end().child(selected_by(
-                    "apps-flyout-more",
-                    Button::new("apps-flyout-more")
-                        .outline()
-                        .small()
-                        .icon(Glyph::PLUS.icon())
-                        .label(GET_MORE_APPS)
-                        .on_click(cx.listener(|_, _, _, cx| cx.emit(FlyoutEvent::GetMoreApps))),
-                )),
-            )
+            .child(Self::foot(cx))
             .into_any_element()
     }
 

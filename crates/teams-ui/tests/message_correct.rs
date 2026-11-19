@@ -238,6 +238,16 @@ fn click(cx: &mut VisualTestContext, selector: &'static str) {
     draw(cx);
 }
 
+/// The AI button's menu opened, then its Correct row clicked.
+fn correct_by_menu(cx: &mut VisualTestContext) {
+    click(cx, "compose-ai");
+    assert!(
+        cx.debug_bounds("compose-ai-menu").is_some(),
+        "the AI button opens its menu"
+    );
+    click(cx, "compose-correct-row");
+}
+
 fn sent_texts(rig: &Rig) -> Vec<String> {
     rig.core
         .actions
@@ -391,7 +401,7 @@ fn the_buttons_send_and_keep_too() {
     assert_eq!(value(&compose, cx), "teh one");
     assert_eq!(status(&compose, cx), CorrectionStatus::Idle);
 
-    click(cx, "compose-correct");
+    correct_by_menu(cx);
     until_status(&compose, cx, &CorrectionStatus::Proposed);
     // the button again gives the proposal the keyboard, nothing more
     ask(&compose, cx);
@@ -540,7 +550,7 @@ fn it_can_be_stopped_from_the_button_or_with_escape() {
     type_in(&compose, cx, "teh report");
     ask(&compose, cx);
     let pid = fake.running_pid(cx);
-    click(cx, "compose-correct");
+    correct_by_menu(cx);
     assert_eq!(status(&compose, cx), CorrectionStatus::Idle);
     fake.assert_stopped(pid, cx);
 
@@ -726,7 +736,7 @@ fn with_the_ai_features_off_the_box_offers_no_ai_and_no_tool_runs() {
     let fake = Fake::new(&rig);
     let (compose, settings, cx) = chat_and_settings(&rig);
     draw(cx);
-    let tools = ["compose-correct", "compose-translate"];
+    let tools = ["compose-ai"];
     for tool in tools {
         assert!(cx.debug_bounds(tool).is_some(), "{tool}");
     }

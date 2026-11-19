@@ -7,12 +7,14 @@ use gpui::{
     AnyElement, App, AppContext as _, Context, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
     Styled as _, Window, anchored, deferred, div, px,
 };
+use gpui_component::kbd::Kbd;
 use gpui_component::{Selectable as _, Sizable as _};
 use serde_json::{Value, json};
 use teams_proto::chat::AppCard;
 
+use super::menus::{Item, MenuKind};
 use super::{Compose, ComposeEvent, TOOL, Writes, measured};
-use crate::apps_flyout::{AppsFlyout, FlyoutEvent};
+use crate::apps_flyout::{AppsFlyout, FlyoutAction, FlyoutEvent};
 use crate::card_view::{CardsElement, ShownCards};
 use crate::clock::HourCycle;
 use crate::icons::{Glyph, icon_button, selected_by};
@@ -44,7 +46,8 @@ impl Compose {
             && !matches!(self.mode, super::Mode::Edit { .. })
     }
 
-    pub(super) fn apps_button(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// "+" while it offers apps: it opens the flyout, the hidden tools' rows over its apps.
+    pub(super) fn apps_button(&self, fit: &super::fit::Fit, cx: &mut Context<Self>) -> AnyElement {
         let open = self.apps.flyout.is_some();
         div()
             .relative()
@@ -55,8 +58,14 @@ impl Compose {
                     .selected(open)
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_apps(window, cx))),
             ))
-            .child(measured(&self.apps.at))
+            .child(self.apps_anchor())
+            .children(self.anchors(MenuKind::Plus, fit, cx))
             .into_any_element()
+    }
+
+    /// Where the flyout opens by: "+", or More options while "+" is in it.
+    pub(super) fn apps_anchor(&self) -> AnyElement {
+        measured(&self.apps.at)
     }
 
     /// Opens Actions and apps, or closes it when open.
@@ -68,23 +77,54 @@ impl Compose {
             return;
         }
         let (core, conversation) = (Arc::clone(&self.core), self.conversation.clone());
-        let flyout = cx.new(|cx| AppsFlyout::new(core, conversation, window, cx));
+        let mut items = self.menu_items(MenuKind::Plus, cx);
+        // the flyout has Customize toolbar at its foot
+        items.retain(|item| *item != Item::Customize);
+        let actions = self.flyout_actions(&items, window, cx);
+        let flyout = cx.new(|cx| AppsFlyout::new(core, conversation, window, cx).with_actions(actions));
         let events = cx.subscribe_in(
             &flyout,
             window,
-            |this: &mut Self, _, event: &FlyoutEvent, window, cx| {
+            move |this: &mut Self, _, event: &FlyoutEvent, window, cx| {
                 this.apps.flyout = None;
                 match event {
                     FlyoutEvent::Close => {}
                     FlyoutEvent::GetMoreApps => cx.emit(ComposeEvent::ShowStore),
                     FlyoutEvent::Dialog(seed) => cx.emit(ComposeEvent::AppDialog(seed.clone())),
                     FlyoutEvent::Card(card) => this.add_app_card(card.as_ref().clone(), window, cx),
+                    FlyoutEvent::Customize => this.take(Item::Customize, window, cx),
+                    FlyoutEvent::Action(at) => {
+                        if let Some(item) = items.get(*at) {
+                            this.take(*item, window, cx);
+                        }
+                    }
                 }
                 cx.notify();
             },
         );
         self.apps.flyout = Some((flyout, events));
         cx.notify();
+    }
+
+    /// The rows of `items` as the flyout lists them over its apps: each with its icon, its name, its key and whether
+    /// it can be taken now.
+    fn flyout_actions(&self, items: &[Item], window: &Window, cx: &App) -> Vec<FlyoutAction> {
+        let text = self.editor.read(cx).focus.clone();
+        items
+            .iter()
+            .map(|item| {
+                let row = self.row(*item, cx);
+                FlyoutAction {
+                    selector: format!("{}-row", item.selector()).into(),
+                    label: row.label,
+                    glyph: item.glyph(),
+                    key: item
+                        .action()
+                        .and_then(|action| Kbd::binding_for_action_in(action, &text, window)),
+                    disabled: row.disabled,
+                }
+            })
+            .collect()
     }
 
     /// Actions and apps, while it is open.

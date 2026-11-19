@@ -65,6 +65,7 @@ Translation, corrections and summaries use your own [Claude Code](https://claude
 
 **Make it yours**
 - Teams Light and Dark, High Contrast, Solarized Light and Dark, Nord and Dracula themes
+- Hide the message box buttons that you do not use (right-click its toolbar, or Settings > Appearance). A hidden button stays in its "+" menu
 
 <table>
   <tr>

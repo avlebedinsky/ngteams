@@ -496,3 +496,47 @@ fn a_refused_send_gives_its_card_back_beside_a_card_that_came_in_meanwhile() {
     });
     assert_eq!(texts, ["Made up", "Made up too"], "the refused send's card first");
 }
+
+#[test]
+fn a_hidden_button_s_action_is_over_the_apps_and_customize_is_at_the_foot() {
+    let rig = apps_rig(true);
+    let (view, cx) = window(&rig);
+    let settings = view.read_with(cx, |view, cx| view.compose().read(cx).settings().clone());
+    cx.update(|_, cx| {
+        settings.update(cx, |model, cx| {
+            model.change(
+                |settings| settings.show_compose_tool(teams_ui::settings::ComposeTool::Emoji, false),
+                cx,
+            );
+        });
+    });
+    assert!(!found(cx, "compose-emoji"));
+    click(cx, "compose-apps");
+    assert!(found(cx, "apps-flyout"));
+    let emoji = cx
+        .debug_bounds("compose-emoji-row")
+        .expect("the hidden Emoji is a row of the flyout");
+    let app = cx
+        .debug_bounds(Box::leak(format!("apps-flyout-app-{FINDER}").into_boxed_str()))
+        .unwrap();
+    assert!(emoji.bottom() <= app.top(), "the actions are over the apps");
+    assert!(found(cx, "compose-customize-row"));
+    // a search lists apps alone
+    cx.simulate_input("praise");
+    assert!(!found(cx, "compose-emoji-row"));
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    // Enter on the first row takes the hidden action: the emoji picker opens
+    click(cx, "compose-apps");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(!found(cx, "apps-flyout"));
+    let compose = view.read_with(cx, |view, _| view.compose().clone());
+    assert!(compose.read_with(cx, |compose, _| compose.emoji_picker().is_some()));
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    // Customize toolbar at the foot lists the buttons
+    click(cx, "compose-apps");
+    click(cx, "compose-customize-row");
+    assert!(compose.read_with(cx, |compose, _| compose.customize_open()));
+}

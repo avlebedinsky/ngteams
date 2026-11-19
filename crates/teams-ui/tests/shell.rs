@@ -1525,7 +1525,7 @@ fn use_ai_features_off_hides_every_ai_control_and_on_brings_them_back() {
         cx.set_global(Catalog::with(Vec::new(), Vec::new()));
     });
     click(cx, "chat-row-1");
-    let chat_controls = ["chat-translate", "compose-correct", "compose-translate"];
+    let chat_controls = ["chat-translate", "compose-ai"];
     assert_drawn(cx, &chat_controls, true);
     cx.update(|_, cx| shell.update(cx, Shell::show_settings));
     let settings_boxes = [
@@ -1568,6 +1568,41 @@ fn use_ai_features_off_hides_every_ai_control_and_on_brings_them_back() {
     cx.update(|window, cx| shell.update(cx, |shell, cx| shell.show_chats(window, cx)));
     click(cx, "chat-row-1");
     assert_drawn(cx, &chat_controls, true);
+}
+
+#[test]
+fn the_appearance_page_lists_the_message_box_buttons_that_can_hide() {
+    use teams_ui::settings::ComposeTool;
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig, Settings::default(), Arc::new(ViewTrace::off()));
+    cx.update(|_, cx| shell.update(cx, Shell::show_settings));
+    click(cx, "settings-page-appearance");
+    let switches = [
+        "compose-tool-format",
+        "compose-tool-emoji",
+        "compose-tool-attach",
+        "compose-tool-loop",
+        "compose-tool-ai",
+    ];
+    assert_drawn(cx, &switches, true);
+    click(cx, "compose-tool-emoji");
+    assert_eq!(settings_of(&shell, cx).compose_hidden, [ComposeTool::Emoji]);
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.show_chats(window, cx)));
+    click(cx, "chat-row-1");
+    assert!(bounds(cx, "compose-emoji").is_none(), "the box follows the switch");
+    assert!(bounds(cx, "compose-attach").is_some());
+    // with the AI features off, the AI button has no row
+    cx.update(|_, cx| {
+        shell.update(cx, |shell, cx| {
+            shell
+                .settings()
+                .update(cx, |model, cx| model.set_ai_features(false, cx));
+        });
+    });
+    cx.update(|_, cx| shell.update(cx, Shell::show_settings));
+    click(cx, "settings-page-appearance");
+    assert_drawn(cx, &switches[..4], true);
+    assert_drawn(cx, &["compose-tool-ai"], false);
 }
 
 /// Asserts that each of `selectors` is drawn (`shown`), or that none is.

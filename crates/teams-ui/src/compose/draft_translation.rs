@@ -1,7 +1,6 @@
-//! The box's side of translating a draft ([`crate::draft_translate`]): Translate (the toolbar's button or Ctrl+Shift+Y)
-//! sends what the box holds to the tool the settings name and puts the translation in its place; the language button
-//! beside it shows the language every box translates into (in a narrow box only in its tooltip, the button a caret alone)
-//! and opens the menu that changes it.
+//! The box's side of translating a draft ([`crate::draft_translate`]): Translate (the AI button's row or Ctrl+Shift+Y)
+//! sends what the box holds to the tool the settings name and puts the translation in its place; the language row
+//! under it shows the language every box translates into and opens the menu that changes it.
 //!
 //! - **One edit**: the translation replaces the draft as one edit, so Ctrl+Z brings the draft as written back.
 //! - **Of the draft it read**: the draft changing while the tool works drops the translation, saying so; a result that
@@ -19,13 +18,13 @@ use gpui::{
     ParentElement as _, SharedString, Styled as _, Subscription, Window, actions, div, px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::{Disableable as _, Selectable as _, Sizable as _, Size};
+use gpui_component::{Sizable as _, Size};
 
-use super::{Compose, TOOL};
-use crate::draft_translate::menu::{self, LanguageMenu, LanguageMenuEvent};
+use super::Compose;
+use crate::draft_translate::menu::{LanguageMenu, LanguageMenuEvent};
 use crate::draft_translate::{self, Limits, MAX_DRAFT, Outcome, Request, Translating};
 use crate::editor::doc::Doc;
-use crate::icons::{Glyph, icon_button, icon_button_with_key, selected_by};
+use crate::icons::{Glyph, icon_button, selected_by};
 use crate::local_ai::{Failure, Tools, Work};
 use crate::message_correct::draft;
 use crate::theme::{self, Palette};
@@ -40,9 +39,6 @@ actions!(
         OpenTranslationSettings
     ]
 );
-
-/// The language button's longest label, in characters, before it is cut short.
-const LANGUAGE_LABEL: usize = 12;
 
 /// Binds the key of translating a draft: Ctrl+Shift+Y, ⌘⇧Y on macOS.
 pub(super) fn bind_keys(cx: &mut App) {
@@ -95,7 +91,7 @@ pub(super) struct DraftTranslation {
     /// The draft a line about nothing to translate, or a failure, is about: it goes once the draft changes.
     about: Option<Doc>,
     limits: Limits,
-    /// The language menu, made the first time the button draws (it needs the window).
+    /// The language menu, made the first time the box draws (it needs the window).
     menu: Option<(Entity<LanguageMenu>, Subscription)>,
 }
 
@@ -140,7 +136,7 @@ impl Compose {
         self.draft_translation.menu.as_ref().map(|(menu, _)| menu.clone())
     }
 
-    /// The button or its key: the draft translated, or the translation running stopped.
+    /// Its row or its key: the draft translated, or the translation running stopped.
     pub fn translate_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !crate::local_ai::enabled(cx) {
             return;
@@ -332,40 +328,6 @@ impl Compose {
         self.language_menu_entity(window, cx);
     }
 
-    /// Translate and the language button, in the box's toolbar: Translate lit while it runs, when it stops it; the
-    /// language button its name and a caret, or the caret alone in a `narrow` box.
-    pub(super) fn translate_buttons(&self, narrow: bool, cx: &mut Context<Self>) -> AnyElement {
-        let language = self.settings.read(cx).settings().message_translate_to.clone();
-        let (tip, busy, can) = self.translate_state(cx);
-        let translate = icon_button_with_key("compose-translate", Glyph::LANGUAGES, tip, &TranslateDraft)
-            .with_size(Size::Size(px(TOOL)))
-            .selected(busy)
-            .disabled(!busy && !can)
-            .on_click(cx.listener(|this, _, window, cx| this.translate_draft(window, cx)));
-        let face = Button::new("compose-language")
-            .ghost()
-            .compact()
-            .tooltip(format!("Translation language: {language}"))
-            .accessibility_label(format!("Translation language: {language}"));
-        let face = if narrow {
-            face.with_size(Size::XSmall).icon(Glyph::CHEVRON_DOWN.icon())
-        } else {
-            face.with_size(Size::Small).label(short(&language)).dropdown_caret(true)
-        };
-        div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .child(selected_by("compose-translate", translate))
-            .children(self.language_menu().map(|menu| {
-                selected_by(
-                    "compose-language",
-                    menu::popover(&menu, "compose-language-popover", gpui::Anchor::BottomRight, face, cx),
-                )
-            }))
-            .into_any_element()
-    }
-
     /// Translate's name now ("Translate to <language>", or "Stop translating" while it runs), whether it runs and
     /// whether it can start.
     pub(super) fn translate_state(&self, cx: &App) -> (SharedString, bool, bool) {
@@ -478,15 +440,6 @@ impl Compose {
         )
         .into_any_element()
     }
-}
-
-/// `language` cut to fit the toolbar's button.
-fn short(language: &str) -> String {
-    if language.chars().count() <= LANGUAGE_LABEL {
-        return language.to_owned();
-    }
-    let cut: String = language.chars().take(LANGUAGE_LABEL - 1).collect();
-    format!("{}\u{2026}", cut.trim_end())
 }
 
 /// A line over the box, its mark first.

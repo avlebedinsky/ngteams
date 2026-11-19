@@ -34,13 +34,14 @@
 //! - **The box** is drawn as Teams' compose box: the editor on a rounded surface with a hairline border and no shadow
 //!   ([`BOX_HEIGHT`] at least), Teams' accent line in the brand colour along its foot while it has the focus, and its
 //!   controls inside it on the right: Format, Emoji, Attach, Loop (shown disabled, saying the app doesn't have it yet),
-//!   Actions and apps (disabled the same way, unless `NGTEAMS_BOTS=1` is set, the account's cloud serves apps, and the
-//!   box writes a chat's new message, not a channel's post, a thread's reply or an edit, outside read-only mode: then
-//!   it opens its flyout, [`apps`]), Correct, Translate and its language, a thin divider, then Send. The box can hold
-//!   apps' cards (a message extension's result), drawn over the tools, each with a close mark, and sent with the
-//!   message. Its
-//!   placeholder stays on one line, cut short with an ellipsis; a narrow box (a thread's pane) shows the language as
-//!   a caret alone, naming it in its tooltip. A box too narrow for its text beside its tools (a call's Chat pane) is
+//!   Actions and apps (the "+": a menu of the hidden tools' actions and "Customize toolbar"; with `NGTEAMS_BOTS=1`, an
+//!   account whose cloud serves apps, and a box that writes a chat's new message outside read-only mode, it opens the
+//!   apps' flyout with those rows over the apps, [`apps`]), the AI button (one menu of Correct, Translate and the
+//!   translation language, [`menus`]), a thin divider, then Send. The user hides the buttons they do not use, by a
+//!   right click on the toolbar, "Customize toolbar" or Settings ([`crate::settings::ComposeTool`]); a hidden one's
+//!   action stays in "+", with its key. Send and "+" never hide. The box can hold apps' cards (a message extension's
+//!   result), drawn over the tools, each with a close mark, and sent with the message. Its placeholder stays on one
+//!   line, cut short with an ellipsis. A box too narrow for its text beside its tools (a call's Chat pane) is
 //!   stacked, as Teams' is: the text on top, the tools and Send on a row under it, and the tools that do not fit in
 //!   "More options" ([`fit`]). Expanded, the format bar ([`crate::editor::toolbar::FormatBar`]) runs
 //!   along its top, the editor is taller, and the controls sit along its foot; Discard on the bar empties the box (and
@@ -51,7 +52,7 @@
 //!
 //! - **A channel's box** ([`Compose::in_channel`]): "Message in <channel>" posting to the channel, or a post's
 //!   thread's "Reply in thread" posting to the post's chain, with Teams' "Send to: thread only" over its text. It
-//!   offers Format, Emoji, Correct, Translate and Send, no more: it sends no typing (no capture showed a channel's)
+//!   offers Format, Emoji, "+", the AI button and Send, no more: it sends no typing (no capture showed a channel's)
 //!   and takes no file (a channel's files go to its team's site, which this app doesn't upload to).
 //! - **New message's box** ([`Compose::for_new_chat`]): a chat's box for a chat not made yet. It sends no typing and
 //!   takes no pasted picture; its first message is handed to New message ([`ComposeEvent::Start`]), which makes the
@@ -61,11 +62,11 @@
 //!   this app (no write type is mapped to a `48:` stream), so their box shows [`READ_ONLY_NOTES`] in place of the text
 //!   area and its send: nothing can be typed, sent, replied to or edited there, and no typing goes out.
 //!
-//! - **Correct** ([`correction`], the button or Ctrl+Shift+G): the draft's spelling, grammar and style checked by the AI
+//! - **Correct** ([`correction`], the AI button's row or Ctrl+Shift+G): the draft's spelling, grammar and style checked by the AI
 //!   tool the settings name, the proposal shown over the box word by word; nothing changes or goes out until the user
 //!   takes it.
-//! - **Translate** ([`draft_translation`], the button or Ctrl+Shift+Y): the draft translated by the AI tool the settings
-//!   name into the language every box shares (the button beside it), in place, as one edit Ctrl+Z takes back.
+//! - **Translate** ([`draft_translation`], the AI button's row or Ctrl+Shift+Y): the draft translated by the AI tool the
+//!   settings name into the language every box shares (the row under it), in place, as one edit Ctrl+Z takes back.
 //!
 //! What the box does is traced (`compose opened` when the box is made, `sent`, `replying`, `editing`, `cancelled`, and
 //! `changed` each time what it holds changes), never its text.
@@ -75,6 +76,7 @@ pub mod attachments;
 mod correction;
 mod draft_translation;
 mod fit;
+mod menus;
 mod pictures;
 mod translated;
 
@@ -102,6 +104,7 @@ use teams_store::Message;
 
 pub use correction::{CorrectDraft, CorrectionStatus, KeepOriginal, SendCorrection, UseCorrection};
 pub use draft_translation::{DraftTranslationStatus, OpenTranslationSettings, TranslateDraft};
+pub use menus::{AI_TOOLS, CUSTOMIZE, MenuKind, SHOW_IN_TOOLBAR};
 
 pub use crate::editor::Editor;
 use crate::editor::convert::{self, CantLoad};
@@ -565,9 +568,6 @@ pub const READ_ONLY_NOTES: &str = "Notes can't be written from this app yet";
 /// What Loop says: Loop components aren't in this app.
 pub const NO_LOOP: &str = "Loop components aren't available in this app";
 
-/// What Actions and apps says: apps aren't in this app.
-pub const NO_APPS: &str = "Actions and apps aren't available in this app";
-
 /// What every box says in the app's read-only mode ([`crate::Core::read_only`]): nothing is sent from it.
 pub const READ_ONLY_APP: &str = "Read-only: this window sends nothing";
 /// What the box says when a reply or an edit is started while the message sent is translated.
@@ -722,8 +722,12 @@ pub struct Compose {
     box_at: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The window's rem size as the box was last drawn: its gaps and padding follow it ([`fit`]).
     rem: Pixels,
-    /// "More options" while it is open ([`fit`]).
-    more: Option<fit::More>,
+    /// The menu of tools that is open: More options, the AI button's or "+" ([`menus`]).
+    menu: Option<menus::ToolMenu>,
+    /// The customize list, while it is open ([`menus`]).
+    customize: Option<menus::Customize>,
+    /// Where the button that holds "Customize toolbar" was last drawn, for the list to open by.
+    customize_at: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// Whether the picker was open as the emoji button was pressed: its click then closes it.
     emoji_on_press: bool,
     _editor_events: Subscription,
@@ -873,7 +877,9 @@ impl Compose {
             emoji_at: Rc::default(),
             box_at: Rc::default(),
             rem: px(f32::from(theme::FONT_SIZE)),
-            more: None,
+            menu: None,
+            customize: None,
+            customize_at: Rc::default(),
             emoji_on_press: false,
             _editor_events: editor_events,
             _bar_events: bar_events,
@@ -1072,6 +1078,12 @@ impl Compose {
     #[must_use]
     pub fn editor(&self) -> &Entity<Editor> {
         &self.editor
+    }
+
+    /// The settings the box reads: its hidden buttons, the translation language.
+    #[must_use]
+    pub fn settings(&self) -> &Entity<SettingsModel> {
+        &self.settings
     }
 
     /// The format bar shown while the box is expanded.
@@ -2041,19 +2053,25 @@ impl Compose {
         selected_by("compose-format", button).into_any_element()
     }
 
-    /// The box's controls, inside it on the right as Teams has them: Format, Emoji, Attach, Loop and Actions and
-    /// apps (the last two not in this app yet: shown disabled, saying so), then this app's Correct, Translate and its
-    /// language, a thin divider, then Send. The tools that `fit` puts in the menu go into "More options"; a stacked
-    /// box's row has its tools on the left and Send on the right.
+    /// The box's controls, inside it on the right as Teams has them: Format, Emoji, Attach, Loop (not in this app yet:
+    /// shown disabled, saying so) and Actions and apps, then this app's AI button, a thin divider, then Send. The
+    /// tools that `fit` puts in the menu go into "More options"; a stacked box's row has its tools on the left and Send
+    /// on the right. A right click on it lists the buttons to show or hide.
     fn toolbar(&self, palette: Palette, fit: &fit::Fit, cx: &mut Context<Self>) -> AnyElement {
-        let narrow = self.is_narrow();
         let tools: Vec<AnyElement> = fit
             .row
             .iter()
-            .filter_map(|tool| self.tool_button(*tool, narrow, palette, cx))
+            .map(|tool| self.tool_button(*tool, fit, palette, cx))
             .collect();
         div()
             .debug_selector(|| "compose-toolbar".to_owned())
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.open_customize(event.position, window, cx);
+                }),
+            )
             .flex_none()
             .flex()
             .items_center()
@@ -2062,22 +2080,16 @@ impl Compose {
             // the box's inside, its padding and border taken off: centred on one line, at the foot of more
             .h(px(BOX_HEIGHT - 2.0 * BOX_PADDING - 2.0))
             .children(tools)
-            .children((!fit.more.is_empty()).then(|| self.more_button(&fit.more, cx)))
+            .children((!fit.more.is_empty()).then(|| self.menu_button(MenuKind::More, fit, cx)))
             .when(fit.stacked, |row| row.child(div().flex_1()))
             .child(div().w(px(1.0)).h(px(20.0)).mx_1().bg(rgb(palette.border)))
             .child(self.send_button(palette, cx))
             .into_any_element()
     }
 
-    /// A tool's button on the box's row; Translate draws its language button too, beside it.
-    fn tool_button(
-        &self,
-        tool: fit::Tool,
-        narrow: bool,
-        palette: Palette,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        Some(match tool {
+    /// A tool's button on the box's row.
+    fn tool_button(&self, tool: fit::Tool, fit: &fit::Fit, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        match tool {
             fit::Tool::Format => self.format_button(palette, cx),
             fit::Tool::Emoji => self.emoji_button(cx),
             fit::Tool::Attach => selected_by(
@@ -2089,12 +2101,10 @@ impl Compose {
             )
             .into_any_element(),
             fit::Tool::Loop => unavailable("compose-loop", Glyph::REPEAT, NO_LOOP),
-            fit::Tool::Apps if self.offers_apps(cx) => self.apps_button(cx),
-            fit::Tool::Apps => unavailable("compose-apps", Glyph::PLUS, NO_APPS),
-            fit::Tool::Correct => self.correct_button(cx),
-            fit::Tool::Translate => self.translate_buttons(narrow, cx),
-            fit::Tool::Language => return None,
-        })
+            fit::Tool::Apps if self.offers_apps(cx) => self.apps_button(fit, cx),
+            fit::Tool::Apps => self.menu_button(MenuKind::Plus, fit, cx),
+            fit::Tool::Ai => self.menu_button(MenuKind::Ai, fit, cx),
+        }
     }
 
     /// The emoji picker over the box, by the emoji button as it was last drawn, opening upwards: out of the box's key
@@ -2398,7 +2408,7 @@ impl Render for Compose {
         self.draft_translation_follows_draft(cx);
         self.prepare_language_menu(window, cx);
         self.rem = window.rem_size();
-        self.more_follows_tools(window, cx);
+        self.menus_follow_tools(window, cx);
         let focused = self.focused(window, cx);
         let keyed = div()
             .key_context(CONTEXT)
@@ -2434,6 +2444,7 @@ impl Render for Compose {
             .child(keyed)
             .children(self.emoji_overlay(cx))
             .children(self.apps_overlay())
+            .children(self.customize_overlay())
             .into_any_element()
     }
 }

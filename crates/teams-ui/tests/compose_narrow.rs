@@ -28,16 +28,17 @@ const PANE: f32 = 360.0;
 const USABLE: f32 = 180.0;
 
 /// The tools of a chat's box, in their order, Send apart.
-const TOOLS: [&str; 8] = [
+const TOOLS: [&str; 6] = [
     "compose-format",
     "compose-emoji",
     "compose-attach",
     "compose-loop",
     "compose-apps",
-    "compose-correct",
-    "compose-translate",
-    "compose-language",
+    "compose-ai",
 ];
+
+/// The AI button's rows, in a menu in its place.
+const AI_ROWS: [&str; 3] = ["compose-correct", "compose-translate", "compose-language"];
 
 fn draw(cx: &mut VisualTestContext) {
     for _ in 0..3 {
@@ -156,10 +157,14 @@ fn the_menu_holds_each_tool_that_does_not_fit_and_its_rows_act() {
     let (compose, cx) = chat(&rig, PANE);
     click(cx, "compose-more");
     assert!(shown(cx, "compose-more-menu"));
-    for tool in TOOLS {
+    for tool in TOOLS.into_iter().filter(|tool| *tool != "compose-ai") {
         let in_box = shown(cx, tool);
         let in_menu = cx.debug_bounds(row(tool)).is_some();
         assert!(in_box != in_menu, "{tool}: in the box {in_box}, in the menu {in_menu}");
+    }
+    assert!(!shown(cx, "compose-ai"), "the AI button is in the menu");
+    for tool in AI_ROWS {
+        assert!(shown(cx, row(tool)), "{tool} is a row of the menu");
     }
     // the language row opens the language menu, as its button does, and the click closes More options
     click(cx, "compose-language-row");
@@ -214,13 +219,17 @@ fn a_channel_box_moves_only_the_tools_it_has() {
     assert!(shown(cx, "compose-more"), "a narrow channel box has More options");
     click(cx, "compose-more");
     assert!(shown(cx, "compose-more-menu"));
-    for tool in ["compose-correct", "compose-translate", "compose-language"] {
+    for tool in AI_ROWS {
         assert!(shown(cx, row(tool)), "{tool} is in the menu of a channel's box");
     }
-    for tool in ["compose-attach", "compose-loop", "compose-apps"] {
+    for tool in ["compose-attach", "compose-loop"] {
         assert!(!shown(cx, row(tool)), "{tool} is not in a channel's box");
         assert!(!shown(cx, tool), "{tool} is not in a channel's box");
     }
+    assert!(
+        shown(cx, "compose-apps"),
+        "a channel's box has its \"+\", as Teams' does"
+    );
 }
 
 #[test]
@@ -376,9 +385,9 @@ fn tab_from_the_text_reaches_no_hidden_stop() {
     let rig = Rig::start();
     let (compose, cx) = chat(&rig, PANE);
     type_in(&compose, cx, "A made-up draft");
-    // the stops after the text: Format, Emoji, Attach, More options, then Send; the language is in More options, so
-    // Enter on no stop opens the language menu
-    for stops in 5..=6 {
+    // the stops after the text: Format, Emoji, Attach, "+", More options, then Send; the language is in More options,
+    // so Enter on no stop opens the language menu
+    for stops in 6..=7 {
         for _ in 0..stops {
             cx.update(gpui::Window::focus_next);
             draw(cx);
@@ -393,8 +402,8 @@ fn tab_from_the_text_reaches_no_hidden_stop() {
         cx.update(|window, cx| compose.update(cx, |compose, cx| compose.focus(window, cx)));
         draw(cx);
     }
-    // the fifth stop is Send: Enter on it sends (a focused control clicks as the key goes up)
-    for _ in 0..5 {
+    // the sixth stop is Send: Enter on it sends (a focused control clicks as the key goes up)
+    for _ in 0..6 {
         cx.update(gpui::Window::focus_next);
         draw(cx);
     }
@@ -405,7 +414,7 @@ fn tab_from_the_text_reaches_no_hidden_stop() {
     draw(cx);
     assert!(
         compose.read_with(cx, |compose, cx| compose.value(cx).is_empty()),
-        "Enter on the fifth stop sends"
+        "Enter on the sixth stop sends"
     );
 }
 

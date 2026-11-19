@@ -16,8 +16,8 @@ use teams_media::video::effects::{Backdrop, Background};
 use teams_ui::local_ai::ToolChoice as TranslatorChoice;
 use teams_ui::local_ai::{AiChoice, Model};
 use teams_ui::settings::{
-    AccountSettings, DEFAULT_IDLE_MINUTES, FirstRunState, LogLevel, ManualStatus, Notifications, Problem, Settings,
-    SettingsFile, SettingsModel, TimeFormat, VideoEffect, attach_devices, parse, render,
+    AccountSettings, ComposeTool, DEFAULT_IDLE_MINUTES, FirstRunState, LogLevel, ManualStatus, Notifications, Problem,
+    Settings, SettingsFile, SettingsModel, TimeFormat, VideoEffect, attach_devices, parse, render,
 };
 use teams_ui::theme::{self, Appearance, THEMES};
 use teams_ui::translate::Backend;
@@ -123,6 +123,7 @@ fn changed() -> Settings {
             model: teams_ui::local_ai::Model::Recommended,
         },
         ai_providers: vec![teams_ui::local_ai::Provider::new_api(Backend::Anthropic, &[])],
+        compose_hidden: vec![ComposeTool::Emoji, ComposeTool::Ai],
     }
 }
 
@@ -1309,4 +1310,61 @@ fn the_ai_providers_go_through_the_file_without_their_keys() {
             .any(|problem| problem.to_string().contains("ai_providers")),
         "{problems:?}"
     );
+}
+
+#[test]
+fn every_toolbar_button_shows_by_default_and_the_hidden_ones_go_through_the_file() {
+    assert!(Settings::default().compose_hidden.is_empty());
+    assert!(!render(&Settings::default()).contains("compose_hidden_tools"));
+    let mut settings = Settings::default();
+    settings.show_compose_tool(ComposeTool::Ai, false);
+    settings.show_compose_tool(ComposeTool::Format, false);
+    settings.show_compose_tool(ComposeTool::Format, false);
+    assert_eq!(
+        settings.compose_hidden,
+        [ComposeTool::Format, ComposeTool::Ai],
+        "each once, in the bar's order"
+    );
+    assert!(!settings.shows_compose_tool(ComposeTool::Format) && settings.shows_compose_tool(ComposeTool::Emoji));
+    let text = render(&settings);
+    assert!(text.contains(r#"compose_hidden_tools = ["format", "ai"]"#), "{text}");
+    let (read, problems) = parse(&text).expect("TOML");
+    assert_eq!(read, settings);
+    assert!(problems.is_empty(), "{problems:?}");
+    settings.show_compose_tool(ComposeTool::Format, true);
+    assert_eq!(settings.compose_hidden, [ComposeTool::Ai]);
+
+    // a name of a newer build is passed over; a value that is not a list of names is reported, the default kept
+    let (read, problems) = parse(r#"compose_hidden_tools = ["loop", "stickers", "loop"]"#).expect("TOML");
+    assert_eq!(read.compose_hidden, [ComposeTool::Loop]);
+    assert!(problems.is_empty(), "{problems:?}");
+    for bad in [
+        "compose_hidden_tools = \"emoji\"",
+        "compose_hidden_tools = [\"emoji\", 3]",
+    ] {
+        let (read, problems) = parse(bad).expect("TOML");
+        assert!(read.compose_hidden.is_empty(), "{bad}");
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.to_string().contains("compose_hidden_tools")),
+            "{bad}: {problems:?}"
+        );
+    }
+}
+
+#[gpui::test]
+fn a_hidden_toolbar_button_is_still_hidden_after_a_restart(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (file, _) = file_in(&dir);
+    let model = cx.update(|cx| cx.new(|_| SettingsModel::load(file)));
+    cx.update(|cx| {
+        model.update(cx, |model, cx| {
+            model.change(|settings| settings.show_compose_tool(ComposeTool::Attach, false), cx);
+        });
+    });
+    let (file, _) = file_in(&dir);
+    let restarted = SettingsModel::load(file);
+    assert_eq!(restarted.settings().compose_hidden, [ComposeTool::Attach]);
+    assert!(!restarted.settings().shows_compose_tool(ComposeTool::Attach));
 }

@@ -128,6 +128,14 @@ name = "font_styles"
 harness = false
 
 [[test]]
+# the message box's toolbar (its AI button and menu, the customize list, hidden buttons in "+", narrow and with a large
+# font), drawn in the UI sandbox over the fake engine, screenshotted in each theme under
+# `target/ui-shots/compose-toolbar-*.png`: its own `main` (GPUI runs on the main thread), which runs itself again inside
+# the sandbox
+name = "compose_toolbar_window"
+harness = false
+
+[[test]]
 # a draft translated in its box, drawn in the UI sandbox over the fake engine and a fake translator, screenshotted in
 # each theme under `target/ui-shots/compose-translate-*.png`: its own `main` (GPUI runs on the main thread), which runs
 # itself again inside the sandbox
