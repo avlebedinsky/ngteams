@@ -568,3 +568,56 @@ fn a_channels_box_translates_too() {
     by_ai_menu(cx, "compose-translate-row");
     until(cx, |cx| value(&compose, cx) == "hallo");
 }
+
+/// The label of the row `selector` in the open apps' flyout.
+fn flyout_label(compose: &Entity<Compose>, cx: &mut VisualTestContext, selector: &str) -> String {
+    compose.read_with(cx, |compose, cx| {
+        let flyout = compose.apps_flyout().expect("the flyout is open").read(cx);
+        let action = flyout.actions().iter().find(|action| action.selector == selector);
+        action
+            .unwrap_or_else(|| panic!("{selector} is in the flyout"))
+            .label
+            .to_string()
+    })
+}
+
+#[test]
+fn a_hidden_translate_in_the_apps_flyout_follows_the_job_and_gives_the_keyboard_back() {
+    let rig = Rig::start();
+    let fake = Fake::install(&rig);
+    rig.cx.update(|cx| cx.set_global(teams_ui::bots_flag::BotsFlag(true)));
+    *rig.core.extension_apps.lock().unwrap() =
+        teams_proto::extension_apps(teams_mock::extension_apps_answer().to_string().as_bytes());
+    let model = settings(&rig);
+    rig.cx.update(|cx| {
+        model.update(cx, |model, cx| {
+            model.change(
+                |settings| settings.show_compose_tool(teams_ui::settings::ComposeTool::Ai, false),
+                cx,
+            );
+        });
+    });
+    let (compose, cx) = chat_in(&rig, &model);
+    type_in(&compose, cx, "hello");
+    fake.held.store(true, Ordering::Relaxed);
+    click(cx, "compose-apps");
+    assert!(compose.read_with(cx, |compose, _| compose.apps_flyout().is_some()));
+    // the row taken: the flyout closes, the translation runs, and the keyboard is in the text again
+    click(cx, "compose-translate-row");
+    assert!(compose.read_with(cx, |compose, _| compose.apps_flyout().is_none()));
+    assert_eq!(status(&compose, cx), DraftTranslationStatus::Running);
+    assert!(cx.update(|window, cx| compose.read(cx).focused(window, cx)));
+    // the flyout opened while it runs offers to stop it
+    click(cx, "compose-apps");
+    assert_eq!(flyout_label(&compose, cx, "compose-translate-row"), "Stop translating");
+    // the translation ends while the flyout is open: the row offers a new one, and its click starts it
+    fake.held.store(false, Ordering::Relaxed);
+    until(cx, |cx| status(&compose, cx) == DraftTranslationStatus::Idle);
+    assert!(compose.read_with(cx, |compose, _| compose.apps_flyout().is_some()));
+    assert_ne!(flyout_label(&compose, cx, "compose-translate-row"), "Stop translating");
+    fake.held.store(true, Ordering::Relaxed);
+    click(cx, "compose-translate-row");
+    assert_eq!(status(&compose, cx), DraftTranslationStatus::Running);
+    fake.held.store(false, Ordering::Relaxed);
+    until(cx, |cx| status(&compose, cx) == DraftTranslationStatus::Idle);
+}

@@ -9,7 +9,8 @@
 //! - **the model's name**, while another model is being typed or one the tool didn't list is set: any name the tool
 //!   takes, used on Enter (or when the field is left).
 //!
-//! A draft's translation adds its language's row on top: the menu the compose box's language button opens
+//! A draft's translation adds its language's row on top: the menu the compose box's AI menu row "Translation language"
+//! opens
 //! ([`crate::draft_translate::menu`]), its button `message-language` and its rows `message-language-<language>`.
 //!
 //! Changing the provider sets its recommended model again: a model of one provider means nothing to the other. Test
@@ -230,8 +231,8 @@ impl AiPicker {
         })
     }
 
-    /// The language a draft is translated into, the same in every box: a button opening the menu the compose box's
-    /// language button opens.
+    /// The language a draft is translated into, the same in every box: a button opening the menu the compose box's AI
+    /// menu row "Translation language" opens.
     fn language_row(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let palette = theme::current(cx);
         let settings = self.model.clone();

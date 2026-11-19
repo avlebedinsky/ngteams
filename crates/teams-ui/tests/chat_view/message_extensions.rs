@@ -540,3 +540,71 @@ fn a_hidden_button_s_action_is_over_the_apps_and_customize_is_at_the_foot() {
     click(cx, "compose-customize-row");
     assert!(compose.read_with(cx, |compose, _| compose.customize_open()));
 }
+
+/// The chat's box with `tool` hidden from its toolbar.
+fn hiding(view: &Entity<ChatView>, cx: &mut VisualTestContext, tool: teams_ui::settings::ComposeTool) {
+    let settings = view.read_with(cx, |view, cx| view.compose().read(cx).settings().clone());
+    cx.update(|_, cx| {
+        settings.update(cx, |model, cx| {
+            model.change(|settings| settings.show_compose_tool(tool, false), cx);
+        });
+    });
+}
+
+fn flyout_labels(view: &Entity<ChatView>, cx: &mut VisualTestContext) -> Vec<String> {
+    view.read_with(cx, |view, cx| {
+        let compose = view.compose().read(cx);
+        let flyout = compose.apps_flyout().expect("the flyout is open").read(cx);
+        flyout.actions().iter().map(|action| action.label.to_string()).collect()
+    })
+}
+
+#[test]
+fn a_hidden_action_in_the_flyout_shows_its_key_follows_the_box_and_gives_the_keyboard_to_the_text() {
+    let rig = apps_rig(true);
+    let (view, cx) = window(&rig);
+    hiding(&view, cx, teams_ui::settings::ComposeTool::Format);
+    click(cx, "compose-apps");
+    assert!(found(cx, "compose-format-row"));
+    assert!(found(cx, "compose-format-row-key"), "the row shows its key");
+    assert_eq!(flyout_labels(&view, cx), ["Show formatting options"]);
+    // the box's state changes while the flyout is open: the row says what its click does now
+    let compose = view.read_with(cx, |view, _| view.compose().clone());
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.toggle_expanded(window, cx)));
+    draw(cx);
+    assert!(found(cx, "apps-flyout"));
+    assert_eq!(flyout_labels(&view, cx), ["Hide formatting options"]);
+    // the row taken: the flyout closes and the keyboard is in the text again
+    click(cx, "compose-format-row");
+    assert!(!found(cx, "apps-flyout"));
+    assert!(!compose.read_with(cx, |compose, _| compose.is_expanded()));
+    assert!(cx.update(|window, cx| compose.read(cx).focused(window, cx)));
+}
+
+#[test]
+fn enter_on_the_focused_customize_button_opens_the_list_not_the_lit_row() {
+    let rig = apps_rig(true);
+    let (view, cx) = window(&rig);
+    hiding(&view, cx, teams_ui::settings::ComposeTool::Emoji);
+    click(cx, "compose-apps");
+    assert!(found(cx, "compose-emoji-row"));
+    // Tab (the window's next focus) goes from the search field to the flyout's first button, "Customize toolbar"
+    cx.update(gpui::Window::focus_next);
+    draw(cx);
+    // a key press as the platform sends it: a button takes its click on the key's release
+    let enter = gpui::Keystroke::parse("enter").unwrap();
+    cx.simulate_event(gpui::KeyDownEvent {
+        keystroke: enter.clone(),
+        is_held: false,
+        prefer_character_input: false,
+    });
+    cx.simulate_event(gpui::KeyUpEvent { keystroke: enter });
+    cx.run_until_parked();
+    draw(cx);
+    let compose = view.read_with(cx, |view, _| view.compose().clone());
+    assert!(
+        compose.read_with(cx, |compose, _| compose.emoji_picker().is_none()),
+        "the lit row is not taken"
+    );
+    assert!(compose.read_with(cx, |compose, _| compose.customize_open()));
+}

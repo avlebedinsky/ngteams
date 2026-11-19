@@ -556,17 +556,25 @@ to paste. There is no separate write-decision log.
 
 #### Translating the message you write
 
-Every message box (a chat's, a channel's post and reply boxes, editing a message, New message) has Translate beside
-Correct (Ctrl+Shift+Y), with the language button next to it. Translate replaces the draft with its translation, in
-place and as one edit, so Ctrl+Z brings the draft back; mentions, links that show their address, inline code, blocks
-of code, pictures and line breaks never go to the tool and come back as they were, and formatted words stay formatted.
-While it runs, a line over the box shows the language and the tool with Cancel (Escape or the button again cancel
-too); a failure keeps the draft and says why, with Try again, and with no tool installed it offers the settings. The
-language button opens a searchable list of common languages, and any other language can be typed. The language is one
-setting for every box and account in the app, kept across restarts; it and the tool are in Settings → General →
-Message translation (the tool: Automatic, which is Claude Code when installed and else Codex, or either one; by
-default Claude Sonnet or GPT-6.1-Terra). Only the draft's words and the language go to the tool and its provider,
-never the chat, names or tokens (`crates/teams-ui/src/draft_translate.rs`).
+Every message box (a chat's, a channel's post and reply boxes, editing a message, New message) has Translate
+(Ctrl+Shift+Y) in the menu of its AI button, with Correct and the "Translation language" row. Translate replaces the
+draft with its translation, in place and as one edit, so Ctrl+Z brings the draft back; mentions, links that show their
+address, inline code, blocks of code, pictures and line breaks never go to the tool and come back as they were, and
+formatted words stay formatted. While it runs, a line over the box shows the language and the tool with Cancel (Escape
+or the menu's "Stop translating" row cancel too); a failure keeps the draft and says why, with Try again, and with no
+tool installed it offers the settings. The "Translation language" row opens a searchable list of common languages, and
+any other language can be typed. The language is one setting for every box and account in the app, kept across restarts;
+it and the tool are in Settings → General → Message translation (the tool: Automatic, which is Claude Code when
+installed and else Codex, or either one; by default Claude Sonnet or GPT-6.1-Terra). Only the draft's words and the
+language go to the tool and its provider, never the chat, names or tokens (`crates/teams-ui/src/draft_translate.rs`).
+
+#### The message box toolbar
+
+The toolbar shows Format, Emoji, Attach files, Loop components, "+" (Actions and apps), the AI button and Send. To
+hide a button, right-click the toolbar or select "Customize toolbar" at the end of "+", and remove its check; the
+same list is in Settings → Appearance → Message box toolbar. "+" and Send cannot hide. A hidden button's action
+stays in "+", with its icon and key. The choice is one setting for every box, kept across restarts
+(`crates/teams-ui/src/compose/menus.rs`).
 
 ## Captures and fixtures
 

@@ -131,8 +131,8 @@ pub const BOX_HEIGHT: f32 = 56.0;
 const BOX_PADDING: f32 = 6.0;
 /// A toolbar button in the box, px (its icon three quarters of it).
 const TOOL: f32 = 28.0;
-/// Below this width, px, the box's toolbar is compacted (the translation language an icon alone), as in a thread's pane,
-/// and the box is stacked when its text has no room beside its tools ([`fit`]).
+/// Below this width, px, the box is stacked when its text has no room beside its tools ([`fit`]), as in a thread's
+/// pane.
 const NARROW_BOX: f32 = 560.0;
 /// The editor's least height expanded, px: Teams' expanded box's writing area.
 const EXPANDED_MIN: f32 = 96.0;
@@ -718,7 +718,7 @@ pub struct Compose {
     emoji: Option<(Entity<ReactionPicker>, Subscription)>,
     /// Where the emoji button was last drawn, for the picker to open by.
     emoji_at: Rc<Cell<Option<Bounds<Pixels>>>>,
-    /// Where the box was last drawn: a narrow one compacts its toolbar.
+    /// Where the box was last drawn: a narrow one can stack ([`fit`]).
     box_at: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The window's rem size as the box was last drawn: its gaps and padding follow it ([`fit`]).
     rem: Pixels,
@@ -2131,7 +2131,7 @@ impl Compose {
         )
     }
 
-    /// Whether the box was last drawn narrower than [`NARROW_BOX`], its toolbar compacted.
+    /// Whether the box was last drawn narrower than [`NARROW_BOX`].
     #[must_use]
     pub fn is_narrow(&self) -> bool {
         self.box_at
@@ -2409,6 +2409,7 @@ impl Render for Compose {
         self.prepare_language_menu(window, cx);
         self.rem = window.rem_size();
         self.menus_follow_tools(window, cx);
+        self.flyout_follows_tools(window, cx);
         let focused = self.focused(window, cx);
         let keyed = div()
             .key_context(CONTEXT)

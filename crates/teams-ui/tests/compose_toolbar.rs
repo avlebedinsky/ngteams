@@ -212,6 +212,15 @@ fn a_hidden_button_s_action_stays_in_plus_with_its_key() {
     ] {
         assert!(shown(cx, row), "{row} is in \"+\"");
     }
+    // each row of an action with a key shows that key
+    for key in [
+        "compose-format-row-key",
+        "compose-emoji-row-key",
+        "compose-correct-row-key",
+        "compose-translate-row-key",
+    ] {
+        assert!(shown(cx, key), "{key} shows in \"+\"");
+    }
     assert!(
         !shown(cx, "compose-attach-row"),
         "a button on the bar has no row in \"+\""

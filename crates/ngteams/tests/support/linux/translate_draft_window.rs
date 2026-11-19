@@ -1011,8 +1011,6 @@ fn tip_shown(user: &mut User, button: Rect, name: &str) -> SandboxResult {
     Ok(())
 }
 
-/// A click at `at` brings a state `wanted` takes, named `what` in the error. A click the app didn't take is clicked
-/// again and said, at most twice.
 /// The AI menu's row `row` taken until `wanted`, at most three times.
 fn ai_row_until(user: &mut User, bar: Toolbar, row: u32, what: &str, wanted: impl Fn(&Value) -> bool) -> SandboxResult {
     for attempt in 0..3 {

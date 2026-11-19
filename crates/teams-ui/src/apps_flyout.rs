@@ -15,16 +15,17 @@
 //!   `invoke` asks the app for its card first (`composeExtension/selectItem`).
 //!
 //! The flyout asks the engine; it builds no request ([`crate::bridge::Core`]). Up and Down move in its lists, which
-//! scroll to keep the lit row in view; Enter chooses, Escape goes back or closes it.
+//! scroll to keep the lit row in view; Enter in a field of it chooses (a focused button of it takes its own Enter),
+//! Escape goes back or closes it.
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, AsyncApp, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _,
-    IntoElement, KeyDownEvent, ParentElement as _, Render, RenderImage, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, div, px, rgb,
+    AnyElement, AppContext as _, AsyncApp, Context, Entity, EventEmitter, FocusHandle, Focusable as _,
+    InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Render, RenderImage, ScrollHandle,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, div, px, rgb,
 };
 use gpui_component::Sizable as _;
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -187,6 +188,18 @@ impl AppsFlyout {
     pub fn with_actions(mut self, actions: Vec<FlyoutAction>) -> Self {
         self.actions = actions;
         self
+    }
+
+    /// The box's actions changed while it is open (a job started or stopped): its rows show them now.
+    pub fn set_actions(&mut self, actions: Vec<FlyoutAction>, cx: &mut Context<Self>) {
+        self.actions = actions;
+        cx.notify();
+    }
+
+    /// The box's actions it holds, as it lists them while no search is typed.
+    #[must_use]
+    pub fn actions(&self) -> &[FlyoutAction] {
+        &self.actions
     }
 
     /// The actions it lists now: none while a search is typed.
@@ -506,6 +519,17 @@ impl AppsFlyout {
         self.rows.scroll_to_item(at);
     }
 
+    /// Whether the keyboard is in the search field, the pane's query field or the flyout itself. Enter then
+    /// chooses the lit row. A focused button of the flyout (the foot, a command) gets its Enter itself.
+    fn typing(&self, window: &Window, cx: &gpui::App) -> bool {
+        self.focus.is_focused(window)
+            || self.search.read(cx).focus_handle(cx).is_focused(window)
+            || self
+                .pane
+                .as_ref()
+                .is_some_and(|pane| pane.query.read(cx).focus_handle(cx).is_focused(window))
+    }
+
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let actions = if self.pane.is_some() {
             0
@@ -523,7 +547,7 @@ impl AppsFlyout {
             "escape" => self.back(window, cx),
             "down" if rows > 0 => self.light((self.highlight + 1).min(rows - 1)),
             "up" => self.light(self.highlight.saturating_sub(1)),
-            "enter" if rows > 0 => {
+            "enter" if rows > 0 && self.typing(window, cx) => {
                 let at = self.highlight.min(rows - 1);
                 if self.pane.is_some() {
                     self.choose_result(at, cx);
@@ -625,7 +649,10 @@ impl AppsFlyout {
             .when(at == self.highlight, |row| row.bg(rgb(palette.hover)))
             .child(action.glyph.icon().size(px(16.0)))
             .child(div().flex_1().min_w_0().truncate().child(action.label))
-            .children(action.key)
+            .children(action.key.map(|key| {
+                let selector = format!("{}-key", action.selector);
+                div().debug_selector(move || selector).child(key)
+            }))
             .into_any_element()
     }
 

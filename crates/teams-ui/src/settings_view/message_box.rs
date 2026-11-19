@@ -1,5 +1,5 @@
-//! The Appearance page's "Message box" group: a switch for each toolbar button that can hide, the same list as the
-//! box's customize list ([`crate::compose::SHOW_IN_TOOLBAR`]). A hidden button's action stays in the box's "+".
+//! The Appearance page's "Message box toolbar" group: a switch for each toolbar button that can hide, the same list as
+//! the box's customize list ([`crate::compose::SHOW_IN_TOOLBAR`]). A hidden button's action stays in the box's "+".
 
 use gpui::{AnyElement, App, IntoElement as _, SharedString};
 use gpui_component::switch::Switch;
@@ -21,8 +21,8 @@ fn description(tool: ComposeTool) -> &'static str {
 }
 
 impl SettingsView {
-    /// The "Message box" group: a row for each button that can hide (`compose-tool-<key>`), the AI button's only while
-    /// the AI features are on.
+    /// The "Message box toolbar" group: a row for each button that can hide (`compose-tool-<key>`), the AI button's
+    /// only while the AI features are on.
     pub(super) fn message_box(&self, settings: &Settings, palette: Palette, cx: &App) -> AnyElement {
         let uses_ai = self.model.read(cx).uses_ai();
         let rows = ComposeTool::ALL

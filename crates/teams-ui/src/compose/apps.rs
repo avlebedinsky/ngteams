@@ -1,6 +1,8 @@
-//! The box's Actions and apps (the "+"), behind `NGTEAMS_BOTS=1` for an account whose cloud serves apps
-//! ([`crate::apps_flyout`]), and the apps' cards the box sends with its message: each drawn over the tools as Teams
-//! draws a chosen result, its app's picture and name over the card, with a close mark that takes it out.
+//! The box's Actions and apps (the "+"): its apps' flyout, behind `NGTEAMS_BOTS=1` for an account whose cloud serves
+//! apps ([`crate::apps_flyout`]), with the hidden tools' rows over the apps; and the apps' cards the box sends with its
+//! message: each drawn over the tools as Teams draws a chosen result, its app's picture and name over the card, with a
+//! close mark that takes it out. With no apps, "+" is a menu of the hidden tools and "Customize toolbar"
+//! ([`super::menus`]).
 use std::sync::Arc;
 
 use gpui::{
@@ -12,7 +14,7 @@ use gpui_component::{Selectable as _, Sizable as _};
 use serde_json::{Value, json};
 use teams_proto::chat::AppCard;
 
-use super::menus::{Item, MenuKind};
+use super::menus::{Item, MenuKind, Row};
 use super::{Compose, ComposeEvent, TOOL, Writes, measured};
 use crate::apps_flyout::{AppsFlyout, FlyoutAction, FlyoutEvent};
 use crate::card_view::{CardsElement, ShownCards};
@@ -32,6 +34,8 @@ pub(super) struct Apps {
     flyout: Option<(gpui::Entity<AppsFlyout>, gpui::Subscription)>,
     /// Where its button was last drawn, for the flyout to open by.
     at: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    /// The rows of the hidden tools' actions that the open flyout lists, in its order.
+    rows: Vec<Row>,
 }
 
 impl Compose {
@@ -77,16 +81,15 @@ impl Compose {
             return;
         }
         let (core, conversation) = (Arc::clone(&self.core), self.conversation.clone());
-        let mut items = self.menu_items(MenuKind::Plus, cx);
-        // the flyout has Customize toolbar at its foot
-        items.retain(|item| *item != Item::Customize);
-        let actions = self.flyout_actions(&items, window, cx);
+        let rows = self.flyout_rows(cx);
+        let actions = self.flyout_actions(&rows, window, cx);
         let flyout = cx.new(|cx| AppsFlyout::new(core, conversation, window, cx).with_actions(actions));
         let events = cx.subscribe_in(
             &flyout,
             window,
             move |this: &mut Self, _, event: &FlyoutEvent, window, cx| {
                 this.apps.flyout = None;
+                let rows = std::mem::take(&mut this.apps.rows);
                 match event {
                     FlyoutEvent::Close => {}
                     FlyoutEvent::GetMoreApps => cx.emit(ComposeEvent::ShowStore),
@@ -94,8 +97,10 @@ impl Compose {
                     FlyoutEvent::Card(card) => this.add_app_card(card.as_ref().clone(), window, cx),
                     FlyoutEvent::Customize => this.take(Item::Customize, window, cx),
                     FlyoutEvent::Action(at) => {
-                        if let Some(item) = items.get(*at) {
-                            this.take(*item, window, cx);
+                        if let Some(row) = rows.get(*at) {
+                            // the keyboard goes back to the text first; an action that opens a picker takes it after
+                            this.focus(window, cx);
+                            this.take(row.item, window, cx);
                         }
                     }
                 }
@@ -103,26 +108,53 @@ impl Compose {
             },
         );
         self.apps.flyout = Some((flyout, events));
+        self.apps.rows = rows;
         cx.notify();
     }
 
-    /// The rows of `items` as the flyout lists them over its apps: each with its icon, its name, its key and whether
-    /// it can be taken now.
-    fn flyout_actions(&self, items: &[Item], window: &Window, cx: &App) -> Vec<FlyoutAction> {
+    /// The rows of the hidden tools' actions that the flyout lists over its apps, as they are now.
+    fn flyout_rows(&self, cx: &App) -> Vec<Row> {
+        self.menu_items(MenuKind::Plus, cx)
+            .into_iter()
+            // the flyout has Customize toolbar at its foot
+            .filter(|item| *item != Item::Customize)
+            .map(|item| self.row(item, cx))
+            .collect()
+    }
+
+    /// As the box draws: when a row of the open flyout no longer shows its tool's state, its rows are made again
+    /// after this frame, so that each says what its click does now.
+    pub(super) fn flyout_follows_tools(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.apps.flyout.is_some() && self.apps.rows != self.flyout_rows(cx) {
+            cx.defer_in(window, Self::refresh_flyout);
+        }
+    }
+
+    fn refresh_flyout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((flyout, _)) = &self.apps.flyout else { return };
+        let rows = self.flyout_rows(cx);
+        if rows == self.apps.rows {
+            return;
+        }
+        let actions = self.flyout_actions(&rows, window, cx);
+        flyout.update(cx, |flyout, cx| flyout.set_actions(actions, cx));
+        self.apps.rows = rows;
+    }
+
+    /// `rows` as the flyout lists them over its apps: each with its icon, its name, its key and whether it can be
+    /// taken now.
+    fn flyout_actions(&self, rows: &[Row], window: &Window, cx: &App) -> Vec<FlyoutAction> {
         let text = self.editor.read(cx).focus.clone();
-        items
-            .iter()
-            .map(|item| {
-                let row = self.row(*item, cx);
-                FlyoutAction {
-                    selector: format!("{}-row", item.selector()).into(),
-                    label: row.label,
-                    glyph: item.glyph(),
-                    key: item
-                        .action()
-                        .and_then(|action| Kbd::binding_for_action_in(action, &text, window)),
-                    disabled: row.disabled,
-                }
+        rows.iter()
+            .map(|row| FlyoutAction {
+                selector: format!("{}-row", row.item.selector()).into(),
+                label: row.label.clone(),
+                glyph: row.item.glyph(),
+                key: row
+                    .item
+                    .action()
+                    .and_then(|action| Kbd::binding_for_action_in(action, &text, window)),
+                disabled: row.disabled,
             })
             .collect()
     }

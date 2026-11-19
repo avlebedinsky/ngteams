@@ -589,7 +589,7 @@ const STEPS: [Step; 5 + 325 + 8 + 5 + 15 + 6 + 12 + 10 + 5] = [
         cx.set_global(teams_ui::local_ai::Tools::default());
         clear_compose(shell, window, cx);
     }),
-    // Translate and its language button in the box's toolbar, the language German
+    // a draft in the box with the AI button, the translation language German
     ("compose-translate", |shell, window, cx| {
         tour_translator(cx);
         set_message_language(shell, "German", cx);

@@ -649,12 +649,13 @@ fn check_row(selector: String, label: &'static str, checked: bool) -> PopupMenuI
 }
 
 /// A tool's row in a menu: its icon, its name, its key as bound where the `text` is, and a check while the tool is
-/// lit (`<item>-row`, `<item>-check` for tests). The check is the row's own: the kit draws a row's icon in place of its
-/// check. The language row shows a chevron, as it opens a menu of its own.
+/// lit (`<item>-row`, `<item>-row-key`, `<item>-check` for tests). The check is the row's own: the kit draws a row's
+/// icon in place of its check. The language row shows a chevron, as it opens a menu of its own.
 fn menu_row(row: &Row, text: &FocusHandle, window: &Window) -> PopupMenuItem {
     let selector = format!("{}-row", row.item.selector());
     let check = row.checked.then(|| format!("{}-check", row.item.selector()));
     let label = row.label.clone();
+    let key_selector = format!("{selector}-key");
     let key = row
         .item
         .action()
@@ -662,6 +663,10 @@ fn menu_row(row: &Row, text: &FocusHandle, window: &Window) -> PopupMenuItem {
     let opens = row.item == Item::Language;
     PopupMenuItem::element(move |_, _| {
         let selector = selector.clone();
+        let key = key.clone().map(|key| {
+            let key_selector = key_selector.clone();
+            div().debug_selector(move || key_selector).child(key)
+        });
         let check = check.clone().map(|check| {
             div()
                 .debug_selector(move || check.clone())
@@ -681,7 +686,7 @@ fn menu_row(row: &Row, text: &FocusHandle, window: &Window) -> PopupMenuItem {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .children(key.clone())
+                    .children(key)
                     .child(div().flex_none().w(px(14.0)).children(check).children(chevron)),
             )
     })
