@@ -6,17 +6,15 @@
 //!   toolbar". With apps offered, the same rows are over the apps in its flyout, as Teams lists its own actions there,
 //!   and "Customize toolbar" is at the flyout's foot.
 //! - **"More options"**, on a stacked box's row: the tools that do not fit; with "+" in it, the hidden tools too.
-//! - **The customize list**: a right click on the toolbar, or "Customize toolbar", lists the buttons that can hide,
-//!   each with a check. A click shows or hides one, and the list stays open. The choice is a setting
-//!   ([`crate::settings::ComposeTool`]) of every box. Send and "+" are listed, and cannot hide.
+//! - **The customize list** ([`super::customize`]): a right click on the toolbar, or "Customize toolbar", lists the
+//!   buttons that can hide.
 //!
 //! A row keeps its tool's action, its key (bound in the box's key context as before) and its state (checked while its
 //! button would be lit).
 
 use gpui::{
-    AnyElement, App, Bounds, Context, DismissEvent, Entity, FocusHandle, Focusable as _, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, Point, SharedString, Styled as _, Subscription, Window, anchored,
-    deferred, div, px,
+    AnyElement, App, Context, DismissEvent, Entity, FocusHandle, Focusable as _, InteractiveElement as _, IntoElement,
+    ParentElement as _, SharedString, Styled as _, Subscription, Window, div, px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::kbd::Kbd;
@@ -30,14 +28,11 @@ use crate::chat_view::measured;
 use crate::draft_translate::menu;
 use crate::editor;
 use crate::icons::{Glyph, icon_button, selected_by};
-use crate::settings::ComposeTool;
 
 /// The AI button's tooltip and name.
 pub const AI_TOOLS: &str = "AI tools";
 /// The row that opens the customize list.
 pub const CUSTOMIZE: &str = "Customize toolbar";
-/// The customize list's title.
-pub const SHOW_IN_TOOLBAR: &str = "Show in the toolbar";
 
 /// A menu of the box's tools.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -190,15 +185,6 @@ pub(super) struct ToolMenu {
     kind: MenuKind,
     menu: Entity<PopupMenu>,
     rows: Vec<Row>,
-    _dismissed: Subscription,
-}
-
-/// The customize list while it is open, where it opened, and whether a click asked for it again.
-pub(super) struct Customize {
-    menu: Entity<PopupMenu>,
-    at: Point<Pixels>,
-    anchor: gpui::Anchor,
-    again: bool,
     _dismissed: Subscription,
 }
 
@@ -488,164 +474,6 @@ impl Compose {
                 .into_any_element(),
         )
     }
-
-    // --- the customize list ---
-
-    /// Opens the customize list at `at` in the window (a right click on the toolbar, tests).
-    pub fn open_customize(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_customize_with(at, gpui::Anchor::BottomLeft, window, cx);
-    }
-
-    /// "Customize toolbar": opens the customize list by the button whose menu holds that row.
-    pub fn customize_toolbar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let at = self
-            .customize_at
-            .get()
-            .or_else(|| self.box_at.get())
-            .map_or_else(Point::default, |bounds: Bounds<Pixels>| bounds.top_right());
-        self.open_customize_with(at, gpui::Anchor::BottomRight, window, cx);
-    }
-
-    fn open_customize_with(
-        &mut self,
-        at: Point<Pixels>,
-        anchor: gpui::Anchor,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.read_only.is_some() {
-            return;
-        }
-        let menu = self.customize_menu(window, cx);
-        let dismissed = cx.subscribe_in(&menu, window, |this: &mut Self, _, _: &DismissEvent, window, cx| {
-            this.customize_dismissed(window, cx);
-        });
-        menu.focus_handle(cx).focus(window, cx);
-        self.customize = Some(Customize {
-            menu,
-            at,
-            anchor,
-            again: false,
-            _dismissed: dismissed,
-        });
-        cx.notify();
-    }
-
-    /// The list closed: by a click on a row, it opens again where it was, with that row's new check.
-    fn customize_dismissed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(customize) = self.customize.take() else { return };
-        if customize.again {
-            return self.open_customize_with(customize.at, customize.anchor, window, cx);
-        }
-        self.focus(window, cx);
-        cx.notify();
-    }
-
-    /// Whether the customize list is open.
-    #[must_use]
-    pub fn customize_open(&self) -> bool {
-        self.customize.is_some()
-    }
-
-    /// Closes the customize list, the keyboard back in the text.
-    pub fn close_customize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.customize.take().is_some() {
-            self.focus(window, cx);
-            cx.notify();
-        }
-    }
-
-    /// The buttons the customize list offers: the AI button only while the AI features are on.
-    fn customizable(cx: &App) -> Vec<ComposeTool> {
-        ComposeTool::ALL
-            .into_iter()
-            .filter(|tool| *tool != ComposeTool::Ai || crate::local_ai::enabled(cx))
-            .collect()
-    }
-
-    /// The customize list: a row with a check for each button that can hide (`compose-customize-<tool>`), then "+" and
-    /// Send, checked and off, as they always show.
-    fn customize_menu(&self, window: &mut Window, cx: &mut Context<Self>) -> Entity<PopupMenu> {
-        let settings = self.settings.read(cx).settings().clone();
-        let compose = cx.entity().downgrade();
-        let model = self.settings.clone();
-        let tools = Self::customizable(cx);
-        PopupMenu::build(window, cx, move |menu, _, _| {
-            let menu = tools
-                .iter()
-                .fold(menu.min_w(px(220.0)).label(SHOW_IN_TOOLBAR), |menu, tool| {
-                    let (tool, shown) = (*tool, settings.shows_compose_tool(*tool));
-                    let toggle = toggle_tool(compose.clone(), model.clone(), tool, shown);
-                    menu.item(
-                        check_row(format!("compose-customize-{}", tool.key()), tool.label(), shown)
-                            .on_click(move |_, _, cx| toggle(cx)),
-                    )
-                });
-            menu.item(check_row("compose-customize-apps".to_owned(), ACTIONS_AND_APPS, true).disabled(true))
-                .item(check_row("compose-customize-send".to_owned(), "Send", true).disabled(true))
-        })
-    }
-
-    /// The customize list over the window, where it opened.
-    pub(super) fn customize_overlay(&self) -> Option<AnyElement> {
-        let customize = self.customize.as_ref()?;
-        Some(
-            deferred(
-                anchored()
-                    .anchor(customize.anchor)
-                    .position(customize.at)
-                    .snap_to_window_with_margin(px(8.0))
-                    .child(
-                        div()
-                            .debug_selector(|| "compose-customize-menu".to_owned())
-                            .pb_1()
-                            .child(customize.menu.clone()),
-                    ),
-            )
-            .with_priority(1)
-            .into_any_element(),
-        )
-    }
-}
-
-/// Shows `tool` again, or hides it, as a click on its row of the customize list asks; the list then opens again.
-fn toggle_tool(
-    compose: gpui::WeakEntity<Compose>,
-    model: Entity<crate::settings::SettingsModel>,
-    tool: ComposeTool,
-    shown: bool,
-) -> impl Fn(&mut App) {
-    move |cx| {
-        model.update(cx, |model, cx| {
-            model.change(|settings| settings.show_compose_tool(tool, !shown), cx);
-        });
-        let _ = compose.update(cx, |this, _| {
-            if let Some(customize) = &mut this.customize {
-                customize.again = true;
-            }
-        });
-    }
-}
-
-/// A row of the customize list: its name, and a check while its button shows (`<selector>`, `<selector>-check`).
-fn check_row(selector: String, label: &'static str, checked: bool) -> PopupMenuItem {
-    let check = checked.then(|| format!("{selector}-check"));
-    PopupMenuItem::element(move |_, _| {
-        let selector = selector.clone();
-        let check = check.clone().map(|check| {
-            div()
-                .debug_selector(move || check.clone())
-                .child(Glyph::CHECK.icon().size(px(14.0)))
-        });
-        div()
-            .debug_selector(move || selector.clone())
-            .flex_1()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(div().flex_none().w(px(14.0)).children(check))
-            .child(label)
-    })
 }
 
 /// A tool's row in a menu: its icon, its name, its key as bound where the `text` is, and a check while the tool is

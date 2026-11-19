@@ -177,6 +177,50 @@ fn a_right_click_on_the_toolbar_lists_its_buttons_and_a_click_hides_one() {
 }
 
 #[test]
+fn a_right_click_opens_the_list_over_the_toolbar_s_buttons() {
+    let rig = Rig::start();
+    let Opened { cx, .. } = chat_with(&rig, Settings::default(), 1280.0);
+    right_click(cx, "compose-emoji");
+    let list = cx.debug_bounds("compose-customize-menu").unwrap();
+    for tool in ["compose-format", "compose-emoji", "compose-ai", "compose-send"] {
+        let button = cx.debug_bounds(tool).unwrap();
+        assert!(
+            list.bottom() <= button.top() + px(1.0),
+            "the list leaves {tool} visible: {list:?}, {button:?}"
+        );
+    }
+}
+
+#[test]
+fn the_list_s_keys_pass_over_its_title_and_go_round() {
+    let rig = Rig::start();
+    let Opened {
+        compose, settings, cx, ..
+    } = chat_with(&rig, Settings::default(), 900.0);
+    right_click(cx, "compose-attach");
+    // the first Down selects Format, not the title
+    cx.simulate_keystrokes("down enter");
+    draw(cx);
+    assert_eq!(hidden_tools(&settings, cx), [ComposeTool::Format]);
+    assert!(shown(cx, "compose-customize-menu"), "the list stays open");
+    // the row stays selected: Enter shows Format again
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    assert!(hidden_tools(&settings, cx).is_empty());
+    // Up from Format goes round to AI tools, the last row that can hide; Down from it to Format
+    cx.simulate_keystrokes("up enter");
+    draw(cx);
+    assert_eq!(hidden_tools(&settings, cx), [ComposeTool::Ai]);
+    cx.simulate_keystrokes("enter down enter");
+    draw(cx);
+    assert_eq!(hidden_tools(&settings, cx), [ComposeTool::Format]);
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    assert!(!compose.read_with(cx, |compose, _| compose.customize_open()));
+    assert!(cx.update(|window, cx| compose.read(cx).focused(window, cx)));
+}
+
+#[test]
 fn customize_toolbar_in_plus_opens_the_same_list() {
     let rig = Rig::start();
     let Opened { settings, cx, .. } = chat_with(&rig, Settings::default(), 900.0);

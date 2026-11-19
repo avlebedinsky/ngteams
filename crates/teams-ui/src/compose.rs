@@ -74,6 +74,7 @@
 mod apps;
 pub mod attachments;
 mod correction;
+mod customize;
 mod draft_translation;
 mod fit;
 mod menus;
@@ -103,8 +104,9 @@ use teams_proto::{Mri, is_group_chat_id};
 use teams_store::Message;
 
 pub use correction::{CorrectDraft, CorrectionStatus, KeepOriginal, SendCorrection, UseCorrection};
+pub use customize::{CustomizeClose, CustomizeDown, CustomizeToggle, CustomizeUp, SHOW_IN_TOOLBAR};
 pub use draft_translation::{DraftTranslationStatus, OpenTranslationSettings, TranslateDraft};
-pub use menus::{AI_TOOLS, CUSTOMIZE, MenuKind, SHOW_IN_TOOLBAR};
+pub use menus::{AI_TOOLS, CUSTOMIZE, MenuKind};
 
 pub use crate::editor::Editor;
 use crate::editor::convert::{self, CantLoad};
@@ -175,6 +177,7 @@ pub fn init(cx: &mut App) {
     }));
     cx.bind_keys([KeyBinding::new("secondary-shift-u", AttachFiles, Some(CONTEXT))]);
     correction::bind_keys(cx);
+    customize::bind_keys(cx);
     draft_translation::bind_keys(cx);
 }
 
@@ -724,8 +727,8 @@ pub struct Compose {
     rem: Pixels,
     /// The menu of tools that is open: More options, the AI button's or "+" ([`menus`]).
     menu: Option<menus::ToolMenu>,
-    /// The customize list, while it is open ([`menus`]).
-    customize: Option<menus::Customize>,
+    /// The customize list, while it is open ([`customize`]).
+    customize: Option<customize::Customize>,
     /// Where the button that holds "Customize toolbar" was last drawn, for the list to open by.
     customize_at: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// Whether the picker was open as the emoji button was pressed: its click then closes it.
@@ -2445,7 +2448,7 @@ impl Render for Compose {
             .child(keyed)
             .children(self.emoji_overlay(cx))
             .children(self.apps_overlay())
-            .children(self.customize_overlay())
+            .children(self.customize_overlay(cx))
             .into_any_element()
     }
 }

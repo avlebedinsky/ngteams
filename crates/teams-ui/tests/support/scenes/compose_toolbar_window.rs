@@ -1,7 +1,7 @@
 //! The message box's toolbar, drawn on the real platform in the UI sandbox (`harness = false`: GPUI runs on the process's
 //! main thread), for its screenshots: the app's window over the fake engine (`common`), a chat with a made-up draft in
-//! its box. Each surface — the bar with its one AI button, the AI menu, the language menu by it, the customize list,
-//! "+" with hidden buttons, the settings' list, a narrow window's stacked box with its More options and its "+", and a
+//! its box. Each surface — the bar with its one AI button, the AI menu, the language menu by it, the customize list
+//! from "+" and from a right click on the bar (its first row selected by Down), "+" with hidden buttons, the settings' list, a narrow window's stacked box with its More options and its "+", and a
 //! large font — runs the test again inside the sandbox in Teams Light and Teams Dark; the parent screenshots each window
 //! into `target/ui-shots/compose-toolbar-<surface>-<theme>.png`. No AI tool runs.
 //!
@@ -28,7 +28,7 @@ use std::{fs, mem};
 use common::{FakeCore, FakeEvents, LAB_A, LAB_B};
 use gpui::{App, AppContext as _, Entity, Window};
 use teams_store::{Conversation, ConversationKind, Member, Message};
-use teams_ui::compose::{Compose, MenuKind};
+use teams_ui::compose::{Compose, CustomizeDown, MenuKind};
 use teams_ui::settings::{ComposeTool, Settings, SettingsModel};
 use teams_ui::settings_view::Page;
 use teams_ui::shell::{Shell, ShellParts};
@@ -51,11 +51,12 @@ const WAIT: Duration = Duration::from_secs(20);
 /// Frames the window presents before each step, and before the child says `ready`.
 const FRAMES: usize = 30;
 /// The surfaces shot in a wide window.
-const WIDE: [&str; 7] = [
+const WIDE: [&str; 8] = [
     "bar",
     "ai-menu",
     "ai-language",
     "customize",
+    "customize-click",
     "hidden",
     "settings",
     "large-font",
@@ -282,6 +283,19 @@ fn compose(shell: &Entity<Shell>, cx: &App) -> Option<Entity<Compose>> {
     shell.read(cx).chat().map(|chat| chat.read(cx).compose().clone())
 }
 
+/// The customize list as a right click on the bar's Emoji opens it, its first row selected by Down.
+fn right_click_list(compose: &mut Compose, window: &mut Window, cx: &mut gpui::Context<Compose>) {
+    let Some(bounds) = compose.box_bounds() else {
+        eprintln!("the box was not drawn");
+        return;
+    };
+    let emoji = gpui::point(bounds.right() - gpui::px(170.0), bounds.bottom() - gpui::px(22.0));
+    compose.open_customize(emoji, window, cx);
+    after_frames(window, 2, |window, cx| {
+        window.dispatch_action(Box::new(CustomizeDown), cx);
+    });
+}
+
 /// Puts the window in `surface`'s state.
 fn show(shell: &Entity<Shell>, surface: &str, window: &mut Window, cx: &mut App) {
     if surface == "settings" {
@@ -305,6 +319,7 @@ fn show(shell: &Entity<Shell>, surface: &str, window: &mut Window, cx: &mut App)
                 "ai-menu" | "large-font" => compose.open_menu(MenuKind::Ai, window, cx),
                 "ai-language" => compose.open_language_menu(window, cx),
                 "customize" => compose.customize_toolbar(window, cx),
+                "customize-click" => right_click_list(compose, window, cx),
                 "hidden" | "narrow-hidden" => compose.open_menu(MenuKind::Plus, window, cx),
                 "narrow-more" => compose.open_more(window, cx),
                 _ => {}
