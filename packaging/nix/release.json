@@ -1,7 +1,7 @@
 {
-  "version": "0.1.0.142",
+  "version": "0.1.0.144",
   "x86_64-linux": {
-    "url": "https://github.com/nickalie/ngteams/releases/download/v0.1.0.142/ngteams-0.1.0.142-linux-x86_64.tar.gz",
-    "hash": "sha256-b3m6QQ4KdCRu687ggjJhgBl/CCC562w8FNgJOC8mcsc="
+    "url": "https://github.com/nickalie/ngteams/releases/download/v0.1.0.144/ngteams-0.1.0.144-linux-x86_64.tar.gz",
+    "hash": "sha256-pMu6/82G0dxaWDG85HExGdYtrZw6HzUiVd190Z3VPdQ="
   }
 }
