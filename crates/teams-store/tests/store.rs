@@ -2338,27 +2338,30 @@ fn a_horizon_bookmark_keeps_the_later_time_and_goes_with_its_conversation() {
     assert_eq!(store.horizon_bookmark(CHAT).expect("gone"), None);
 }
 
-#[test]
-fn a_chat_marked_unread_counts_from_the_mark_until_a_later_bookmark_ends_it() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let mut store = with_chat(&dir).expect("a store with the chat");
+/// The a–b chat with two messages from the peer and our own newest, all read.
+fn read_chat(dir: &tempfile::TempDir) -> Result<Store, StoreError> {
+    let mut store = with_chat(dir)?;
     for (at, sender) in [(1000, PEER), (2000, PEER), (3000, ME)] {
-        store
-            .upsert_message(&message(&at.to_string(), at, "x", at, sender), None)
-            .expect("message");
+        store.upsert_message(&message(&at.to_string(), at, "x", at, sender), None)?;
     }
-    let horizon = ReadHorizon {
+    store.set_read_horizon(&ReadHorizon {
         conversation_id: CHAT.to_owned(),
         user: ME.to_owned(),
         last_read_arrival: 3000,
         updated: 3000,
         raw: None,
-    };
-    store.set_read_horizon(&horizon).expect("all read");
+    })?;
+    Ok(store)
+}
+
+#[test]
+fn a_chat_marked_unread_counts_from_the_mark_whatever_its_horizon_and_newest_say() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = read_chat(&dir).expect("the chat, read");
     assert_eq!(store.unread_count(CHAT, ME).expect("read"), 0);
     assert_eq!(store.unread_mark(CHAT).expect("none"), None);
 
-    // "Mark as unread" on the first message: from it on, whatever the horizon and the newest message say
+    // "Mark as unread" on the first message
     assert_eq!(
         store.set_unread_bookmark(CHAT, 999, 5000).expect("marked"),
         Applied::Inserted
@@ -2374,7 +2377,13 @@ fn a_chat_marked_unread_counts_from_the_mark_until_a_later_bookmark_ends_it() {
         Applied::Ignored
     );
     assert_eq!(store.unread_mark(CHAT).expect("kept"), Some(2999));
+}
 
+#[test]
+fn a_later_mark_all_read_or_a_bookmark_of_zeros_ends_a_mark() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = read_chat(&dir).expect("the chat, read");
+    store.set_unread_bookmark(CHAT, 2999, 6000).expect("marked");
     // a mark-all-read after the mark reads it as the rest
     store
         .set_app_read_horizon(AppReadHorizon { chat: 7000, channel: 0 })
@@ -2382,7 +2391,6 @@ fn a_chat_marked_unread_counts_from_the_mark_until_a_later_bookmark_ends_it() {
     assert_eq!(store.unread_count(CHAT, ME).expect("all read after the mark"), 0);
     store.set_app_read_horizon(AppReadHorizon::default()).expect("reset");
     assert_eq!(store.unread_count(CHAT, ME).expect("marked again"), 1);
-
     // the chat opened again: `0;<ms>;0`
     assert_eq!(store.set_horizon_bookmark(CHAT, 8000).expect("ended"), Applied::Updated);
     assert_eq!(store.unread_mark(CHAT).expect("ended"), None);

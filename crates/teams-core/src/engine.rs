@@ -2213,6 +2213,29 @@ where
 
 /// The future `make` makes, on the heap. In a debug build a poll frame holds every future made in it by value and
 /// shares no slot between them; made here instead, they cost the caller's frame a pointer each.
+/// Whether `action` moves the account's own read state in a conversation: a read receipt or an unread mark's write.
+fn is_read_state(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::Read { .. } | Action::MarkUnread { .. } | Action::MarkRead { .. } | Action::EndUnreadMark { .. }
+    )
+}
+
+/// The error of an action [`EngineRequests::write`] handles on its own path, should it reach the generic command.
+fn not_generic(action: &Action) -> EngineError {
+    let message = match action {
+        Action::MarkUnread { conversation, .. }
+        | Action::MarkRead { conversation }
+        | Action::EndUnreadMark { conversation } => conversation.clone(),
+        _ => activity::FEED.to_owned(),
+    };
+    EngineError::Unknown {
+        message,
+        missing: "its own write handling",
+        action: "converted to a generic command",
+    }
+}
+
 fn on_heap<F: Future>(make: impl FnOnce() -> F) -> Pin<Box<F>> {
     Box::pin(make())
 }
@@ -2890,19 +2913,8 @@ where
         if matches!(action, Action::ActivitySeen | Action::ActivityAllRead) {
             return on_heap(|| self.activity_write(&action)).await;
         }
-        if let Action::Read {
-            conversation,
-            message_id,
-        } = action
-        {
-            let row = self.inbox.queue_read(&mut self.store, conversation, message_id)?;
-            return on_heap(|| self.send_row(row.id)).await;
-        }
-        if matches!(
-            action,
-            Action::MarkUnread { .. } | Action::MarkRead { .. } | Action::EndUnreadMark { .. }
-        ) {
-            return on_heap(|| self.unread_write(action)).await;
+        if is_read_state(&action) {
+            return on_heap(|| self.read_write(action)).await;
         }
         let command = if let Action::ActivityTurnOffApp { item } = action {
             on_heap(|| self.activity_app_command(&item)).await?
@@ -3068,22 +3080,12 @@ where
                 self.standing(activity::FEED, &item)?;
                 Command::ActivityRead { item, read }
             }
-            Action::ActivitySeen | Action::ActivityAllRead | Action::ActivityTurnOffApp { .. } => {
-                return Err(EngineError::Unknown {
-                    message: activity::FEED.to_owned(),
-                    missing: "activity write handling",
-                    action: "converted to a generic command",
-                });
-            }
-            Action::MarkUnread { conversation, .. }
-            | Action::MarkRead { conversation }
-            | Action::EndUnreadMark { conversation } => {
-                return Err(EngineError::Unknown {
-                    message: conversation,
-                    missing: "unread mark handling",
-                    action: "converted to a generic command",
-                });
-            }
+            other @ (Action::ActivitySeen
+            | Action::ActivityAllRead
+            | Action::ActivityTurnOffApp { .. }
+            | Action::MarkUnread { .. }
+            | Action::MarkRead { .. }
+            | Action::EndUnreadMark { .. }) => return Err(not_generic(&other)),
         })
     }
 
@@ -3146,6 +3148,19 @@ where
         let row = enqueue(&mut self.store, &command)?;
         self.emit(Event::Queued(row.clone()));
         self.send_row(row.id).await
+    }
+
+    /// A read receipt (its local horizon moved when it is queued), or an unread mark's write ([`Self::unread_write`]).
+    async fn read_write(&mut self, action: Action) -> Result<OutboxEntry, EngineError> {
+        if let Action::Read {
+            conversation,
+            message_id,
+        } = action
+        {
+            let row = self.inbox.queue_read(&mut self.store, conversation, message_id)?;
+            return self.send_row(row.id).await;
+        }
+        self.unread_write(action).await
     }
 
     /// "Mark as unread", "Mark as read" and the end of a mark: the rows queued in order on the conversation's read

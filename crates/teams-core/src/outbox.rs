@@ -1067,23 +1067,8 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
                 Some(request) => self.deliver(request).await,
                 None => Tried::NotSent("the chat's members don't make a chat".to_owned()),
             },
-            Command::UnreadMark {
-                conversation,
-                message_id,
-                client_message_id,
-            } => {
-                let request = match (message_id, client_message_id) {
-                    (Some(message_id), Some(client_message_id)) => {
-                        UnreadMark::from_message(conversation, &message_id, client_message_id)
-                    }
-                    _ => Some(UnreadMark::cleared(conversation)),
-                };
-                match request {
-                    Some(request) => self.deliver(request.at(at)).await,
-                    None => Tried::NotSent("the message's id isn't an arrival number".to_owned()),
-                }
-            }
             command @ (Command::AddMembers { .. }
+            | Command::UnreadMark { .. }
             | Command::ActivityRead { .. }
             | Command::FeedRead
             | Command::ActivityTurnOffApp { .. }
@@ -1091,7 +1076,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         }
     }
 
-    /// [`Outbox::attempt`]'s people added to a chat and the activity feed's writes.
+    /// [`Outbox::attempt`]'s people added to a chat, the activity feed's writes and a conversation's unread mark.
     async fn attempt_more(&self, command: Command, at: i64, row: i64) -> Tried {
         match command {
             Command::AddMembers {
@@ -1111,6 +1096,22 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
                 None => Tried::NotSent("the activity item's id can't be read".to_owned()),
             },
             Command::FeedRead => self.deliver(MarkFeedRead::at(at)).await,
+            Command::UnreadMark {
+                conversation,
+                message_id,
+                client_message_id,
+            } => {
+                let request = match (message_id, client_message_id) {
+                    (Some(message_id), Some(client_message_id)) => {
+                        UnreadMark::from_message(conversation, &message_id, client_message_id)
+                    }
+                    _ => Some(UnreadMark::cleared(conversation)),
+                };
+                match request {
+                    Some(request) => self.deliver(request.at(at)).await,
+                    None => Tried::NotSent("the message's id isn't an arrival number".to_owned()),
+                }
+            }
             Command::ActivityTurnOffApp { app, activity_types } => self.turn_off_app(row, &app, &activity_types).await,
             Command::ActivityRestoreApp { app, preference } => {
                 let mut settings = match self.app_settings().await {

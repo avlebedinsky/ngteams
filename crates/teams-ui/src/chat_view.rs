@@ -1119,16 +1119,9 @@ pub struct ChatView {
     /// Where the store's next older page starts; `None` once the store has no older message.
     next: Option<PageCursor>,
     history: History,
-    /// The account's read horizon when the chat opened.
-    horizon: Option<i64>,
-    /// Where the chat was marked unread ("Mark as unread"): when it opened, or here since. The "New messages" divider
-    /// stands before the first message after it.
-    mark: Option<i64>,
-    /// The chat was marked unread while this view shows it: no read receipt goes until it is shown again, as Teams
-    /// keeps the chat unread until it is opened again.
-    marked_here: bool,
-    /// A mark the chat had when it opened ends once the view is shown.
-    mark_to_end: bool,
+    /// The account's read horizon when the chat opened, where the chat was marked unread ("Mark as unread"), and what
+    /// the view does about the mark.
+    marked: Marked,
     /// People as the engine has them, by MRI: the ask whose answer the entry takes, and that answer (`None`: asked,
     /// no answer yet or none).
     people: HashMap<String, (u64, Option<Shown>)>,
@@ -1340,10 +1333,7 @@ impl ChatView {
             reactions: HashMap::new(),
             next: None,
             history: History::More,
-            horizon: None,
-            mark: None,
-            marked_here: false,
-            mark_to_end: false,
+            marked: Marked::default(),
             people: HashMap::new(),
             bot_faces: bot_chat::BotFaces::default(),
             asks: 0,
@@ -1623,7 +1613,7 @@ impl ChatView {
         self.shown = if shown { Visibility::Shown } else { Visibility::Hidden };
         if shown {
             // shown again: the chat is opened again, so a mark made here or on the chat list ends
-            self.marked_here = false;
+            self.marked.standing = Standing::Nothing;
             self.reread_mark(cx);
             self.want_receipt(cx);
         } else {
@@ -2650,15 +2640,24 @@ impl ChatView {
             .update(cx, |translation, cx| translation.follow(&held, &name_of, cx));
     }
 
+    /// The first load's read horizon and mark: where the divider stands, and whether the mark is to end.
+    fn take_horizon(&mut self, horizon: Option<i64>, mark: Option<i64>) {
+        // a channel's post or a thread marks no "New messages": no read receipt moves its horizon here
+        self.marked.horizon = horizon.filter(|_| !self.place.in_channel());
+        if self.marked.standing != Standing::MadeHere {
+            self.marked.at = mark.filter(|_| !self.place.in_channel());
+            // the channel's posts end its mark, not a thread opened beside them
+            self.marked.standing = if mark.is_some() && !matches!(self.place, Place::Thread { .. }) {
+                Standing::ToEnd
+            } else {
+                Standing::Nothing
+            };
+        }
+    }
+
     fn take(&mut self, load: Load, read: Read) {
         if let Horizon::Read(horizon, mark) = read.horizon {
-            // a channel's post or a thread marks no "New messages": no read receipt moves its horizon here
-            self.horizon = horizon.filter(|_| !self.place.in_channel());
-            if !self.marked_here {
-                self.mark = mark.filter(|_| !self.place.in_channel());
-                // the channel's posts end its mark, not a thread opened beside them
-                self.mark_to_end = mark.is_some() && !matches!(self.place, Place::Thread { .. });
-            }
+            self.take_horizon(horizon, mark);
         }
         if let Some(roots) = read.roots {
             self.roots = roots;
@@ -3484,7 +3483,7 @@ impl ChatView {
             &self.conversation,
             rows,
             self.history,
-            (self.horizon, self.mark),
+            (self.marked.horizon, self.marked.at),
             &Local,
         );
         items.extend(self.pending(&known, now_ms).into_iter().map(Item::Pending));
@@ -3585,7 +3584,7 @@ impl ChatView {
             // a channel's horizon isn't moved from here: no capture showed a channel's receipt
             && !self.place.in_channel()
             && !self.core.read_only()
-            && !self.marked_here
+            && self.marked.standing != Standing::MadeHere
             && self.settings.read(cx).sends_read_receipts();
         if !wanted {
             return None;
@@ -3645,9 +3644,8 @@ impl ChatView {
             message.to_owned()
         };
         self.receipt = None;
-        self.marked_here = true;
-        self.mark_to_end = false;
-        self.mark = Some(arrival - 1);
+        self.marked.at = Some(arrival - 1);
+        self.marked.standing = Standing::MadeHere;
         // the row comes back as the engine's events
         drop(self.core.write(Action::MarkUnread {
             conversation: self.conversation.clone(),
@@ -3665,14 +3663,14 @@ impl ChatView {
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             let Ok(Some(mark)) = reply.await else { return };
             let _ = this.update(cx, |view, cx| {
-                if view.marked_here {
+                if view.marked.standing == Standing::MadeHere {
                     return;
                 }
                 if !view.place.in_channel() {
-                    view.mark = Some(mark);
+                    view.marked.at = Some(mark);
                     view.rebuild(cx);
                 }
-                view.mark_to_end = true;
+                view.marked.standing = Standing::ToEnd;
                 view.end_mark(cx);
             });
         })
@@ -3681,10 +3679,10 @@ impl ChatView {
 
     /// Ends the mark the chat had when it opened, once the view is shown, as Teams does on opening a marked chat.
     fn end_mark(&mut self, cx: &mut Context<Self>) {
-        if !self.mark_to_end || !self.is_shown() || self.core.read_only() {
+        if self.marked.standing != Standing::ToEnd || !self.is_shown() || self.core.read_only() {
             return;
         }
-        self.mark_to_end = false;
+        self.marked.standing = Standing::Nothing;
         drop(self.core.write(Action::EndUnreadMark {
             conversation: self.conversation.clone(),
         }));
@@ -4777,6 +4775,27 @@ pub fn message_key(item: &MessageItem) -> MessageKey {
 /// A pending post's place among the view's messages for the text selection: after every message, by its row.
 fn pending_key(pending: &PendingItem) -> MessageKey {
     MessageKey::new((i64::MAX, pending.note.row), format!("pending-{}", pending.note.row))
+}
+
+/// Where the "New messages" divider stands: before the first message after the mark ("Mark as unread": when the chat
+/// opened, or here since), else after the read horizon as the chat opened.
+#[derive(Default)]
+struct Marked {
+    horizon: Option<i64>,
+    at: Option<i64>,
+    standing: Standing,
+}
+
+/// What the view does about the chat's mark.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Standing {
+    #[default]
+    Nothing,
+    /// The chat had the mark when it opened, or when it was shown again: the mark ends once the view is shown.
+    ToEnd,
+    /// The chat was marked unread while this view shows it: no read receipt goes until it is shown again, as Teams
+    /// keeps the chat unread until it is opened again.
+    MadeHere,
 }
 
 /// Whether a load read the account's read horizon, and what it was.
