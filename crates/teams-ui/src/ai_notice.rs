@@ -3,14 +3,16 @@
 //! turn them off. The answer is "Use AI features" in Settings under General ([`crate::settings::Settings::ai_features`]).
 //! The shell shows it over everything after the first run's screen, as a modal dialog: it takes the keyboard and keeps
 //! Tab in itself (the kit's `focus_trap`), and it fits the window at every font size, its points scrolled when they do
-//! not fit and its buttons wrapped.
+//! not fit and its buttons wrapped. A scroll bar shows beside the points whenever they do not fit, so the user sees
+//! that more text follows.
 
 use gpui::{
     AnyElement, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px, rems, rgb,
+    Render, ScrollHandle, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px, rems, rgb,
 };
 use gpui_component::FocusTrapElement as _;
 use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::scroll::{Scrollbar, ScrollbarMode};
 
 use crate::icons::{Glyph, selected_by};
 use crate::settings::SettingsModel;
@@ -34,6 +36,9 @@ const WIDTH_REMS: f32 = 34.0;
 /// The space the dialog leaves to the window's edges, px.
 const MARGIN: f32 = 48.0;
 
+/// The scroll bar's track, px: the kit's width, in the dialog's padding right of the points.
+const SCROLLBAR_WIDTH: f32 = 16.0;
+
 /// The notice was answered: the shell gives the keyboard back to the window.
 pub struct Answered;
 
@@ -41,6 +46,8 @@ pub struct Answered;
 pub struct AiNotice {
     model: Entity<SettingsModel>,
     focus: FocusHandle,
+    /// The points' scroll position, which the scroll bar shows and moves.
+    body: ScrollHandle,
     _observing: Subscription,
 }
 
@@ -52,6 +59,7 @@ impl AiNotice {
         Self {
             model,
             focus: cx.focus_handle(),
+            body: ScrollHandle::new(),
             _observing: observing,
         }
     }
@@ -114,10 +122,61 @@ impl Render for AiNotice {
             .text_color(rgb(palette.foreground))
             .shadow_lg()
             .child(Self::title(palette))
+            .child(self.body(palette))
+            .child(
+                div()
+                    .debug_selector(|| "ai-notice-buttons".to_owned())
+                    .flex_none()
+                    .flex()
+                    .flex_wrap()
+                    .justify_end()
+                    .gap_2()
+                    .child(Self::answer("ai-notice-off", false, cx))
+                    .child(Self::answer("ai-notice-on", true, cx)),
+            )
+            .focus_trap("ai-notice-trap", &self.focus)
+    }
+}
+
+impl AiNotice {
+    /// The points and the "change this later" line, scrolled when they do not fit. The scroll bar beside them shows
+    /// whenever they do not fit; its test selector `ai-notice-scrollbar` is there then (as the last frame laid out).
+    fn body(&self, palette: Palette) -> gpui::Div {
+        let cut = self.body.max_offset().y > px(0.0);
+        let scrollbar = div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .right(px(-SCROLLBAR_WIDTH))
+            .w(px(SCROLLBAR_WIDTH))
+            .child(
+                Scrollbar::vertical(&self.body)
+                    .id("ai-notice-scrollbar")
+                    .mode(ScrollbarMode::Always)
+                    .viewport_from_layout()
+                    // the kit's thumb takes the hover colour, too light to see on the dialog
+                    .styles(|styles| {
+                        styles
+                            .thumb(|thumb| thumb.bg(gpui::Hsla::from(rgb(palette.muted_foreground)).alpha(0.6)))
+                            .thumb_hover(|thumb| thumb.bg(gpui::Hsla::from(rgb(palette.muted_foreground))))
+                    }),
+            );
+        let scrollbar = if cut {
+            scrollbar.debug_selector(|| "ai-notice-scrollbar".to_owned())
+        } else {
+            scrollbar
+        };
+        div()
+            .relative()
+            .min_h_0()
+            .flex_shrink(1.0)
+            .flex()
+            .flex_col()
             .child(
                 div()
                     .debug_selector(|| "ai-notice-body".to_owned())
                     .id("ai-notice-body")
+                    .track_scroll(&self.body)
                     .min_h_0()
                     .flex_shrink(1.0)
                     .overflow_y_scroll()
@@ -135,22 +194,9 @@ impl Render for AiNotice {
                             .child(LATER),
                     ),
             )
-            .child(
-                div()
-                    .debug_selector(|| "ai-notice-buttons".to_owned())
-                    .flex_none()
-                    .flex()
-                    .flex_wrap()
-                    .justify_end()
-                    .gap_2()
-                    .child(Self::answer("ai-notice-off", false, cx))
-                    .child(Self::answer("ai-notice-on", true, cx)),
-            )
-            .focus_trap("ai-notice-trap", &self.focus)
+            .child(scrollbar)
     }
-}
 
-impl AiNotice {
     /// The icon and the title.
     fn title(palette: Palette) -> gpui::Div {
         div()

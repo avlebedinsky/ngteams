@@ -1,7 +1,8 @@
 //! The AI notice as a modal dialog, in the kit's root (which takes Tab), as the app opens it over the shell: it takes
 //! the keyboard when it shows, Tab and Shift+Tab stay in it, Enter or Space on a button answers it, nothing behind it
-//! takes a key while it waits except the keys of the call that rings or is up, and the whole notice fits the window at
-//! the largest font.
+//! takes a key while it waits except the keys of the call that rings or is up, the banner of a call that rings shows
+//! over it and takes a click, and the whole notice fits the window at the largest font, a scroll bar beside its points
+//! whenever they do not fit.
 
 #![cfg(test)]
 
@@ -15,8 +16,8 @@ use std::sync::Arc;
 
 use common::{LAB_B, Rig};
 use gpui::{
-    AppContext as _, Bounds, Entity, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, Pixels, ScrollDelta,
-    ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext, point, px, size,
+    AppContext as _, Bounds, Entity, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, MouseButton, Pixels, Point,
+    ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext, point, px, size,
 };
 use teams_core::{CallAction, CallId, CallStatus, Event, IncomingCall, RegistrationReport};
 use teams_proto::Mri;
@@ -193,6 +194,100 @@ fn a_call_that_rings_while_the_notice_waits_is_answered_or_declined_from_the_key
     assert_eq!(actions().len(), 3);
     assert!(bounds(cx, "ai-notice").is_some(), "the notice still waits");
     assert_eq!(answer(&shell, cx), None);
+}
+
+/// A click (down and up) at `at`, on what the last frame drew there.
+fn click_at(cx: &mut VisualTestContext, at: Point<Pixels>) {
+    draw(cx);
+    cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+}
+
+#[test]
+fn the_banner_of_a_call_that_rings_while_the_notice_waits_shows_over_it_and_takes_a_click() {
+    let rig = Rig::start_with(|cx| teams_ui::Models::with_calls(None, cx));
+    let (shell, cx) = notice_window(&rig, waiting(theme_font()));
+    rig.send(Event::CallingRegistration(RegistrationReport::Registered));
+    let actions = || rig.core.call_actions.lock().unwrap().clone();
+    for (number, button, action) in [
+        (
+            1,
+            "call-decline",
+            CallAction::Decline {
+                call: CallId::for_tests(1),
+            },
+        ),
+        (
+            2,
+            "call-answer",
+            CallAction::Answer {
+                call: CallId::for_tests(2),
+            },
+        ),
+    ] {
+        rig.send(Event::IncomingCall(IncomingCall {
+            call: CallId::for_tests(number),
+            caller: Mri::new(LAB_B),
+            caller_name: None,
+            group_chat: None,
+        }));
+        let found = bounds(cx, button).expect("the banner's button");
+        click_at(cx, found.center());
+        assert_eq!(actions().last(), Some(&action), "a click on {button} over the notice");
+    }
+    rig.send(Event::Call {
+        call: CallId::for_tests(2),
+        status: CallStatus::Connected,
+    });
+    assert!(bounds(cx, "ai-notice").is_some(), "the notice still waits");
+    assert_eq!(answer(&shell, cx), None);
+    // the notice keeps the keyboard after the calls
+    press(cx, "tab enter");
+    assert_eq!(answer(&shell, cx), Some(false));
+}
+
+#[test]
+fn the_points_show_a_scroll_bar_only_when_they_do_not_fit() {
+    let largest = *teams_ui::theme::FONT_SIZES.end();
+    for (font, width, height, cut) in [
+        (theme_font(), 1280.0, 800.0, false),
+        (largest, 1280.0, 800.0, false),
+        (largest, 1280.0, 480.0, true),
+        (largest, 520.0, 800.0, true),
+    ] {
+        let rig = Rig::start();
+        let (_, cx) = notice_window(&rig, waiting(font));
+        cx.simulate_resize(size(px(width), px(height)));
+        draw(cx);
+        let body = bounds(cx, "ai-notice-body").expect("the points");
+        let later = bounds(cx, "ai-notice-later").expect("the last line");
+        assert_eq!(
+            later.bottom() > body.bottom(),
+            cut,
+            "font {font}, {width}x{height}: the points are cut"
+        );
+        let scrollbar = bounds(cx, "ai-notice-scrollbar");
+        assert_eq!(
+            scrollbar.is_some(),
+            cut,
+            "font {font}, {width}x{height}: the scroll bar shows only when the points are cut"
+        );
+        let Some(scrollbar) = scrollbar else { continue };
+        let dialog = bounds(cx, "ai-notice").expect("the notice");
+        assert!(
+            inside(scrollbar, dialog) && scrollbar.left() >= body.right(),
+            "font {font}, {width}x{height}: the scroll bar {scrollbar:?} is right of the points {body:?}, in the notice"
+        );
+        assert_eq!((scrollbar.top(), scrollbar.bottom()), (body.top(), body.bottom()));
+        // a click low on the bar's track scrolls the last line into view
+        click_at(cx, point(scrollbar.center().x, scrollbar.bottom() - px(2.0)));
+        let scrolled = bounds(cx, "ai-notice-later").expect("the last line");
+        assert!(
+            scrolled.bottom() <= body.bottom(),
+            "font {font}, {width}x{height}: the scroll bar brings the last line into the box"
+        );
+    }
 }
 
 #[test]

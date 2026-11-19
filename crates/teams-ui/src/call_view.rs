@@ -579,6 +579,12 @@ impl CallBar {
                 cx,
                 |this, cx| this.ask(Ask::Decline, cx),
             ));
+        // the sheet's rounding: the shell can draw the banner over the AI notice, above the sheet's corner caps
+        let banner = if palette.depth {
+            banner.rounded_t(px(theme::SHEET_RADIUS))
+        } else {
+            banner
+        };
         // drawn whole at once: faded in, it is an empty band over the panes while the ring's start holds the thread
         banner.into_any_element()
     }
