@@ -1025,6 +1025,13 @@ const FACE_MARGIN: u32 = 6;
 /// people.
 const PEOPLE_BUTTON: (u32, u32) = (1243, 71);
 const START_GROUP: (u32, u32) = (1098, 258);
+/// The people flyout's rows of the chat's members, under its title, over "Start a group chat".
+const PEOPLE_MEMBERS: Rect = Rect {
+    x0: 1012,
+    y0: 128,
+    x1: 1256,
+    y1: 232,
+};
 /// The suggestions of "Start a group chat", inside the picker's border, under its box.
 const GROUP_PICKER: Rect = Rect {
     x0: 726,
@@ -1082,8 +1089,8 @@ impl Walk<'_> {
         Ok(())
     }
 
-    /// The chat's people (the header's button), "Start a group chat" and "lab" typed: its suggestions (people and
-    /// chats, 32 px faces) in both themes, as [`Self::list_faces`] checks them, one size for all.
+    /// The chat's people (the header's button), "Start a group chat" and "lab" typed: the flyout's members and the
+    /// picker's suggestions (people and chats, 32 px faces) in both themes, as [`Self::list_faces`] checks them.
     fn start_group_faces(&mut self) -> SandboxResult {
         self.run.open(PERSON_B.chat)?;
         thread::sleep(SETTLE);
@@ -1101,13 +1108,16 @@ impl Walk<'_> {
             thread::sleep(SETTLE);
             let name = format!("qa543-start-group-lab-{}.png", theme_name(dark));
             self.run.shot(self.sandbox, &name)?;
+            // its own name keeps the members' zoomed faces apart from the suggestions'
+            let members = name.replace(".png", "-members.png");
+            self.check_faces((PEOPLE_MEMBERS, SUGGESTION_FACE), (2, Some(2)), &members)?;
             self.check_faces((GROUP_PICKER, SUGGESTION_FACE), (2, Some(2)), &name)?;
         }
         self.run.theme(false)?;
         self.run.input.key(keys::ESC)?;
         self.run.input.key(keys::ESC)?;
         self.people_until("the people flyout closed", |open, _, _| !open)?;
-        step("Start a group chat's suggestions: one size of initials for people and chats");
+        step("the people flyout and Start a group chat: one size of initials for members, people and chats");
         Ok(())
     }
 
