@@ -98,7 +98,7 @@ fn a_tree_with_a_nix_marker_outside_the_store_is_a_nix_install_too() {
     let installation = Installation::detect(&places(root.join("usr/bin/ngteams"), home.path())).unwrap();
     assert_eq!(installation.format(), Format::Nix(NixInstall::HomeManager));
     assert_eq!(installation.root(), root);
-    assert_eq!(crate::NIX_STORE, "/nix/store");
+    assert_eq!(crate::installation::NIX_STORE, "/nix/store");
 }
 
 #[test]

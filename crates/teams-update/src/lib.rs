@@ -56,7 +56,7 @@ mod stage;
 
 pub use check::{Release, Source};
 pub use install::{Prepared, Restart};
-pub use installation::{Installation, NIX_STORE, Places};
+pub use installation::{Installation, Places};
 
 /// The release marker, relative to an installed tree's root (the folder holding `usr/`): how this copy was installed,
 /// one of [`Format::marker`]'s words.
