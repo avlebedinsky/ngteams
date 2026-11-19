@@ -202,7 +202,7 @@ pub(super) fn replies_line(
     open: OnOpen,
 ) -> AnyElement {
     let faces = replies.people.iter().enumerate().map(|(at, (name, face))| {
-        let avatar = face.avatar(name, gpui_component::Size::XSmall).size(px(20.0));
+        let avatar = face.avatar(name, gpui_component::Size::Size(px(20.0)));
         let tile = div()
             .size(px(22.0))
             .rounded_full()

@@ -1022,9 +1022,7 @@ impl ChatPeople {
         let highlighted = self.highlighted == Some(at);
         let (face, detail) = match suggested {
             Picked::Person(person) => (
-                people::avatar(Some(&person.name), person.picture.as_ref(), Size::Medium)
-                    .size(px(FACE))
-                    .into_any_element(),
+                people::avatar(Some(&person.name), person.picture.as_ref(), Size::Size(px(FACE))).into_any_element(),
                 person.detail.clone(),
             ),
             Picked::Chat(row) => (

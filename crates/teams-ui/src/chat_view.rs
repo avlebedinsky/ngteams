@@ -3747,8 +3747,7 @@ impl ChatView {
             crate::bot_face::tile(self.bot_faces.apps.get(bot), AVATAR, palette).into_any_element()
         } else {
             item.face
-                .avatar(&item.sender_name, Size::Medium)
-                .size(px(AVATAR))
+                .avatar(&item.sender_name, Size::Size(px(AVATAR)))
                 .into_any_element()
         };
         let id = item.id.clone();

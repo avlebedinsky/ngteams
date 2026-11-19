@@ -792,14 +792,11 @@ impl PictureViewer {
                 .items_center()
                 .gap_3()
                 .min_w_0()
-                .child(
-                    people::avatar(
-                        current.face.named.then_some(&current.sender),
-                        current.face.picture.as_ref(),
-                        AvatarSize::Medium,
-                    )
-                    .size(px(32.0)),
-                )
+                .child(people::avatar(
+                    current.face.named.then_some(&current.sender),
+                    current.face.picture.as_ref(),
+                    AvatarSize::Size(px(32.0)),
+                ))
                 .child(
                     div()
                         .flex()
