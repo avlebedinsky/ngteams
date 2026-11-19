@@ -219,6 +219,11 @@ name = "qa_ai_notice_window"
 harness = false
 
 [[test]]
+# QA of task 579, round 2: a call rings while the AI notice waits, in the app's window over the mock
+name = "qa_ai_notice_ring_window"
+harness = false
+
+[[test]]
 # QA of task 575: one message translated from its More options menu, over the mock and an own server, in the UI sandbox
 name = "qa_translate_message_window"
 harness = false

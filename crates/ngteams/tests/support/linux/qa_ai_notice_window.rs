@@ -1,4 +1,4 @@
-//! QA of task 579 (round 1), in the UI sandbox: the AI notice and the "Use AI features" switch. The real app runs as a
+//! QA of task 579 (rounds 1 and 2), in the UI sandbox: the AI notice and the "Use AI features" switch. The real app runs as a
 //! child in the sandbox, as lab account a on `teams-mock`, with its settings as the installed app makes them (the
 //! first run's screen asked for). The parent drives it with the sandbox's virtual pointer and keyboard, and asks the
 //! child through a file in the sandbox dir to do what a click on a view does (the same view methods) and what the
@@ -11,6 +11,9 @@
 //!   keyboard); a restart over that file (no notice; the switch on with the keyboard; on and off while a correction and
 //!   a chat's translation run); an upgrade from a file without `ai_features` at the largest font (the notice, answered
 //!   "on" with the keyboard); a file with a bad value (the notice, answered "on" with the pointer).
+//! - **Round 2** ([`round2`]): a new profile whose notice is a modal dialog (Tab, Shift+Tab, keys and clicks behind
+//!   it, the font keys, the answer and the window's keys after it, another dialog), ten starts each answered with one
+//!   Enter or Space, and at the largest font a body that scrolls and a low window.
 //!
 //! `QA579_ONLY` (a comma list of check names) runs only those. `QA579_EVIDENCE` names a directory that gets the
 //! screenshots, the settings files, the tool's logs and the results. Screenshots also go to
@@ -28,6 +31,8 @@ use std::{fs, future, thread};
 
 use gpui::{App, AsyncApp, Entity, Window, WindowHandle, WindowingModes};
 use ngteams::app::{self, Launch};
+#[path = "qa_ai_notice_round2.rs"]
+mod round2;
 #[path = "../window.rs"]
 mod support;
 use serde_json::{Value, json};
@@ -185,9 +190,14 @@ const RESTART_CHECKS: [Check; 6] = [
 ];
 
 /// An upgrade from a build without the setting, at the largest font.
-const UPGRADE_CHECKS: [Check; 3] = [
+const UPGRADE_CHECKS: [Check; 5] = [
     ("upgrade_shows_the_notice", upgrade_shows_the_notice),
     ("notice_large_font_and_narrow", notice_large_font_and_narrow),
+    (
+        "r2_body_scrolls_at_the_largest_font",
+        round2::body_scrolls_at_the_largest_font,
+    ),
+    ("r2_notice_fits_a_low_window", round2::notice_fits_a_low_window),
     ("keyboard_keeps_ai_on", keyboard_keeps_ai_on),
 ];
 
@@ -196,6 +206,35 @@ const BAD_CHECKS: [Check; 2] = [
     ("notice_font_15_narrow_and_ring", notice_font_15_narrow_and_ring),
     ("bad_value_asks_again", bad_value_asks_again),
 ];
+
+/// Round 2, a new profile: the first run's screen confirmed with the pointer, then the notice as a modal dialog.
+const R2_FIRST_CHECKS: [Check; 7] = [
+    ("r2_first_run_then_first_tab", round2::first_run_then_first_tab),
+    ("r2_tab_and_shift_tab_cycle", round2::tab_and_shift_tab_cycle),
+    ("r2_keys_behind_do_nothing", round2::keys_behind_do_nothing),
+    ("r2_pointer_behind_does_nothing", round2::pointer_behind_does_nothing),
+    ("r2_font_keys_while_waiting", round2::font_keys_while_waiting),
+    ("r2_space_answers_then_keys_work", round2::space_answers_then_keys_work),
+    ("r2_other_dialog_keeps_tab", round2::other_dialog_keeps_tab),
+];
+
+/// Round 2: ten starts of the app with the notice waiting, each answered with one key press (Enter or Space) on one
+/// button.
+const R2_REPEATS: [(&str, Check); 10] = [
+    ("r2-repeat-1", ("r2_repeat_1_enter_off", round2::enter_turns_off)),
+    ("r2-repeat-2", ("r2_repeat_2_space_keep", round2::space_keeps_on)),
+    ("r2-repeat-3", ("r2_repeat_3_enter_keep", round2::enter_keeps_on)),
+    ("r2-repeat-4", ("r2_repeat_4_space_off", round2::space_turns_off)),
+    ("r2-repeat-5", ("r2_repeat_5_enter_off", round2::enter_turns_off)),
+    ("r2-repeat-6", ("r2_repeat_6_space_keep", round2::space_keeps_on)),
+    ("r2-repeat-7", ("r2_repeat_7_enter_keep", round2::enter_keeps_on)),
+    ("r2-repeat-8", ("r2_repeat_8_space_off", round2::space_turns_off)),
+    ("r2-repeat-9", ("r2_repeat_9_enter_off", round2::enter_turns_off)),
+    ("r2-repeat-10", ("r2_repeat_10_space_keep", round2::space_keeps_on)),
+];
+
+/// The notice waits at once: the first run confirmed, no `ai_features`.
+const CONFIRMED_FILE: &str = "first_run = \"confirmed\"\n";
 
 /// What an earlier build kept: the first run confirmed, the largest font, no `ai_features`.
 const UPGRADE_FILE: &str = "first_run = \"confirmed\"\nmessage_translate_to = \"German\"\nfont_size = 24\n";
@@ -223,12 +262,25 @@ fn parent() -> SandboxResult {
     fs::write(&upgrade, UPGRADE_FILE)?;
     let bad = sandbox.path("bad-settings.toml");
     fs::write(&bad, BAD_FILE)?;
-    let runs: [(&'static str, &Path, &[Check]); 4] = [
+    let r2_fresh = sandbox.path("r2-settings.toml");
+    let mut repeats = Vec::new();
+    for (name, check) in &R2_REPEATS {
+        let file = sandbox.path(&format!("{name}-settings.toml"));
+        fs::write(&file, CONFIRMED_FILE)?;
+        repeats.push((*name, file, std::slice::from_ref(check)));
+    }
+    let mut runs: Vec<(&'static str, &Path, &[Check])> = vec![
         ("new", &fresh, &NEW_CHECKS),
         ("restart", &fresh, &RESTART_CHECKS),
         ("upgrade", &upgrade, &UPGRADE_CHECKS),
         ("bad", &bad, &BAD_CHECKS),
+        ("r2-first", &r2_fresh, &R2_FIRST_CHECKS),
     ];
+    runs.extend(
+        repeats
+            .iter()
+            .map(|(name, file, checks)| (*name, file.as_path(), *checks)),
+    );
     let mut quits = Vec::new();
     for (name, file, checks) in runs {
         if !checks.iter().any(|(check, _)| wanted(check)) {
@@ -533,6 +585,8 @@ struct User<'a> {
     settings_file: PathBuf,
     asked: u32,
     looks: u32,
+    /// Round 2: the notice before its first key, kept from one check to the next.
+    plain: Option<round2::Plain>,
 }
 
 impl<'a> User<'a> {
@@ -555,6 +609,7 @@ impl<'a> User<'a> {
             settings_file,
             asked: 0,
             looks: 0,
+            plain: None,
         };
         user.park()?;
         thread::sleep(SETTLE);
@@ -1521,6 +1576,8 @@ fn on_shell(shell: &Entity<Shell>, verb: &str, window: &mut Window, cx: &mut App
             });
         }
         ["focus"] => return focus_of(shell, window, cx),
+        // what the Teams page's "Create team" does
+        ["open-create-team"] => shell.update(cx, |shell, cx| shell.open_create_team(window, cx)),
         ["font", size] => {
             let size = size.parse().unwrap_or(teams_ui::theme::FONT_SIZE);
             model.update(cx, |model, cx| {
@@ -1564,6 +1621,10 @@ fn state_of(shell: &Entity<Shell>, window: &Window, cx: &App) -> Value {
         }),
         "main": format!("{:?}", shell.read(cx).main()),
         "width": f64::from(window.viewport_size().width),
+        "height": f64::from(window.viewport_size().height),
+        "font": model.settings().appearance.font_size,
+        "switcher": shell.read(cx).switcher().is_some(),
+        "status_menu": shell.read(cx).status_menu_open(),
         "box": compose,
         "chat_translation": translation,
         "rows": rows,
