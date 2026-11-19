@@ -204,12 +204,44 @@ fn click_at(cx: &mut VisualTestContext, at: Point<Pixels>) {
     cx.run_until_parked();
 }
 
-#[test]
-fn the_banner_of_a_call_that_rings_while_the_notice_waits_shows_over_it_and_takes_a_click() {
-    let rig = Rig::start_with(|cx| teams_ui::Models::with_calls(None, cx));
-    let (shell, cx) = notice_window(&rig, waiting(theme_font()));
-    rig.send(Event::CallingRegistration(RegistrationReport::Registered));
-    let actions = || rig.core.call_actions.lock().unwrap().clone();
+/// The settings of [`waiting`], in the theme `theme` (not the system's).
+fn waiting_in(theme: &'static str) -> SettingsModel {
+    let mut settings = Settings {
+        first_run: FirstRunState::Confirmed,
+        ..Settings::default()
+    };
+    settings.appearance.follow_system = false;
+    settings.appearance.theme = theme;
+    SettingsModel::in_memory(settings).requiring_first_run()
+}
+
+/// A click at the centre of `button`, which the notice covers: it is not under the dialog, only under its backdrop.
+fn click_behind_the_notice(cx: &mut VisualTestContext, button: &str) {
+    let found = bounds(cx, button).expect("the button behind the notice");
+    let dialog = bounds(cx, "ai-notice").expect("the notice");
+    assert!(
+        !dialog.contains(&found.center()),
+        "{button} {found:?} is beside the notice {dialog:?}"
+    );
+    click_at(cx, found.center());
+}
+
+fn ring(rig: &Rig, number: u64) {
+    rig.send(Event::IncomingCall(IncomingCall {
+        call: CallId::for_tests(number),
+        caller: Mri::new(LAB_B),
+        caller_name: None,
+        group_chat: None,
+    }));
+}
+
+fn call_actions(rig: &Rig) -> Vec<CallAction> {
+    rig.core.call_actions.lock().unwrap().clone()
+}
+
+/// Call 1 rings and its banner's Decline is clicked over the notice, then call 2 rings, its Answer is clicked and it
+/// connects. The banner is at the call bar's place, the sheet's top left.
+fn decline_and_answer_from_the_banner(rig: &Rig, cx: &mut VisualTestContext, theme: &str) {
     for (number, button, action) in [
         (
             1,
@@ -226,25 +258,89 @@ fn the_banner_of_a_call_that_rings_while_the_notice_waits_shows_over_it_and_take
             },
         ),
     ] {
-        rig.send(Event::IncomingCall(IncomingCall {
-            call: CallId::for_tests(number),
-            caller: Mri::new(LAB_B),
-            caller_name: None,
-            group_chat: None,
-        }));
+        ring(rig, number);
+        let banner = bounds(cx, "call-banner").expect("the banner");
+        let bar = bounds(cx, "call-bar").expect("the call bar");
+        assert_eq!(
+            banner.origin, bar.origin,
+            "{theme}: the banner is at the sheet's top left"
+        );
         let found = bounds(cx, button).expect("the banner's button");
         click_at(cx, found.center());
-        assert_eq!(actions().last(), Some(&action), "a click on {button} over the notice");
+        assert_eq!(
+            call_actions(rig).last(),
+            Some(&action),
+            "{theme}: a click on {button} over the notice"
+        );
     }
     rig.send(Event::Call {
         call: CallId::for_tests(2),
         status: CallStatus::Connected,
     });
-    assert!(bounds(cx, "ai-notice").is_some(), "the notice still waits");
-    assert_eq!(answer(&shell, cx), None);
-    // the notice keeps the keyboard after the calls
-    press(cx, "tab enter");
-    assert_eq!(answer(&shell, cx), Some(false));
+}
+
+/// The strip of the call that is up stays behind the notice, also while call 3 rings over it; the banner of call 3
+/// takes its Decline.
+fn the_strip_stays_behind(rig: &Rig, cx: &mut VisualTestContext, theme: &str) {
+    let taken = call_actions(rig).len();
+    click_behind_the_notice(cx, "call-hang-up");
+    assert_eq!(
+        call_actions(rig).len(),
+        taken,
+        "{theme}: Leave behind the notice takes no click"
+    );
+    ring(rig, 3);
+    click_behind_the_notice(cx, "call-hang-up");
+    assert_eq!(
+        call_actions(rig).len(),
+        taken,
+        "{theme}: Leave behind the notice takes no click while a call rings"
+    );
+    let found = bounds(cx, "call-decline").expect("the banner of the second call");
+    click_at(cx, found.center());
+    let declined = CallAction::Decline {
+        call: CallId::for_tests(3),
+    };
+    assert_eq!(
+        call_actions(rig).last(),
+        Some(&declined),
+        "{theme}: the banner takes a click during a call"
+    );
+}
+
+#[test]
+fn the_banner_of_a_call_that_rings_while_the_notice_waits_shows_over_it_and_takes_a_click() {
+    // the light theme has depth (the sheet's rounded corners), High Contrast is flat
+    for (theme, depth) in [(teams_ui::theme::LIGHT_KEY, true), ("high-contrast", false)] {
+        let rig = Rig::start_with(|cx| teams_ui::Models::with_calls(None, cx));
+        let (shell, cx) = notice_window(&rig, waiting_in(theme));
+        assert_eq!(cx.update(|_, cx| teams_ui::theme::current(cx).depth), depth, "{theme}");
+        rig.send(Event::CallingRegistration(RegistrationReport::Registered));
+        decline_and_answer_from_the_banner(&rig, cx, theme);
+        the_strip_stays_behind(&rig, cx, theme);
+        assert!(bounds(cx, "ai-notice").is_some(), "{theme}: the notice still waits");
+        assert_eq!(answer(&shell, cx), None);
+        // the user answers the notice while a call rings: after it, the banner and the strip are as without the notice
+        ring(&rig, 4);
+        press(cx, "tab enter");
+        assert_eq!(
+            answer(&shell, cx),
+            Some(false),
+            "{theme}: the notice keeps the keyboard"
+        );
+        assert!(bounds(cx, "ai-notice").is_none());
+        assert!(bounds(cx, "call-banner").is_some(), "{theme}: the call still rings");
+        let found = bounds(cx, "call-hang-up").expect("the strip of the call that is up");
+        click_at(cx, found.center());
+        let left = CallAction::HangUp {
+            call: CallId::for_tests(2),
+        };
+        assert_eq!(
+            call_actions(&rig).last(),
+            Some(&left),
+            "{theme}: Leave takes a click after the answer"
+        );
+    }
 }
 
 #[test]

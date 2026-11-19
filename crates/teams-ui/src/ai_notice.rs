@@ -1,9 +1,10 @@
 //! The AI notice: one dialog, shown once before any AI use ([`SettingsModel::awaiting_ai_notice`]). It says which AI
 //! features the app has, what runs them, who pays for them and where the text goes, and asks at once: keep them on or
 //! turn them off. The answer is "Use AI features" in Settings under General ([`crate::settings::Settings::ai_features`]).
-//! The shell shows it over everything after the first run's screen, as a modal dialog: it takes the keyboard and keeps
-//! Tab in itself (the kit's `focus_trap`), and it fits the window at every font size, its points scrolled when they do
-//! not fit and its buttons wrapped. A scroll bar shows beside the points whenever they do not fit, so the user sees
+//! The shell shows it over everything after the first run's screen, except the banner of a call that rings
+//! ([`crate::call_view::CallBar`]), as a modal dialog: it takes the keyboard and keeps Tab in itself (the kit's
+//! `focus_trap`), and it fits the window at every font size, its points scrolled when they do not fit and its buttons
+//! wrapped. A scroll bar shows beside the points whenever they do not fit, so the user sees
 //! that more text follows.
 
 use gpui::{

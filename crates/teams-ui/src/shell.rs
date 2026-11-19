@@ -903,7 +903,8 @@ impl Shell {
         // the account's calls' captions saved on this computer, as the settings ask
         crate::call_transcript::follow(core, &models.calls, settings, trace, cx);
         let (core, list, trace, calls) = (Arc::clone(core), list.clone(), Arc::clone(trace), models.calls.clone());
-        let call_bar = cx.new(|cx| CallBar::new(core, calls, list, trace, cx));
+        let settings = settings.clone();
+        let call_bar = cx.new(|cx| CallBar::new(core, (calls, list, settings), trace, cx));
         // a call up, rung or ended: the header's call button follows
         let calling = cx.observe(&models.calls, |this: &mut Self, _, cx| {
             this.trace_call_button(cx);
@@ -3423,23 +3424,16 @@ impl Shell {
 
 impl Shell {
     /// The call bar and the panes on one sheet floating on the frame ([`crate::sheet`]), right of the rail and under
-    /// the title bar. A call that rings while the AI notice waits shows over everything, as Teams' incoming call does:
-    /// its banner is drawn last, over the notice's backdrop, and takes the pointer.
+    /// the title bar. The banner of a call that rings while the AI notice waits is drawn over the notice
+    /// ([`CallBar`]).
     fn sheet(&self, palette: Palette, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
-        let calls = self.models.calls.read(cx);
-        let over_notice = calls.shows() && calls.ringing().is_some() && self.settings.read(cx).awaiting_ai_notice();
-        let call_bar = if over_notice {
-            gpui::deferred(self.call_bar.clone()).into_any_element()
-        } else {
-            self.call_bar.clone().into_any_element()
-        };
         let panes = div()
             .relative()
             .size_full()
             .flex()
             .flex_col()
             .bg(rgb(palette.background))
-            .child(call_bar)
+            .child(self.call_bar.clone())
             .child(div().flex_1().min_h_0().child(self.body(palette, window, cx)));
         let holder = div().flex_1().h_full().min_w_0();
         crate::sheet::float(holder, panes, palette, window, (RAIL_WIDTH, TITLE_HEIGHT), false)
@@ -3651,8 +3645,9 @@ impl Render for Shell {
 }
 
 impl Shell {
-    /// The first run's screen, then the AI notice, over everything while one waits for the user. The notice holds the
-    /// keyboard while it waits: whatever took it, the next frame gives it back.
+    /// The first run's screen, then the AI notice, over everything while one waits for the user, except the banner of a
+    /// call that rings ([`Shell::sheet`]). The notice holds the keyboard while it waits: whatever took it, the next
+    /// frame gives it back.
     fn first_run_layer(&self, window: &mut Window, cx: &mut App) -> Option<gpui::Div> {
         let settings = self.settings.read(cx);
         let view: AnyView = if settings.awaiting_first_run() {
