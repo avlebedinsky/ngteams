@@ -51,11 +51,12 @@ use teams_ctl::{Client, Timeouts};
 use teams_media::devices::file::{AudioInput, FileDevices, FrameCounter, Pacing, PatternCamera, StillSource};
 use teams_media::devices::{AudioSink, AudioSource, DeviceError, Devices, VideoSink, VideoSource};
 use teams_media::processing::ProcessingConfig;
-use teams_media::session::SessionConfig;
+use teams_media::session::{SCREEN_IDLE_REPEAT, SessionConfig};
 use teams_media::tone::Tone;
 use teams_proto::{CalendarEvent, EventAttendee, EventDraft, EventShowAs, Mri, Organizer, ZonedTime};
 use teams_store::OutboxState;
 use teams_ui::settings::Settings;
+use teams_ui::video::TRACE_EVERY;
 use teams_ui::{SettingsFile, VideoFeed};
 use ui_sandbox::{Running, Sandbox, SandboxOptions, SandboxResult, sandbox_or_skip, wait_until};
 
@@ -98,13 +99,10 @@ const SHOWN_BOUND: Duration = Duration::from_secs(10);
 const SHOWN_AIM: Duration = Duration::from_secs(2);
 /// How long the shared screen holds still before a joins (the source stops after [`STILL_FRAMES`] frames).
 const STILL_FOR: Duration = Duration::from_secs(3);
-/// How long no share frame may come to a's stage before the share counts as gone. A still screen's repeats come 5
-/// times each second, so a share that stays crosses a traced count in this time.
-const GONE_FOR: Duration = Duration::from_secs(10);
+/// What [`gone_for`] adds to the time of [`TRACE_EVERY`] settled repeats: a late frame, a loaded host.
+const GONE_MARGIN: Duration = Duration::from_secs(10);
 /// The frames a still source gives before it holds still.
 const STILL_FRAMES: u32 = 3;
-/// The trace tells a tile's presented frames at the first and every this many after it (`teams_ui::video`).
-const TRACE_EVERY: u64 = 30;
 const SHARE: &str = "share";
 const NIRI_CONFIG: &str = "layout {\n    gaps 0\n    default-column-width { proportion 1.0; }\n    focus-ring {\n        off\n    }\n    border {\n        off\n    }\n}\ngestures {\n    hot-corners {\n        off\n    }\n}\n";
 const SCREEN: (u32, u32) = (1920, 1080);
@@ -694,6 +692,13 @@ fn share_timeline(seen: &[Seen], first: Instant) -> String {
     lines.join(", ")
 }
 
+/// How long no traced share frame may come to a's stage before the share counts as gone. A still screen that settled
+/// goes again only each [`SCREEN_IDLE_REPEAT`] and the trace tells each [`TRACE_EVERY`]th frame, so a share that stays
+/// crosses a traced count in this time, and two in twice this time.
+fn gone_for() -> Duration {
+    SCREEN_IDLE_REPEAT.saturating_mul(u32::try_from(TRACE_EVERY).unwrap_or(u32::MAX)) + GONE_MARGIN
+}
+
 fn evidence_dirs() -> Vec<PathBuf> {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .parent()
@@ -862,7 +867,7 @@ impl<'a> Rig<'a> {
         let wanted = presented_in(&seen[..mark], call) + 2 * TRACE_EVERY;
         self.app
             .trace
-            .wait_until(&format!("{what}: {wanted} frames presented"), |seen| {
+            .wait_within(gone_for() * 2, &format!("{what}: {wanted} frames presented"), |seen| {
                 presented_in(seen, call) >= wanted
             })?;
         say(&format!(
@@ -874,21 +879,19 @@ impl<'a> Rig<'a> {
         Ok(first)
     }
 
-    /// Until no share frame comes to a's stage for [`GONE_FOR`] (the stage draws no share tile then, so nothing says
-    /// it hidden).
+    /// Until no traced share frame comes to a's stage for [`gone_for`] (the stage draws no share tile then, so nothing
+    /// says it hidden). A frame still on its way at the stop can cross a count in the first time, not in a second one.
     fn share_gone(&mut self, what: &str) -> SandboxResult {
-        let deadline = Instant::now() + WAIT;
-        loop {
+        let gone_for = gone_for();
+        for _ in 0..2 {
             let before = self.app.trace.presented();
-            thread::sleep(GONE_FOR);
+            thread::sleep(gone_for);
             if self.app.trace.presented() == before {
                 say(&format!("{what}: the share left a's stage"));
                 return Ok(());
             }
-            if Instant::now() > deadline {
-                return Err(format!("{what}: the share is still presented").into());
-            }
         }
+        Err(format!("{what}: the share is still presented").into())
     }
 
     fn windows(&self) -> SandboxResult<Vec<serde_json::Value>> {
@@ -1072,7 +1075,11 @@ impl TraceReader {
     }
 
     fn wait_until(&mut self, what: &str, done: impl Fn(&[Seen]) -> bool) -> SandboxResult {
-        let deadline = Instant::now() + WAIT;
+        self.wait_within(WAIT, what, done)
+    }
+
+    fn wait_within(&mut self, bound: Duration, what: &str, done: impl Fn(&[Seen]) -> bool) -> SandboxResult {
+        let deadline = Instant::now() + bound;
         while !done(self.catch_up()) {
             let left = deadline.saturating_duration_since(Instant::now());
             let seen = self.lines.recv_timeout(left).map_err(|_| {
