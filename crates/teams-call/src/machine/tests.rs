@@ -2813,3 +2813,57 @@ fn a_group_chat_s_meeting_its_start_named_is_joined_where_it_runs() {
     assert!(!calls.joinable("19:meeting_SyntheticMeeting@thread.v2"));
     assert!(!calls.joinable("19:a_b@unq.gbl.spaces"));
 }
+
+/// The media controller's notice for the account's video (`controlVideoStreaming`, seen 2026-11-19 at a sharer as a
+/// viewer joined): its receipt goes at once, as Teams for the web answers it, and each source it starts is told as
+/// asked for, the account's camera told apart by its roster entry. A notice the tracker didn't take is left alone.
+#[test]
+fn a_video_control_is_answered_and_each_source_it_starts_is_told_asked_for() {
+    let now = Instant::now();
+    let (mut calls, call) = connected_call(now);
+    let roster = calls
+        .call
+        .as_ref()
+        .unwrap()
+        .path_of(Kind::Conversation, "rosterUpdate")
+        .unwrap()
+        .to_owned();
+    let own = json!({"participants": {A: {"version": 1, "state": "active", "endpoints": {"e1": {"call": {
+        "mediaStreams": [{"type": "video", "label": "main-video", "sourceId": 300, "direction": "sendrecv"}]}}}}}});
+    calls.on_delivery(&delivery(&roster, &own), Observed::Nothing, now);
+    let _ = effects(&mut calls);
+
+    let path = callback(&calls, "controlVideoStreaming");
+    let notice = json!({"controlVideoStreaming": {"sequenceNumber": 7, "globalTimeStamp": "11/19/2026 09:07:46",
+        "controlInfo": [
+            {"control": 0, "sourceId": 851, "fmtParams": "max-fps=1500;max-br=955;packetization-mode=1;max-fs=8160"},
+            {"control": 0, "sourceId": 300, "fmtParams": "max-br=500"},
+            {"control": 1, "sourceId": 851, "fmtParams": ""}]}, "debugContent": null});
+    let delivered = delivery(&path, &notice);
+    calls.on_delivery(&delivered, Observed::Nothing, now);
+    assert!(effects(&mut calls).is_empty(), "a notice the tracker didn't take");
+
+    calls.on_delivery(&delivered, Observed::VideoControl, now);
+    let answered = effects(&mut calls);
+    assert_eq!(receipts(&answered), [DeliveryKey::of(&delivered)]);
+    assert_eq!(
+        events(&answered),
+        [
+            CallEvent::VideoAsked { call, camera: false },
+            CallEvent::VideoAsked { call, camera: true }
+        ]
+    );
+
+    calls.on_delivery(
+        &delivery(&path, &json!({"controlVideoStreaming": {}})),
+        Observed::VideoControl,
+        now,
+    );
+    let unread = effects(&mut calls);
+    assert_eq!(
+        receipts(&unread).len(),
+        1,
+        "a notice that doesn't read is still answered"
+    );
+    assert!(events(&unread).is_empty(), "{unread:?}");
+}

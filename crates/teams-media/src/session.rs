@@ -695,11 +695,11 @@ impl MediaSession {
         Ok(())
     }
 
-    /// Has the screen thread force a keyframe of the shared screen at its next read of its sender's counts, as for a
-    /// request libwebrtc left unanswered (tests: a far end of libwebrtc's never sends one that libwebrtc ignores).
-    #[cfg(feature = "test-support")]
-    pub fn force_screen_keyframe(&self) {
-        self.shared.video.force_keyframe.store(true, Ordering::Relaxed);
+    /// Has the screen thread make a keyframe of the shared screen at its next read of its sender's counts: the call's
+    /// media controller asked for the screen again, as when a viewer starts to watch it (`controlVideoStreaming`).
+    /// Nothing while no screen goes out.
+    pub fn ask_screen_keyframe(&self) {
+        self.shared.video.screen_asked.store(true, Ordering::Relaxed);
     }
 
     /// What libwebrtc counted of the shared screen's sender: the far end's requests for a keyframe, and the keyframes

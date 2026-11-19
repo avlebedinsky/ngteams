@@ -126,7 +126,7 @@ impl Context {
         };
         self.captions.update(&value);
     }
-    fn owns_callback(&self, path: &str) -> bool {
+    pub(super) fn owns_callback(&self, path: &str) -> bool {
         self.callbacks
             .iter()
             .any(|url| super::parse_callback(url).is_some_and(|callback| callback.path == path))
@@ -241,7 +241,7 @@ impl Tracker {
         }
         let needs_reply = matches!(
             observed,
-            Observed::Offered | Observed::Acceptance | Observed::Renegotiation
+            Observed::Offered | Observed::Acceptance | Observed::Renegotiation | Observed::VideoControl
         );
         let Some(request) = delivery.trouter_request.as_ref().filter(|_| needs_reply) else {
             return;

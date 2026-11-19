@@ -294,8 +294,8 @@ fn a_still_screen_shared_again_on_a_group_call_s_sharing_line_reaches_the_far_en
 }
 
 /// A still screen on a group call's sharing line settles to a picture a second, which keeps libwebrtc's receivers from
-/// asking for keyframes. A keyframe forced then (as for a request libwebrtc left unanswered) is made of the last
-/// picture, which goes again at once and reaches the far end.
+/// asking for keyframes. A keyframe the media controller asks for then (a viewer joins) is made of the last picture,
+/// which goes again at once and reaches the far end.
 #[test]
 fn a_still_group_share_settles_to_a_picture_a_second_and_a_forced_keyframe_reaches_the_far_end() {
     let turn = TurnServer::start().unwrap();
@@ -312,6 +312,8 @@ fn a_still_group_share_settles_to_a_picture_a_second_and_a_forced_keyframe_reach
     // past the share's first seconds, whose keyframes go unasked, and the settling after the last of them
     std::thread::sleep(START_KEYFRAMES_FOR + SCREEN_SETTLE + Duration::from_secs(1));
     let settled = mixer.share.counts().frames;
+    // a receiver under load may ask once while the share starts; a settled one has no reason to
+    let asked = a.session.screen_sender_counts().expect("the screen's sender counts");
     std::thread::sleep(SCREEN_IDLE_REPEAT * 4);
     let idle = mixer.share.counts().frames - settled;
     assert!(
@@ -320,13 +322,13 @@ fn a_still_group_share_settles_to_a_picture_a_second_and_a_forced_keyframe_reach
     );
     let counts = a.session.screen_sender_counts().expect("the screen's sender counts");
     assert_eq!(
-        counts.plis + counts.firs,
+        (counts.plis + counts.firs) - (asked.plis + asked.firs),
         0,
-        "the far end asks for no keyframe: {counts:?}"
+        "the far end asks for no keyframe once the share settled: {asked:?} then {counts:?}"
     );
 
     let before = mixer.share.counts().frames;
-    a.session.force_screen_keyframe();
+    a.session.ask_screen_keyframe();
     let limit = Instant::now() + Duration::from_secs(5);
     let mut after = counts;
     while Instant::now() < limit && after.keyframes <= counts.keyframes {

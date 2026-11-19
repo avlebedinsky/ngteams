@@ -316,6 +316,66 @@ async fn a_group_call_shares_on_its_sharing_line_by_describing_it_without_a_rene
     }
 }
 
+/// The mixer asks a sharer for its screen with a `controlVideoStreaming` notice, as a share starts and as each viewer
+/// joins (`docs/protocol/calling.md`, "Keyframes of a share"): the sharer answers each at once, as Teams for the web
+/// does, and its session makes a keyframe of the screen. Unanswered, the live mixer sent each notice again five times
+/// and forwarded no picture to a viewer who joined.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sharer_answers_the_mixer_s_video_control_at_once() {
+    let lab = Lab::start_group_video().await;
+    let mut a = lab.account(LAB_A, A_TONE).await;
+    let mut b = lab.account(LAB_B, B_TONE).await;
+    let call_a = a
+        .handle
+        .requests()
+        .call(CallAction::Call { chat: ABC_CHAT.into() })
+        .await
+        .unwrap();
+    let ringing = b.incoming().await;
+    let call_b = b
+        .handle
+        .requests()
+        .call(CallAction::Answer { call: ringing.call })
+        .await
+        .unwrap();
+    b.status(call_b, &CallStatus::Connected).await;
+    a.status(call_a, &CallStatus::Connected).await;
+    let share = CallAction::Share { call: call_b, on: true };
+    assert_eq!(b.handle.requests().call(share).await.unwrap(), call_b);
+    assert!(share_told(&mut b, call_b, true).await, "b shares");
+
+    let callback = actual_callback(
+        &lab,
+        "/callAcceptance/clientContentForMediaController/controlVideoStreaming",
+    )
+    .await;
+    let notice = serde_json::json!({"controlVideoStreaming": {"sequenceNumber": 7,
+        "globalTimeStamp": "11/19/2026 09:07:46", "controlInfo": [{"control": 0, "sourceId": 1003,
+        "fmtParams": "max-fps=1500;max-br=955;max-mbps=135000;profile-level-id=42C02A;packetization-mode=1;max-fs=8160"}]},
+        "debugContent": null});
+    let id = lab.trouter.deliver_call(LAB_B, &callback, &notice);
+    let answered = |id: i64| {
+        lab.trouter
+            .sockets()
+            .iter()
+            .filter(|socket| socket.account.as_deref() == Some(LAB_B))
+            .flat_map(|socket| socket.frames.clone())
+            .filter_map(|frame| serde_json::from_str::<Value>(frame.strip_prefix("3:::")?).ok())
+            .any(|frame| frame["id"] == id && frame["status"] == 200 && frame["body"] == "")
+    };
+    wait_until(|| answered(id)).await;
+
+    for (account, call) in [(&mut a, call_a), (&mut b, call_b)] {
+        account
+            .handle
+            .requests()
+            .call(CallAction::HangUp { call })
+            .await
+            .unwrap();
+        assert_eq!(account.ended(call).await, End::HungUp);
+    }
+}
+
 /// As in Teams, a share that starts while the account shares in a group call takes over: b shares, then the roster
 /// lists c sharing; b's share stops, told and described `recvonly` again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

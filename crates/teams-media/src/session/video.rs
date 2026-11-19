@@ -113,8 +113,9 @@ pub(super) struct VideoShared {
     received: AtomicU64,
     shown: AtomicU64,
     screen_sent: AtomicU64,
-    /// A keyframe of the shared screen is to be forced at the screen thread's next read of its counts (tests).
-    pub(super) force_keyframe: AtomicBool,
+    /// The call's media controller asked for the shared screen: a keyframe is due at the screen thread's next read of
+    /// its counts.
+    pub(super) screen_asked: AtomicBool,
     /// The sinks of the far end's video, by line, once the video started.
     sinks: Mutex<Option<LineSinks>>,
     /// The decoding threads.
@@ -318,6 +319,8 @@ impl ScreenLoop {
         let mut keyframes = KeyframeWatch::default();
         let mut polled = Instant::now();
         let mut start = StartKeyframes::new(polled);
+        // an ask from before this share is for a screen no longer sent: the share's first keyframes come anyway
+        self.shared.video.screen_asked.store(false, Ordering::Relaxed);
         while !self.stop.load(Ordering::Relaxed) && !self.shared.stopping() {
             if polled.elapsed() >= KEYFRAME_POLL {
                 polled = Instant::now();
@@ -382,8 +385,8 @@ impl ScreenLoop {
             );
         }
         let mut step = watch.read(counts, Instant::now());
-        if self.shared.video.force_keyframe.swap(false, Ordering::Relaxed) {
-            step = Step::Force;
+        if self.shared.video.screen_asked.swap(false, Ordering::Relaxed) {
+            step = Step::Asked;
         } else if unasked && step == Step::Wait {
             step = Step::Start;
         }
@@ -397,6 +400,10 @@ impl ScreenLoop {
             ),
             Step::Start => {
                 log::debug!("a keyframe of the shared screen forced in its first seconds");
+                sender.generate_key_frame();
+            }
+            Step::Asked => {
+                log::debug!("the media controller asks for the shared screen: a keyframe forced");
                 sender.generate_key_frame();
             }
             Step::Force => {

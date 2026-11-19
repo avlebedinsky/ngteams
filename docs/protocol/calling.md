@@ -818,22 +818,26 @@ a alone). What each of Teams' remaining call controls sends:
   sharing to b and c in their chat): b and c showed the screen's moving pattern beside a's blurred camera, and a's
   close log counted 325 of a shared screen sent.
 - **Keyframes of a share.** The mixer forwards a share to a viewer only from a keyframe that comes after the viewer
-  asked for the source (its `sr`, a few seconds after the share starts). It asks the sharer for keyframes with RTCP FIR
-  only (a web camera's sender counted 10 FIRs and no PLI in a meeting; web viewers send neither), and while it waits
-  it sends the same FIR again, with the same sequence number. libwebrtc makes one keyframe for each FIR sequence number
-  and ignores the repeats. Native runs on win11 (2026-11-19) traced the sharer's counts: at a share's start the mixer
-  sent 3 to 10 FIRs in 2 s, of which libwebrtc answered only the first ones; in later shares of the same call it sent
-  no FIR at all, though the viewers' `sr` was answered `ok`. Either way the viewers in the call got no RTP of the share
-  (QA saw 20 s to 3.5 min) until a participant's join made the mixer ask again. The web sharer makes a keyframe about
-  every second in a share's first seconds with no FIR or PLI counted. The native client does both: its screen sender's
-  FIR, PLI and keyframe counts are read every 250 ms, each request sends the last picture again, and a request with no
-  keyframe after 500 ms gets one forced (`RtpSenderInterface::GenerateKeyFrame`, bound through `vendor/webrtc-sys`);
-  and a keyframe is forced each second for the first 8 s of a share. With both, 6 native shares in a row (window,
-  the same window again, the whole screen) reached the web viewers in 2 to 6 s. A screen that holds still goes again
-  at 5 frames a second for 2 s after a change or a keyframe, then once a second: libwebrtc's receivers ask for a
-  keyframe after 3 s without a frame. While its encoder runs, libwebrtc pads a screen's stream (about 50 kbit/s on
-  loopback, about 100 kbit/s through the mixer), which the mixer forwards; Call health counts RTP headers and padding
-  with the media.
+  asked for the source (its `sr`). It asks the sharer for that keyframe on the call's signaling: a
+  `controlVideoStreaming` notice at the callback the sharer named in `clientContentForMediaController`
+  (`{"controlVideoStreaming": {"sequenceNumber", "globalTimeStamp", "controlInfo": [{"control": 0, "sourceId": <the
+  sharer's sharing source>, "fmtParams": "max-fps=1500;max-br=<kbit/s>;max-mbps=135000;profile-level-id=42C02A;
+  packetization-mode=1;max-fs=8160"}]}, "debugContent": null}`), about one a second while a share starts and one as
+  each viewer joins, its `max-br` changing as it goes. The web sharer answers each at once (`200`, empty body) and
+  makes one keyframe within a second of each (2026-11-06 group share: 9 notices, 9 keyframes, 0 FIR, 0 PLI). Only
+  `control` `0` was seen. Unanswered, the notice comes again 6 s, 20 s, 26 s, 40 s and 46 s later. The native client
+  first neither answered nor acted on it (win11 QA, 2026-11-19): a viewer who joined a running share got a notice at
+  the sharer within a second of the join, no keyframe came, and the viewer saw nothing for 30 s to 8 min (3 of 3
+  joins). The native client now answers each notice and forces a keyframe of the shared screen
+  (`RtpSenderInterface::GenerateKeyFrame`, bound through `vendor/webrtc-sys`) unless the notice names its camera;
+  `max-br` is logged only. The mixer also sends RTCP FIRs in a share's first seconds, the same sequence number again
+  while it waits; libwebrtc makes one keyframe for each number and ignores the repeats. So the screen sender's FIR,
+  PLI and keyframe counts are read every 250 ms, each request sends the last picture again, a request with no
+  keyframe after 500 ms gets one forced, and a keyframe is forced each second for the first 8 s of a share. A screen
+  that holds still goes again at 5 frames a second for 2 s after a change or a keyframe, then once a second:
+  libwebrtc's receivers ask for a keyframe after 3 s without a frame. While its encoder runs, libwebrtc pads a
+  screen's stream (about 50 kbit/s on loopback, about 100 kbit/s through the mixer), which the mixer forwards; Call
+  health counts RTP headers and padding with the media.
 - **The native client's share, 1:1.** Share asks the desktop's screen-cast portal (`org.freedesktop.portal.ScreenCast`:
   `CreateSession`, `SelectSources` for a monitor or a window with the cursor drawn in, `Start`, `OpenPipeWireRemote`)
   for what to share; the node it names is read over the portal's PipeWire remote for as long as the share, its frames

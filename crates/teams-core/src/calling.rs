@@ -1013,6 +1013,7 @@ where
                 self.muted_by_organizer(call, &state);
                 self.emit(Event::CallMeeting { call, state });
             }
+            CallEvent::VideoAsked { call, camera } => self.video_asked(call, camera),
             CallEvent::KeepAliveDue { call, sent } => {
                 log::info!("call {}: its keep-alive fell due (sent: {sent})", call.get());
             }

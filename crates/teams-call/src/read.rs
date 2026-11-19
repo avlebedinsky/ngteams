@@ -563,6 +563,44 @@ pub(crate) fn reaction(body: &[u8]) -> Option<(Mri, Option<String>, String)> {
     Some((mri, name, reaction))
 }
 
+/// The `control` of a [`VideoControl`] that starts (or goes on with) the source it names, the only one captured:
+/// Teams for the web makes a keyframe of the source at each.
+pub(crate) const VIDEO_CONTROL_START: i64 = 0;
+
+/// One source of a media controller's notice for the account's video.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VideoControl {
+    pub(crate) control: i64,
+    pub(crate) source: i64,
+    /// The bitrate the source may take (`max-br` of its `fmtParams`, kbit/s).
+    pub(crate) max_bitrate_kbps: Option<u64>,
+}
+
+/// The sources of a notice delivered at the account's `controlVideoStreaming` callback (`{"controlVideoStreaming":
+/// {"sequenceNumber", "globalTimeStamp", "controlInfo": [{"control": 0, "sourceId", "fmtParams": "max-fps=1500;
+/// max-br=955;…"}]}, "debugContent": null}`, seen 2026-11-06 and 2026-11-19 at a sharer, about one a second while a
+/// share starts and one as a viewer joins); `None` unless it reads.
+pub(crate) fn video_controls(body: &[u8]) -> Option<Vec<VideoControl>> {
+    let body: Value = serde_json::from_slice(body).ok()?;
+    let controls = body.pointer("/controlVideoStreaming/controlInfo")?.as_array()?;
+    Some(
+        controls
+            .iter()
+            .filter_map(|control| {
+                Some(VideoControl {
+                    control: control.get("control")?.as_i64()?,
+                    source: control.get("sourceId")?.as_i64()?,
+                    max_bitrate_kbps: control
+                        .get("fmtParams")
+                        .and_then(Value::as_str)
+                        .and_then(|params| params.split(';').find_map(|param| param.trim().strip_prefix("max-br=")))
+                        .and_then(|rate| rate.parse().ok()),
+                })
+            })
+            .collect(),
+    )
+}
+
 /// A renegotiation delivered at the account's `mediaRenegotiation` callback (`{"mediaNegotiation": {"mediaContent",
 /// "links": {"mediaAnswer", …}}}`): its offer and the link the answer goes to; `None` unless both read.
 #[cfg(test)]
@@ -968,6 +1006,30 @@ mod tests {
             !active("active", &json!({"e1": {"modalityJoined": "Call"}})),
             "no endpoint in the call"
         );
+    }
+
+    #[test]
+    fn a_video_control_reads_each_source_with_its_control_and_bitrate() {
+        let body = json!({"controlVideoStreaming": {"sequenceNumber": 1, "controlInfo": [
+            {"control": 0, "sourceId": 851, "fmtParams": "max-fps=1500;max-br=955;max-fs=8160"},
+            {"control": 0, "sourceId": 852},
+            {"sourceId": 853}]}});
+        assert_eq!(
+            super::video_controls(body.to_string().as_bytes()),
+            Some(vec![
+                super::VideoControl {
+                    control: 0,
+                    source: 851,
+                    max_bitrate_kbps: Some(955)
+                },
+                super::VideoControl {
+                    control: 0,
+                    source: 852,
+                    max_bitrate_kbps: None
+                },
+            ])
+        );
+        assert_eq!(super::video_controls(b"{}"), None);
     }
 }
 

@@ -471,6 +471,17 @@ where
         let _ = reply.send(Ok(call));
     }
 
+    /// The call's media controller asked for the account's video again (a viewer starts to watch it): a keyframe of
+    /// the shared screen, as Teams for the web makes. The camera's keyframes are libwebrtc's, at the mixer's FIR.
+    pub(super) fn video_asked(&self, call: CallId, camera: bool) {
+        if camera {
+            return;
+        }
+        if let Some(live) = self.live.as_ref().filter(|live| live.call == call) {
+            live.session.ask_screen_keyframe();
+        }
+    }
+
     /// The screen the account shares ended at the desktop: stopped, as Stop sharing does (nobody waits for it).
     pub(super) fn screen_ended(&mut self, call: CallId) {
         log::info!("call {}: the shared screen ended at the desktop", call.get());

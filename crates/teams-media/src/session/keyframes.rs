@@ -1,11 +1,14 @@
 //! The keyframes of a shared screen, as the far end asks for them.
 //!
-//! The Teams mixer asks a sender for a keyframe with an RTCP FIR when a viewer starts to watch a source, and while it
-//! waits it sends the same FIR again, with the same sequence number. libwebrtc makes one keyframe for each sequence
-//! number and ignores the rest. When the mixer still waits after that one keyframe, the viewers in the call see no
-//! share until a new number comes (a participant who joins). libwebrtc counts each FIR and PLI it gets, answered or
-//! not: [`KeyframeWatch`] compares those counts with the keyframes the encoder made, and forces a keyframe when a
-//! request stays without one for [`ANSWER_WAIT`].
+//! The Teams mixer asks a sharer for the screen with a `controlVideoStreaming` notice on the call's signaling, as a
+//! share starts and as each viewer joins: Teams for the web makes a keyframe at each, and the mixer forwards the share
+//! to a new viewer only from a keyframe. The call takes the notice and asks the session
+//! ([`super::MediaSession::ask_screen_keyframe`]).
+//!
+//! The mixer also asks with an RTCP FIR, and while it waits it sends the same FIR again, with the same sequence
+//! number. libwebrtc makes one keyframe for each sequence number and ignores the rest. libwebrtc counts each FIR and
+//! PLI it gets, answered or not: [`KeyframeWatch`] compares those counts with the keyframes the encoder made, and
+//! forces a keyframe when a request stays without one for [`ANSWER_WAIT`].
 //!
 //! A screen that holds still goes again only once a second (`super::video::SCREEN_IDLE_REPEAT`): each request also
 //! sends the last picture again at once, for the encoder to make the keyframe of.
@@ -78,6 +81,9 @@ pub(super) enum Step {
     Force,
     /// A keyframe forced unasked in a share's first seconds ([`StartKeyframes`]), of the last picture sent again.
     Start,
+    /// The call's media controller asked for the screen (`controlVideoStreaming`): a keyframe is forced, of the last
+    /// picture sent again.
+    Asked,
 }
 
 /// The requests for a keyframe that wait for one, read from the sender's counts ([`KeyframeWatch::read`]).
