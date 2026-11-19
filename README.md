@@ -28,7 +28,7 @@ built for your desktop instead of a web page in a wrapper.
 **Chat**
 - One-on-one and group chats, with formatting, emoji, @mentions, replies, reactions, edits and deletes
 - Drop in files, or paste screenshots and pictures straight into a message
-- Search messages and people, and keep unread counts in sync with your other devices
+- Search messages and people, mark chats as read or unread, and keep unread counts in sync with your other devices
 - Click or hover anyone's picture or name for their profile card, as in Teams: their availability, work hours and local time, contact details, who they work with and their org chart, with Chat, a quick message, and video and audio calls right there
 - Drafts stay put while you move around
 
@@ -263,7 +263,7 @@ Add the other people in **Settings → Manage users**. Deployment, backups, TLS 
 | <kbd>Ctrl</kbd>+<kbd>2</kbd> | Go to the chat list |
 | <kbd>Ctrl</kbd>+<kbd>4</kbd> | Open the calendar |
 | <kbd>Enter</kbd> / <kbd>Shift</kbd>+<kbd>Enter</kbd> | Send / new line |
-| <kbd>R</kbd>, <kbd>A</kbd>, <kbd>E</kbd> on a selected message | Reply, react, edit |
+| <kbd>R</kbd>, <kbd>A</kbd>, <kbd>E</kbd>, <kbd>U</kbd> on a selected message | Reply, react, edit, mark as unread |
 | <kbd>Left</kbd> / <kbd>Right</kbd>, <kbd>Space</kbd> on a selected message | See who reacted, add or remove your reaction |
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd> | Mute or unmute in a call |
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>O</kbd> | Turn the camera on or off |
