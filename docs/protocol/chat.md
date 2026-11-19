@@ -560,8 +560,8 @@ how the web client draws them, from its bundle.
   alone in a message `58px` (`animated-emoticon-58-…`). Teams draws one inside text at the text's height and a message
   of emoticons alone large, animated and without a bubble. The native client draws both from the emoticon's animation
   strip on the CDN ([Reaction pictures](#reaction-pictures)): the first frame inline, the whole animation large.
-- **Stickers**: the bundle knows a sticker `itemtype` (`http://schema.skype.com/Sticker`, its pictures on
-  `static.asm.skype.com`), but none appears in any capture or in the user's chats.
+- **Stickers** are an `<img>` of `itemtype="http://schema.skype.com/Sticker"` on Teams' sticker CDN: see
+  [Stickers](#stickers-team-manage-2026-11-19).
 - **GIFs** picked from Teams' GIF picker are `<img>`s on Giphy's media CDN:
   `https://media<n>.giphy.com/media/v1.<token>/<id>/giphy.gif` (the shard `media0` to `media4`, the token Giphy's
   base64url note of where it was picked). The common form has no `itemtype`, its size as `width` and `height`
@@ -571,6 +571,70 @@ how the web client draws them, from its bundle.
   picture, playing. The native client reads it from `https://media.giphy.com/media/<id>/
   <file>` with no token, leaving Giphy's token, the shard and any query out (Giphy serves the same bytes without them;
   [endpoints.md](endpoints.md#giphy-mediagiphycom-mediangiphycom)), and plays it as a pasted GIF is played.
+
+## Stickers (team-manage, 2026-11-19)
+
+Browser Teams as a, in the a–b 1:1 chat, with nothing held (`team-manage`, its writes let through). Then b's page
+read the same chat. The captures are `team-manage/20261119T163307Z` (a) and `20261119T164448Z` (b) in the lab's data
+dir. The fixture is `tests/fixtures/chatsvc/sticker.json`.
+
+**The picker.** The compose box's "Emoji, GIFs and Stickers" button opens a panel with the tabs All, Emoji, GIFs and
+Stickers and a "Find something fun" search box.
+
+- All has the sections Emoji, GIFs and Stickers, each with "See all".
+- Stickers has "Recent" (8 stickers) and "Sticker Packs" with "See all". "See all" shows each pack as a tile with its
+  name and its header picture, in a scrolled grid of two columns, with a back arrow.
+- A pack shows its stickers in a grid of three columns. A sticker that has a caption shows a pencil mark. Its button's
+  name ends in "Editable." (`High five. Editable.`).
+- The search finds stickers by their words ("hello" gave six, from several packs).
+- No request lists the packs or the stickers. The previews come from
+  `https://teams.public.onecdn.static.microsoft/evergreen-assets/funstuff/stickers/<locale>/assets/<Pack>/Preview/<name>.png?v=5`.
+
+**A plain sticker.** A click on a sticker puts it in the compose box, after the text. It does not send it. The box
+shows it at 180 by 180 in a frame. Send posts it:
+
+- The `content` is `<p>&nbsp;</p>`, then a `readonly` element with `aria-label` and `title` (the sticker's words, for
+  example `Clippy says &quot;Hello there&quot;`), `contenteditable="false"` and
+  `itemtype="http://schema.skype.com/Sticker"`, then `<p>&nbsp;</p>`.
+- In the element is one `<img>`: `src` is the sticker's GIF,
+  `https://teams.public.onecdn.static.microsoft/evergreen-assets/stickerassets/<pack>-250x250/<locale>/<Name>.gif?v=5`,
+  then `height="180"`, `alt` (the words again), `width="180"`, `data-image-type="standard"`,
+  `data-image-mode="single"` and `itemtype="http://schema.skype.com/Sticker"`, in that order.
+- Nothing goes to AMS: `amsreferences` is `[]`. The other fields are a text message's.
+
+**As read back** (b's page, and a's own list), the service removed the `readonly` element and the `data-image-*`
+attributes: `<p>&nbsp;</p>\r\n<img src="…" height="180" alt="…" width="180"
+itemtype="http://schema.skype.com/Sticker">\r\n<p>&nbsp;</p>`. Thus the `img`'s `itemtype` is the mark of a sticker
+that is read, and the `readonly` element is the mark of a sticker that is sent.
+
+**How Teams shows it.** The message has no bubble. The sticker shows at 180 by 180 in a frame with a thin border and
+round corners, under the sender and the time, as a pasted picture alone does. The GIF plays when the message comes,
+then Teams shows its still preview (the `Preview/<name>.png` above) with a round play button over it. A click plays it
+(the button changes to pause). A click does not open the picture viewer.
+
+**A sticker with a caption** ("Edit sticker"). A click on a sticker with a pencil mark opens an editor in the panel:
+the picture large, a "Caption" box with the sticker's own words in it, and Cancel and Done. The picture shows the
+typed words in the place of the old words. Done puts in the compose box a PNG that the page drew (`blob:`, 240 by 180
+for "High five"), in the same `readonly` element, labelled by the caption. Its `<img>` has `itemscope="image/png"`,
+`itemtype="http://schema.skype.com/CachedImage"`, `alt="Sticker image, <caption>"` and `data-cache-key`.
+
+- Send makes an AMS object (`POST /v1/objects/` on the async gateway, `type` `pish/image`, `sharingMode` `Inline`,
+  `filename` `MicrosoftTeams-image.png`, `read` permission for the chat), answered `201`, then
+  `PUT /v1/objects/<id>/content/imgpsh` with the PNG.
+- **The capture did not show the post.** The capture's request interception stalls the browser's upload, as it did
+  for a larger pasted picture ([Pictures sent](#pictures-sent-team-manage-2026-11-06)). The browser cancelled the
+  `PUT` each time and made a new object. Thus the `<img>` that a captioned sticker sends, and its read-back form, are
+  not known.
+
+**The native client** reads a sticker in both forms (`teams_proto::chat::Sticker`): an `<img>` of itemtype Sticker,
+or the `readonly` element of that itemtype around a picture, whose `aria-label` (else `title`, else the picture's
+`alt`) is its label. Another `readonly` element stays unknown markup. It reads the GIF from Teams' sticker CDN with
+no token and no query ([endpoints.md](endpoints.md#teams-sticker-cdn-teamspubliconecdnstaticmicrosoft)). It draws a
+message of a sticker alone without a bubble, at the size the message gives, and the GIF plays. It does not draw the
+still preview and the play button yet. The builder (`Sticker::of_teams`, `sticker_message`) writes the captured
+`content` byte for byte. `Sticker::of_picture` puts a pasted picture's `<img>` (AMSImage, its object in
+`amsreferences`) in the same element. That form is the best guess for a captioned or imported sticker until a capture
+shows the real one.
 
 ## Link previews
 

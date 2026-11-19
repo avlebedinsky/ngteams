@@ -62,7 +62,7 @@ the own origin rather than a Microsoft SharePoint origin:
 | Calling | `/flightproxy/api/v2/` | `CallContext::for_cloud`, `CallLink::parse_in`; typed starts and operations, machine and tracker retain exact same-origin links; callbacks use `/trouter/v4/f/<endpoint>/callAgent/…` |
 | TURN credentials | `/trap/tokens` | `RelayTokens` |
 
-The public emoticon, Giphy and app-picture CDNs retain their current URLs with no account credentials. Optional
+The public emoticon, Giphy, sticker and app-picture CDNs retain their current URLs with no account credentials. Optional
 Microsoft platform services have no own-server GTMs; the fixed Flow and Power Apps bases are `/workflows/` and
 `/workflow-connections/` on the own origin, with dynamic off-origin destinations refused. The own server serves the
 webhook workflows' subset there ([server.md](../server.md#workflows-with-incoming-webhooks)) and issues the two
@@ -496,6 +496,18 @@ Giphy's public media CDN holds GIFs selected by Teams' picker. The native transp
 | Method | Path | What it does | Native | Notes · task | Evidence |
 | --- | --- | --- | --- | --- | --- |
 | `GET` | `/media/<id>/<file>.gif` (a message names it as `https://media<n>.giphy.com/media/v1.<token>/<id>/giphy.gif`, sometimes with a query) | a GIF a message shows, picked from Teams' GIF picker: its bytes | Read (`GiphyPicture`) | [chat.md](chat.md#pictures-in-messages) | the user's chats (the `<img>`, read for its shape); the read without the token and on `media.giphy.com` checked by hand (the same bytes); native on the mock only; own server: public host |
+
+## Teams' sticker CDN (`teams.public.onecdn.static.microsoft`)
+
+Teams' public CDN holds the pictures of its own sticker packs. The web client loads them as any browser loads an
+`<img>`, with no credential. The native transport uses `Service::Stickers` on
+`https://teams.public.onecdn.static.microsoft/evergreen-assets/stickerassets/` with no account credential and
+implements the picture read below.
+
+| Method | Path | What it does | Native | Notes · task | Evidence |
+| --- | --- | --- | --- | --- | --- |
+| `GET` | `/evergreen-assets/stickerassets/<pack>-250x250/<locale>/<Name>.gif` (a message names it with `?v=5`; `statics.teams.cdn.office.net` serves the same path) | a sticker a message shows: its GIF | Read (`StickerPicture`) | [chat.md](chat.md#stickers-team-manage-2026-11-19) · 649 | team-manage 2026-11-19 (a sent one, b read it); the read without the query checked by hand (the same 226 KB GIF); native on the mock only; own server: public host |
+| `GET` | `/evergreen-assets/funstuff/stickers/<locale>/assets/<Pack>/Preview/<name>.png?v=5` | the picker's preview of a sticker, and the still picture Teams shows of a sticker message when the GIF does not play | not used | [chat.md](chat.md#stickers-team-manage-2026-11-19) · 649 | team-manage 2026-11-19 |
 
 ## AI providers with the user's own key (`api.anthropic.com`, `api.openai.com`, a compatible server's base URL)
 
