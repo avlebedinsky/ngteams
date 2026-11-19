@@ -189,6 +189,11 @@ name = "qa_final_dot_window"
 harness = false
 
 [[test]]
+# QA of task 580: the update notice of each Nix install kind in the app's window, in the UI sandbox
+name = "qa_nix_update_window"
+harness = false
+
+[[test]]
 # QA of task 525: a message with several files, its grid of file cards, their actions and odd shapes, in the UI sandbox
 name = "qa_file_grid_window"
 harness = false
