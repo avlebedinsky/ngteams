@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::{Error, Format, IDENTITY, MARKER, Version, error};
 
 /// The Nix store: a copy in it cannot replace its own files, and only Nix updates it.
+#[cfg(all(unix, not(target_os = "macos")))]
 pub(crate) const NIX_STORE: &str = "/nix/store";
 
 /// What [`Installation::detect`] reads: the process's executable and its AppImage environment, where a package's
