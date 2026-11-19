@@ -11,6 +11,8 @@
 //! - The a-b-c chat's call: b calls, a declines over the control socket, c answers. b shares its still screen. a joins
 //!   late over the control socket (`Join`): a's stage presents b's share. The test logs the time from a's join to the
 //!   first frame on a's stage and fails above [`SHOWN_BOUND`].
+//! - When b's still share settles, b's and c's Call health is read two times, as the pane reads it: b's sent rate
+//!   counts the headers and padding on the wire (at least [`STILL_SENT_KBPS`]), and b sends at most [`STILL_FPS`].
 //! - b stops: the share leaves a's stage. b shares the same screen again: a's stage presents it. b stops and shares a
 //!   still window (another size): a's stage presents it. b stops and c shares its still screen: a's stage presents it.
 //! - b's meeting with a and c invited (invited people bypass the lobby): b and c join, b shares its still screen. a
@@ -45,13 +47,13 @@ use ngteams::setup::Setup;
 use teams_auth::secrets::{MemorySecretStore, Secret};
 use teams_core::account::{AccountCalls, AccountEngine, call_video, web_client_info};
 use teams_core::engine::{Action, Event};
-use teams_core::{CallAction, CallFloor, CallId, CallMedia, CallStatus, EventWrite, Relay, VideoOutput};
+use teams_core::{CallAction, CallFloor, CallHealth, CallId, CallMedia, CallStatus, EventWrite, Relay, VideoOutput};
 use teams_ctl::protocol::{CallRow, Request, Response};
 use teams_ctl::{Client, Timeouts};
 use teams_media::devices::file::{AudioInput, FileDevices, FrameCounter, Pacing, PatternCamera, StillSource};
 use teams_media::devices::{AudioSink, AudioSource, DeviceError, Devices, VideoSink, VideoSource};
 use teams_media::processing::ProcessingConfig;
-use teams_media::session::{SCREEN_IDLE_REPEAT, SessionConfig};
+use teams_media::session::{SCREEN_IDLE_REPEAT, SCREEN_SETTLE, START_KEYFRAMES_FOR, SessionConfig};
 use teams_media::tone::Tone;
 use teams_proto::{CalendarEvent, EventAttendee, EventDraft, EventShowAs, Mri, Organizer, ZonedTime};
 use teams_store::OutboxState;
@@ -103,6 +105,13 @@ const STILL_FOR: Duration = Duration::from_secs(3);
 const GONE_MARGIN: Duration = Duration::from_secs(10);
 /// The frames a still source gives before it holds still.
 const STILL_FRAMES: u32 = 3;
+/// The time between the two reads of Call health: the pane's rates are counted between two reads.
+const HEALTH_SPAN: Duration = Duration::from_secs(5);
+/// The least sent rate Call health may show for a still share: its RTP headers and padding go on the wire (task 577
+/// QA, Q3: the pane showed 0.3 kbit/s of payload while about 117 kbit/s went out).
+const STILL_SENT_KBPS: f64 = 5.0;
+/// The most frames each second Call health may show for a still share that settled (one each [`SCREEN_IDLE_REPEAT`]).
+const STILL_FPS: f64 = 2.5;
 const SHARE: &str = "share";
 const NIRI_CONFIG: &str = "layout {\n    gaps 0\n    default-column-width { proportion 1.0; }\n    focus-ring {\n        off\n    }\n    border {\n        off\n    }\n}\ngestures {\n    hot-corners {\n        off\n    }\n}\n";
 const SCREEN: (u32, u32) = (1920, 1080);
@@ -397,6 +406,13 @@ impl Peer {
         .map_err(Into::into)
     }
 
+    /// The Call health of `call`, as the pane reads it (its rates count from this client's last read).
+    fn health(&self, runtime: &tokio::runtime::Runtime, call: CallId) -> SandboxResult<CallHealth> {
+        runtime
+            .block_on(self.engine.handle.requests().call_health(call))?
+            .ok_or_else(|| format!("{}: no Call health in the call", self.name).into())
+    }
+
     /// Until this client shows another's share in `call`.
     fn sees_share(&mut self, runtime: &tokio::runtime::Runtime, call: CallId) -> SandboxResult {
         self.next(runtime, "a share shown", |event| match event {
@@ -525,6 +541,7 @@ fn scenario(rig: &mut Rig<'_>, (b, c): (&mut Peer, &mut Peer), server: (&str, &s
     rig.theme(teams_ui::theme::LIGHT_KEY)?;
     let a_mri = rig.own_mri()?;
     let calls = late_join_call(rig, (b, c), &a_mri)?;
+    still_share_health(rig.runtime, (b, c), calls)?;
     shares_again(rig, (b, c), calls)?;
     late_join_meeting(rig, (b, c), &a_mri, server)?;
     for line in &rig.times {
@@ -568,6 +585,42 @@ fn late_join_call(rig: &mut Rig<'_>, (b, c): (&mut Peer, &mut Peer), a_mri: &str
         Request::Join { chat },
     )?;
     Ok((b_call, c_call))
+}
+
+/// The Call health of b's still share after it settled, read as the pane reads it: b's sent rate counts what goes on
+/// the wire (headers and padding too), and b's frame rate settles to a repeat each [`SCREEN_IDLE_REPEAT`].
+fn still_share_health(
+    runtime: &tokio::runtime::Runtime,
+    (b, c): (&mut Peer, &mut Peer),
+    (b_call, c_call): (CallId, CallId),
+) -> SandboxResult {
+    thread::sleep(START_KEYFRAMES_FOR + SCREEN_SETTLE);
+    b.health(runtime, b_call)?;
+    c.health(runtime, c_call)?;
+    thread::sleep(HEALTH_SPAN);
+    let sent = b
+        .health(runtime, b_call)?
+        .sharing
+        .sent
+        .ok_or("b's Call health: no sent screen share")?;
+    let received = c.health(runtime, c_call)?.sharing.received;
+    say(&format!(
+        "Call health of b's still share: b sent {:?} kbit/s at {:?} fps, {:?}; c received {:?} kbit/s at {:?} fps",
+        sent.bitrate_kbps,
+        sent.frame_rate,
+        sent.resolution,
+        received.as_ref().and_then(|stream| stream.bitrate_kbps),
+        received.as_ref().and_then(|stream| stream.frame_rate),
+    ));
+    let kbps = sent.bitrate_kbps.ok_or("b's Call health: no sent rate")?;
+    if kbps < STILL_SENT_KBPS {
+        return Err(format!("b's Call health shows {kbps} kbit/s sent for a still share").into());
+    }
+    let fps = sent.frame_rate.ok_or("b's Call health: no sent frame rate")?;
+    if fps > STILL_FPS {
+        return Err(format!("b's still share did not settle: {fps} fps sent").into());
+    }
+    Ok(())
 }
 
 /// b stops and shares the same screen again, then a still window; then c shares: a's stage presents each share.
