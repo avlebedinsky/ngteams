@@ -1308,6 +1308,7 @@ const STEPS: [Step; 5 + 324 + 8 + 5 + 15 + 12 + 10] = [
     // (at its newest, the forwards), then scrolled to its first message, each picture at its own size in the flow and
     // the code in Teams' code card
     ("chat-mixed-dark", |shell, window, cx| {
+        close_share_file(shell, cx);
         shell.update(cx, |shell, cx| shell.open_chat(AX_CHAT.to_owned(), window, cx));
     }),
     ("chat-mixed-dark-read", |shell, _, cx| show_first_message(shell, cx)),
@@ -1528,6 +1529,7 @@ const STEPS: [Step; 5 + 324 + 8 + 5 + 15 + 12 + 10] = [
     // the a–b–c chat: its senders' presence as the view asked the engine and the mock's UPS answered (`seed_group`),
     // b's and c's badges on their avatars
     ("chat-group-presence", |shell, window, cx| {
+        close_share_file(shell, cx);
         shell.update(cx, |shell, cx| shell.open_chat(ABC_CHAT.to_owned(), window, cx));
     }),
     // `@` typed in the a–b–c chat: the mention picker over the box, the chat's members, then Everyone; above it b's
@@ -4440,6 +4442,13 @@ fn format_share_file(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) {
             dialog.toggle_formatting(window, cx);
             dialog.toggle_emoji(window, cx);
         });
+    }
+}
+
+/// "Link created" closed with its X, so it covers no later step.
+fn close_share_file(shell: &Entity<Shell>, cx: &mut App) {
+    if let Some(dialog) = shell.read(cx).share_dialog().cloned() {
+        dialog.update(cx, teams_ui::share_file::ShareFileDialog::close);
     }
 }
 

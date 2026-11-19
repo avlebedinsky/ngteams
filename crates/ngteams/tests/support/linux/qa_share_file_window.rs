@@ -19,6 +19,9 @@
 //!   query with no match says so.
 //! - **Chip faces** (round 3): the face of a named group chat's chip and of a person's chip, in both themes. The
 //!   initials are in the middle of the circle, and all of them are inside it.
+//! - **Faces in other views** (round 3): the chat list's faces (48 px), and New message's suggestions (32 px) for
+//!   people, for group chats of two words and for one of one word, in both themes. The initials are in the middle of
+//!   the circle and inside it, on one line, at the size Teams gives the face, with one or two letters.
 //! - **Share**: one and three people, one and three group chats, one and two channels (the mock's teams have two
 //!   live channels). Each target gets one post with the file's entry and the message, and the chat shows the file's
 //!   card. A bold word and an emoji go out as rich text. The toast says "You've shared <file>".
@@ -59,6 +62,7 @@ use teams_proto::{Author, Client as ChatClient, Credentials, HttpTransport, Mri}
 use teams_store::Store;
 use teams_trouter::{Options, Trouter, TrouterCredentials};
 use teams_ui::chat_view::{Body, ChatView, MessageItem};
+use teams_ui::new_chat::Suggested;
 use teams_ui::rich_text::Block;
 use teams_ui::share_file::{ShareFileDialog, Target};
 use teams_ui::shell::Shell;
@@ -193,7 +197,9 @@ fn walk(sandbox: &Sandbox, service: &Service, runtime: &tokio::runtime::Runtime,
         ctx.channels()?;
         ctx.copy_link()?;
         ctx.outside()?;
-        ctx.send_error()
+        ctx.send_error()?;
+        ctx.list_faces()?;
+        ctx.new_message_faces()
     })();
     if let Err(error) = outcome {
         return Err(run.fail(sandbox, &*error));
@@ -985,6 +991,340 @@ fn keep_zoomed(shot: &image::RgbImage, (x, y): (u32, u32), shot_name: &str) -> S
     Ok(())
 }
 
+// --- round 3: the faces of the chat list and of New message ---
+
+/// The faces across, px: the chat list's (`teams_ui::chat_list::AVATAR`) and New message's suggestions'.
+const LIST_FACE: u32 = 48;
+const SUGGESTION_FACE: u32 = 32;
+/// The chat list on the screen, from the rail to the conversation, under its header.
+const LIST: Rect = Rect {
+    x0: 78,
+    y0: 96,
+    x1: 450,
+    y1: SCREEN.1,
+};
+/// The conversation's side, where New message shows its suggestions, under the title bar.
+const CONVERSATION: Rect = Rect {
+    x0: 456,
+    y0: 48,
+    x1: SCREEN.0,
+    y1: SCREEN.1,
+};
+/// A group chat of one word: its face has one letter.
+const ONE_WORD: &str = "Harbourcrew";
+/// How many times larger a zoomed shot of a face is, and the margin round the face it keeps.
+const FACE_ZOOM: u32 = 6;
+const FACE_MARGIN: u32 = 6;
+
+impl Walk<'_> {
+    /// The faces with initials in the chat list (48 px), in both themes: the initials in the middle of the circle,
+    /// inside it, on one line, at Teams' size for the face.
+    fn list_faces(&mut self) -> SandboxResult {
+        self.run.open(PERSON_B.chat)?;
+        for dark in [false, true] {
+            self.run.theme(dark)?;
+            thread::sleep(SETTLE);
+            let name = format!("qa543-list-faces-{}.png", theme_name(dark));
+            self.run.shot(self.sandbox, &name)?;
+            self.check_faces((LIST, LIST_FACE), (3, None), &name)?;
+        }
+        self.run.theme(false)?;
+        step("the chat list's faces: the initials in the middle of the circle");
+        Ok(())
+    }
+
+    /// New message (Ctrl+N), its To: line's suggestions (32 px faces) for people, for group chats of two words and for
+    /// a group chat of one word, in both themes: as [`Self::list_faces`] checks them, with one or two letters.
+    fn new_message_faces(&mut self) -> SandboxResult {
+        self.ctrl('n')?;
+        self.new_message_until("New message open", |open, _| open)?;
+        thread::sleep(SETTLE);
+        for (query, at_least, letters) in [("Lab", 2, 2), (MANY, 3, 2), (ONE_WORD, 1, 1)] {
+            self.run.input.type_text(query)?;
+            let found = self.new_message_until(&format!("suggestions for {query:?}"), |_, names| {
+                names.iter().any(|name| name.contains(query))
+            })?;
+            step(&format!("New message: {query:?} suggests {found:?}"));
+            for dark in [false, true] {
+                self.run.theme(dark)?;
+                thread::sleep(SETTLE);
+                let slug = query.to_lowercase().replace(' ', "-");
+                let name = format!("qa543-new-message-{slug}-{}.png", theme_name(dark));
+                self.run.shot(self.sandbox, &name)?;
+                self.check_faces((CONVERSATION, SUGGESTION_FACE), (at_least, Some(letters)), &name)?;
+            }
+            self.run.theme(false)?;
+            for _ in query.chars() {
+                self.run.input.key(keys::BACKSPACE)?;
+            }
+            // the empty line suggests the people of the latest chats again
+            self.new_message_until("the To: line empty again", |_, names| names != found.as_slice())?;
+        }
+        self.run.open(PERSON_B.chat)?;
+        step("New message's suggestions: the initials in the middle of the circle");
+        Ok(())
+    }
+
+    /// Waits up to [`WAIT`] for New message as `wanted` takes it (open, its suggestions' names); the names.
+    fn new_message_until(
+        &mut self,
+        what: &str,
+        wanted: impl Fn(bool, &[String]) -> bool,
+    ) -> SandboxResult<Vec<String>> {
+        let start = Instant::now();
+        loop {
+            let answer = self.run.question("new_message")?;
+            let read: Value = serde_json::from_str(&answer)?;
+            let open = read["open"].as_bool().unwrap_or_default();
+            let names: Vec<String> = read["suggestions"]
+                .as_array()
+                .map(|names| names.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+                .unwrap_or_default();
+            if wanted(open, &names) {
+                return Ok(names);
+            }
+            if start.elapsed() > WAIT {
+                return Err(format!("{what}: never came; last {answer}").into());
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// The round faces `side` px across in `area` of the last shot: at least `at_least` of them, each with initials
+    /// (of `letters` letters, when given) in the middle of the circle and inside it, on one line, at Teams' size.
+    /// A zoomed shot of each face goes next to the shot.
+    fn check_faces(
+        &self,
+        (area, side): (Rect, u32),
+        (at_least, letters): (usize, Option<usize>),
+        shot_name: &str,
+    ) -> SandboxResult {
+        let shot = &self.run.last;
+        let faces = round_faces(shot, area, side);
+        if faces.len() < at_least {
+            note(format!(
+                "{} round faces of {side} px in {area:?}, not at least {at_least} ({shot_name})",
+                faces.len()
+            ));
+        }
+        for (at, face) in faces.iter().enumerate() {
+            keep_face_zoomed(shot, *face, &format!("{}-face{at}", shot_name.trim_end_matches(".png")))?;
+            let Some((ink, drawn)) = face_ink(shot, *face) else {
+                note(format!("the face {face:?} draws no initials ({shot_name})"));
+                continue;
+            };
+            step(&format!(
+                "a face {face:?}: initials {ink:?}, {drawn} letter(s), {} px high ({shot_name})",
+                ink.height()
+            ));
+            // the middles are doubled, so they stay whole numbers
+            let off_x = (ink.x0 + ink.x1).abs_diff(face.x0 + face.x1);
+            let off_y = (ink.y0 + ink.y1).abs_diff(face.y0 + face.y1);
+            if off_x > 2 * OFF_MIDDLE || off_y > 2 * OFF_MIDDLE {
+                note(format!(
+                    "the initials {ink:?} are not in the middle of the face {face:?} ({shot_name})"
+                ));
+            }
+            if !ink_inside(shot, *face, ink) {
+                note(format!(
+                    "the circle of the face {face:?} cuts its initials {ink:?} ({shot_name})"
+                ));
+            }
+            // capitals stand about 0.7 of the text's size: on one line, at the size Teams gives the face
+            let text = teams_initials_size(side);
+            if ink.height() * 10 < text * 6 || ink.height() * 10 > text * 9 {
+                note(format!(
+                    "the initials {ink:?} on the face {face:?} are {} px high, not those of Teams' {text} px text on \
+                     one line ({shot_name})",
+                    ink.height()
+                ));
+            }
+            if letters.is_some_and(|letters| letters != drawn) {
+                note(format!(
+                    "the face {face:?} shows {drawn} letter(s), not {letters:?} ({shot_name})"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn theme_name(dark: bool) -> &'static str {
+    if dark { "dark" } else { "light" }
+}
+
+/// The size of the initials Teams (Fluent's avatar) gives a face `side` px across, px.
+const fn teams_initials_size(side: u32) -> u32 {
+    match side {
+        ..=24 => 10,
+        25..=28 => 12,
+        29..=40 => 14,
+        41..=56 => 16,
+        57..=96 => 20,
+        _ => 24,
+    }
+}
+
+/// The round faces `side` px across in `area` of `shot`: each a patch off its row's background (the row's most
+/// common colour in `area`) that fills a square of the side, the square's corners on the background. A presence
+/// badge at its corner may make the patch up to 3 px larger. A split group face and a team's square are not taken.
+fn round_faces(shot: &image::RgbImage, area: Rect, side: u32) -> Vec<Rect> {
+    let backgrounds: Vec<[u8; 3]> = (area.y0..area.y1).map(|y| row_background(shot, area, y)).collect();
+    let off = |x: u32, y: u32| {
+        y.checked_sub(area.y0)
+            .and_then(|row| backgrounds.get(row as usize))
+            .is_some_and(|&background| !near(at(shot, x, y), background, 12))
+    };
+    let mut seen = vec![false; area.width() as usize * area.height() as usize];
+    let mut faces = Vec::new();
+    for y in area.y0..area.y1 {
+        for x in area.x0..area.x1 {
+            if seen[area.index(x, y)] || !off(x, y) {
+                continue;
+            }
+            let patch = patch_at((x, y), area, &off, &mut seen);
+            let fits = |across: u32| (side..=side + 3).contains(&across);
+            // a circle leaves the square's corner bare; a team's square, rounded less, does not
+            let corner = side / 10;
+            let round =
+                !off(patch.x0 + corner, patch.y0 + corner) && !off(patch.x0 + side - 1 - corner, patch.y0 + corner);
+            if fits(patch.width()) && fits(patch.height()) && round {
+                faces.push(Rect {
+                    x0: patch.x0,
+                    y0: patch.y0,
+                    x1: patch.x0 + side,
+                    y1: patch.y0 + side,
+                });
+            }
+        }
+    }
+    faces
+}
+
+/// The box round the patch of pixels that `off` takes, joined side by side, from `start` in `area`; each is marked in
+/// `seen` (a flag a pixel of `area`, row by row).
+fn patch_at(start: (u32, u32), area: Rect, off: &impl Fn(u32, u32) -> bool, seen: &mut [bool]) -> Rect {
+    seen[area.index(start.0, start.1)] = true;
+    let mut patch = Rect {
+        x0: start.0,
+        y0: start.1,
+        x1: start.0 + 1,
+        y1: start.1 + 1,
+    };
+    let mut stack = vec![start];
+    while let Some((px, py)) = stack.pop() {
+        patch = Rect {
+            x0: patch.x0.min(px),
+            y0: patch.y0.min(py),
+            x1: patch.x1.max(px + 1),
+            y1: patch.y1.max(py + 1),
+        };
+        let next = [
+            (px.wrapping_sub(1), py),
+            (px + 1, py),
+            (px, py.wrapping_sub(1)),
+            (px, py + 1),
+        ];
+        for (nx, ny) in next {
+            let inside = (area.x0..area.x1).contains(&nx) && (area.y0..area.y1).contains(&ny);
+            if inside && !seen[area.index(nx, ny)] && off(nx, ny) {
+                seen[area.index(nx, ny)] = true;
+                stack.push((nx, ny));
+            }
+        }
+    }
+    patch
+}
+
+/// The most common colour of row `y` in `area`.
+fn row_background(shot: &image::RgbImage, area: Rect, y: u32) -> [u8; 3] {
+    let mut counts: std::collections::HashMap<[u8; 3], u32> = std::collections::HashMap::new();
+    for x in area.x0..area.x1 {
+        *counts.entry(at(shot, x, y)).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .max_by_key(|&(_, count)| count)
+        .map_or([0, 0, 0], |(colour, _)| colour)
+}
+
+/// Whether a pixel `(x, y)` is at most `within` px inside the edge of the circle of `face` (the middles doubled).
+fn in_circle(face: Rect, (x, y): (u32, u32), within: u32) -> bool {
+    let dx = i64::from(2 * x + 1) - i64::from(face.x0 + face.x1);
+    let dy = i64::from(2 * y + 1) - i64::from(face.y0 + face.y1);
+    let radius = i64::from(face.width()) - i64::from(2 * within);
+    dx * dx + dy * dy <= radius * radius
+}
+
+/// The box round the ink of the initials on `face`, and how many letters it has (by its width): the
+/// pixels in the circle that differ much from the face's tint, read above the letters. `None` when there are too
+/// few for a letter.
+fn face_ink(shot: &image::RgbImage, face: Rect) -> Option<(Rect, usize)> {
+    let tint = at(shot, face.x0 + face.width() / 2, face.y0 + face.height() / 8);
+    let ink = |x: u32, y: u32| {
+        let pixel = at(shot, x, y);
+        let apart: u32 = pixel
+            .iter()
+            .zip(tint)
+            .map(|(&got, want)| u32::from(got.abs_diff(want)))
+            .sum();
+        apart > 60 && in_circle(face, (x, y), 2)
+    };
+    let pixels: Vec<(u32, u32)> = (face.y0..face.y1)
+        .flat_map(|y| (face.x0..face.x1).map(move |x| (x, y)))
+        .filter(|&(x, y)| ink(x, y))
+        .collect();
+    if pixels.len() < 8 {
+        return None;
+    }
+    let found = Rect {
+        x0: pixels.iter().map(|&(x, _)| x).min()?,
+        y0: pixels.iter().map(|&(_, y)| y).min()?,
+        x1: pixels.iter().map(|&(x, _)| x).max()? + 1,
+        y1: pixels.iter().map(|&(_, y)| y).max()? + 1,
+    };
+    // a capital is at most about 1.3 times as wide as high; two side by side are wider (the gap between them can
+    // close in the smoothing, so the runs of inked columns do not count them)
+    let letters = if found.width() * 20 > found.height() * 27 { 2 } else { 1 };
+    Some((found, letters))
+}
+
+/// Whether the initials' ink keeps clear of the circle's edge: no inked pixel in the last 3 px of the circle.
+fn ink_inside(shot: &image::RgbImage, face: Rect, ink: Rect) -> bool {
+    let tint = at(shot, face.x0 + face.width() / 2, face.y0 + face.height() / 8);
+    (ink.y0..ink.y1)
+        .flat_map(|y| (ink.x0..ink.x1).map(move |x| (x, y)))
+        .filter(|&(x, y)| {
+            let apart: u32 = at(shot, x, y)
+                .iter()
+                .zip(tint)
+                .map(|(&got, want)| u32::from(got.abs_diff(want)))
+                .sum();
+            apart > 60
+        })
+        .all(|point| in_circle(face, point, 3))
+}
+
+/// `face` with a margin, [`FACE_ZOOM`] times larger, kept as `<name>-zoom.png` where the shots go.
+fn keep_face_zoomed(shot: &image::RgbImage, face: Rect, name: &str) -> SandboxResult {
+    let x = face.x0.saturating_sub(FACE_MARGIN);
+    let y = face.y0.saturating_sub(FACE_MARGIN);
+    let across = face.width() + 2 * FACE_MARGIN;
+    let crop = image::imageops::crop_imm(shot, x, y, across, across).to_image();
+    let zoomed = image::imageops::resize(
+        &crop,
+        across * FACE_ZOOM,
+        across * FACE_ZOOM,
+        image::imageops::FilterType::Nearest,
+    );
+    let name = format!("{name}-zoom.png");
+    zoomed.save(shots_dir()?.join(&name))?;
+    if let Some(evidence) = std::env::var_os(EVIDENCE_ENV) {
+        zoomed.save(PathBuf::from(evidence).join(&name))?;
+    }
+    Ok(())
+}
+
 // --- the shares ---
 
 impl Walk<'_> {
@@ -1545,6 +1885,11 @@ impl Rect {
         self.y1 - self.y0
     }
 
+    /// Where the pixel `(x, y)` in the box is, row by row from its top left.
+    const fn index(&self, x: u32, y: u32) -> usize {
+        (y - self.y0) as usize * self.width() as usize + (x - self.x0) as usize
+    }
+
     const fn overlaps(&self, other: &Self) -> bool {
         self.x0 < other.x1 && other.x0 < self.x1 && self.y0 < other.y1 && other.y0 < self.y1
     }
@@ -1775,6 +2120,8 @@ impl Service {
         ] {
             mock.add_group(topic, members).ok_or("no group made")?;
         }
+        // a group chat of one word, so New message shows a face of one letter (round 3)
+        mock.add_group(ONE_WORD, &[LAB_A, LAB_B]).ok_or("no group made")?;
         // b and the outsider say something in their 1:1 chats with a, so the chats are named after them
         for (chat, who) in [(AB_CHAT, (LAB_B, "Lab B")), (AX_CHAT, (OUTSIDER, "Outsider X"))] {
             mock.add_message(chat, who, "RichText/Html", "<p>Made-up hello</p>")
@@ -2445,6 +2792,21 @@ fn on_shell(shell: &Entity<Shell>, verb: &str, cx: &mut App) -> String {
             .cloned()
             .map_or_else(|| json!({"open": false}), |dialog| dialog_of(&dialog, cx)),
         "toast" => json!(shell.read(cx).toast().map(ToString::to_string).unwrap_or_default()),
+        "new_message" => shell.read(cx).new_chat().map_or_else(
+            || json!({"open": false, "suggestions": []}),
+            |view| {
+                let names: Vec<String> = view
+                    .read(cx)
+                    .suggestions()
+                    .iter()
+                    .map(|suggested| match suggested {
+                        Suggested::Person { name, .. } => name.to_string(),
+                        Suggested::Chat(row) => row.name.to_string(),
+                    })
+                    .collect();
+                json!({"open": true, "suggestions": names})
+            },
+        ),
         other => json!(format!("unknown {other}")),
     }
     .to_string()
