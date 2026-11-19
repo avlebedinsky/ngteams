@@ -1,4 +1,4 @@
-//! QA of task 579 (round 2): a call rings while the AI notice waits, in the app's window over the mock. Linux
+//! QA of task 579 (rounds 2 and 3): a call rings while the AI notice waits, in the app's window over the mock. Linux
 //! compositor harness (`harness = false`: GPUI runs on the process's main thread).
 #[cfg(target_os = "linux")]
 #[path = "support/linux/qa_ai_notice_ring_window.rs"]

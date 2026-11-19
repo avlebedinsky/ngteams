@@ -1,4 +1,4 @@
-//! QA of task 579 (rounds 1 and 2), in the UI sandbox: the AI notice and the "Use AI features" switch. The real app runs as a
+//! QA of task 579 (rounds 1 to 3), in the UI sandbox: the AI notice and the "Use AI features" switch. The real app runs as a
 //! child in the sandbox, as lab account a on `teams-mock`, with its settings as the installed app makes them (the
 //! first run's screen asked for). The parent drives it with the sandbox's virtual pointer and keyboard, and asks the
 //! child through a file in the sandbox dir to do what a click on a view does (the same view methods) and what the
@@ -14,6 +14,8 @@
 //! - **Round 2** ([`round2`]): a new profile whose notice is a modal dialog (Tab, Shift+Tab, keys and clicks behind
 //!   it, the font keys, the answer and the window's keys after it, another dialog), ten starts each answered with one
 //!   Enter or Space, and at the largest font a body that scrolls and a low window.
+//! - **Round 3** ([`round3`]): at the largest font, the body's scroll bar shows only when the body is cut, and a click
+//!   on its track and a drag of its thumb scroll the body.
 //!
 //! `QA579_ONLY` (a comma list of check names) runs only those. `QA579_EVIDENCE` names a directory that gets the
 //! screenshots, the settings files, the tool's logs and the results. Screenshots also go to
@@ -33,6 +35,8 @@ use gpui::{App, AsyncApp, Entity, Window, WindowHandle, WindowingModes};
 use ngteams::app::{self, Launch};
 #[path = "qa_ai_notice_round2.rs"]
 mod round2;
+#[path = "qa_ai_notice_round3.rs"]
+mod round3;
 #[path = "../window.rs"]
 mod support;
 use serde_json::{Value, json};
@@ -218,6 +222,13 @@ const R2_FIRST_CHECKS: [Check; 7] = [
     ("r2_other_dialog_keeps_tab", round2::other_dialog_keeps_tab),
 ];
 
+/// Round 3, the largest font with no answer yet: the body's scroll bar.
+const R3_CHECKS: [Check; 3] = [
+    ("r3_no_scrollbar_when_it_fits", round3::no_scrollbar_when_it_fits),
+    ("r3_scrollbar_at_520", round3::scrollbar_at_520),
+    ("r3_scrollbar_at_1280x480", round3::scrollbar_at_1280x480),
+];
+
 /// Round 2: ten starts of the app with the notice waiting, each answered with one key press (Enter or Space) on one
 /// button.
 const R2_REPEATS: [(&str, Check); 10] = [
@@ -263,6 +274,8 @@ fn parent() -> SandboxResult {
     let bad = sandbox.path("bad-settings.toml");
     fs::write(&bad, BAD_FILE)?;
     let r2_fresh = sandbox.path("r2-settings.toml");
+    let r3_file = sandbox.path("r3-settings.toml");
+    fs::write(&r3_file, UPGRADE_FILE)?;
     let mut repeats = Vec::new();
     for (name, check) in &R2_REPEATS {
         let file = sandbox.path(&format!("{name}-settings.toml"));
@@ -275,6 +288,7 @@ fn parent() -> SandboxResult {
         ("upgrade", &upgrade, &UPGRADE_CHECKS),
         ("bad", &bad, &BAD_CHECKS),
         ("r2-first", &r2_fresh, &R2_FIRST_CHECKS),
+        ("r3-font-24", &r3_file, &R3_CHECKS),
     ];
     runs.extend(
         repeats

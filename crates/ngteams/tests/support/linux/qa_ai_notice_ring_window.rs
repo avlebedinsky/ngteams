@@ -1,4 +1,4 @@
-//! QA of task 579, round 2, in the UI sandbox: a call rings while the AI notice waits. b's app runs on the mock with
+//! QA of task 579, rounds 2 and 3, in the UI sandbox: a call rings while the AI notice waits. b's app runs on the mock with
 //! calls, its settings as the installed app makes them (the first run confirmed, no answer to the notice yet), so the
 //! notice waits over the window. A caller the mock plays (a) rings b. The parent reads b's view trace and asks b's
 //! window for its state through a file in the sandbox dir.
@@ -8,6 +8,10 @@
 //!   a click on the banner's Answer is tried as a user tries it; Ctrl+Shift+C starts no call; the notice still waits
 //!   after each call and still takes Tab and Enter.
 //! - **After the answer**: a click on the banner's Answer answers the ring.
+//! - **Round 3** ([`round3`]): the banner's Decline clicked over the notice, a call in progress behind the notice, Tab
+//!   after the calls, and the call bar after the notice (a ring, a call in progress, another dialog open).
+//!
+//! `QA579_RING_ONLY` (a comma list of check names) runs only those.
 //!
 //! Screenshots go to `target/ui-shots/qa579-ring-*.png` and to `QA579_EVIDENCE` if set. Every name is made up.
 //! Without weston 15, niri, `dbus-daemon`, PipeWire or WirePlumber it says so and passes, unless `GPUI_SMOKE_REQUIRE=1`.
@@ -54,6 +58,8 @@ use ui_sandbox::input::{VirtualInput, keys};
 use ui_sandbox::pipewire::PipeWireOptions;
 use ui_sandbox::{NIRI_FULL_WINDOW, Running, Sandbox, SandboxOptions, SandboxResult, sandbox_or_skip};
 
+#[path = "qa_ai_notice_ring_round3.rs"]
+mod round3;
 #[path = "../window.rs"]
 mod support;
 
@@ -61,6 +67,7 @@ use support::Alias;
 
 const CHILD_ENV: &str = "QA579_RING_CHILD";
 const EVIDENCE_ENV: &str = "QA579_EVIDENCE";
+const ONLY_ENV: &str = "QA579_RING_ONLY";
 const TRACE_FD_ENV: &str = "QA579_RING_TRACE_FD";
 const DIR_ENV: &str = "QA579_RING_DIR";
 const ORIGIN_ENV: &str = "QA579_RING_ORIGIN";
@@ -158,6 +165,9 @@ fn parent() -> SandboxResult {
     let mut b = Callee::start(&sandbox, &env)?;
     let mut results = Results::default();
     for (name, check) in CHECKS {
+        if !wanted(name) {
+            continue;
+        }
         say(&format!("check {name}"));
         let outcome = check(&mut b, &mock);
         if outcome.is_err() {
@@ -178,9 +188,13 @@ fn parent() -> SandboxResult {
     ensure(results.failed == 0, || format!("{} checks failed", results.failed))
 }
 
+fn wanted(name: &str) -> bool {
+    std::env::var(ONLY_ENV).map_or(true, |only| only.split(',').any(|one| one.trim() == name))
+}
+
 type Check = fn(&mut Callee<'_>, &ChatServiceMock) -> SandboxResult;
 
-const CHECKS: [(&str, Check); 8] = [
+const CHECKS: [(&str, Check); 14] = [
     ("ring_shows_while_the_notice_waits", ring_shows_while_the_notice_waits),
     ("decline_key_while_the_notice_waits", decline_key_while_the_notice_waits),
     (
@@ -192,7 +206,19 @@ const CHECKS: [(&str, Check); 8] = [
         "banner_click_while_the_notice_waits",
         banner_click_while_the_notice_waits,
     ),
+    (
+        "r3_banner_decline_click_while_the_notice_waits",
+        round3::banner_decline_click_while_the_notice_waits,
+    ),
+    (
+        "r3_call_in_progress_stays_behind_the_notice",
+        round3::call_in_progress_stays_behind_the_notice,
+    ),
     ("no_new_call_from_behind_the_notice", no_new_call_from_behind_the_notice),
+    (
+        "r3_tab_stays_in_the_notice_after_calls",
+        round3::tab_stays_in_the_notice_after_calls,
+    ),
     (
         "notice_still_takes_tab_and_enter_after_calls",
         notice_still_takes_tab_and_enter,
@@ -200,6 +226,15 @@ const CHECKS: [(&str, Check); 8] = [
     (
         "banner_click_answers_after_the_notice",
         banner_click_answers_after_the_notice,
+    ),
+    ("r3_banner_after_the_notice", round3::banner_after_the_notice),
+    (
+        "r3_in_call_strip_after_the_notice",
+        round3::in_call_strip_after_the_notice,
+    ),
+    (
+        "r3_ring_with_another_dialog_open",
+        round3::ring_with_another_dialog_open,
     ),
 ];
 
@@ -847,7 +882,11 @@ fn answer(window: WindowHandle<KitRoot>, cx: &mut App) {
                 return;
             }
             let reply = shell_of(window, cx)
-                .and_then(|shell| window.update(cx, |_, _, cx| on_shell(&shell, verb, cx)).ok())
+                .and_then(|shell| {
+                    window
+                        .update(cx, |_, window, cx| on_shell(&shell, verb, window, cx))
+                        .ok()
+                })
                 .unwrap_or_else(|| "no shell".to_owned());
             say(&format!("re {seq} {reply}"));
         }
@@ -855,7 +894,7 @@ fn answer(window: WindowHandle<KitRoot>, cx: &mut App) {
     .detach();
 }
 
-fn on_shell(shell: &Entity<Shell>, verb: &str, cx: &mut App) -> String {
+fn on_shell(shell: &Entity<Shell>, verb: &str, window: &mut gpui::Window, cx: &mut App) -> String {
     let model = shell.read(cx).settings().clone();
     match verb {
         "state" => {
@@ -882,6 +921,11 @@ fn on_shell(shell: &Entity<Shell>, verb: &str, cx: &mut App) -> String {
                     cx,
                 );
             });
+            "ok".to_owned()
+        }
+        // what the Teams page's "Create team" does
+        "open-create-team" => {
+            shell.update(cx, |shell, cx| shell.open_create_team(window, cx));
             "ok".to_owned()
         }
         _ => format!("unknown {verb}"),
