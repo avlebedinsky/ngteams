@@ -228,6 +228,7 @@ fn the_binary_refuses_first() {
     // the keyring is opened only through `ngteams::accounts`, which `main` reaches after the refusal; the sign-in
     // window's page engine is served after it too
     for later in [
+        "pin_sign_in_worker",
         "pin_worker",
         "Cli::parse",
         "Setup::from_env",
