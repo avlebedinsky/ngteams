@@ -32,6 +32,8 @@ use std::{fs, future, io, thread};
 
 use gpui::{App, AsyncApp, Context, Entity, ListOffset, Window, WindowHandle, WindowingModes, px};
 use ngteams::app::{self, Launch};
+#[path = "ui_tour_compose_edge.rs"]
+mod compose_edge;
 #[path = "../window.rs"]
 mod support;
 use ngteams::descriptors::adopt_trace;
@@ -190,7 +192,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 320 + 8 + 5 + 15 + 6] = [
+const STEPS: [Step; 5 + 324 + 8 + 5 + 15 + 6] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -335,6 +337,12 @@ const STEPS: [Step; 5 + 320 + 8 + 5 + 15 + 6] = [
         fixed_theme(shell, None, cx);
         hover_none(shell, cx);
         select_last_message(shell, window, cx);
+    }),
+    // the box without the focus, which is on the message list: its border alone, no accent line
+    ("compose-unfocused", |shell, window, cx| {
+        if let Some(chat) = shell.read(cx).chat().cloned() {
+            chat.read(cx).focus_handle().clone().focus(window, cx);
+        }
     }),
     ("chat-reply", |shell, window, cx| {
         if let Some((chat, message)) = last_message(shell, cx) {
@@ -1150,8 +1158,25 @@ const STEPS: [Step; 5 + 320 + 8 + 5 + 15 + 6] = [
         update_shown(UpdateStatus::Ready(TOUR_RELEASE.into()), cx);
     }),
     ("update-failed-dark", |_, _, cx| update_shown(update_failed(), cx)),
-    ("chat-dark-compose", |shell, window, cx| {
+    // the a–b chat's box without the focus, editing a's last message, then holding a draft in a larger text size: its
+    // border and focus line in each
+    ("compose-unfocused-dark", |shell, window, cx| {
         update_shown(UpdateStatus::None, cx);
+        shell.update(cx, |shell, cx| shell.open_chat(AB_CHAT.to_owned(), window, cx));
+        if let Some(chat) = shell.read(cx).chat().cloned() {
+            chat.read(cx).focus_handle().clone().focus(window, cx);
+        }
+    }),
+    ("compose-edit-dark", |shell, window, cx| {
+        edit_last_own(shell, window, cx);
+    }),
+    ("compose-font-18-dark", |shell, window, cx| {
+        with_compose(shell, cx, |compose, cx| compose.cancel(window, cx));
+        set_font_size(shell, 18, cx);
+        type_in_compose(shell, "Lunch at noon?", window, cx);
+    }),
+    ("chat-dark-compose", |shell, window, cx| {
+        set_font_size(shell, teams_ui::theme::FONT_SIZE, cx);
         type_in_compose(shell, "Lunch at noon?\nThe usual place, or the new one?", window, cx);
     }),
     ("chat-dark-compose-expanded", |shell, window, cx| {
@@ -3865,6 +3890,14 @@ fn tour(sandbox: &Sandbox) -> SandboxResult {
         .line_where(STARTUP, |line| line == "ready")
         .map_err(|error| running.fail(&format!("no ready line: {error:?}")))?;
     for (name, _) in tour_steps() {
+        let edge = if compose_edge::SHOTS.contains(&name) {
+            let said = running
+                .line_where(WAIT, |line| line.starts_with(compose_edge::PREFIX))
+                .map_err(|error| running.fail(&format!("no compose edge for {name}: {error:?}")))?;
+            Some(said)
+        } else {
+            None
+        };
         running
             .line_where(WAIT, |line| line == format!("shot {name}"))
             .map_err(|error| running.fail(&format!("no shot {name}: {error:?}")))?;
@@ -3877,6 +3910,9 @@ fn tour(sandbox: &Sandbox) -> SandboxResult {
         fs::copy(&png, shots_dir()?.join(&file))?;
         if RINGING_SHOTS.contains(&name) {
             band_drawn(&png).map_err(|error| running.fail(&format!("{name}: {error}")))?;
+        }
+        if let Some(said) = edge {
+            compose_edge::check(&png, &said).map_err(|error| running.fail(&format!("{name}: {error}")))?;
         }
         fs::write(sandbox.dir().join(NEXT), "")?;
     }
@@ -3966,6 +4002,22 @@ fn toggle_first_video(cx: &mut App) {
 
 /// Shows the hover bar of the last message of b's (`own` false) or a's that offers actions, as the pointer over it
 /// would, nothing selected.
+/// Edits the account's last message in its chat, as its Edit action does.
+fn edit_last_own(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) {
+    let Some(chat) = shell.read(cx).chat().cloned() else {
+        return;
+    };
+    let message = chat.read(cx).items().iter().rev().find_map(|item| match item {
+        Item::Message(message) if message.own && message.actions().contains(&MessageAction::Edit) => {
+            Some(message.id.clone())
+        }
+        _ => None,
+    });
+    if let Some(message) = message {
+        chat.update(cx, |chat, cx| chat.act(MessageAction::Edit, &message, window, cx));
+    }
+}
+
 fn hover_last(shell: &Entity<Shell>, own: bool, cx: &mut App) {
     let Some(chat) = shell.read(cx).chat().cloned() else {
         return;
@@ -4481,6 +4533,14 @@ fn walk(window: WindowHandle<KitRoot>, cx: &mut App) {
                 let _ = window.update(cx, |_, window, cx| step(&shell, window, cx));
             }
             cx.background_executor().timer(SETTLE).await;
+            if compose_edge::SHOTS.contains(&name) {
+                let edge = shown(window, cx).and_then(|shell| {
+                    window
+                        .update(cx, |_, window, cx| compose_edge::line(&shell, window, cx))
+                        .ok()
+                });
+                say(&edge.unwrap_or_else(|| format!("{}none", compose_edge::PREFIX)));
+            }
             say(&format!("shot {name}"));
             while fs::remove_file(&next).is_err() {
                 cx.background_executor().timer(Duration::from_millis(100)).await;

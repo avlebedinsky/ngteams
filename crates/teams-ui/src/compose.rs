@@ -31,7 +31,7 @@
 //!   doesn't start it over), never while editing, and only with the "send typing" setting on. Nothing is sent when
 //!   typing stops: the web client never sent `Control/ClearTyping`.
 //!
-//! - **The box** is drawn as Teams' compose box: the editor on a raised, rounded surface with a hairline border
+//! - **The box** is drawn as Teams' compose box: the editor on a rounded surface with a hairline border and no shadow
 //!   ([`BOX_HEIGHT`] at least), Teams' accent line in the brand colour along its foot while it has the focus, and its
 //!   controls inside it on the right: Format, Emoji, Attach, Loop (shown disabled, saying the app doesn't have it yet),
 //!   Actions and apps (disabled the same way, unless `NGTEAMS_BOTS=1` is set, the account's cloud serves apps, and the
@@ -2126,10 +2126,18 @@ impl Compose {
             .is_some_and(|bounds| bounds.size.width < px(NARROW_BOX))
     }
 
-    /// The box itself: the editor and its controls on a raised, rounded surface with a hairline border, and Teams'
-    /// accent line along its foot while it has the focus; expanded, the format bar along its top and the controls
-    /// along its foot.
+    /// Where the box was last drawn in its window, inside its border.
+    #[must_use]
+    pub fn box_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.box_at.get()
+    }
+
+    /// The box itself: the editor and its controls on a rounded surface with a hairline border and no shadow, and
+    /// Teams' accent line along its foot while it has the focus; expanded, the format bar along its top and the
+    /// controls along its foot.
     fn input_box(&self, palette: Palette, focused: bool, cx: &mut Context<Self>) -> AnyElement {
+        // as round as the box's inside so it bends with the corners, and twice that tall, or GPUI halves the radius
+        let inner_radius = self.rem * 0.5 - px(1.0);
         let accent = focused.then(|| {
             div()
                 .debug_selector(|| "compose-accent".to_owned())
@@ -2137,9 +2145,10 @@ impl Compose {
                 .left_0()
                 .right_0()
                 .bottom_0()
-                .h(px(2.0))
-                .rounded_b_md()
-                .bg(theme::brand_gradient(palette, 90.0))
+                .h(inner_radius * 2.0)
+                .rounded_b(inner_radius)
+                .border_b_2()
+                .border_color(rgb(palette.brand))
         });
         // the accent line grows out from the middle as the box takes the focus
         let accent = accent.map(|accent| {
@@ -2154,17 +2163,8 @@ impl Compose {
             .min_h(px(BOX_HEIGHT))
             .rounded_lg()
             .border_1()
-            .border_color(rgb(if focused {
-                theme::mix(palette.border, palette.brand, 0.45)
-            } else {
-                palette.border
-            }))
+            .border_color(rgb(palette.border))
             .bg(rgb(palette.surface))
-            .shadow(if focused {
-                theme::glow(palette, palette.brand, 0.22, 18.0, 4.0)
-            } else {
-                theme::glow(palette, 0x0000_0000, 0.06, 8.0, 2.0)
-            })
             .text_color(rgb(palette.foreground));
         // an edit stays where its reply is: nothing is sent anywhere new
         let send_to =
@@ -2178,6 +2178,8 @@ impl Compose {
                 .px_3()
                 .pt_2()
                 .pb(px(BOX_PADDING))
+                // as the one-line box: nothing inside, Send's glow too, draws past the frame
+                .overflow_hidden()
                 .children(send_to)
                 .children(self.expanded.then(|| self.format_bar.clone()))
                 .child(div().px_1().pt_1().child(self.editor.clone()))
