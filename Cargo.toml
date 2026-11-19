@@ -442,11 +442,15 @@ gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
 image-webp = { path = "vendor/image-webp" }
 # LiveKit's libwebrtc bindings, the pinned 0.3.55 plus build/patches/libwebrtc (scripts/vendor-crates.sh):
 # `RtpTransceiver::set_direction`, which webrtc-sys binds and the safe API leaves out (0.4.0 too). A group call's screen
-# goes out on the mixer's sharing line, turned to send before the answer (crates/teams-media/src/rtc.rs). Only the Rust
-# crate is patched: webrtc-sys and its prebuilt libwebrtc stay crates.io's. Candidate-pair RTT also preserves field
-# presence, so a measured zero differs from an absent statistic. Keep the patches until upstream exposes direction
-# and preserves optional RTT values.
+# goes out on the mixer's sharing line, turned to send before the answer (crates/teams-media/src/rtc.rs). Candidate-pair
+# RTT also preserves field presence, so a measured zero differs from an absent statistic. Keep the patches until
+# upstream exposes direction and preserves optional RTT values.
 libwebrtc = { path = "vendor/libwebrtc" }
+# webrtc-sys 0.3.52 plus build/patches/webrtc-sys: libwebrtc's `RtpSenderInterface::GenerateKeyFrame` bound, which
+# libwebrtc's safe API (build/patches/libwebrtc/0003) exposes. A shared screen forces the keyframe that the Teams mixer
+# still waits for when libwebrtc ignored its repeated FIR (crates/teams-media/src/session/keyframes.rs). The prebuilt
+# libwebrtc it links stays the one its build script downloads.
+webrtc-sys = { path = "vendor/webrtc-sys" }
 # burn-tch, Burn's LibTorch backend, swapped for an empty stub (vendor/burn-tch): burn-dispatch names it only in weak
 # features (`burn-tch?/std`), which Cargo still writes into Cargo.lock (rust-lang/cargo#10801), and with it tch 0.22 and
 # torch-sys 0.22's zip 0.6.6 (GHSA zip cloaking, AES HMAC bypass), though no build enables the backend. The stub keeps

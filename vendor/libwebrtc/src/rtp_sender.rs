@@ -91,6 +91,12 @@ impl RtpSender {
     pub fn set_video_encoder_backend(&self, backend: VideoEncoderBackend) {
         self.handle.set_video_encoder_backend(backend)
     }
+
+    /// Asks the video encoder for a keyframe of every layer (`RtpSenderInterface::GenerateKeyFrame`); whether the
+    /// sender is a video sender that took the request.
+    pub fn generate_key_frame(&self) -> bool {
+        self.handle.generate_key_frame()
+    }
 }
 
 impl Debug for RtpSender {

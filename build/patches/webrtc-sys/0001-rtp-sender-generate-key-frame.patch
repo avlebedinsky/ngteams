@@ -1,0 +1,42 @@
+RtpSender::generate_key_frame: libwebrtc's RtpSenderInterface::GenerateKeyFrame (in the prebuilt, behind the sender's
+proxy) bound for Rust. The Teams mixer asks a sender for a keyframe with an RTCP FIR and sends the same FIR again while
+it waits; libwebrtc ignores a FIR whose sequence number it saw before, so a request it already answered once is never
+answered again. ngteams forces the keyframe the mixer still waits for (crates/teams-media/src/session/keyframes.rs).
+
+--- a/include/livekit/rtp_sender.h
++++ b/include/livekit/rtp_sender.h
+@@ -67,6 +67,8 @@
+ 
+   void set_video_encoder_backend(VideoEncoderBackend backend) const;
+ 
++  bool generate_key_frame() const;
++
+   webrtc::scoped_refptr<webrtc::RtpSenderInterface> rtc_sender() const {
+     return sender_;
+   }
+--- a/src/rtp_sender.cpp
++++ b/src/rtp_sender.cpp
+@@ -212,6 +212,13 @@
+     throw std::runtime_error(serialize_error(to_error(error)));
+ }
+ 
++bool RtpSender::generate_key_frame() const {
++  if (sender_->media_type() != webrtc::MediaType::VIDEO) {
++    return false;
++  }
++  return sender_->GenerateKeyFrame({}).ok();
++}
++
+ void RtpSender::set_video_encoder_backend(VideoEncoderBackend backend) const {
+   if (sender_->media_type() != webrtc::MediaType::VIDEO) {
+     RTC_LOG(LS_WARNING)
+--- a/src/rtp_sender.rs
++++ b/src/rtp_sender.rs
+@@ -51,6 +51,7 @@
+         fn get_parameters(self: &RtpSender) -> RtpParameters;
+         fn set_parameters(self: &RtpSender, parameters: RtpParameters) -> Result<()>;
+         fn set_video_encoder_backend(self: &RtpSender, backend: VideoEncoderBackend);
++        fn generate_key_frame(self: &RtpSender) -> bool;
+ 
+         fn _shared_rtp_sender() -> SharedPtr<RtpSender>;
+     }

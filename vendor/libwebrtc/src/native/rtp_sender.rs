@@ -84,6 +84,10 @@ impl RtpSender {
     pub fn set_video_encoder_backend(&self, backend: VideoEncoderBackend) {
         self.sys_handle.set_video_encoder_backend(backend.into());
     }
+
+    pub fn generate_key_frame(&self) -> bool {
+        self.sys_handle.generate_key_frame()
+    }
 }
 
 impl From<VideoEncoderBackend> for sys_webrtc::ffi::VideoEncoderBackend {
