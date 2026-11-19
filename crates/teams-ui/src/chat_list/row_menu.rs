@@ -19,6 +19,9 @@ use crate::theme::{self, Palette};
 pub const MARK_READ: &str = "Mark as read";
 /// The row menu's entry on a read chat, as Teams words it.
 pub const MARK_UNREAD: &str = "Mark as unread";
+/// How much of the row's right end the "..." covers while shown, px: the time and the count under it, as Teams shows
+/// the "..." in their place.
+const COVER: f32 = 72.0;
 /// The "..."'s tooltip and accessible name, as Teams words it.
 pub const MORE_CHAT_OPTIONS: &str = "More chat options";
 
@@ -63,32 +66,40 @@ impl ChatList {
         }));
         let panel = format!("{selector}-menu");
         let shown = open.is_some();
-        Some(
-            div()
-                .id(SharedString::from(format!("{selector}-more-wrap")))
-                .absolute()
-                .top_0()
-                .bottom_0()
-                .right(px(4.0))
-                .px_1()
-                .flex()
-                .items_center()
-                .bg(gpui::rgb(cover))
-                .when(!shown, |more| {
-                    more.invisible().group_hover(group, gpui::Styled::visible)
-                })
-                // the "..." takes its own clicks: the row under it doesn't open
-                .on_click(|_, _, cx| cx.stop_propagation())
-                .child(selected_by(format!("{selector}-more"), button))
-                .children(open.map(|menu| {
+        // the menu opens under the "...", its left edge the button's
+        let anchor = div()
+            .relative()
+            .child(selected_by(format!("{selector}-more"), button))
+            .children(open.map(|menu| {
+                div().absolute().top(gpui::relative(1.0)).left_0().child(
                     gpui::deferred(
                         gpui::anchored()
                             .anchor(gpui::Anchor::TopLeft)
                             .snap_to_window_with_margin(px(8.0))
                             .child(div().debug_selector(move || panel.clone()).child(menu)),
                     )
-                    .with_priority(1)
-                }))
+                    .with_priority(1),
+                )
+            }));
+        Some(
+            div()
+                .id(SharedString::from(format!("{selector}-more-wrap")))
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .right_0()
+                .w(px(COVER))
+                .pr_3()
+                .flex()
+                .items_center()
+                .justify_end()
+                .bg(gpui::rgb(cover))
+                .when(!shown, |more| {
+                    more.invisible().group_hover(group, gpui::Styled::visible)
+                })
+                // the "..." takes its own clicks: the row under it doesn't open
+                .on_click(|_, _, cx| cx.stop_propagation())
+                .child(anchor)
                 .into_any_element(),
         )
     }
@@ -107,7 +118,6 @@ impl ChatList {
             return;
         }
         let weak = cx.entity().downgrade();
-        let palette = theme::current(cx);
         let return_focus = window.focused(cx);
         let chosen = id.to_owned();
         let menu = PopupMenu::build(window, cx, move |menu, _, _| {
@@ -119,11 +129,9 @@ impl ChatList {
             let (weak, chosen) = (weak.clone(), chosen.clone());
             let menu = menu
                 .min_w(px(200.0))
-                .item(
-                    item(format!("chat-row-{key}"), label, glyph, palette).on_click(move |_, _, cx| {
-                        let _ = weak.update(cx, |this, cx| this.mark(&chosen, unread, cx));
-                    }),
-                );
+                .item(item(format!("chat-row-{key}"), label, glyph).on_click(move |_, _, cx| {
+                    let _ = weak.update(cx, |this, cx| this.mark(&chosen, unread, cx));
+                }));
             match return_focus.clone() {
                 Some(focus) => menu.action_context(focus),
                 None => menu,
@@ -163,8 +171,10 @@ impl ChatList {
     }
 }
 
-fn item(id: String, label: &'static str, glyph: Glyph, palette: Palette) -> PopupMenuItem {
-    PopupMenuItem::element(move |_, _| {
+/// A menu entry, drawn in the theme of the moment it is drawn.
+fn item(id: String, label: &'static str, glyph: Glyph) -> PopupMenuItem {
+    PopupMenuItem::element(move |_, cx| {
+        let palette: Palette = theme::current(cx);
         let id = id.clone();
         div()
             .debug_selector(move || id.clone())
