@@ -530,9 +530,13 @@ impl Walk<'_> {
     /// Closes the open More options menu: one Escape, as in Teams; else a second one, else a click outside it.
     fn close_menu(&mut self, view: &str) -> SandboxResult {
         static SAID: std::sync::Once = std::sync::Once::new();
+        static SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         self.run.input.key(keys::ESC)?;
         thread::sleep(SETTLE);
         if self.run.state(view)?["options"].is_null() {
+            if !SHOWN.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                self.shots("escape-closed")?;
+            }
             return Ok(());
         }
         let _ = self.run.shot(self.sandbox, "qa575-escape-menu-light.png");
@@ -719,6 +723,103 @@ impl Walk<'_> {
         });
         self.run.input.key(keys::ESC)?;
         step(&format!("the keys that open the menu: {opened:?}"));
+        self.menu_by_keys()
+    }
+
+    /// The menu opened by Shift+F10 works with the keys: Down to "Translation", Right into its list, Enter on its
+    /// offer, Left and Escape back out. b's message shows translated when this starts.
+    fn menu_by_keys(&mut self) -> SandboxResult {
+        let hello = self.ids().hello.clone();
+        self.select_by_keys(&hello)?;
+        self.menu_key_on("chat", &hello)?;
+        self.key_shots("keys-menu")?;
+        self.run.input.key(keys::DOWN)?;
+        self.run.input.key(keys::RIGHT)?;
+        thread::sleep(SETTLE);
+        self.key_shots("keys-translation-list")?;
+        // Left closes the list alone, Right opens it again
+        self.run.input.key(keys::LEFT)?;
+        thread::sleep(SETTLE);
+        expect(self.run.state("chat")?["options"] == hello.as_str(), || {
+            "Left in the Translation list closes the whole menu".to_owned()
+        });
+        self.run.input.key(keys::RIGHT)?;
+        thread::sleep(SETTLE);
+        self.run.input.key(keys::ENTER)?;
+        self.until_shows("chat", &hello, HELLO.0, "none")?;
+        let state = self.run.state("chat")?;
+        expect(
+            state["options"].is_null() && state["selected"] == hello.as_str(),
+            || format!("Enter in the list leaves the menu open or the message unselected: {state}"),
+        );
+        // the keys are back on the message: Shift+F10 again, and Translate
+        self.menu_key_on("chat", &hello)?;
+        for key in [keys::DOWN, keys::RIGHT, keys::ENTER] {
+            self.run.input.key(key)?;
+            thread::sleep(Duration::from_millis(300));
+        }
+        self.until_shows("chat", &hello, HELLO.1, "translated")?;
+        // Escape in the list closes the list, a second one the menu
+        self.menu_key_on("chat", &hello)?;
+        self.run.input.key(keys::DOWN)?;
+        self.run.input.key(keys::RIGHT)?;
+        thread::sleep(SETTLE);
+        self.run.input.key(keys::ESC)?;
+        thread::sleep(SETTLE);
+        expect(self.run.state("chat")?["options"] == hello.as_str(), || {
+            "Escape in the Translation list closes the whole menu".to_owned()
+        });
+        self.run.input.key(keys::ESC)?;
+        thread::sleep(SETTLE);
+        expect(self.run.state("chat")?["options"].is_null(), || {
+            "a second Escape leaves the menu open".to_owned()
+        });
+        // a third lets the message go: the next steps find its hover bar with the pointer
+        self.run.input.key(keys::ESC)?;
+        thread::sleep(SETTLE);
+        step("the menu by the keys: Shift+F10, Down, Right, Left, Enter, Escape");
+        Ok(())
+    }
+
+    /// Shift+F10 on the message `id` selected in `view`: its menu opens, and takes the keys once it is drawn.
+    fn menu_key_on(&mut self, view: &str, id: &str) -> SandboxResult {
+        self.run.input.key_with(&[Modifier::Shift], KEY_F10)?;
+        self.run
+            .until(view, "Shift+F10 opens the menu", |state| state["options"] == id)?;
+        thread::sleep(SETTLE);
+        Ok(())
+    }
+
+    /// Light and dark screenshots with the pointer where it is: a move of the pointer hides the keys' highlight.
+    fn key_shots(&mut self, name: &str) -> SandboxResult {
+        self.key_shot(&format!("qa575-{name}-light.png"))?;
+        self.run.theme(true)?;
+        thread::sleep(SETTLE);
+        self.key_shot(&format!("qa575-{name}-dark.png"))?;
+        self.run.theme(false)?;
+        thread::sleep(SETTLE);
+        Ok(())
+    }
+
+    fn key_shot(&mut self, file: &str) -> SandboxResult {
+        let png = self.sandbox.screenshot(file, false)?;
+        fs::copy(&png, shots_dir()?.join(file))?;
+        Ok(())
+    }
+
+    /// In `view` (a channel's posts or a thread), the message `id` selected, as Escape and Up select it there: Shift+F10
+    /// opens its menu and Escape closes it.
+    fn menu_key_in(&mut self, view: &str, id: &str) -> SandboxResult {
+        self.run.question(&format!("select {view} {id}"))?;
+        thread::sleep(SETTLE);
+        self.menu_key_on(view, id)?;
+        self.key_shots(&format!("keys-menu-{view}"))?;
+        self.run.input.key(keys::ESC)?;
+        thread::sleep(SETTLE);
+        expect(self.run.state(view)?["options"].is_null(), || {
+            format!("Escape leaves the menu in {view} open")
+        });
+        step(&format!("Shift+F10 in {view}"));
         Ok(())
     }
 
@@ -921,6 +1022,7 @@ impl Walk<'_> {
         self.choose_offer("posts", &post, false)?;
         self.until_shows("posts", &post, POST.1, "translated")?;
         self.shots("channel-post")?;
+        self.menu_key_in("posts", &post)?;
         self.run.question(&format!("open-thread {CHANNEL_POST}"))?;
         self.run.until("thread", "b's reply in the thread", |state| {
             item(state, &reply).is_some()
@@ -929,6 +1031,7 @@ impl Walk<'_> {
         self.choose_offer("thread", &reply, false)?;
         self.until_shows("thread", &reply, REPLY.1, "translated")?;
         self.shots("thread-reply")?;
+        self.menu_key_in("thread", &reply)?;
         step("a channel's post and a reply");
         Ok(())
     }
@@ -1927,6 +2030,18 @@ fn on_shell(shell: &Entity<Shell>, verb: &str, window: &mut Window, cx: &mut App
                     chat.list_state().scroll_to_reveal_item(index);
                     cx.notify();
                 }
+            });
+            "ok".to_owned()
+        }
+        // the message selected and the list's focus, as Escape in the box and Up give them
+        "select" => {
+            let (view, id) = rest.split_once(' ').unwrap_or((rest, ""));
+            let Some(chat) = view_of(shell, view, cx) else {
+                return "no view".to_owned();
+            };
+            chat.update(cx, |chat, cx| {
+                chat.select(Some(id.to_owned()), cx);
+                chat.focus_handle().clone().focus(window, cx);
             });
             "ok".to_owned()
         }
