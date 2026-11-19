@@ -273,6 +273,8 @@ pub struct Shown {
     originals: Arc<HashSet<String>>,
     sent: Arc<Vec<Sent>>,
     failed: Option<Failure>,
+    /// The AI features are off: no message offers a translation.
+    ai_off: bool,
 }
 
 impl Shown {
@@ -343,7 +345,7 @@ impl Shown {
     /// shows as written, else the way to its other form.
     #[must_use]
     pub fn offer_of(&self, message: &Message) -> Option<Offer> {
-        if !translatable(message) {
+        if self.ai_off || !translatable(message) {
             return None;
         }
         let entry = self
@@ -439,6 +441,8 @@ pub struct ChatTranslation {
     reading_in: Option<Reading>,
     /// The messages the user asked to see translated, one at a time, while the chat isn't translated.
     picked: Arc<HashSet<String>>,
+    /// The AI features are on: off, nothing is read in a language and no message offers a translation.
+    ai: bool,
     /// The messages the store was asked about whether they were translated one at a time.
     picks_asked: HashSet<String>,
     /// Asking it: the messages held since are asked once it answers.
@@ -508,6 +512,7 @@ impl ChatTranslation {
             language: None,
             reading_in: None,
             picked: Arc::default(),
+            ai: crate::local_ai::enabled(cx),
             picks_asked: HashSet::new(),
             picking: None,
             pick_again: false,
@@ -614,6 +619,7 @@ impl ChatTranslation {
                 Status::Failed(failure) => Some(failure.clone()),
                 _ => None,
             },
+            ai_off: !self.ai,
         }
     }
 
@@ -639,7 +645,7 @@ impl ChatTranslation {
     /// "Translate" on the message `message`, while the chat isn't translated: it shows in the "Translate to" language,
     /// its translation kept in the store. One that failed is asked again; after the tool failed, it starts anew.
     pub fn translate_message(&mut self, message: &str, cx: &mut Context<Self>) {
-        if self.language.is_some() {
+        if self.language.is_some() || !self.ai {
             return;
         }
         Arc::make_mut(&mut self.originals).remove(message);
@@ -844,9 +850,8 @@ impl ChatTranslation {
     /// translated again). The "Translate to" language is theirs while the chat isn't translated.
     fn reconcile(&mut self, cx: &mut Context<Self>) {
         let settings = self.settings.read(cx).settings();
-        let language = settings
-            .chat_language_of(self.core.me(), &self.chat)
-            .filter(|_| crate::local_ai::enabled(cx));
+        let ai = crate::local_ai::enabled(cx);
+        let language = settings.chat_language_of(self.core.me(), &self.chat).filter(|_| ai);
         let choice = settings.chat_translator.clone();
         let translate_to = settings.message_translate_to.clone();
         // the store keeps them: asked again once the chat is read as written
@@ -858,11 +863,13 @@ impl ChatTranslation {
         }
         let reading = match language {
             Some(code) => Some(Reading::of_code(code)),
-            None => (!self.picked.is_empty()).then(|| Reading::of_name(&translate_to)),
+            // the messages picked stay picked: they show translated again once the AI features are on
+            None => (ai && !self.picked.is_empty()).then(|| Reading::of_name(&translate_to)),
         };
-        if language == self.language && choice == self.choice && reading == self.reading_in {
+        if language == self.language && choice == self.choice && reading == self.reading_in && ai == self.ai {
             return;
         }
+        self.ai = ai;
         let read_as_written = self.language.is_some() && language.is_none();
         self.language = language;
         self.reading_in.clone_from(&reading);

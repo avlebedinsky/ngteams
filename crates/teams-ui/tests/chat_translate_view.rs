@@ -558,6 +558,12 @@ fn a_translated_send_keeps_the_apps_cards_of_the_box() {
 
 /// The a–b chat of [`translated_chat`], not translated, in a window of its own.
 fn plain_chat(rig: &Rig) -> (Entity<ChatView>, &'static mut VisualTestContext) {
+    let (view, _, cx) = plain_chat_and_settings(rig);
+    (view, cx)
+}
+
+/// [`plain_chat`] with the settings its views share.
+fn plain_chat_and_settings(rig: &Rig) -> (Entity<ChatView>, Entity<SettingsModel>, &'static mut VisualTestContext) {
     rig.core.messages.lock().unwrap().insert(
         AB.to_owned(),
         vec![
@@ -568,11 +574,12 @@ fn plain_chat(rig: &Rig) -> (Entity<ChatView>, &'static mut VisualTestContext) {
     );
     rig.cx.update(teams_ui::window::init);
     let parts = parts::parts(rig, Settings::default(), Arc::new(ViewTrace::off()));
+    let settings = parts.settings.clone();
     let app: &'static mut TestAppContext = Box::leak(Box::new(rig.cx.clone()));
     let (view, cx) = app.add_window_view(|window, cx| ChatView::new(parts, AB.to_owned(), window, cx));
     cx.simulate_resize(size(px(800.0), px(600.0)));
     draw(cx);
-    (view, cx)
+    (view, settings, cx)
 }
 
 /// Points at the message `id`, opens its more-options menu and its Translation list, and clicks the list's first row.
@@ -674,6 +681,68 @@ fn translate_in_a_message_s_menu_shows_it_translated_and_see_original_switches_b
     assert_eq!(mark_of(&again, cx, "1003"), None);
     let model = translation(&again, cx);
     assert_eq!(cx.update(|_, cx| model.read(cx).batches()), 0);
+}
+
+#[test]
+fn with_the_ai_features_off_a_message_offers_no_translation_and_t_does_nothing() {
+    use teams_ui::chat_translate::{Mark, Offer};
+    let rig = Rig::start();
+    let dir = tempfile::tempdir().unwrap();
+    let fake = tool(dir.path(), "claude", FAKE_CLAUDE);
+    rig.cx
+        .update(|cx| cx.set_global(Tools::with(vec![(Backend::Claude, fake)])));
+    let (view, settings, cx) = plain_chat_and_settings(&rig);
+    translate_from_menu(cx, "1001");
+    until(cx, |cx| {
+        matches!(mark_of(&view, cx, "1001"), Some(Mark::Translated { .. }))
+    });
+    let model = translation(&view, cx);
+    let asked = cx.update(|_, cx| model.read(cx).batches());
+    let use_ai = |on: bool, cx: &mut VisualTestContext| {
+        cx.update(|_, cx| settings.update(cx, |model, cx| model.set_ai_features(on, cx)));
+        draw(cx);
+    };
+
+    use_ai(false, cx);
+    // the translation shown and its mark go; no message offers one
+    assert_eq!(mark_of(&view, cx, "1001"), None);
+    assert!(cx.debug_bounds("translation-mark-1001").is_none());
+    for id in ["1001", "1002", "1003"] {
+        assert_eq!(offer_of(&view, cx, id), None, "{id}");
+    }
+    // the menu has no Translation row
+    let row = cx.debug_bounds("message-1003").unwrap();
+    cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+    draw(cx);
+    let more = cx.debug_bounds("message-more").unwrap();
+    cx.simulate_click(more.center(), Modifiers::none());
+    draw(cx);
+    assert!(cx.debug_bounds("message-menu").is_some());
+    assert!(cx.debug_bounds("action-translation").is_none());
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    // T on a selected message translates nothing
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| view.select(Some("1002".to_owned()), cx));
+        view.read(cx).focus_handle().clone().focus(window, cx);
+    });
+    cx.simulate_keystrokes("t");
+    draw(cx);
+    std::thread::sleep(Duration::from_millis(200));
+    draw(cx);
+    assert_eq!(mark_of(&view, cx, "1002"), None);
+    assert_eq!(
+        cx.update(|_, cx| model.read(cx).batches()),
+        asked,
+        "nothing asked of the tool"
+    );
+
+    // on again: the message translated before shows translated again, and the menu offers it
+    use_ai(true, cx);
+    until(cx, |cx| {
+        matches!(mark_of(&view, cx, "1001"), Some(Mark::Translated { .. }))
+    });
+    assert_eq!(offer_of(&view, cx, "1002"), Some(Offer::Translate));
 }
 
 #[test]
