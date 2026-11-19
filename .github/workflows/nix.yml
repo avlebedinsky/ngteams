@@ -1,0 +1,74 @@
+# The Nix flake's release file (packaging/nix/release.json) for the newest published release, committed to main
+# (docs/ci.md, "The Nix flake").
+#
+# The release workflow cancels a run when a newer push comes, also after that run's `publish`. So this is a workflow of
+# its own: it starts when a release run ends in any state, a newer release run cannot cancel it, and it writes the
+# newest published release, not the release of the run that started it.
+#
+# No loop: a push with this workflow's token starts no workflow, the message has `[skip ci]`, and the push workflows
+# leave packaging/nix/ out of their paths.
+name: nix
+
+on:
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run at a time. A started run always ends. A waiting run can give its place to a newer one, which writes the same.
+concurrency:
+  group: nix-flake
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  flake:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          # the push below is this job's only use of the token
+          persist-credentials: true
+      - name: Release file from the newest release's SHA256SUMS
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release list --exclude-drafts --limit 100 --json tagName,isDraft,isPrerelease > "$RUNNER_TEMP/releases.json"
+          version="$(python3 scripts/release-nix.py newest "$RUNNER_TEMP/releases.json")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          gh release download "v$version" --pattern SHA256SUMS --dir "$RUNNER_TEMP"
+          python3 scripts/release-nix.py "$version" "$RUNNER_TEMP/SHA256SUMS" packaging/nix/release.json
+      - name: Commit it to main
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          if git diff --quiet -- packaging/nix/release.json; then
+            echo "::notice::the flake has $VERSION or a newer release already"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore(nix): use release $VERSION in the flake [skip ci]" -- packaging/nix/release.json
+          # another push can land on main meanwhile: put this commit on top of it
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "::warning::push $attempt was refused: rebase on main"
+            git pull --rebase origin main
+          done
+          echo "::error::main did not take the flake's commit"
+          exit 1

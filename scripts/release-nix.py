@@ -2,10 +2,15 @@
 """Write the Nix flake's release file (packaging/nix/release.json) for one published release.
 
     python3 scripts/release-nix.py VERSION SHA256SUMS OUTPUT
+    python3 scripts/release-nix.py newest RELEASES
 
 VERSION is the release's four-part version. SHA256SUMS is the release's own checksum file. The flake fetches the
 Linux archive, so the file holds its URL and its hash in the SRI form that Nix reads. The script writes nothing if a
 check fails, and it does not replace a file of the same or a newer release.
+
+`newest` prints the version of the newest published app release in RELEASES, the JSON of
+`gh release list --json tagName,isDraft,isPrerelease`. Drafts, prereleases (the `web-engine-<key>` runtimes) and
+other tags do not count.
 """
 
 from __future__ import annotations
@@ -46,6 +51,27 @@ def numbers(version: str) -> tuple[int, ...]:
     return tuple(int(part) for part in version.split("."))
 
 
+def newest(releases: str) -> str:
+    try:
+        entries = json.loads(releases)
+    except ValueError as error:
+        raise ValueError(f"the release list is not JSON: {error}") from error
+    if not isinstance(entries, list):
+        raise ValueError("the release list is not a JSON list")
+    versions = [
+        entry["tagName"][1:]
+        for entry in entries
+        if isinstance(entry, dict)
+        and entry.get("isDraft") is False
+        and entry.get("isPrerelease") is False
+        and isinstance(entry.get("tagName"), str)
+        and re.fullmatch(r"v[0-9]+(\.[0-9]+){3}", entry["tagName"])
+    ]
+    if not versions:
+        raise ValueError("the release list has no published app release")
+    return max(versions, key=numbers)
+
+
 def current(output: Path) -> str | None:
     """The release that `output` holds now, if it holds one."""
     try:
@@ -56,8 +82,15 @@ def current(output: Path) -> str | None:
 
 
 def main(argv: list[str]) -> int:
+    if len(argv) == 3 and argv[1] == "newest":
+        try:
+            print(newest(Path(argv[2]).read_text()))
+        except (OSError, ValueError) as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        return 0
     if len(argv) != 4:
-        print("usage: scripts/release-nix.py VERSION SHA256SUMS OUTPUT", file=sys.stderr)
+        print("usage: scripts/release-nix.py VERSION SHA256SUMS OUTPUT | newest RELEASES", file=sys.stderr)
         return 2
     output = Path(argv[3])
     try:

@@ -135,5 +135,85 @@ class ReleaseNixAsTheJobRunsIt(unittest.TestCase):
             self.assertEqual(output.read_text(), before)
 
 
+def listed(tag: str, draft: bool = False, prerelease: bool = False) -> dict:
+    return {"tagName": tag, "isDraft": draft, "isPrerelease": prerelease}
+
+
+class NewestRelease(unittest.TestCase):
+    """The release that the `nix` workflow writes: the newest published app release (QA of task 580, Q1)."""
+
+    def test_the_highest_version_wins_by_numbers_not_by_text_or_order(self) -> None:
+        releases = [listed("v0.1.0.150"), listed("v0.1.0.1000"), listed("v0.1.0.999")]
+        self.assertEqual(release_nix.newest(json.dumps(releases)), "0.1.0.1000")
+
+    def test_drafts_prereleases_and_other_tags_do_not_count(self) -> None:
+        releases = [
+            listed("v0.1.0.150"),
+            listed("v0.1.0.152", draft=True),
+            listed("v0.1.0.151", prerelease=True),
+            listed("web-engine-dcd8198e", prerelease=True),
+            listed("v0.1.0"),
+            {"tagName": "v0.1.0.153"},
+            "v0.1.0.154",
+        ]
+        self.assertEqual(release_nix.newest(json.dumps(releases)), "0.1.0.150")
+
+    def test_a_list_with_no_app_release_or_no_list_is_refused(self) -> None:
+        for releases in ("[]", json.dumps([listed("web-engine-x", prerelease=True)]), "{}", "not json"):
+            with self.subTest(releases=releases), self.assertRaises(ValueError):
+                release_nix.newest(releases)
+
+    def test_the_command_prints_the_version_or_fails_in_one_line(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "releases.json")
+            path.write_text(json.dumps([listed("v0.1.0.143"), listed("v0.1.0.144")]))
+            run = [sys.executable, "-B", str(REPO / "scripts/release-nix.py"), "newest", str(path)]
+            done = subprocess.run(run, capture_output=True, text=True, check=False)
+            self.assertEqual((done.returncode, done.stdout), (0, "0.1.0.144\n"), done.stderr)
+            path.write_text("[]")
+            done = subprocess.run(run, capture_output=True, text=True, check=False)
+            self.assertEqual((done.returncode, done.stdout), (1, ""))
+            self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
+
+
+class NixWorkflow(unittest.TestCase):
+    """A newer release run cannot cancel the flake's update (QA of task 580, Q1)."""
+
+    workflow = (REPO / ".github/workflows/nix.yml").read_text()
+    release = (REPO / ".github/workflows/release.yml").read_text()
+
+    def top_level(self, key: str, text: str) -> str:
+        return text.split(f"\n{key}:\n", 1)[1].split("\n\n", 1)[0]
+
+    def test_it_starts_when_any_release_run_on_main_ends(self) -> None:
+        trigger = self.top_level("on", self.workflow)
+        self.assertIn("  workflow_run:\n    workflows: [release]\n    types: [completed]\n", trigger)
+        self.assertIn("    branches: [main]\n", trigger)
+        self.assertIn("\nname: release\n", self.release)
+        # it must run after a cancelled or failed run too
+        self.assertNotIn("conclusion", self.workflow)
+
+    def test_its_group_is_its_own_and_a_newer_run_does_not_cancel_it(self) -> None:
+        group = self.top_level("concurrency", self.workflow)
+        self.assertIn("  cancel-in-progress: false", group)
+        self.assertIn("  group: nix-flake", group)
+        self.assertNotIn("nix-flake", self.release)
+
+    def test_it_writes_the_newest_release_and_the_release_run_writes_none(self) -> None:
+        self.assertIn('release-nix.py newest "$RUNNER_TEMP/releases.json"', self.workflow)
+        self.assertNotIn("release-nix.py", self.release.replace("test_release_nix.py", ""))
+
+    def test_the_loop_guards_hold(self) -> None:
+        self.assertIn("[skip ci]", self.workflow)
+        self.assertIn("GH_TOKEN: ${{ github.token }}", self.workflow)
+        self.assertNotIn("secrets.", self.workflow)
+        self.assertNotIn("\n  push:", self.top_level("on", self.workflow))
+        self.assertIn("'!packaging/nix/**'", self.top_level("on", self.release))
+        for name in ("coverage", "macos", "windows"):
+            paths = self.top_level("on", (REPO / f".github/workflows/{name}.yml").read_text())
+            for path in ("'!flake.nix'", "'!flake.lock'", "'!packaging/nix/**'"):
+                self.assertIn(path, paths, name)
+
+
 if __name__ == "__main__":
     unittest.main()

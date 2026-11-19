@@ -478,19 +478,22 @@ the right nix command in place of a download (`crates/teams-update`, `Format::Ni
 gives WebKit's sandbox `/nix/store` (and `/run/opengl-driver`) read-only, because the FHS environment's libraries are
 links into the store (`crates/teams-wpe/src/engine/nix.rs`).
 
-After `publish`, the release workflow's `nix` job downloads the new release's `SHA256SUMS` and runs
-`scripts/release-nix.py`, which writes `release.json` from it. It does not replace a file of the same or a newer
-release. The job commits the file to `main` as `github-actions[bot]` with `[skip ci]` and pushes with the workflow's
-own token (`contents: write`), so no new secret is necessary. If `main` moved, it rebases and tries again, three times.
-That commit cannot start a release loop:
+The `nix` workflow (`.github/workflows/nix.yml`) keeps `release.json` on the newest published release. It starts
+each time a release run on `main` ends, in any state, also when a newer push cancelled that run after `publish`. It
+has its own concurrency group without `cancel-in-progress`. A run that has started always ends. A run that waits can
+give its place to a newer run, and that run also writes the newest release. It finds the newest published app release (drafts and
+the `web-engine-<key>` prereleases do not count), downloads its `SHA256SUMS` and runs `scripts/release-nix.py`,
+which writes `release.json` from it. The script does not replace a file of the same or a newer release. The workflow
+commits the file to `main` as `github-actions[bot]` with `[skip ci]` and pushes with the workflow's own token
+(`contents: write`), so no new secret is necessary. If `main` moved, it rebases and tries again, three times. That
+commit cannot start a release loop:
 
 - a push with the workflow's own token starts no workflow;
 - `[skip ci]` skips the push workflows of that commit;
 - the release's `paths` leave out `packaging/nix/**`, and Coverage, macOS and Windows leave out `flake.nix`,
   `flake.lock` and `packaging/nix/**`.
 
-If a newer push cancels the release workflow after `publish` and before `nix`, the flake keeps the previous release
-until the next one. To write the file by hand, run
+To write the file again, run the `nix` workflow by hand (`workflow_dispatch`), or run
 `python3 scripts/release-nix.py <version> SHA256SUMS packaging/nix/release.json` with that release's `SHA256SUMS`.
 `nix flake check` evaluates the two modules and the package (it builds nothing large). CI does not run Nix: check a
 change to `packaging/nix/` locally, for example in the `docker.io/nixos/nix` image.
