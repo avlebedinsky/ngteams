@@ -50,6 +50,7 @@ mod relay;
 mod request;
 mod schedule;
 mod search;
+mod sticker;
 mod team_apps;
 pub use activity_settings::{
     AppNotificationPreference, UserGraphSettings, UserGraphSettingsError, UserGraphSettingsRead,
@@ -140,6 +141,7 @@ pub use search::{
     ALL_PAGE, Found, FoundChannel, FoundChat, FoundFile, FoundMessage, FoundPerson, PAGE, SUBSTRATE_AUDIENCE,
     SUBSTRATE_HOST, SearchAnswerError, SearchKind, SubstrateSearch, highlighted,
 };
+pub use sticker::{STICKERS_HOST, StickerPicture};
 pub use team_apps::{
     AppDefinitions, AppStore, DEFINITIONS_PAGE, DefaultTeamPicture, InstalledApp, OwnedGroups, StoreApp,
     TEMPLATE_LOCALE, TeamApps, TeamTemplateCard, TeamTemplateDetails, TeamTemplateRead, TeamTemplates, TemplateChannel,

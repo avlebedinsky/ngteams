@@ -20,6 +20,11 @@
 //! - a picture sent to the media service (`crate::ams::sent_picture`: itemtype `AMSImage`, its `imgo` view on an AMS
 //!   host, `itemid` its object) as the web client writes a pasted picture, its object in the post's `amsreferences`
 //!   ([`MessageText::pictures`]); any other image is refused.
+//! - a sticker ([`Sticker`]) in the `readonly` element of itemtype Sticker the web client sends around it, labelled by
+//!   its `aria-label` and `title`: one of Teams' own stickers as captured in `team-manage` on 2026-11-19 (its `<img>` of
+//!   itemtype Sticker on Teams' sticker CDN, with the editor's `data-image-*` attributes), a picture sent to the media
+//!   service as a pasted picture's `<img>` (that form inside the element was not captured yet); [`sticker_message`]
+//!   is the message of a sticker alone, between the two blank paragraphs the web client sends around it.
 //!
 //! - an app's card (a message extension's result, `docs/protocol/chat.md`, "App cards") as the web client sends a
 //!   link's app card: after the text, a span of itemtype `InputExtension` naming the card's client id, and the card in
@@ -39,8 +44,8 @@ use url::Url;
 use crate::chat::MentionKind;
 use crate::chat::code::{Code, language_of};
 use crate::chat::html::{
-    INDENT_STEP, List, MAX_CONTENT, MAX_DEPTH, MAX_INDENT, MENTION_ITEMTYPE, Marks, Node, Quote, REPLY_ITEMTYPE,
-    RichText, SpanStyle, Table,
+    INDENT_STEP, Image, List, MAX_CONTENT, MAX_DEPTH, MAX_INDENT, MENTION_ITEMTYPE, Marks, Node, Quote, REPLY_ITEMTYPE,
+    RichText, STICKER_ITEMTYPE, SpanStyle, Sticker, Table,
 };
 
 /// Why a [`MessageText`] can't be built.
@@ -664,6 +669,7 @@ impl<'a> Render<'a> {
             }
             Node::Rule => self.html.push_str("<hr>"),
             Node::Image(image) => self.picture(image)?,
+            Node::Sticker(sticker) => self.sticker(sticker)?,
             Node::Quote(quote) => self.quote(quote, depth)?,
             Node::List(list) => self.list(list, depth)?,
             Node::Table(table) => self.table(table, depth)?,
@@ -708,6 +714,47 @@ impl<'a> Render<'a> {
         if !self.pictures.contains(&object) {
             self.pictures.push(object);
         }
+        Ok(())
+    }
+
+    /// A sticker in the `readonly` element the web client sends around one, its label as the element's `aria-label`
+    /// and `title`: one of Teams' own as the capture shows it (its `<img>`'s attributes in that order), any other as a
+    /// picture sent to the media service ([`Self::picture`]).
+    fn sticker(&mut self, sticker: &Sticker) -> Result<(), ComposeError> {
+        let label = sticker
+            .label
+            .as_deref()
+            .or(sticker.image.alt.as_deref())
+            .filter(|label| !label.trim().is_empty())
+            .map_or_else(|| STICKER_LABEL.to_owned(), escape);
+        self.push(&[
+            "<readonly aria-label=\"",
+            &label,
+            "\" contenteditable=\"false\" itemtype=\"",
+            STICKER_ITEMTYPE,
+            "\" title=\"",
+            &label,
+            "\">",
+        ]);
+        if crate::StickerPicture::of(&sticker.image.src).is_some() {
+            let (width, height) = sticker.image.size.ok_or(ComposeError::Image)?;
+            self.push(&[
+                "<img src=\"",
+                &escape(&sticker.image.src),
+                "\" height=\"",
+                &height.to_string(),
+                "\" alt=\"",
+                &label,
+                "\" width=\"",
+                &width.to_string(),
+                "\" data-image-type=\"standard\" data-image-mode=\"single\" itemtype=\"",
+                STICKER_ITEMTYPE,
+                "\">",
+            ]);
+        } else {
+            self.picture(&sticker.image)?;
+        }
+        self.html.push_str("</readonly>");
         Ok(())
     }
 
@@ -898,7 +945,13 @@ fn within_depth(nodes: &[Node], depth: usize) -> Result<(), ComposeError> {
                     within_depth(&cell.nodes, depth + 3)?;
                 }
             }
-            Node::Text { .. } | Node::Break | Node::Mention { .. } | Node::Image(_) | Node::Code(_) | Node::Rule => {}
+            Node::Text { .. }
+            | Node::Break
+            | Node::Mention { .. }
+            | Node::Image(_)
+            | Node::Sticker(_)
+            | Node::Code(_)
+            | Node::Rule => {}
         }
     }
     Ok(())
@@ -909,15 +962,7 @@ fn within_depth(nodes: &[Node], depth: usize) -> Result<(), ComposeError> {
 fn pictures_on(cloud: &crate::Cloud, nodes: &mut [Node]) {
     for node in nodes {
         match node {
-            Node::Image(image) => {
-                let moved = crate::MessagePicture::of_in(&crate::Cloud::Microsoft, &image.src)
-                    .filter(|picture| picture.view() == "imgo")
-                    .zip(image.size)
-                    .and_then(|(picture, size)| crate::sent_picture_in(cloud, picture.object(), size));
-                if let Some(moved) = moved {
-                    image.src = moved.src;
-                }
-            }
+            Node::Image(image) | Node::Sticker(Sticker { image, .. }) => picture_on(cloud, image),
             Node::Paragraph(children)
             | Node::Link { children, .. }
             | Node::Span { children, .. }
@@ -936,6 +981,68 @@ fn pictures_on(cloud: &crate::Cloud, nodes: &mut [Node]) {
             }
             Node::Text { .. } | Node::Break | Node::Mention { .. } | Node::Code(_) | Node::Rule => {}
         }
+    }
+}
+
+/// `image` moved to `cloud`'s media service when it is a picture in Microsoft's sent form.
+fn picture_on(cloud: &crate::Cloud, image: &mut Image) {
+    let moved = crate::MessagePicture::of_in(&crate::Cloud::Microsoft, &image.src)
+        .filter(|picture| picture.view() == "imgo")
+        .zip(image.size)
+        .and_then(|(picture, size)| crate::sent_picture_in(cloud, picture.object(), size));
+    if let Some(moved) = moved {
+        image.src = moved.src;
+    }
+}
+
+/// The label of a sticker that has none.
+const STICKER_LABEL: &str = "Sticker";
+
+impl Sticker {
+    /// One of Teams' own stickers: its picture `src` on Teams' sticker CDN ([`crate::StickerPicture`]), drawn at `size`
+    /// CSS pixels (Teams' are 180 by 180), with `label`. `None` for a `src` off that CDN.
+    #[must_use]
+    pub fn of_teams(src: &str, size: (u32, u32), label: &str) -> Option<Self> {
+        crate::StickerPicture::of(src)?;
+        Some(Self {
+            image: Image {
+                src: src.to_owned(),
+                alt: Some(label.to_owned()),
+                item_type: Some(STICKER_ITEMTYPE.to_owned()),
+                item_id: None,
+                size: Some((size.0.max(1), size.1.max(1))),
+            },
+            label: Some(label.to_owned()),
+        })
+    }
+
+    /// A picture sent to `cloud`'s media service into `object` as a sticker, drawn at `size` CSS pixels, with `label`:
+    /// its `<img>` a pasted picture's ([`crate::sent_picture_in`]). `None` for an id that isn't an object's.
+    #[must_use]
+    pub fn of_picture(cloud: &crate::Cloud, object: &str, size: (u32, u32), label: &str) -> Option<Self> {
+        let image = crate::sent_picture_in(cloud, object, size)?;
+        Some(Self {
+            image: Image {
+                alt: Some(label.to_owned()),
+                ..image
+            },
+            label: Some(label.to_owned()),
+        })
+    }
+}
+
+/// A message of `sticker` alone, as the web client sends one: between two blank paragraphs (`<p>&nbsp;</p>`).
+#[must_use]
+pub fn sticker_message(sticker: Sticker) -> RichText {
+    let blank = || {
+        Node::Paragraph(vec![Node::Text {
+            text: "\u{a0}".to_owned(),
+            marks: Marks::NONE,
+        }])
+    };
+    RichText {
+        nodes: vec![blank(), Node::Sticker(sticker), blank()],
+        truncated: false,
     }
 }
 

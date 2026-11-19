@@ -14,7 +14,7 @@ use teams_mock::{AB_CHAT, ABC_CHAT, AC_CHAT, CHAT_BASE, ChatServiceMock, EventKi
 use teams_proto::Mri;
 use teams_proto::chat::{
     Code, CodeRun, ComposeError, Image, List, MAX_CONTENT, MAX_DEPTH, Marks, MessageText, Node, Quote, RichText,
-    parse_html,
+    Sticker, parse_html, sticker_message,
 };
 use teams_proto::{
     AddChatMembers, Author, CreateChat, Credentials, DeleteMessage, EditMessage, HttpTransport, Original, ReadReceipt,
@@ -623,6 +623,99 @@ async fn a_message_with_a_mention_is_sent_as_the_mention_fixture() -> TestResult
 
     assert_eq!(sent, read_listed(recorded(&fixture("mention.json")?["request"])?)?);
     Ok(())
+}
+
+/// `sticker.json`'s made-up sticker on Teams' sticker CDN, as the web client's picker names it.
+const STICKER_SRC: &str = "https://teams.public.onecdn.static.microsoft/evergreen-assets/stickerassets/madeup-250x250/en-us/MadeUp_HiThere.gif?v=5";
+
+/// `sticker.json`'s sticker: Teams' 180 by 180, its label with quotes in it.
+fn made_up_sticker() -> Sticker {
+    Sticker::of_teams(STICKER_SRC, (180, 180), "A made-up sticker says \"Hi there\"").unwrap()
+}
+
+#[test]
+fn a_sticker_alone_renders_byte_for_byte_as_the_web_client_sent_it() -> TestResult {
+    let text = MessageText::new(sticker_message(made_up_sticker()), [])?;
+
+    let sent = fixture("sticker.json")?;
+    assert_eq!(
+        text.html(),
+        sent["request"]["body"]["content"].as_str().ok_or("no content")?
+    );
+    assert!(text.pictures().is_empty(), "one of Teams' own goes to no AMS object");
+    // read back as it went, its label kept
+    let read = parse_html(text.html());
+    assert_eq!(read.nodes[1], Node::Sticker(made_up_sticker()));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_sticker_is_sent_as_the_sticker_fixture() -> TestResult {
+    let request = SendMessage::new(
+        AB_CHAT,
+        lab_a(),
+        MessageText::new(sticker_message(made_up_sticker()), [])?,
+    )
+    .composed_at(NEW_YEAR_MS + 70_000)
+    .with_client_message_id("8888888888888888888");
+
+    let sent = read_listed(sent(ChatWrite::Send(request)).await?)?;
+
+    assert_eq!(sent, read_listed(recorded(&fixture("sticker.json")?["request"])?)?);
+    Ok(())
+}
+
+#[test]
+fn a_sticker_sent_to_the_media_service_is_a_pasted_pictures_img_in_the_sticker_element() -> TestResult {
+    let object = "0-eus-d1-00000000000000000000000000000abc";
+    let sticker = Sticker::of_picture(
+        &teams_proto::Cloud::Microsoft,
+        object,
+        (240, 180),
+        "A made-up <caption>",
+    )
+    .ok_or("an object's id")?;
+
+    let text = MessageText::new(sticker_message(sticker.clone()), [])?;
+
+    assert_eq!(
+        text.html(),
+        format!(
+            "<p>&nbsp;</p><readonly aria-label=\"A made-up &lt;caption&gt;\" contenteditable=\"false\" \
+             itemtype=\"http://schema.skype.com/Sticker\" title=\"A made-up &lt;caption&gt;\"><img \
+             src=\"https://us-api.asm.skype.com/v1/objects/{object}/views/imgo\" \
+             itemtype=\"http://schema.skype.com/AMSImage\" width=\"240\" height=\"180\" alt=\"A made-up &lt;caption&gt;\" \
+             id=\"x_{object}\" itemid=\"{object}\"></readonly><p>&nbsp;</p>"
+        )
+    );
+    assert_eq!(text.pictures(), [object.to_owned()], "its object goes in amsreferences");
+    assert_eq!(parse_html(text.html()).nodes[1], Node::Sticker(sticker));
+    Ok(())
+}
+
+#[test]
+fn a_sticker_off_teams_sticker_cdn_and_the_media_service_is_refused() {
+    assert!(
+        Sticker::of_teams(
+            "https://images.example.test/stickerassets/a-250x250/A.gif",
+            (180, 180),
+            "a"
+        )
+        .is_none()
+    );
+    assert!(Sticker::of_picture(&teams_proto::Cloud::Microsoft, "../x", (1, 1), "a").is_none());
+    let mut sticker = made_up_sticker();
+    sticker.image.src = "https://images.example.test/made-up.gif".to_owned();
+    assert_eq!(MessageText::new(sticker_message(sticker), []), Err(ComposeError::Image));
+    let mut sized = made_up_sticker();
+    sized.image.size = None;
+    assert_eq!(MessageText::new(sticker_message(sized), []), Err(ComposeError::Image));
+    // no label: Teams' word for it
+    let mut unlabelled = made_up_sticker();
+    unlabelled.label = None;
+    unlabelled.image.alt = Some(" ".to_owned());
+    let html = MessageText::new(sticker_message(unlabelled), []).map(|text| text.html().to_owned());
+    assert!(html.is_ok_and(|html| html.contains("aria-label=\"Sticker\"")));
 }
 
 /// "Everyone\u{a0}a made-up mention of everyone" in the mock's group chat: `mention-everyone.json`'s text.

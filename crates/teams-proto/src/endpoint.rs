@@ -93,6 +93,11 @@ pub enum Service {
     /// `<img>` loads as any browser does): a GIF a message shows, picked from Teams' GIF picker
     /// (`media/<id>/<file>`, [`crate::GiphyPicture`]). Reads only, nothing of the account's sent.
     Giphy,
+    /// Teams' public sticker CDN, `https://teams.public.onecdn.static.microsoft/evergreen-assets/stickerassets/`, with
+    /// no token (Microsoft's public files, which the web client's `<img>` loads as any browser does): a sticker from
+    /// Teams' own packs a message shows (`<pack folder>[/<locale>]/<file>`, [`crate::StickerPicture`]). Reads only,
+    /// nothing of the account's sent.
+    Stickers,
     /// App tiles on Microsoft's CDN, `https://res.cdn.office.net/teamsappdata/`, with no token (public files the web
     /// client's `<img>` loads as any browser does): the picture an app definition's `largeImageUrl` names
     /// ([`crate::AppPicture`]). Reads only, nothing of the account's sent.

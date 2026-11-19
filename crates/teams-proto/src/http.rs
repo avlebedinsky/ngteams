@@ -27,6 +27,7 @@ use crate::post_read::PostRead;
 use crate::read::Read;
 use crate::request::Request;
 use crate::search::{SUBSTRATE_AUDIENCE, SUBSTRATE_HOST, SubstrateSearch};
+use crate::sticker::{STICKERS_HOST, STICKERS_PATH};
 use crate::thumbnail::{ThumbnailLink, is_thumbnail_link_in};
 use crate::write::on_calling_base;
 
@@ -64,8 +65,9 @@ pub const TROUTER_HOST: &str = "go.trouter.teams.microsoft.com";
 /// The largest body read, in bytes; a longer one is [`HttpError::BodyTooLarge`].
 pub const MAX_BODY: usize = 4 * 1024 * 1024;
 
-/// The largest body read from AMS ([`Service::Ams`]) or Giphy ([`Service::Giphy`]), in bytes: a picture pasted into a
-/// message, a photo's original included, or a GIF at its full size; a longer one is [`HttpError::BodyTooLarge`].
+/// The largest body read from AMS ([`Service::Ams`]), Giphy ([`Service::Giphy`]) or Teams' sticker CDN
+/// ([`Service::Stickers`]), in bytes: a picture pasted into a message, a photo's original included, or a GIF at its full
+/// size; a longer one is [`HttpError::BodyTooLarge`].
 pub const MAX_PICTURE_BODY: usize = 24 * 1024 * 1024;
 
 /// The largest part of a meeting recording's presentation read ([`HttpTransport::media_segment`]), in bytes: a few
@@ -1017,6 +1019,7 @@ impl<C: Credentials> HttpTransport<C> {
             Service::Relay => fixed(format!("https://{RELAY_HOST}/{RELAY_PATH}"), "/trap"),
             Service::Emoticons => public(format!("https://{EMOTICONS_HOST}/{EMOTICONS_PATH}")),
             Service::Giphy => public(format!("https://{GIPHY_HOST}/")),
+            Service::Stickers => public(format!("https://{STICKERS_HOST}/{}", STICKERS_PATH.join("/"))),
             Service::AppPictures => fixed(
                 format!("https://{APP_PICTURES_HOST}/{APP_PICTURES_PATH}"),
                 &format!("/{APP_PICTURES_PATH}"),
@@ -1166,7 +1169,10 @@ impl<C: Credentials> HttpTransport<C> {
             && url.username().is_empty()
             && url.password().is_none()
             && url.fragment().is_none()
-            && matches!(url.host_str(), Some(EMOTICONS_HOST | GIPHY_HOST | APP_PICTURES_HOST))
+            && matches!(
+                url.host_str(),
+                Some(EMOTICONS_HOST | GIPHY_HOST | STICKERS_HOST | APP_PICTURES_HOST)
+            )
     }
 
     /// One request with exactly `headers` (lower-cased names, none of them a credential) and the credential `auth`
@@ -1696,6 +1702,7 @@ fn audience(service: Service) -> Option<&'static str> {
         | Service::FileThumbnail
         | Service::FileContent
         | Service::Giphy
+        | Service::Stickers
         | Service::AppPictures
         | Service::StaticAppPictures => None,
     }
@@ -1724,6 +1731,7 @@ fn plain_headers(service: Service, body: bool) -> Vec<(String, String)> {
         | Service::FileThumbnail
         | Service::FileContent
         | Service::Giphy
+        | Service::Stickers
         | Service::AppPictures
         | Service::StaticAppPictures
         | Service::Substrate
@@ -1733,7 +1741,7 @@ fn plain_headers(service: Service, body: bool) -> Vec<(String, String)> {
     // a picture's view and a thumbnail answer an image, as a browser's `<img>` asks for one
     let accept = match service {
         Service::Ams | Service::FileThumbnail | Service::AppPictures | Service::StaticAppPictures => PICTURE_ACCEPT,
-        Service::Giphy => GIF_ACCEPT,
+        Service::Giphy | Service::Stickers => GIF_ACCEPT,
         // a file's bytes, whatever it holds, as a browser's media element asks for them
         Service::FileContent => "*/*",
         Service::ChatService
@@ -1821,6 +1829,7 @@ fn service_headers(service: Service) -> &'static [(&'static str, &'static str)] 
         | Service::FileThumbnail
         | Service::FileContent
         | Service::Giphy
+        | Service::Stickers
         | Service::AppPictures
         | Service::StaticAppPictures
         | Service::Substrate => &[],
@@ -1832,7 +1841,7 @@ fn on_base_in(cloud: &Cloud, service: Service, base: &Url, url: &Url, endpoint: 
     if cloud.is_microsoft()
         || matches!(
             service,
-            Service::Emoticons | Service::Giphy | Service::StaticAppPictures
+            Service::Emoticons | Service::Giphy | Service::Stickers | Service::StaticAppPictures
         )
     {
         return on_base(service, base, url, endpoint);
@@ -1896,6 +1905,7 @@ fn on_base(service: Service, base: &Url, url: &Url, endpoint: &Endpoint) -> bool
         | Service::FileThumbnail
         | Service::FileContent
         | Service::Giphy
+        | Service::Stickers
         | Service::AppPictures
         | Service::StaticAppPictures
         | Service::Substrate
@@ -2130,7 +2140,8 @@ fn parse_mock_origin(origin: &str) -> Option<Url> {
     (url.scheme() == "http" && loopback && url.port().is_some() && bare && url.password().is_none()).then_some(url)
 }
 
-/// The largest body read for a request to `url`: [`MAX_PICTURE_BODY`] from AMS's async gateway and Giphy's media host,
+/// The largest body read for a request to `url`: [`MAX_PICTURE_BODY`] from AMS's async gateway, Giphy's media host and
+/// Teams' sticker CDN,
 /// [`MAX_SEGMENT_BODY`] from the media transform service, [`MAX_BODY`] from anywhere else.
 fn max_body(url: &Url) -> usize {
     if url.host_str().is_some_and(crate::recording::is_media_host) {
@@ -2138,7 +2149,7 @@ fn max_body(url: &Url) -> usize {
     }
     if url
         .host_str()
-        .is_some_and(|host| host.ends_with(AMS_HOST_SUFFIX) || host == GIPHY_HOST)
+        .is_some_and(|host| host.ends_with(AMS_HOST_SUFFIX) || host == GIPHY_HOST || host == STICKERS_HOST)
     {
         MAX_PICTURE_BODY
     } else {

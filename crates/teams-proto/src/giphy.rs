@@ -12,6 +12,7 @@ use crate::ams::{MessagePicture, PastedFormat, PastedPicture};
 use crate::client::Response;
 use crate::endpoint::{Endpoint, Service};
 use crate::read::Read;
+use crate::sticker::StickerPicture;
 use crate::urlp::LinkPreviewPicture;
 
 /// The longest GIF id read (Giphy's are about 13 to 20 letters and digits).
@@ -95,19 +96,20 @@ impl Read for GiphyPicture {
     }
 }
 
-/// A picture a message shows, as the engine reads it: a picture pasted into it, from AMS, a GIF from Giphy, or the
-/// picture of a link's preview, from the async gateway's URL preview service.
+/// A picture a message shows, as the engine reads it: a picture pasted into it, from AMS, a GIF from Giphy, a sticker
+/// from Teams' sticker CDN, or the picture of a link's preview, from the async gateway's URL preview service.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum InlinePicture {
     Ams(MessagePicture),
     Giphy(GiphyPicture),
+    Sticker(StickerPicture),
     LinkPreview(LinkPreviewPicture),
 }
 
 impl InlinePicture {
-    /// The read of the picture an `<img>`'s `src` names: a view of an AMS object ([`MessagePicture::of`]) or a GIF on
-    /// Giphy's media host ([`GiphyPicture::of`]), or a link preview's `previewurl` ([`LinkPreviewPicture::of`]); `None`
-    /// for anything else.
+    /// The read of the picture an `<img>`'s `src` names: a view of an AMS object ([`MessagePicture::of`]), a GIF on
+    /// Giphy's media host ([`GiphyPicture::of`]), a sticker on Teams' sticker CDN ([`StickerPicture::of`]), or a link
+    /// preview's `previewurl` ([`LinkPreviewPicture::of`]); `None` for anything else.
     #[must_use]
     pub fn of(src: &str) -> Option<Self> {
         Self::of_in(&crate::Cloud::Microsoft, src)
@@ -119,16 +121,18 @@ impl InlinePicture {
         MessagePicture::of_in(cloud, src)
             .map(Self::Ams)
             .or_else(|| GiphyPicture::of(src).map(Self::Giphy))
+            .or_else(|| StickerPicture::of(src).map(Self::Sticker))
             .or_else(|| LinkPreviewPicture::of_in(cloud, src).map(Self::LinkPreview))
     }
 
     /// The picture the answer gives, as its read takes it ([`MessagePicture::read_answer`],
-    /// [`GiphyPicture::read_answer`]).
+    /// [`GiphyPicture::read_answer`], [`StickerPicture::read_answer`]).
     #[must_use]
     pub fn read_answer(&self, answer: &Response) -> Option<PastedPicture> {
         match self {
             Self::Ams(picture) => picture.read_answer(answer),
             Self::Giphy(picture) => picture.read_answer(answer),
+            Self::Sticker(picture) => picture.read_answer(answer),
             Self::LinkPreview(picture) => picture.read_answer(answer),
         }
     }
@@ -139,6 +143,7 @@ impl Read for InlinePicture {
         match self {
             Self::Ams(picture) => picture.service(),
             Self::Giphy(picture) => picture.service(),
+            Self::Sticker(picture) => picture.service(),
             Self::LinkPreview(picture) => picture.service(),
         }
     }
@@ -147,6 +152,7 @@ impl Read for InlinePicture {
         match self {
             Self::Ams(picture) => picture.endpoint(),
             Self::Giphy(picture) => picture.endpoint(),
+            Self::Sticker(picture) => picture.endpoint(),
             Self::LinkPreview(picture) => picture.endpoint(),
         }
     }

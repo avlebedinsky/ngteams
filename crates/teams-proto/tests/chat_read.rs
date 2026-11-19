@@ -17,9 +17,9 @@ use teams_mock::{AB_CHAT, ABC_CHAT, CHANNEL, CHAT_BASE, ChatServiceMock, LAB_A, 
 use teams_proto::chat::{
     AppConsumptionHorizon, ChatReadError, ChatReads, Code, CodeRun, Conversation, ConversationKind, ConversationList,
     Field, FileKind, FilePreview, LinkPermission, List, MAX_CONTENT, MAX_DEPTH, Marks, MemberList, MentionKind,
-    Message, MessagePage, MessageText, MessageType, Node, Quote, RichText, SharedFile, SharedFiles, Table, TableCell,
-    Thread, Token, Unshown, WEB_CLIENT, forwarded, link_endpoint, onedrive_page, parse_html, read_link_permission,
-    share_entry, share_token, shared_files, unshown_parts, web_chat_link,
+    Message, MessagePage, MessageText, MessageType, Node, Quote, RichText, STICKER_ITEMTYPE, SharedFile, SharedFiles,
+    Sticker, Table, TableCell, Thread, Token, Unshown, WEB_CLIENT, forwarded, link_endpoint, onedrive_page, parse_html,
+    read_link_permission, share_entry, share_token, shared_files, unshown_parts, web_chat_link,
 };
 use teams_proto::{Client, Cloud, Credentials, HttpError, HttpTransport};
 use wiremock::matchers::{method, path_regex};
@@ -431,6 +431,78 @@ fn a_mention_reads_in_the_captured_form_from_content_and_properties_as_sent_and_
         );
     }
     Ok(())
+}
+
+#[test]
+fn a_sticker_reads_as_one_with_its_label_as_sent_and_read_back() -> TestResult {
+    let fixture = fixture("sticker.json")?;
+    let label = "A made-up sticker says \"Hi there\"";
+    // as sent its `img` is in a `readonly` element; read back it is bare, without the editor's attributes
+    for form in [&fixture["request"]["body"], &fixture["read_back"]] {
+        let rich = message(form)?.rich_text().ok_or("no rich text")?;
+        let blank = || Node::Paragraph(vec![text("\u{a0}")]);
+        let [first, Node::Sticker(sticker), last] = &rich.nodes[..] else {
+            panic!("a sticker between two blank paragraphs: {rich:#?}");
+        };
+        assert_eq!((first, last), (&blank(), &blank()));
+        assert_eq!(sticker.label.as_deref(), Some(label));
+        assert_eq!(sticker.image.item_type.as_deref(), Some(STICKER_ITEMTYPE));
+        assert_eq!(sticker.image.size, Some((180, 180)));
+        assert!(sticker.image.src.contains("/stickerassets/madeup-250x250/"));
+        assert_eq!(rich.plain_text().trim_matches(['\u{a0}', '\n']), label);
+    }
+    Ok(())
+}
+
+#[test]
+fn a_sticker_elements_label_wins_over_its_pictures() {
+    // a picture sent to the media service in the element: the element's label, not the picture's `alt`
+    let ams = parse_html(
+        "<readonly aria-label=\"A made-up caption\" itemtype=\"http://schema.skype.com/Sticker\" title=\"t\"><img \
+         src=\"https://us-api.asm.skype.com/v1/objects/0-eus-d1-0000000000000000000000000000000a/views/imgo\" \
+         itemtype=\"http://schema.skype.com/AMSImage\" width=\"240\" height=\"180\" alt=\"image\"></readonly>",
+    );
+    let [Node::Sticker(Sticker { image, label })] = &ams.nodes[..] else {
+        panic!("a sticker: {ams:#?}");
+    };
+    assert_eq!(label.as_deref(), Some("A made-up caption"));
+    assert_eq!((image.alt.as_deref(), image.size), (Some("image"), Some((240, 180))));
+    // the title when there is no aria-label, the picture's alt when neither says anything
+    let titled = parse_html(
+        "<readonly title=\"Titled\" itemtype=\"http://schema.skype.com/Sticker\"><img \
+         src=\"https://teams.public.onecdn.static.microsoft/evergreen-assets/stickerassets/a-250x250/A.gif\" alt=\"a\"></readonly>",
+    );
+    assert!(matches!(&titled.nodes[..], [Node::Sticker(Sticker { label: Some(label), .. })] if label == "Titled"));
+    let bare = parse_html(
+        "<readonly aria-label=\" \" itemtype=\"http://schema.skype.com/Sticker\"><img \
+         src=\"https://teams.public.onecdn.static.microsoft/evergreen-assets/stickerassets/a-250x250/A.gif\" alt=\"Alt\"></readonly>",
+    );
+    assert!(matches!(&bare.nodes[..], [Node::Sticker(Sticker { label: Some(label), .. })] if label == "Alt"));
+}
+
+#[test]
+fn a_sticker_element_of_no_picture_and_any_other_readonly_element_stay_as_they_were() {
+    // an element of no picture keeps its text; a mention's element is unknown markup as before
+    let empty = parse_html("<readonly itemtype=\"http://schema.skype.com/Sticker\">made-up words</readonly>");
+    assert_eq!(empty.nodes, [text("made-up words")]);
+    let other = parse_html(
+        "<p><readonly itemtype=\"http://schema.skype.com/Mention\"><img \
+         src=\"https://teams.public.onecdn.static.microsoft/evergreen-assets/stickerassets/a-250x250/A.gif\" alt=\"x\"></readonly></p>",
+    );
+    assert!(
+        matches!(&other.nodes[..], [Node::Paragraph(children)] if matches!(&children[..], [Node::Image(_)])),
+        "{other:#?}"
+    );
+    // an emoticon in the element is no sticker
+    let emoticon = parse_html(
+        "<readonly itemtype=\"http://schema.skype.com/Sticker\"><img itemtype=\"http://schema.skype.com/Emoji\" \
+         src=\"https://statics.teams.cdn.office.net/evergreen-assets/personal-expressions/v2/assets/emoticons/laugh/default/20_f.png\" \
+         itemid=\"laugh\" alt=\"x\"></readonly>",
+    );
+    assert!(
+        matches!(&emoticon.nodes[..], [Node::Image(image)] if image.is_emoji()),
+        "{emoticon:#?}"
+    );
 }
 
 /// Each reaction's key and how many users it lists, in the order read.
