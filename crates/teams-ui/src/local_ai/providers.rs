@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use gpui::{App, AsyncApp, BorrowAppContext as _, Global};
@@ -491,6 +492,8 @@ pub struct ApiModels {
     listed: HashMap<String, Listing>,
     /// The providers asked now, with what was asked: a listing of a provider changed since is stale.
     asking: HashMap<String, Provider>,
+    /// Set when the AI features go off: a listing not sent yet is not sent.
+    stop: Arc<AtomicBool>,
 }
 
 impl Global for ApiModels {}
@@ -522,11 +525,12 @@ impl ApiModels {
         let held = cx.default_global::<Self>();
         held.listed.remove(&provider.id);
         held.asking.insert(provider.id.clone(), provider.clone());
+        let stop = Arc::clone(&held.stop);
         let asked = provider.clone();
         let keys = AiKeys::of(cx);
         let listing = cx
             .background_executor()
-            .spawn(async move { api::list_models(&asked, &keys) });
+            .spawn(async move { Self::list_unless(&stop, &asked, &keys) });
         let asked = provider.clone();
         cx.spawn(async move |cx: &mut AsyncApp| {
             let listing = listing.await;
@@ -544,6 +548,30 @@ impl ApiModels {
                 held.listed.insert(asked.id, listing);
             }
         });
+    }
+
+    /// What is set when the AI features go off (see [`ApiModels::list_unless`]).
+    pub(crate) fn stop_flag(cx: &mut App) -> Arc<AtomicBool> {
+        Arc::clone(&cx.default_global::<Self>().stop)
+    }
+
+    /// What `provider` lists (blocking: it is asked), unless `stop` was set before the request is sent.
+    pub(crate) fn list_unless(stop: &AtomicBool, provider: &Provider, keys: &AiKeys) -> Listing {
+        if stop.load(Ordering::SeqCst) {
+            return Err(Failure::Off);
+        }
+        api::list_models(provider, keys)
+    }
+
+    /// The AI features went off: a listing not sent yet is not sent, and one that answers later is dropped, so that
+    /// the next [`ApiModels::of`] lists again. A request already sent cannot be called back.
+    pub(super) fn stop_listing(cx: &mut App) {
+        if cx.has_global::<Self>() {
+            let held = cx.global_mut::<Self>();
+            held.stop.store(true, Ordering::SeqCst);
+            held.stop = Arc::default();
+            held.asking.clear();
+        }
     }
 
     /// Forgets what `provider` listed (it was removed).

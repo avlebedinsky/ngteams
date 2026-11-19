@@ -20,8 +20,8 @@ const GATED: [&str; 7] = [
     "Target::Api(",
     "ApiTarget {",
     "Tools::detect(",
-    "Catalog::list(",
     "list_models(",
+    "list_unless(",
 ];
 
 /// The callers outside `local_ai` that may write one of [`GATED`], each once, in a function that asks the switch
@@ -30,7 +30,7 @@ const ASKS_ITSELF: [(&str, &str, &str); 1] = [
     // "Test connection" in the AI providers' settings
     (
         "teams-ui/src/settings_view/ai_providers.rs",
-        "list_models(",
+        "list_unless(",
         "pub fn test_connection(",
     ),
 ];

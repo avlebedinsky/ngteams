@@ -172,7 +172,7 @@ fn the_catalog_lists_each_installed_tool_and_the_app_s_is_listed_in_the_backgrou
     fs::write(&catalog, CODEX_CATALOG).unwrap();
     let codex = fake(dir.path(), "codex", &format!("cat '{}'", catalog.display()));
     let tools = Tools::with(vec![(Backend::Codex, codex)]);
-    let listed = Catalog::list(&tools);
+    let listed = Catalog::list_until(&tools, &AtomicBool::new(false));
     assert!(listed.is_listed());
     assert_eq!(listed.models(Backend::Codex).len(), 3);
     assert!(listed.models(Backend::Claude).is_empty());
@@ -211,7 +211,10 @@ fn turning_ai_off_stops_the_listing_and_on_again_lists_anew(cx: &mut TestAppCont
     cx.update(|cx| super::super::AiSwitch::publish(false, cx));
     cx.run_until_parked();
     assert!(!starts.exists(), "no tool started once AI went off");
-    assert!(!cx.update(Catalog::of).is_listed());
+    assert!(
+        !cx.update(|cx| cx.has_global::<Catalog>()),
+        "the half-listed catalog is forgotten"
+    );
 
     cx.update(|cx| super::super::AiSwitch::publish(true, cx));
     cx.update(Catalog::of);

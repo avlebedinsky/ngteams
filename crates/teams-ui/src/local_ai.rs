@@ -450,6 +450,7 @@ impl AiSwitch {
             cx.set_global(Self(on));
             if !on {
                 Catalog::stop_listing(cx);
+                providers::ApiModels::stop_listing(cx);
             }
         }
     }

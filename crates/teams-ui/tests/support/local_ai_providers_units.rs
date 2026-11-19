@@ -312,3 +312,60 @@ fn each_failure_says_where_to_fix_it() {
         assert_eq!(failure.install_hint(), "");
     }
 }
+
+/// A mock API on the loopback that lists three synthetic models, and counts the requests.
+fn listing_mock() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::io::{BufRead as _, BufReader, Write as _};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = Arc::clone(&asked);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            counted.fetch_add(1, Ordering::SeqCst);
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap_or(0) > 0 && line.trim_end() != "" {
+                line.clear();
+            }
+            let body = r#"{"data":[{"id":"model-a"},{"id":"model-b"},{"id":"model-c"}]}"#;
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    (base, asked)
+}
+
+#[gpui::test]
+fn turning_ai_off_keeps_an_api_listing_unsent_and_on_again_lists_anew(cx: &mut gpui::TestAppContext) {
+    let (base, asked) = listing_mock();
+    let mut provider = api("api-1", Backend::Compatible, false);
+    provider.base_url = Some(base);
+
+    assert!(cx.update(|cx| ApiModels::of(&provider, cx)).is_none(), "being listed");
+    cx.update(|cx| super::super::AiSwitch::publish(false, cx));
+    cx.run_until_parked();
+    assert_eq!(asked.load(Ordering::SeqCst), 0, "no request once AI went off");
+    assert!(matches!(
+        cx.update(|cx| ApiModels::of(&provider, cx)),
+        Some(Err(Failure::Off))
+    ));
+
+    cx.update(|cx| super::super::AiSwitch::publish(true, cx));
+    let mut listed = None;
+    for _ in 0..500 {
+        cx.executor().allow_parking();
+        cx.run_until_parked();
+        listed = cx.update(|cx| ApiModels::of(&provider, cx));
+        if listed.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(listed.and_then(Result::ok).map(|models| models.len()), Some(3));
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+}

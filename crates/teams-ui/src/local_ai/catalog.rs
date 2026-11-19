@@ -149,13 +149,7 @@ impl Catalog {
         }
     }
 
-    /// Asks each tool in `tools` for its models (blocking: a tool runs).
-    #[must_use]
-    pub fn list(tools: &Tools) -> Self {
-        Self::list_until(tools, &AtomicBool::new(false))
-    }
-
-    /// As [`Catalog::list`], until `stop` is set.
+    /// Asks each tool in `tools` for its models (blocking: a tool runs), until `stop` is set.
     fn list_until(tools: &Tools, stop: &AtomicBool) -> Self {
         let mut catalog = Self {
             listed: true,

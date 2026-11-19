@@ -468,12 +468,28 @@ impl Previews {
     /// dropped is drawn again.
     fn settings_changed(&mut self, cx: &mut Context<Self>) {
         let choice = self.settings.read(cx).settings().chat_translator.clone();
-        if choice != self.choice || !crate::local_ai::enabled(cx) {
+        let enabled = crate::local_ai::enabled(cx);
+        if choice != self.choice || !enabled {
             self.choice = choice;
             self.stop_tools();
             self.paused_until = None;
         }
+        if !enabled {
+            self.forget_waiting();
+        }
         cx.notify();
+    }
+
+    /// The AI features are off: nothing waits for the tool, so what is shown once they are on again is asked anew.
+    fn forget_waiting(&mut self) {
+        self.gathering = None;
+        self.sweeping = None;
+        let waiting = (self.gathered.drain(..).map(|(key, _)| key))
+            .chain(self.queue.drain(..).map(|(key, _)| key))
+            .chain(self.deferred.drain().map(|(key, _)| key));
+        for key in waiting {
+            self.pending.remove(&key);
+        }
     }
 
     /// Closes the tool processes; the batch they worked on is asked again when it is shown again.
@@ -599,6 +615,11 @@ impl Previews {
     /// Hands the tool the next chat's batch, when none runs: up to [`BATCH_ITEMS`] of its messages, the newest first.
     fn pump(&mut self, cx: &mut Context<Self>) {
         if self.running.is_some() || self.preparing.is_some() {
+            return;
+        }
+        // a store read that ends after the AI features went off
+        if !crate::local_ai::enabled(cx) {
+            self.forget_waiting();
             return;
         }
         let Some((first, _)) = self.queue.front() else {

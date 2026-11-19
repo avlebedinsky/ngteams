@@ -35,7 +35,7 @@ use teams_auth::secrets::Secret;
 use super::{group, row, row_colored, row_with};
 use crate::icons::{Glyph, Spinning as _, icon_button, selected_by};
 use crate::local_ai::providers::{self, AiKeys, ApiModels, KeyVault as _, MAX_NAME, MemoryKeys};
-use crate::local_ai::{Backend, Model, Provider, ToolChoice, Tools, Work, api};
+use crate::local_ai::{Backend, Model, Provider, ToolChoice, Tools, Work};
 use crate::settings::SettingsModel;
 use crate::theme::{self, Palette};
 
@@ -535,9 +535,10 @@ impl AiProviders {
                 return;
             }
         };
+        let stop = ApiModels::stop_flag(cx);
         let listed = cx
             .background_executor()
-            .spawn(async move { api::list_models(&provider, &keys) });
+            .spawn(async move { ApiModels::list_unless(&stop, &provider, &keys) });
         editor.testing = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let tested = match listed.await {
                 Ok(models) => Tested::Connected(models.len()),

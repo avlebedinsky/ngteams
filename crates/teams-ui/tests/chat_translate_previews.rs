@@ -247,13 +247,62 @@ fn a_batch_stopped_while_its_context_is_read_is_asked_again_once_ai_is_back() {
     rig.app.run_until_parked();
     assert!(!rig.core.held.lock().unwrap().is_empty(), "the context is being read");
 
-    let use_ai = |rig: &mut Rigged, on: bool| {
-        rig.settings
-            .update(&mut rig.app, |model, cx| model.set_ai_features(on, cx));
-        rig.app.run_until_parked();
-    };
     use_ai(&mut rig, false);
     rig.core.hold_people.lock().unwrap().clear();
+    use_ai(&mut rig, true);
+    rig.want(&previews, vec![newest.clone()]);
+    let shown = rig.until_known(&previews, &newest);
+    assert_eq!(text_of(&shown).as_deref(), Some("DE See you soon"));
+}
+
+fn use_ai(rig: &mut Rigged, on: bool) {
+    rig.settings
+        .update(&mut rig.app, |model, cx| model.set_ai_features(on, cx));
+    rig.app.run_until_parked();
+}
+
+#[test]
+fn a_batch_queued_when_ai_goes_off_is_asked_again_once_ai_is_back() {
+    let mut rig = Rigged::new(FAKE_CLAUDE);
+    let messages = history(&rig.core);
+    let (newest, oldest) = (messages[0].clone(), messages[2].clone());
+    rig.translate(CHAT, Some("de"));
+    let previews = rig.previews();
+    // the first batch's context read waits for the account's name; the second batch waits its turn
+    rig.core.hold_people.lock().unwrap().insert(LAB_A.to_owned());
+    rig.want(&previews, vec![newest.clone()]);
+    rig.app
+        .executor()
+        .advance_clock(teams_ui::chat_translate::previews::GATHER);
+    rig.app.run_until_parked();
+    rig.want(&previews, vec![oldest.clone()]);
+    rig.app
+        .executor()
+        .advance_clock(teams_ui::chat_translate::previews::GATHER);
+    rig.app.run_until_parked();
+
+    use_ai(&mut rig, false);
+    rig.core.hold_people.lock().unwrap().clear();
+    use_ai(&mut rig, true);
+    rig.want(&previews, vec![oldest.clone()]);
+    let shown = rig.until_known(&previews, &oldest);
+    assert_eq!(text_of(&shown).as_deref(), Some("DE Hello"));
+}
+
+#[test]
+fn a_store_read_that_ends_while_ai_is_off_leaves_the_tool_unpaused() {
+    let mut rig = Rigged::new(FAKE_CLAUDE);
+    let newest = history(&rig.core)[0].clone();
+    rig.translate(CHAT, Some("de"));
+    let previews = rig.previews();
+    rig.want(&previews, vec![newest.clone()]);
+    use_ai(&mut rig, false);
+    rig.app
+        .executor()
+        .advance_clock(teams_ui::chat_translate::previews::GATHER);
+    rig.app.run_until_parked();
+    assert!(questions(rig.dir.path()).is_empty(), "no tool asked while AI is off");
+
     use_ai(&mut rig, true);
     rig.want(&previews, vec![newest.clone()]);
     let shown = rig.until_known(&previews, &newest);
