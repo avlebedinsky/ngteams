@@ -3755,8 +3755,7 @@ impl ChatView {
             .debug_selector(move || format!("avatar-{id}"))
             .relative()
             .size(px(AVATAR))
-            // the kit's own sizes: 48 px with small initials, drawn at Teams' 32 (an exact `Size::Size` gives
-            // the initials half its width, too narrow for two)
+            // the wrapper keeps the face's 32 px side, so the presence badge sits on the face's corner
             .child(face)
             .children(badge);
         // a click on the face opens their full card, a rest on it the compact one, as Teams' does
