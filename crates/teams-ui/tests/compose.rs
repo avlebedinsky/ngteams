@@ -1045,6 +1045,30 @@ fn escape_moves_the_focus_from_an_empty_box_to_the_list_and_back_so_r_replies_to
     assert_eq!(trace_changes(&written, "compose"), ["opened", "replying", "cancelled"]);
 }
 
+/// A made-up sticker of Teams' alone in a message, as the chat service reads it back.
+const STICKER_ALONE: &str = "<p>&nbsp;</p>\r\n<img src=\"https://teams.public.onecdn.static.microsoft/evergreen-assets/\
+     stickerassets/madeup-250x250/en-us/MadeUp_Hi.gif?v=5\" height=\"180\" alt=\"A made-up sticker\" width=\"180\" \
+     itemtype=\"http://schema.skype.com/Sticker\">\r\n<p>&nbsp;</p>";
+
+#[test]
+fn up_in_an_empty_box_skips_the_account_s_sticker_and_edits_its_last_text() {
+    let text = message(NOON, LAB_A, "<p>mine</p>");
+    let sticker = message(NOON + 1, LAB_A, STICKER_ALONE);
+    let rig = rig_with(vec![text.clone(), sticker]);
+    let (view, cx, _) = chat_window(&rig, Settings::default());
+    assert_eq!(focused(&view, cx), (false, true));
+    keys(cx, "up");
+    assert!(
+        matches!(mode(&view, cx), Mode::Edit { message_id, .. } if message_id == text.id),
+        "{:?}",
+        mode(&view, cx)
+    );
+    assert_eq!(typed(&view, cx), "mine");
+    let compose = compose(&view, cx);
+    let problem = cx.update(|_, cx| compose.read(cx).problem().cloned());
+    assert_eq!(problem, None, "no note that a message can't be edited");
+}
+
 #[test]
 fn a_click_on_a_message_leaves_the_focus_in_the_box() {
     let theirs = message(NOON, LAB_B, "<p>question?</p>");

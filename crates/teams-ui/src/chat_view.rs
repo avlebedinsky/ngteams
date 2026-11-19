@@ -823,8 +823,7 @@ impl MessageItem {
             MessageAction::Copy,
         ];
         if self.own {
-            // a forward is the original's content: Teams offers no edit of it, and a write of one was never captured
-            if !self.is_forward() {
+            if self.is_editable() {
                 actions.push(MessageAction::Edit);
             }
             actions.push(MessageAction::Delete);
@@ -837,7 +836,7 @@ impl MessageItem {
     fn thread_actions(&self) -> Vec<MessageAction> {
         let mut actions = vec![MessageAction::React, MessageAction::Copy];
         if self.own && matches!(self.body, Body::Text(_)) {
-            if !self.is_forward() {
+            if self.is_editable() {
                 actions.push(MessageAction::Edit);
             }
             actions.push(MessageAction::Delete);
@@ -850,6 +849,20 @@ impl MessageItem {
     #[must_use]
     pub fn offers_workflows(&self) -> bool {
         self.writes == ChatWrites::Taken && matches!(self.body, Body::Text(_))
+    }
+
+    /// Whether an edit of it is offered: not of a forward (the original's content: Teams offers no edit of it, and a
+    /// write of one was never captured), nor of a sticker alone (the sticker is all it says, and no text to edit).
+    fn is_editable(&self) -> bool {
+        !self.is_forward() && self.sticker_alone().is_none()
+    }
+
+    /// Its sticker, when it shows nothing else ([`rich_text::Rendered::sticker_alone`]).
+    fn sticker_alone(&self) -> Option<&rich_text::PictureBlock> {
+        match &self.body {
+            Body::Text(text) => text.0.sticker_alone(),
+            _ => None,
+        }
     }
 
     /// Whether its text holds a forwarded message's content (`rich_text::Block::Forward`).
@@ -2204,13 +2217,18 @@ impl ChatView {
         }
     }
 
-    /// Puts `message`'s text on the clipboard, as the reader sees it (a quote it carries left out).
+    /// Puts `message`'s text on the clipboard, as the reader sees it (a quote it carries left out); of a sticker alone,
+    /// its label, the words the chat list and search show for it.
     fn copy_text(&self, message: &str, cx: &mut Context<Self>) {
         let text = self
             .message_items()
             .find(|item| item.id == message)
             .and_then(|item| match &item.body {
-                Body::Text(text) => Some(plain_text(&text.0)),
+                Body::Text(text) => Some(
+                    text.0
+                        .sticker_alone()
+                        .map_or_else(|| plain_text(&text.0), sticker_label),
+                ),
                 Body::Cards(cards) => Some(
                     teams_proto::chat::card::plain_words(&cards.0)
                         .iter()
@@ -4065,6 +4083,17 @@ pub fn quick_reactions(frequent: &[String]) -> Vec<String> {
         }
     }
     quick
+}
+
+/// A sticker's label: its words, else "Sticker", as a sticker with none is sent.
+fn sticker_label(sticker: &rich_text::PictureBlock) -> String {
+    sticker
+        .alt
+        .as_deref()
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .unwrap_or("Sticker")
+        .to_owned()
 }
 
 /// A message's text as the reader sees it, its paragraphs a line each (an emoticon as its emoji), a list's items each
