@@ -119,6 +119,8 @@ pub struct FakeCore {
     pub expirations: Mutex<HashMap<String, i64>>,
     /// The account's read horizons by conversation.
     pub horizons: Mutex<HashMap<String, ReadHorizon>>,
+    /// Where the account marked conversations unread (`unread_mark`), by conversation.
+    pub unread_marks: Mutex<HashMap<String, i64>>,
     /// Per conversation, the service's older pages `load_older` brings into `messages`, the next one first (each the
     /// newest first); once none is left it answers `None`. A conversation not named answers `None` at once.
     pub older: Mutex<HashMap<String, Vec<Vec<Message>>>>,
@@ -447,6 +449,9 @@ fn conversation_of(action: &Action) -> Option<String> {
         | Action::React { conversation, .. }
         | Action::Unreact { conversation, .. }
         | Action::Read { conversation, .. }
+        | Action::MarkUnread { conversation, .. }
+        | Action::MarkRead { conversation }
+        | Action::EndUnreadMark { conversation }
         | Action::AddMembers { conversation, .. } => Some(conversation.clone()),
         Action::ActivityRead { .. } | Action::ActivitySeen | Action::ActivityAllRead => {
             Some(teams_core::activity::FEED.to_owned())
@@ -1206,6 +1211,10 @@ impl Core for FakeCore {
 
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>> {
         self.answer("read_horizon", || locked(&self.horizons).get(&conversation).cloned())
+    }
+
+    fn unread_mark(&self, conversation: String) -> Reply<Option<i64>> {
+        self.answer("unread_mark", || locked(&self.unread_marks).get(&conversation).copied())
     }
 
     fn translations(&self, conversation: String, language: String, ids: Vec<String>) -> Reply<Vec<StoredTranslation>> {

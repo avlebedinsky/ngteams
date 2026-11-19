@@ -210,6 +210,12 @@ pub trait Core: Send + Sync + 'static {
     }
     /// The account's own read horizon in a conversation.
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>>;
+    /// Where the account marked a conversation unread ("Mark as unread"): the arrival of the message before the first
+    /// unread one; `None` when it isn't marked. A fake marks none.
+    fn unread_mark(&self, conversation: String) -> Reply<Option<i64>> {
+        let _ = conversation;
+        Reply::ready(Ok(None))
+    }
     /// The account's activity feed as stored ([`teams_core::activity`]); an empty one where the engine has none.
     fn activity(&self) -> Reply<teams_core::activity::ActivityFeed> {
         Reply::ready(Ok(teams_core::activity::ActivityFeed::default()))
@@ -1065,6 +1071,10 @@ impl Core for EngineRequests {
 
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>> {
         EngineRequests::read_horizon(self, conversation)
+    }
+
+    fn unread_mark(&self, conversation: String) -> Reply<Option<i64>> {
+        EngineRequests::unread_mark(self, conversation)
     }
 
     fn history_complete(&self, conversation: String) -> Reply<Option<bool>> {

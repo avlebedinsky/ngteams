@@ -1024,6 +1024,9 @@ impl Sidebar {
             return false;
         };
         if crate::keyboard::opens_menu(event) {
+            if self.open_chat_menu(&entry, window, cx) {
+                return true;
+            }
             if let Entry::Channel { id, .. } | Entry::Favorite { id, .. } = &entry
                 && self.teams.read(cx).channel_location(id).is_some()
             {
@@ -1079,6 +1082,24 @@ impl Sidebar {
             },
             _ => return false,
         }
+        true
+    }
+
+    /// The menu key on a chat's row (in "Chats" or "Favorites"): its "More chat options" menu; `false` for any other
+    /// row, a channel's favourite too.
+    fn open_chat_menu(&mut self, entry: &Entry, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let (selector, id) = match entry {
+            Entry::Chat { index, id } => (format!("chat-row-{index}"), id),
+            Entry::Favorite { index, id } if self.teams.read(cx).channel_location(id).is_none() => {
+                (format!("favorite-row-{index}"), id)
+            }
+            _ => return false,
+        };
+        let Some(unread) = self.list.read(cx).row(id).map(|row| row.unread > 0) else {
+            return false;
+        };
+        self.list
+            .update(cx, |list, cx| list.open_row_menu(id, &selector, unread, window, cx));
         true
     }
 

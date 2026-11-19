@@ -195,10 +195,40 @@ client counts messages, and calls a chat unread when the count isn't 0, by the s
   form is the bundle's: no capture shows one, since no lab account marked all read and the personal build hadn't read
   the property. The native client doesn't apply the "joined after it" exception: such a chat's messages from before
   that time count as read, and any newer one still counts.
-- **Mark as unread** isn't read by the native client. Teams keeps it in the conversation's `userConsumptionHorizon` (or
-  `consumptionHorizonBookmark`), and while its arrival time isn't 0 the chat is unread. The 8 chats that carry one in the
-  CSA answer above all have arrival time 0, so none is marked, and clearing one is a write no capture shows.
+- **Mark as unread** is the conversation's `consumptionHorizonBookmark`: while its arrival isn't 0, the chat is unread
+  from the message after that arrival on, whatever its horizon and its newest message say ([Mark as
+  unread](#mark-as-unread)). The 8 chats that carry one in the CSA answer above all have arrival 0, so none is marked.
 - **Notifications** don't follow from any of this: only `Text`, `RichText/Html` and `RichText/Media_Card` notify.
+
+## Mark as unread
+
+Seen in browser Teams (`proto-lab run team-manage`, lab account a, 2026-11-19) in a's 1:1 chat with lab account b and
+in a lab team's General channel. Each write is the account's own property: nobody else is told.
+
+- **A message's "More options"** has "Mark as unread" (glasses with a slash, key U) after a hairline under Forward, Copy
+  link, Save this message, Delete (the account's own) and Pin, before Share to Outlook and Translation. It is on the
+  account's own messages too, and on a channel's post.
+- **The write**: `PUT v1/users/ME/conversations/<conversation>/properties?name=consumptionHorizonBookmark` with
+  `{"consumptionHorizonBookmark": "<message id - 1>;<now>;<clientmessageid>"}`, answered 200. The arrival is the
+  marked message's id minus 1 and the `clientmessageid` is the marked message's own. On a channel's post, the message is
+  the newest of the post's thread (its newest reply), not the post. The read horizon (`consumptionhorizon`) doesn't
+  move.
+- **At once**: the chat list's row is bold with its dot, the rail's count of unread chats goes up by one, and a "Last
+  read" line stands before the marked message, its sender's name and time shown again over it. A channel's post shows
+  "New". The chat stays open and stays unread: a click in it sends nothing.
+- **The chat list's row** has "More chat options" ("..." on hover). Its menu starts with "Mark as unread" (glasses with
+  a slash) on a read chat and "Mark as read" (glasses) on an unread one, then Move to section, Mute, Notify when
+  available, Manage apps, Set workflows, Copy link, Remove chat history and Hide. "Mark as unread" there puts the
+  bookmark before the chat's newest message, the account's own too, and the chat is unread with it. "Mark as read" puts
+  the horizon at the newest message (`consumptionhorizon`), then the bookmark `0;<now>;0`.
+- **Opened again** (another pane, then the chat again): the web client put `consumptionHorizonBookmark` `0;<now>;0` and,
+  with the horizon at the newest message already, no `consumptionhorizon`. The line stayed where the mark was.
+- The native client keeps the bookmark's arrival in the store and counts a marked chat's messages from others after it
+  (at least 1) unless it marked all read later. It ends the mark when the chat is shown after it opened marked, or shown
+  again after it was marked there, and sends no read receipt while the chat stays shown after a mark made there.
+- Not seen: the push delivery of a bookmark to the account's other endpoints (the own server sends a
+  `ConversationUpdate` naming `consumptionHorizonBookmark`; the native client stores a bookmark from any
+  `ConversationUpdate`), and a channel row's or a thread's own mark.
 
 ## The account's own notes
 

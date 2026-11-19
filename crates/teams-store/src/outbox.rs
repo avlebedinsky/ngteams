@@ -49,6 +49,8 @@ pub enum OutboxKind {
     ActivityTurnOffApp,
     /// Undo an app notification change.
     ActivityRestoreApp,
+    /// A conversation marked unread from a message on, or that mark ended.
+    UnreadMark,
 }
 
 /// Where a row stands.
@@ -108,6 +110,7 @@ text_enum!(OutboxKind {
     FeedRead => "feed_read",
     ActivityTurnOffApp => "activity_turn_off_app",
     ActivityRestoreApp => "activity_restore_app",
+    UnreadMark => "unread_mark",
 });
 
 text_enum!(OutboxState {

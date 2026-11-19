@@ -1593,7 +1593,9 @@ native engine following every backward continuation. Message arrays stay below a
 Read horizons are stored per `(chat, account)` and returned only in that account's conversation listing.
 Their own endpoints receive a `ConversationUpdate` with `propertiesUpdated` and the changed property. Other
 members get an internal `ReadReceipt` resource (`id`, `mri`, `consumptionhorizon`); that is separate from the own
-horizon update, which must never mark another member's conversation read.
+horizon update, which must never mark another member's conversation read. A conversation's
+`consumptionHorizonBookmark` ("Mark as unread" and its end) is kept the same way, per `(chat, account)`: its listing
+and its own endpoints only, and other members are told nothing.
 
 Own user properties persist `userGraphSettings` as its native JSON text and `appConsumptionHorizon` as JSON text
 or an object. Mark-all-read may be reset, as in Teams. Writes retain the account's other properties and publish

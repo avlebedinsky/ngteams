@@ -120,7 +120,7 @@ fn the_call_transcripts_migration_starts_with_none() -> Result<(), StoreError> {
     drop(raw);
     let store = Store::open(&store_path(&dir))?;
     assert_eq!(store.schema_version()?, SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 26);
+    assert_eq!(SCHEMA_VERSION, 27);
     assert!(store.call_transcripts(CHAT)?.is_empty());
     Ok(())
 }

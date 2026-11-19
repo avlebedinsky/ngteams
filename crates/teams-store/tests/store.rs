@@ -1436,7 +1436,7 @@ fn the_forgotten_threads_migration_keeps_the_conversations_and_forgets_none() ->
 
     let mut store = open(&dir)?;
     assert_eq!(store.schema_version()?, SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 26);
+    assert_eq!(SCHEMA_VERSION, 27);
     assert_eq!(store.conversation(GROUP)?.map(|stored| stored.version), Some(3));
     assert_eq!(store.forgotten_thread(GROUP)?, None);
     store.forget_conversation(GROUP)?;
@@ -2336,4 +2336,78 @@ fn a_horizon_bookmark_keeps_the_later_time_and_goes_with_its_conversation() {
     assert_eq!(store.horizon_bookmark(CHAT).expect("moved"), Some(3000));
     store.forget_conversation(CHAT).expect("forget");
     assert_eq!(store.horizon_bookmark(CHAT).expect("gone"), None);
+}
+
+#[test]
+fn a_chat_marked_unread_counts_from_the_mark_until_a_later_bookmark_ends_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = with_chat(&dir).expect("a store with the chat");
+    for (at, sender) in [(1000, PEER), (2000, PEER), (3000, ME)] {
+        store
+            .upsert_message(&message(&at.to_string(), at, "x", at, sender), None)
+            .expect("message");
+    }
+    let horizon = ReadHorizon {
+        conversation_id: CHAT.to_owned(),
+        user: ME.to_owned(),
+        last_read_arrival: 3000,
+        updated: 3000,
+        raw: None,
+    };
+    store.set_read_horizon(&horizon).expect("all read");
+    assert_eq!(store.unread_count(CHAT, ME).expect("read"), 0);
+    assert_eq!(store.unread_mark(CHAT).expect("none"), None);
+
+    // "Mark as unread" on the first message: from it on, whatever the horizon and the newest message say
+    assert_eq!(
+        store.set_unread_bookmark(CHAT, 999, 5000).expect("marked"),
+        Applied::Inserted
+    );
+    assert_eq!(store.unread_mark(CHAT).expect("mark"), Some(999));
+    assert_eq!(store.horizon_bookmark(CHAT).expect("time"), Some(5000));
+    assert_eq!(store.unread_count(CHAT, ME).expect("theirs after the mark"), 2);
+    // the chat list's "Mark as unread" on our own newest message still makes it unread
+    store.set_unread_bookmark(CHAT, 2999, 6000).expect("moved");
+    assert_eq!(store.unread_count(CHAT, ME).expect("at least one"), 1);
+    assert_eq!(
+        store.set_unread_bookmark(CHAT, 999, 5500).expect("older"),
+        Applied::Ignored
+    );
+    assert_eq!(store.unread_mark(CHAT).expect("kept"), Some(2999));
+
+    // a mark-all-read after the mark reads it as the rest
+    store
+        .set_app_read_horizon(AppReadHorizon { chat: 7000, channel: 0 })
+        .expect("all read");
+    assert_eq!(store.unread_count(CHAT, ME).expect("all read after the mark"), 0);
+    store.set_app_read_horizon(AppReadHorizon::default()).expect("reset");
+    assert_eq!(store.unread_count(CHAT, ME).expect("marked again"), 1);
+
+    // the chat opened again: `0;<ms>;0`
+    assert_eq!(store.set_horizon_bookmark(CHAT, 8000).expect("ended"), Applied::Updated);
+    assert_eq!(store.unread_mark(CHAT).expect("ended"), None);
+    assert_eq!(store.unread_count(CHAT, ME).expect("read again"), 0);
+}
+
+#[test]
+fn a_bookmark_stored_before_marks_existed_reads_as_no_mark() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = store_path(&dir);
+    {
+        let mut store = Store::open(&path).expect("open");
+        store
+            .upsert_conversation(&conversation(CHAT, ConversationKind::OneToOne, 1))
+            .expect("conversation");
+        store.set_horizon_bookmark(CHAT, 2000).expect("bookmark");
+    }
+    let raw = rusqlite::Connection::open(&path).expect("raw open");
+    raw.execute_batch("ALTER TABLE horizon_bookmarks DROP COLUMN arrival; PRAGMA user_version = 26;")
+        .expect("schema 26");
+    drop(raw);
+    let mut store = Store::open(&path).expect("migrated");
+    assert_eq!(store.schema_version().expect("version"), SCHEMA_VERSION);
+    assert_eq!(store.horizon_bookmark(CHAT).expect("kept"), Some(2000));
+    assert_eq!(store.unread_mark(CHAT).expect("no mark"), None);
+    store.set_unread_bookmark(CHAT, 999, 3000).expect("marked");
+    assert_eq!(store.unread_mark(CHAT).expect("mark"), Some(999));
 }

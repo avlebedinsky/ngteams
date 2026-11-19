@@ -165,7 +165,7 @@ pub use write::{
     RemoveReaction, RemoveState, RenegotiateMedia, ReportRinging, ResumeCall, SendCallReaction, SendMessage,
     SetActivityRead, SetEndpointAvailability, SetMeetingTitle, SetReaction, SetUserGraphSettings, SharedHistory,
     StartCall, StartParts, TEAMS_ECHO_BOT_MRI, TEST_CALL_SCENARIO, TeamCopy, TeamRole, TeamWrite, TemplateTeam,
-    TransferCall, Transferor, Typing, UpdateEndpointMetadata, UpdateEndpointState, UpdateMediaDescriptions,
+    TransferCall, Transferor, Typing, UnreadMark, UpdateEndpointMetadata, UpdateEndpointState, UpdateMediaDescriptions,
     UpdateParticipantProperties, VoiceConsent, Wire, team_created, team_error_code,
 };
 pub use write::{

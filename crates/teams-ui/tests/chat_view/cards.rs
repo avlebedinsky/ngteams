@@ -103,8 +103,11 @@ fn a_workflow_card_is_drawn_on_its_surface_beside_the_apps_avatar() {
     assert!(matches!(shown[0].body, Body::Cards(_)), "{:?}", shown[0].body);
     assert_eq!(shown[0].body.kind(), "cards");
     assert_eq!(shown[0].sender_name.as_ref(), "Workflows");
-    // a card is reacted to and copied
-    assert_eq!(shown[0].actions(), [MessageAction::React, MessageAction::Copy]);
+    // a card is reacted to, copied and marked unread
+    assert_eq!(
+        shown[0].actions(),
+        [MessageAction::React, MessageAction::Copy, MessageAction::MarkUnread]
+    );
     let card = bounds(cx, &format!("card-{ID}-c0")).expect("the card's surface");
     assert!(card.size.width <= gpui::px(CARD_WIDTH), "{card:?}");
     let title = bounds(cx, &format!("card-{ID}-c0b0.")).expect("its title");

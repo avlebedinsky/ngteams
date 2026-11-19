@@ -538,7 +538,9 @@ impl Store {
     /// deleted, that arrived after `me`'s read horizon (all of them without one) and the account's mark-all-read one
     /// ([`Store::app_read_horizon`]). None when the newest message that counts is `me`'s own, as Teams calls such a
     /// chat read whatever its horizon says (`docs/protocol/chat.md`, "Which chats are unread").
-    /// Before history arrives, a list-page preview can supply one unread message.
+    /// Before history arrives, a list-page preview can supply one unread message. A conversation the account marked
+    /// unread ([`Store::unread_mark`]) after its last mark-all-read counts the messages from others after the mark,
+    /// and at least 1, whatever its horizon and its newest message say.
     ///
     /// # Errors
     ///
@@ -556,13 +558,21 @@ impl Store {
                    AND NOT (?1 GLOB '*meeting*' AND message_type IN
                        ('RichText/Media_CallRecording', 'RichText/Media_LocalRecording',
                         'RichText/Media_CallTranscript'))
+             ), all_read AS (
+                 SELECT COALESCE((SELECT CASE (SELECT kind FROM conversations WHERE id = ?1)
+                                  WHEN 'channel' THEN channel ELSE chat END
+                                  FROM app_read_horizon), 0) AS at
+             ), mark AS (
+                 SELECT arrival FROM horizon_bookmarks
+                 WHERE conversation_id = ?1 AND arrival > 0 AND time_ms > (SELECT at FROM all_read)
              )
-             SELECT CASE WHEN (SELECT sender FROM counted ORDER BY arrival_time DESC, id DESC LIMIT 1) IS ?2 THEN 0
+             SELECT CASE
+             WHEN EXISTS (SELECT 1 FROM mark) THEN MAX(1, (SELECT COUNT(*) FROM counted
+                 WHERE delete_time IS NULL AND sender IS NOT ?2 AND arrival_time > (SELECT arrival FROM mark)))
+             WHEN (SELECT sender FROM counted ORDER BY arrival_time DESC, id DESC LIMIT 1) IS ?2 THEN 0
              ELSE (SELECT COUNT(*) FROM counted
                    WHERE delete_time IS NULL AND sender IS NOT ?2
-                     AND arrival_time > COALESCE((SELECT CASE (SELECT kind FROM conversations WHERE id = ?1)
-                                                  WHEN 'channel' THEN channel ELSE chat END
-                                                  FROM app_read_horizon), 0)
+                     AND arrival_time > (SELECT at FROM all_read)
                      AND NOT EXISTS (SELECT 1 FROM read_horizons AS horizon
                          WHERE horizon.conversation_id = ?1 AND horizon.user_mri = ?2
                            AND horizon.last_read_arrival >= counted.arrival_time))
@@ -571,6 +581,29 @@ impl Store {
             |row| row.get(0),
         )?;
         Ok(u64::try_from(count).unwrap_or_default())
+    }
+
+    /// The newest message of a conversation that [counts](counts_unread), from anyone, not deleted, with the
+    /// `clientmessageid` a read horizon or a bookmark names: what the chat list's "Mark as read" and "Mark as unread"
+    /// name. `None` when the store has none.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] when the read fails.
+    pub fn newest_countable(&self, conversation_id: &str) -> Result<Option<Message>, StoreError> {
+        let sql = format!(
+            "SELECT {MESSAGE_COLUMNS} FROM messages
+             WHERE conversation_id = ?1 AND delete_time IS NULL AND client_message_id IS NOT NULL
+               AND (message_type = 'Text' OR message_type GLOB 'RichText*')
+               AND NOT (?1 GLOB '*meeting*' AND message_type IN
+                   ('RichText/Media_CallRecording', 'RichText/Media_LocalRecording', 'RichText/Media_CallTranscript'))
+             ORDER BY arrival_time DESC, id DESC LIMIT 1"
+        );
+        Ok(self
+            .conn
+            .prepare_cached(&sql)?
+            .query_row([conversation_id], message_from_row)
+            .optional()?)
     }
 
     /// The name `mri`'s newest stored message carried (`imdisplayname`), in any conversation; `None` when no stored

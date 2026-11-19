@@ -187,7 +187,8 @@ actions!(
         PickMore,
         CopySelected,
         TranslateSelected,
-        OpenSelectedMenu
+        OpenSelectedMenu,
+        MarkUnreadSelected
     ]
 );
 
@@ -324,6 +325,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("5", PickMore, context),
         KeyBinding::new("secondary-c", CopySelected, context),
         KeyBinding::new("t", TranslateSelected, context),
+        KeyBinding::new("u", MarkUnreadSelected, context),
         // Teams' context menu keys; macOS takes the same Shift+F10
         KeyBinding::new("shift-f10", OpenSelectedMenu, context),
         KeyBinding::new("menu", OpenSelectedMenu, context),
@@ -355,6 +357,8 @@ pub enum MessageAction {
     Delete,
     /// Its text to the clipboard.
     Copy,
+    /// Teams' "Mark as unread": the chat unread from this message on, until it is opened again.
+    MarkUnread,
 }
 
 impl MessageAction {
@@ -367,6 +371,7 @@ impl MessageAction {
             Self::Edit => "Edit",
             Self::Delete => "Delete",
             Self::Copy => "Copy text",
+            Self::MarkUnread => "Mark as unread",
         }
     }
 
@@ -381,6 +386,7 @@ impl MessageAction {
             Self::Edit => Glyph::PENCIL,
             Self::Delete => Glyph::TRASH,
             Self::Copy => Glyph::COPY,
+            Self::MarkUnread => Glyph::GLASSES_OFF,
         }
     }
 
@@ -392,6 +398,7 @@ impl MessageAction {
             Self::Edit => &EditSelected,
             Self::Delete => &DeleteSelected,
             Self::Copy => &CopySelected,
+            Self::MarkUnread => &MarkUnreadSelected,
         }
     }
 
@@ -405,6 +412,7 @@ impl MessageAction {
             Self::Edit => "edit",
             Self::Delete => "delete",
             Self::Copy => "copy",
+            Self::MarkUnread => "mark-unread",
         }
     }
 }
@@ -826,7 +834,7 @@ impl MessageItem {
         if matches!(self.body, Body::Cards(_) | Body::Meeting(_)) {
             return reply
                 .into_iter()
-                .chain([MessageAction::React, MessageAction::Copy])
+                .chain([MessageAction::React, MessageAction::Copy, MessageAction::MarkUnread])
                 .collect();
         }
         let mut actions = vec![
@@ -840,6 +848,7 @@ impl MessageItem {
             }
             actions.push(MessageAction::Delete);
         }
+        actions.push(MessageAction::MarkUnread);
         actions
     }
 
@@ -937,9 +946,22 @@ pub fn arrange<Tz: TimeZone>(
     horizon: Option<i64>,
     tz: &Tz,
 ) -> Vec<Item> {
+    arrange_marked(conversation, messages, history, (horizon, None), tz)
+}
+
+/// [`arrange`], with the read horizon and where the chat was marked unread ("Mark as unread"): with a mark, the
+/// divider stands before the first message after it that the store counts, the account's own too, as Teams draws it.
+#[must_use]
+pub fn arrange_marked<Tz: TimeZone>(
+    conversation: &str,
+    messages: Vec<MessageItem>,
+    history: History,
+    (horizon, mark): (Option<i64>, Option<i64>),
+    tz: &Tz,
+) -> Vec<Item> {
     let mut items = vec![Item::Top(history)];
     let mut day = None;
-    let mut placed = horizon.is_none();
+    let mut placed = horizon.is_none() && mark.is_none();
     let mut before: Option<MessageItem> = None;
     for mut item in messages {
         let today = day_of(item.arrival_time, tz);
@@ -950,10 +972,11 @@ pub fn arrange<Tz: TimeZone>(
         }
         // what the store counts unread: someone else's message, not deleted, after the horizon; without a horizon the
         // store counts every one, but nothing marks where reading stopped: no divider
-        let unread = !item.own
-            && counts_unread(conversation, &item.message_type)
-            && item.body != Body::Deleted
-            && horizon.is_some_and(|at| item.arrival_time > at);
+        let counts = counts_unread(conversation, &item.message_type) && item.body != Body::Deleted;
+        let unread = match mark {
+            Some(at) => counts && item.arrival_time > at,
+            None => !item.own && counts && horizon.is_some_and(|at| item.arrival_time > at),
+        };
         let divider = !placed && unread;
         if divider {
             placed = true;
@@ -1098,6 +1121,14 @@ pub struct ChatView {
     history: History,
     /// The account's read horizon when the chat opened.
     horizon: Option<i64>,
+    /// Where the chat was marked unread ("Mark as unread"): when it opened, or here since. The "New messages" divider
+    /// stands before the first message after it.
+    mark: Option<i64>,
+    /// The chat was marked unread while this view shows it: no read receipt goes until it is shown again, as Teams
+    /// keeps the chat unread until it is opened again.
+    marked_here: bool,
+    /// A mark the chat had when it opened ends once the view is shown.
+    mark_to_end: bool,
     /// People as the engine has them, by MRI: the ask whose answer the entry takes, and that answer (`None`: asked,
     /// no answer yet or none).
     people: HashMap<String, (u64, Option<Shown>)>,
@@ -1310,6 +1341,9 @@ impl ChatView {
             next: None,
             history: History::More,
             horizon: None,
+            mark: None,
+            marked_here: false,
+            mark_to_end: false,
             people: HashMap::new(),
             bot_faces: bot_chat::BotFaces::default(),
             asks: 0,
@@ -1588,6 +1622,9 @@ impl ChatView {
         }
         self.shown = if shown { Visibility::Shown } else { Visibility::Hidden };
         if shown {
+            // shown again: the chat is opened again, so a mark made here or on the chat list ends
+            self.marked_here = false;
+            self.reread_mark(cx);
             self.want_receipt(cx);
         } else {
             self.receipt = None;
@@ -2121,6 +2158,7 @@ impl ChatView {
                 self.focus.focus(window, cx);
             }
             MessageAction::Copy => self.copy_text(message, cx),
+            MessageAction::MarkUnread => self.mark_unread(message, cx),
         }
         cx.notify();
     }
@@ -2600,6 +2638,7 @@ impl ChatView {
             self.reveal_at(target, pages, cx);
         }
         self.kick(cx);
+        self.end_mark(cx);
         self.want_receipt(cx);
     }
 
@@ -2612,9 +2651,14 @@ impl ChatView {
     }
 
     fn take(&mut self, load: Load, read: Read) {
-        if let Horizon::Read(horizon) = read.horizon {
+        if let Horizon::Read(horizon, mark) = read.horizon {
             // a channel's post or a thread marks no "New messages": no read receipt moves its horizon here
             self.horizon = horizon.filter(|_| !self.place.in_channel());
+            if !self.marked_here {
+                self.mark = mark.filter(|_| !self.place.in_channel());
+                // the channel's posts end its mark, not a thread opened beside them
+                self.mark_to_end = mark.is_some() && !matches!(self.place, Place::Thread { .. });
+            }
         }
         if let Some(roots) = read.roots {
             self.roots = roots;
@@ -3436,7 +3480,13 @@ impl ChatView {
             events::drop_bare_starts(&mut rows, &messages);
         }
         self.messages = messages;
-        let mut items = arrange(&self.conversation, rows, self.history, self.horizon, &Local);
+        let mut items = arrange_marked(
+            &self.conversation,
+            rows,
+            self.history,
+            (self.horizon, self.mark),
+            &Local,
+        );
         items.extend(self.pending(&known, now_ms).into_iter().map(Item::Pending));
         let anchor = Anchor::of(&self.list, &self.items);
         splice(&self.list, &self.items, &items);
@@ -3535,6 +3585,7 @@ impl ChatView {
             // a channel's horizon isn't moved from here: no capture showed a channel's receipt
             && !self.place.in_channel()
             && !self.core.read_only()
+            && !self.marked_here
             && self.settings.read(cx).sends_read_receipts();
         if !wanted {
             return None;
@@ -3576,6 +3627,68 @@ impl ChatView {
             message_id,
         }));
         self.want_receipt(cx);
+    }
+
+    /// "Mark as unread" on `message`: the chat is unread from it on, the divider moves before it, and no read receipt
+    /// goes while the view stays shown. A channel's post is marked by its thread's newest message, as Teams marks it.
+    fn mark_unread(&mut self, message: &str, cx: &mut Context<Self>) {
+        let Some(arrival) = self.held_message(message).map(|held| held.arrival_time) else {
+            return;
+        };
+        let named = if self.place.in_channel() {
+            self.messages
+                .iter()
+                .filter(|held| self.root_of(&held.id) == message)
+                .max_by_key(|held| (held.arrival_time, held.id.clone()))
+                .map_or_else(|| message.to_owned(), |newest| newest.id.clone())
+        } else {
+            message.to_owned()
+        };
+        self.receipt = None;
+        self.marked_here = true;
+        self.mark_to_end = false;
+        self.mark = Some(arrival - 1);
+        // the row comes back as the engine's events
+        drop(self.core.write(Action::MarkUnread {
+            conversation: self.conversation.clone(),
+            message_id: Some(named),
+        }));
+        self.rebuild(cx);
+    }
+
+    /// Reads the chat's mark again (the view is shown again): one there is ends, its divider shown where it was.
+    fn reread_mark(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.place, Place::Thread { .. }) {
+            return;
+        }
+        let reply = self.core.unread_mark(self.conversation.clone());
+        cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let Ok(Some(mark)) = reply.await else { return };
+            let _ = this.update(cx, |view, cx| {
+                if view.marked_here {
+                    return;
+                }
+                if !view.place.in_channel() {
+                    view.mark = Some(mark);
+                    view.rebuild(cx);
+                }
+                view.mark_to_end = true;
+                view.end_mark(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Ends the mark the chat had when it opened, once the view is shown, as Teams does on opening a marked chat.
+    fn end_mark(&mut self, cx: &mut Context<Self>) {
+        if !self.mark_to_end || !self.is_shown() || self.core.read_only() {
+            return;
+        }
+        self.mark_to_end = false;
+        drop(self.core.write(Action::EndUnreadMark {
+            conversation: self.conversation.clone(),
+        }));
+        cx.notify();
     }
 
     /// Traces the rows shown, when they changed: the newest [`TRACED`] messages with their kinds, and which of them
@@ -4254,6 +4367,11 @@ impl ChatView {
             .filter(|action| actions.contains(action))
             .map(|action| menu_entry(&message, action, palette, window, cx))
             .collect::<Vec<_>>();
+        // Teams' own group after a hairline: Mark as unread, then the translation
+        if actions.contains(&MessageAction::MarkUnread) {
+            entries.push(crate::workflow_run::menu::separator(palette));
+            entries.push(menu_entry(&message, MessageAction::MarkUnread, palette, window, cx));
+        }
         entries.extend(self.translation_entry(&message, palette, cx));
         let translation_menu = self.translation_menu(&message, palette, window, cx);
         entries.extend(self.refresh_entry(&message, palette, cx));
@@ -4664,8 +4782,9 @@ fn pending_key(pending: &PendingItem) -> MessageKey {
 /// Whether a load read the account's read horizon, and what it was.
 enum Horizon {
     NotRead,
-    /// The last read message's arrival time; `None` when the account has none in the chat.
-    Read(Option<i64>),
+    /// The last read message's arrival time (`None` when the account has none in the chat), and where the chat was
+    /// marked unread (`None` when it isn't).
+    Read(Option<i64>, Option<i64>),
 }
 
 /// What a load read.
@@ -4739,7 +4858,8 @@ async fn window(
     let mut outbox = outbox_read(core, conversation).await;
     outbox.stored = stored_posts(core, conversation, find).await;
     let horizon = if first {
-        Horizon::Read(outbox.read_upto)
+        let mark = core.unread_mark(conversation.to_owned()).await.ok().flatten();
+        Horizon::Read(outbox.read_upto, mark)
     } else {
         Horizon::NotRead
     };
@@ -5679,6 +5799,9 @@ fn hover_bar_keys(list: gpui::Div, cx: &mut Context<ChatView>) -> gpui::Div {
             if !this.copy_selection(cx) {
                 this.act_on_selected(MessageAction::Copy, window, cx);
             }
+        }))
+        .on_action(cx.listener(|this, _: &MarkUnreadSelected, window, cx| {
+            this.act_on_selected(MessageAction::MarkUnread, window, cx);
         }))
 }
 

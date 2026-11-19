@@ -10,6 +10,9 @@
 #![cfg(test)]
 
 mod common;
+// a chat row's "More chat options": Mark as read or unread
+#[path = "chat_list/row_menu.rs"]
+mod row_menu;
 
 use std::sync::Arc;
 

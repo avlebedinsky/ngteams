@@ -103,7 +103,7 @@ fn the_migration_creates_the_index_and_fills_nothing() -> Result<(), StoreError>
 
     let store = Store::open(&store_path(&dir))?;
     assert_eq!(store.schema_version()?, SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 26);
+    assert_eq!(SCHEMA_VERSION, 27);
     let raw = rusqlite::Connection::open(store_path(&dir)).expect("open directly");
     let tables: Vec<String> = raw
         .prepare("SELECT name FROM sqlite_master WHERE name IN ('message_search', 'search_entries') ORDER BY name")

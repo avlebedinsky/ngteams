@@ -38,6 +38,9 @@ mod forward;
 // a link's preview card
 #[path = "chat_view/links.rs"]
 mod links;
+// "Mark as unread" from a message's menu
+#[path = "chat_view/mark_unread.rs"]
+mod mark_unread;
 #[path = "chat_view/meeting.rs"]
 mod meeting;
 // names and pictures in the chat list and the chat view (M2 Task 12)

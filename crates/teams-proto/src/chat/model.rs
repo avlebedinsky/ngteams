@@ -227,15 +227,23 @@ impl Conversation {
             .map(ConsumptionHorizon::parse)
     }
 
-    /// When the account last marked the whole conversation read (`properties.consumptionHorizonBookmark`,
-    /// `0;<ms>;0`, ms): the activity feed's "Mark all as read" (`docs/protocol/chat.md`, "The activity feed");
-    /// `None` when it is absent or its time can't be read.
+    /// When the account last set the conversation's bookmark (`properties.consumptionHorizonBookmark`, ms): the
+    /// activity feed's "Mark all as read" (`0;<ms>;0`), or a chat's "Mark as unread" and its end
+    /// (`docs/protocol/chat.md`); `None` when it is absent or its time can't be read.
     #[must_use]
     pub fn horizon_bookmark(&self) -> Option<u64> {
+        self.unread_bookmark().and_then(|bookmark| bookmark.updated)
+    }
+
+    /// The conversation's bookmark whole (`properties.consumptionHorizonBookmark`): while its arrival isn't 0, the
+    /// account marked the conversation unread from the message after that arrival on (`docs/protocol/chat.md`, "Mark
+    /// as unread").
+    #[must_use]
+    pub fn unread_bookmark(&self) -> Option<ConsumptionHorizon> {
         self.properties
             .get("consumptionHorizonBookmark")
             .and_then(Value::as_str)
-            .and_then(|raw| ConsumptionHorizon::parse(raw).updated)
+            .map(ConsumptionHorizon::parse)
     }
 }
 

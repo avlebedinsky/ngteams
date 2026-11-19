@@ -438,6 +438,7 @@ impl<C: Credentials + 'static> Inbox<C> {
             Query::RecentReactions(limit, reply) => give(reply, store.recent_reactions(me, limit)),
             Query::FrequentReactions(limit, reply) => give(reply, store.frequent_reactions(me, limit)),
             Query::UnreadCount(conversation, reply) => give(reply, store.unread_count(&conversation, me)),
+            Query::UnreadMark(conversation, reply) => give(reply, store.unread_mark(&conversation)),
             Query::DisplayName(mri, reply) => give(reply, store.display_name(&mri)),
             Query::ReadHorizon(conversation, reply) => give(reply, store.read_horizon(&conversation, me)),
             Query::Activity(reply) => give(reply, crate::activity::ActivityFeed::from_store(store, me)),

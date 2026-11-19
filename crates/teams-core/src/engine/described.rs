@@ -45,6 +45,16 @@ pub(super) fn action(action: &Action) -> String {
         Action::ActivityUndoTurnOffApp { row } => format!("activity app setting restored from row {row}"),
         Action::ActivityTurnOffApp { item } => format!("activity app turned off for item {item}"),
         Action::ActivityAllRead => "all activity marked read".to_owned(),
+        Action::MarkUnread {
+            conversation,
+            message_id: Some(message_id),
+        } => format!("{conversation} marked unread from {message_id}"),
+        Action::MarkUnread {
+            conversation,
+            message_id: None,
+        } => format!("{conversation} marked unread from its newest message"),
+        Action::MarkRead { conversation } => format!("{conversation} marked read"),
+        Action::EndUnreadMark { conversation } => format!("the unread mark of {conversation} ended"),
     }
 }
 

@@ -74,7 +74,7 @@ use teams_proto::chat::MessageText;
 use teams_proto::{
     ACTIVITY_FEED, AddChatMembers, Author, CreateChat, DEFAULT_RETRY_WAIT, DeleteMessage, EditMessage, HttpError,
     MarkFeedRead, Original, ReadReceipt, RemoveReaction, Request, Response, SendMessage, SetActivityRead, SetReaction,
-    SharedHistory, Transport,
+    SharedHistory, Transport, UnreadMark,
 };
 use teams_store::{
     Applied, AttemptOutcome, CheckFailed, Message, NewOutboxEntry, OutboxEntry, OutboxKind, OutboxState, Reaction,
@@ -173,6 +173,15 @@ pub enum Command {
         app: String,
         preference: teams_proto::AppNotificationPreference,
     },
+    /// Marks the conversation unread from `message_id` (sent with `client_message_id`) on, or ends its mark when both
+    /// are absent ([`UnreadMark`]).
+    UnreadMark {
+        conversation: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_message_id: Option<String>,
+    },
 }
 
 /// What commands go out in the order they were asked for on: a later one of this run waits while an earlier one on
@@ -254,6 +263,7 @@ impl Command {
             Self::FeedRead => OutboxKind::FeedRead,
             Self::ActivityTurnOffApp { .. } => OutboxKind::ActivityTurnOffApp,
             Self::ActivityRestoreApp { .. } => OutboxKind::ActivityRestoreApp,
+            Self::UnreadMark { .. } => OutboxKind::UnreadMark,
         }
     }
 
@@ -266,6 +276,7 @@ impl Command {
             | Self::Delete { conversation, .. }
             | Self::React { conversation, .. }
             | Self::ReadReceipt { conversation, .. }
+            | Self::UnreadMark { conversation, .. }
             | Self::AddMembers { conversation, .. } => Some(conversation),
             Self::ActivityRead { .. } | Self::FeedRead => Some(ACTIVITY_FEED),
             Self::CreateChat { .. } | Self::ActivityTurnOffApp { .. } | Self::ActivityRestoreApp { .. } => None,
@@ -294,7 +305,10 @@ impl Command {
                 conversation,
                 message_id,
             }),
-            Self::ReadReceipt { conversation, .. } => Some(Lane::ReadHorizon { conversation }),
+            // a mark goes in order with the receipts: "Mark as read" moves the horizon, then ends the mark
+            Self::ReadReceipt { conversation, .. } | Self::UnreadMark { conversation, .. } => {
+                Some(Lane::ReadHorizon { conversation })
+            }
             Self::ActivityRead { item, .. } => Some(Lane::Message {
                 conversation: ACTIVITY_FEED,
                 message_id: item,
@@ -321,7 +335,8 @@ impl Command {
             | Self::AddMembers { .. }
             | Self::FeedRead
             | Self::ActivityTurnOffApp { .. }
-            | Self::ActivityRestoreApp { .. } => None,
+            | Self::ActivityRestoreApp { .. }
+            | Self::UnreadMark { .. } => None,
         }
     }
 }
@@ -1052,6 +1067,22 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
                 Some(request) => self.deliver(request).await,
                 None => Tried::NotSent("the chat's members don't make a chat".to_owned()),
             },
+            Command::UnreadMark {
+                conversation,
+                message_id,
+                client_message_id,
+            } => {
+                let request = match (message_id, client_message_id) {
+                    (Some(message_id), Some(client_message_id)) => {
+                        UnreadMark::from_message(conversation, &message_id, client_message_id)
+                    }
+                    _ => Some(UnreadMark::cleared(conversation)),
+                };
+                match request {
+                    Some(request) => self.deliver(request.at(at)).await,
+                    None => Tried::NotSent("the message's id isn't an arrival number".to_owned()),
+                }
+            }
             command @ (Command::AddMembers { .. }
             | Command::ActivityRead { .. }
             | Command::FeedRead
@@ -1315,7 +1346,8 @@ fn answered_id(row: &OutboxEntry, answer: &Response) -> Option<String> {
         | OutboxKind::AddMembers
         | OutboxKind::FeedRead
         | OutboxKind::ActivityTurnOffApp
-        | OutboxKind::ActivityRestoreApp => None,
+        | OutboxKind::ActivityRestoreApp
+        | OutboxKind::UnreadMark => None,
         OutboxKind::Edit
         | OutboxKind::Delete
         | OutboxKind::AddReaction

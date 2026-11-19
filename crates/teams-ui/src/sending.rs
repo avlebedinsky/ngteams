@@ -196,7 +196,8 @@ impl Note {
             | OutboxKind::ActivityRead
             | OutboxKind::FeedRead
             | OutboxKind::ActivityTurnOffApp
-            | OutboxKind::ActivityRestoreApp => {
+            | OutboxKind::ActivityRestoreApp
+            | OutboxKind::UnreadMark => {
                 return self.state.label().to_owned();
             }
         };

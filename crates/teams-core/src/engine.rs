@@ -278,6 +278,18 @@ pub enum Action {
     },
     /// The account's read horizon moved to a message (a read receipt others may see).
     Read { conversation: String, message_id: String },
+    /// Teams' "Mark as unread": the conversation unread from `message_id` on (a message's menu), or from its newest
+    /// message when none is given (the chat list's menu). Only the account sees it; it stays until the conversation is
+    /// opened again ([`Action::EndUnreadMark`]) or marked read ([`Action::MarkRead`]).
+    MarkUnread {
+        conversation: String,
+        message_id: Option<String>,
+    },
+    /// The chat list's "Mark as read": the read horizon moves to the newest message when it is behind it, and a mark
+    /// the conversation has ends.
+    MarkRead { conversation: String },
+    /// The conversation opened again while marked unread: the mark ends, as Teams ends it.
+    EndUnreadMark { conversation: String },
     /// A chat of the account and `others`: their 1:1 chat for one, a new group chat for two or more, named `topic`
     /// when one is given (New message's "Add group name"; a 1:1 chat takes no name).
     CreateChat { others: Vec<Mri>, topic: Option<String> },
@@ -557,6 +569,8 @@ pub enum EngineError {
     UnknownMessage { conversation: String, message: String },
     #[error("the activity feed holds nothing newer than what was seen")]
     NothingNewInActivity,
+    #[error("conversation {conversation} is read already and has no unread mark")]
+    AlreadyRead { conversation: String },
     #[error("the activity app definition could not be read; try again")]
     ActivityAppUnavailable,
     #[error("message {message} isn't the account's own, so it can't be {action}")]
@@ -654,6 +668,7 @@ impl EngineError {
             Self::UnknownMessage { .. } => "unknown message",
             Self::ActivityAppUnavailable => "activity app unavailable",
             Self::NothingNewInActivity => "nothing new in activity",
+            Self::AlreadyRead { .. } => "already read",
             Self::NotOwn { .. } => "not the account's own",
             Self::Deleted { .. } => "deleted",
             Self::Unknown { .. } => "unknown field",
@@ -956,6 +971,7 @@ enum Query {
     UnreadCount(String, Responder<u64>),
     DisplayName(String, Responder<Option<String>>),
     ReadHorizon(String, Responder<Option<ReadHorizon>>),
+    UnreadMark(String, Responder<Option<i64>>),
     HistoryComplete(String, Responder<Option<bool>>),
     OutboxEntry(i64, Responder<Option<OutboxEntry>>),
     OutboxUnsettled(String, Responder<Vec<OutboxEntry>>),
@@ -1984,6 +2000,13 @@ impl EngineRequests {
         self.query(|reply| Query::ReadHorizon(conversation, reply))
     }
 
+    /// Where the account marked a conversation unread ([`Store::unread_mark`]): the arrival of the message before the
+    /// first unread one; `None` when it isn't marked.
+    pub fn unread_mark(&self, conversation: impl Into<String>) -> Reply<Option<i64>> {
+        let conversation = conversation.into();
+        self.query(|reply| Query::UnreadMark(conversation, reply))
+    }
+
     /// Whether the store holds a conversation's whole history (its kept sync state says so); `None` when the
     /// conversation was never synced, so [`Self::load_older`]'s `None` doesn't yet mean nothing is older.
     pub fn history_complete(&self, conversation: impl Into<String>) -> Reply<Option<bool>> {
@@ -2875,6 +2898,12 @@ where
             let row = self.inbox.queue_read(&mut self.store, conversation, message_id)?;
             return on_heap(|| self.send_row(row.id)).await;
         }
+        if matches!(
+            action,
+            Action::MarkUnread { .. } | Action::MarkRead { .. } | Action::EndUnreadMark { .. }
+        ) {
+            return on_heap(|| self.unread_write(action)).await;
+        }
         let command = if let Action::ActivityTurnOffApp { item } = action {
             on_heap(|| self.activity_app_command(&item)).await?
         } else {
@@ -3046,6 +3075,15 @@ where
                     action: "converted to a generic command",
                 });
             }
+            Action::MarkUnread { conversation, .. }
+            | Action::MarkRead { conversation }
+            | Action::EndUnreadMark { conversation } => {
+                return Err(EngineError::Unknown {
+                    message: conversation,
+                    missing: "unread mark handling",
+                    action: "converted to a generic command",
+                });
+            }
         })
     }
 
@@ -3108,6 +3146,96 @@ where
         let row = enqueue(&mut self.store, &command)?;
         self.emit(Event::Queued(row.clone()));
         self.send_row(row.id).await
+    }
+
+    /// "Mark as unread", "Mark as read" and the end of a mark: the rows queued in order on the conversation's read
+    /// horizon, the store's mark moved at once (as a receipt moves the horizon) and told, then the rows sent. The
+    /// service's bookmark reconciles it by its time, as the horizon is.
+    async fn unread_write(&mut self, action: Action) -> Result<OutboxEntry, EngineError> {
+        let mut rows = Vec::new();
+        match action {
+            Action::MarkUnread {
+                conversation,
+                message_id,
+            } => {
+                let message = match message_id {
+                    Some(id) => self.standing(&conversation, &id)?,
+                    None => self
+                        .store
+                        .newest_countable(&conversation)?
+                        .ok_or_else(|| EngineError::AlreadyRead {
+                            conversation: conversation.clone(),
+                        })?,
+                };
+                let client_message_id = message.client_message_id.clone().ok_or_else(|| EngineError::Unknown {
+                    message: message.id.clone(),
+                    missing: "clientmessageid",
+                    action: "marked unread from",
+                })?;
+                let command = Command::UnreadMark {
+                    conversation,
+                    message_id: Some(message.id.clone()),
+                    client_message_id: Some(client_message_id),
+                };
+                rows.push(self.queue_mark(&command, message.arrival_time.saturating_sub(1))?);
+            }
+            Action::MarkRead { conversation } => {
+                let me = self.outbox.me().mri().as_str().to_owned();
+                let behind = self.store.newest_countable(&conversation)?.filter(|newest| {
+                    self.store
+                        .read_horizon(&conversation, &me)
+                        .ok()
+                        .flatten()
+                        .is_none_or(|horizon| horizon.last_read_arrival < newest.arrival_time)
+                });
+                if let Some(newest) = behind {
+                    rows.push(
+                        self.inbox
+                            .queue_read(&mut self.store, conversation.clone(), newest.id)?,
+                    );
+                }
+                if self.store.unread_mark(&conversation)?.is_some() {
+                    rows.push(self.end_mark(conversation.clone())?);
+                }
+                if rows.is_empty() {
+                    return Err(EngineError::AlreadyRead { conversation });
+                }
+            }
+            Action::EndUnreadMark { conversation } => rows.push(self.end_mark(conversation)?),
+            _ => {}
+        }
+        let mut last = None;
+        for row in rows {
+            last = Some(self.send_row(row.id).await?);
+        }
+        last.ok_or(EngineError::NotAChat)
+    }
+
+    fn end_mark(&mut self, conversation: String) -> Result<OutboxEntry, EngineError> {
+        let command = Command::UnreadMark {
+            conversation,
+            message_id: None,
+            client_message_id: None,
+        };
+        self.queue_mark(&command, 0)
+    }
+
+    /// Queues a mark's row and keeps its `arrival` (0: no mark) in the store as of the row's time; a read-only engine
+    /// keeps nothing, as its row is refused.
+    fn queue_mark(&mut self, command: &Command, arrival: i64) -> Result<OutboxEntry, EngineError> {
+        let row = enqueue(&mut self.store, command)?;
+        self.emit(Event::Queued(row.clone()));
+        if !self.outbox.is_read_only()
+            && let Some(conversation) = command.conversation()
+        {
+            let applied = self.store.set_unread_bookmark(conversation, arrival, row.created_at)?;
+            if applied != Applied::Ignored {
+                self.emit(Event::ReadHorizon {
+                    conversation: conversation.to_owned(),
+                });
+            }
+        }
+        Ok(row)
     }
 
     /// Apply confirmed feed horizons from the durable command, including sends retried by the tick or a resend.
@@ -3230,7 +3358,7 @@ where
         }
         let conversation = match row.kind {
             _ if row.state != OutboxState::Sent => None,
-            OutboxKind::ReadReceipt | OutboxKind::FeedRead => None,
+            OutboxKind::ReadReceipt | OutboxKind::FeedRead | OutboxKind::UnreadMark => None,
             OutboxKind::CreateChat => row.message_id.clone(),
             // a reply posted to a post's chain is stored with its channel's messages
             _ => row

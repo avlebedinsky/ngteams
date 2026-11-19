@@ -47,6 +47,58 @@ async fn an_engine_reads_a_message_and_its_own_horizon_syncs_without_becoming_th
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_chat_marked_unread_reaches_the_accounts_other_client_and_ends_for_both() {
+    for backend in backends() {
+        let pair = Pair::start(backend).await;
+        let id = pair.send("mark me unread").await;
+        assert!(pair.b.sync().await.unwrap().failed.is_empty());
+        let row = pair
+            .b
+            .write(Action::MarkUnread {
+                conversation: pair.chat.clone(),
+                message_id: Some(id.clone()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(row.state, OutboxState::Sent, "{row:?}");
+        let before = id.parse::<i64>().unwrap() - 1;
+        assert_eq!(pair.b.unread_mark(&pair.chat).await.unwrap(), Some(before));
+
+        // b's other client reads the mark from the conversation list; a sees none
+        let dir = tempfile::tempdir().unwrap();
+        let other = super::engine(&pair.server, "b@own.test", &pair.b_id, dir.path()).await;
+        assert!(other.sync().await.unwrap().failed.is_empty());
+        assert_eq!(other.unread_mark(&pair.chat).await.unwrap(), Some(before));
+        assert!(other.unread_count(&pair.chat).await.unwrap() >= 1);
+        let a_client = client(&pair.server, "a@own.test", &pair.a_id).await;
+        let list = ChatReads::new(&a_client).conversations().await.unwrap();
+        let theirs = list.conversations.iter().find(|chat| chat.id == pair.chat).unwrap();
+        assert!(theirs.unread_bookmark().is_none());
+
+        // opened again on the other client: the mark ends for both
+        let row = other
+            .write(Action::EndUnreadMark {
+                conversation: pair.chat.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(row.state, OutboxState::Sent, "{row:?}");
+        assert_eq!(other.unread_mark(&pair.chat).await.unwrap(), None);
+        assert!(pair.b.sync().await.unwrap().failed.is_empty());
+        assert_eq!(pair.b.unread_mark(&pair.chat).await.unwrap(), None);
+        let b_client = client(&pair.server, "b@own.test", &pair.b_id).await;
+        let list = ChatReads::new(&b_client).conversations().await.unwrap();
+        let own = list.conversations.iter().find(|chat| chat.id == pair.chat).unwrap();
+        assert_eq!(
+            own.unread_bookmark().and_then(|bookmark| bookmark.last_read_arrival),
+            Some(0)
+        );
+        other.shutdown();
+        pair.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn native_app_preferences_persist_and_are_visible_only_to_their_own_account() {
     for backend in backends() {
         let pair = Pair::start(backend).await;

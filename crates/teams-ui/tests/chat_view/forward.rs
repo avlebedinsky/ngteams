@@ -308,7 +308,8 @@ fn the_account_s_own_forward_offers_no_edit() {
             MessageAction::Reply,
             MessageAction::React,
             MessageAction::Copy,
-            MessageAction::Delete
+            MessageAction::Delete,
+            MessageAction::MarkUnread
         ],
         "a forward is the original's content: deleted, never edited"
     );

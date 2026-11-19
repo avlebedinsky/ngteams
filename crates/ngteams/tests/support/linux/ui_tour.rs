@@ -195,7 +195,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 328 + 8 + 5 + 15 + 6 + 12 + 10 + 5] = [
+const STEPS: [Step; 5 + 328 + 8 + 5 + 15 + 7 + 6 + 12 + 10 + 5] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -2711,6 +2711,53 @@ const STEPS: [Step; 5 + 328 + 8 + 5 + 15 + 6 + 12 + 10 + 5] = [
             shell.open_chat_apps(AB_CHAT.to_owned(), window, cx);
         });
     }),
+    // a message's More options: "Mark as unread" after a hairline under copy, before the translation
+    ("message-mark-unread-menu", |shell, window, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
+        shell.update(cx, |shell, cx| {
+            shell.show_chats(window, cx);
+            shell.open_chat(AB_CHAT.to_owned(), window, cx);
+        });
+        if let Some((chat, id)) = last_from_others(shell, cx) {
+            chat.update(cx, |chat, cx| {
+                chat.select(Some(id.clone()), cx);
+                chat.toggle_options(&id, cx);
+            });
+        }
+    }),
+    ("message-mark-unread-menu-dark", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
+    }),
+    // chosen: the chat stays open with "New messages" before the message, its row bold with its count
+    ("message-marked-unread", |shell, window, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
+        if let Some((chat, id)) = last_from_others(shell, cx) {
+            chat.update(cx, |chat, cx| chat.act(MessageAction::MarkUnread, &id, window, cx));
+        }
+    }),
+    ("message-marked-unread-dark", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
+    }),
+    // the chat row's "More chat options" on the unread chat: "Mark as read"
+    ("chat-row-menu", |shell, window, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
+        let list = shell.read(cx).list().clone();
+        let at = list.read(cx).rows().iter().position(|row| row.id == AB_CHAT);
+        if let Some(at) = at {
+            list.update(cx, |list, cx| {
+                list.open_row_menu(AB_CHAT, &format!("chat-row-{at}"), true, window, cx);
+            });
+        }
+    }),
+    ("chat-row-menu-dark", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
+    }),
+    // "Mark as read" chosen: the row is read again
+    ("chat-row-marked-read", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
+        let list = shell.read(cx).list().clone();
+        list.update(cx, |list, cx| list.mark(AB_CHAT, true, cx));
+    }),
     // a group call rings while its chat is open, shot as the ring's first frame is drawn and the app is busy (the
     // start of a ring holds the main thread): the banner over the panes is whole at once, never an empty band (QA
     // 297's Q5)
@@ -4625,6 +4672,16 @@ fn translatable_last_message(
     let chat = shell.read(cx).chat()?.clone();
     let message = chat.read(cx).items().iter().rev().find_map(|item| match item {
         Item::Message(message) if message.translate.is_some() => Some(message.id.clone()),
+        _ => None,
+    })?;
+    Some((chat, message))
+}
+
+/// The open chat's newest message from someone else, with the chat's view.
+fn last_from_others(shell: &Entity<Shell>, cx: &App) -> Option<(Entity<teams_ui::chat_view::ChatView>, String)> {
+    let chat = shell.read(cx).chat()?.clone();
+    let message = chat.read(cx).items().iter().rev().find_map(|item| match item {
+        Item::Message(message) if !message.own => Some(message.id.clone()),
         _ => None,
     })?;
     Some((chat, message))

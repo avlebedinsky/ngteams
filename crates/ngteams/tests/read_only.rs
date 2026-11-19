@@ -129,6 +129,13 @@ fn every_write(mine: &str, theirs: &str) -> Vec<Action> {
             conversation: conversation(),
             message_id: theirs.to_owned(),
         },
+        Action::MarkUnread {
+            conversation: conversation(),
+            message_id: Some(theirs.to_owned()),
+        },
+        Action::EndUnreadMark {
+            conversation: conversation(),
+        },
         Action::CreateChat {
             others: vec![Mri::new(OUTSIDER)],
             topic: None,

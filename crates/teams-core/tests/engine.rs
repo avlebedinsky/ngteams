@@ -4534,3 +4534,181 @@ async fn an_update_of_a_stored_meeting_chat_reads_its_people_and_one_of_a_1_1_ch
     assert_eq!(thread_reads_of(&lab, AB_CHAT).await, one_to_one);
     a.shutdown();
 }
+
+/// The bodies of the account's `consumptionHorizonBookmark` puts on `conversation` the mock got, oldest first.
+async fn bookmarks_put(lab: &Lab, conversation: &str) -> Vec<String> {
+    let path = format!("/api/chatsvc/amer/v1/users/ME/conversations/{conversation}/properties");
+    lab.mock
+        .received_requests()
+        .await
+        .iter()
+        .filter(|request| {
+            request.method.as_str() == "PUT"
+                && decoded(request.url.path()) == path
+                && request
+                    .url
+                    .query_pairs()
+                    .any(|(key, value)| key == "name" && value == "consumptionHorizonBookmark")
+        })
+        .filter_map(|request| {
+            let body: Value = serde_json::from_slice(&request.body).ok()?;
+            body["consumptionHorizonBookmark"].as_str().map(str::to_owned)
+        })
+        .collect()
+}
+
+/// A group chat of a and b with nothing in it yet, made on the mock and known to `b`: the a–b chat's fixture messages
+/// arrive later than any new one.
+async fn marks_chat(lab: &Lab, b: &Native) -> String {
+    let chat = lab.mock.add_group("Marks", &[LAB_A, LAB_B]).unwrap();
+    b.handle.sync().await.unwrap();
+    chat
+}
+
+#[tokio::test]
+async fn mark_as_unread_from_a_message_reaches_the_service_and_another_client_and_ends_when_opened_again() {
+    let lab = Lab::start().await;
+    let mut b = native(&lab, LAB_B, How::default());
+    b.ready().await;
+    let chat = marks_chat(&lab, &b).await;
+    let first = lab.mock.post_as(LAB_A, &chat, "<p>first</p>").unwrap();
+    b.message_event(&chat, &first).await;
+    let second = lab.mock.post_as(LAB_A, &chat, "<p>second</p>").unwrap();
+    b.message_event(&chat, &second).await;
+    b.write(Action::Read {
+        conversation: chat.clone(),
+        message_id: second.clone(),
+    })
+    .await;
+    assert_eq!(b.handle.unread_count(&chat).await.unwrap(), 0);
+
+    let marked = b
+        .write(Action::MarkUnread {
+            conversation: chat.clone(),
+            message_id: Some(first.clone()),
+        })
+        .await;
+    assert_eq!((marked.kind, marked.state), (OutboxKind::UnreadMark, OutboxState::Sent));
+    let arrival = b.stored(&chat, &first).await.arrival_time;
+    assert_eq!(b.handle.unread_mark(&chat).await.unwrap(), Some(arrival - 1));
+    assert_eq!(b.handle.unread_count(&chat).await.unwrap(), 2);
+    let client_message_id = b.stored(&chat, &first).await.client_message_id.unwrap();
+    let put = bookmarks_put(&lab, &chat).await;
+    let bookmark = put.last().unwrap();
+    let before: i64 = first.parse::<i64>().unwrap() - 1;
+    assert!(bookmark.starts_with(&format!("{before};")), "{bookmark}");
+    assert!(bookmark.ends_with(&format!(";{client_message_id}")), "{bookmark}");
+
+    // another client of b's reads the mark from the conversation list
+    let mut other = native(&lab, LAB_B, How::default());
+    other.ready().await;
+    other.handle.sync().await.unwrap();
+    assert_eq!(other.handle.unread_mark(&chat).await.unwrap(), Some(before));
+    assert_eq!(other.handle.unread_count(&chat).await.unwrap(), 2);
+    other.shutdown();
+
+    let ended = b
+        .write(Action::EndUnreadMark {
+            conversation: chat.clone(),
+        })
+        .await;
+    assert_eq!(ended.state, OutboxState::Sent);
+    assert_eq!(b.handle.unread_mark(&chat).await.unwrap(), None);
+    assert_eq!(b.handle.unread_count(&chat).await.unwrap(), 0);
+    let put = bookmarks_put(&lab, &chat).await;
+    let cleared = put.last().unwrap();
+    assert!(cleared.starts_with("0;") && cleared.ends_with(";0"), "{cleared}");
+    b.shutdown();
+}
+
+#[tokio::test]
+async fn the_chat_lists_mark_as_unread_names_the_newest_message_and_mark_as_read_ends_it() {
+    let lab = Lab::start().await;
+    let mut b = native(&lab, LAB_B, How::default());
+    b.ready().await;
+    let chat = marks_chat(&lab, &b).await;
+    let theirs = lab.mock.post_as(LAB_A, &chat, "<p>theirs</p>").unwrap();
+    b.message_event(&chat, &theirs).await;
+    let mine = id_of(&b.send(&chat, "mine").await);
+    b.message_event(&chat, &mine).await;
+    assert_eq!(b.handle.unread_count(&chat).await.unwrap(), 0, "our own is newest");
+
+    b.write(Action::MarkUnread {
+        conversation: chat.clone(),
+        message_id: None,
+    })
+    .await;
+    let newest = b.stored(&chat, &mine).await.arrival_time;
+    assert_eq!(b.handle.unread_mark(&chat).await.unwrap(), Some(newest - 1));
+    assert_eq!(
+        b.handle.unread_count(&chat).await.unwrap(),
+        1,
+        "unread whatever is newest"
+    );
+
+    let read = b
+        .write(Action::MarkRead {
+            conversation: chat.clone(),
+        })
+        .await;
+    assert_eq!((read.kind, read.state), (OutboxKind::UnreadMark, OutboxState::Sent));
+    assert_eq!(b.handle.unread_mark(&chat).await.unwrap(), None);
+    assert_eq!(b.handle.unread_count(&chat).await.unwrap(), 0);
+    let horizon = b.handle.read_horizon(&chat).await.unwrap().unwrap();
+    assert_eq!(
+        horizon.last_read_arrival, newest,
+        "the horizon moved to the newest message"
+    );
+    assert!(matches!(
+        b.handle
+            .write(Action::MarkRead {
+                conversation: chat.clone(),
+            })
+            .await,
+        Err(EngineError::AlreadyRead { .. })
+    ));
+    assert!(matches!(
+        b.handle
+            .write(Action::MarkUnread {
+                conversation: chat.clone(),
+                message_id: Some("404".to_owned()),
+            })
+            .await,
+        Err(EngineError::UnknownMessage { .. })
+    ));
+    b.shutdown();
+}
+
+#[tokio::test]
+async fn a_mark_set_on_another_client_arrives_over_the_push_channel() {
+    let lab = Lab::start().await;
+    let mut b = native(&lab, LAB_B, How::default());
+    b.ready().await;
+    let chat = marks_chat(&lab, &b).await;
+    let id = lab.mock.post_as(LAB_A, &chat, "<p>seen</p>").unwrap();
+    b.message_event(&chat, &id).await;
+    b.write(Action::Read {
+        conversation: chat.clone(),
+        message_id: id.clone(),
+    })
+    .await;
+    b.drain().await;
+    let before = id.parse::<i64>().unwrap() - 1;
+    let resource = json!({
+        "id": chat,
+        "properties": {"consumptionHorizonBookmark": format!("{before};{};1", now_ms() + 60_000)},
+        "propertiesUpdated": ["consumptionHorizonBookmark"],
+    });
+    lab.trouter.deliver_chat(
+        LAB_B,
+        &json!({"type": "EventMessage", "resourceType": "ConversationUpdate", "resource": resource}),
+    );
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while b.handle.unread_mark(&chat).await.unwrap().is_none() {
+        assert!(tokio::time::Instant::now() < deadline, "the pushed mark wasn't stored");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(b.handle.unread_mark(&chat).await.unwrap(), Some(before));
+    assert_eq!(b.handle.unread_count(&chat).await.unwrap(), 1);
+    b.shutdown();
+}
