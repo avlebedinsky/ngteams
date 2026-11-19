@@ -79,8 +79,8 @@ pub use ams::{MessagePicture, PastedFormat, PastedPicture, sent_picture, sent_pi
 pub use calendar::{
     Attendee, CALENDAR_VIEW_PATH, CalendarAnswer, CalendarAnswerError, CalendarEvent, CalendarView, ChannelEventRead,
     ChannelEventRef, EventKind, EventRead, EventTime, FloatingTime, FullEvent, MAX_CALENDAR_WINDOW_MS,
-    Response as EventResponse, ShowAs, TimeZoneSettings, join_url_chat, join_url_chat_in, join_url_meeting,
-    join_url_meeting_in,
+    Reminder as EventReminder, Response as EventResponse, ShowAs, TimeZoneSettings, join_url_chat, join_url_chat_in,
+    join_url_meeting, join_url_meeting_in,
 };
 pub use channel_meeting::{CANCELLED_MEETING_TYPE, SCHEDULED_MEETING_TYPE, ScheduledMeeting};
 pub use channel_read::{ChannelCreationStatus, TeamPeopleSearch, TeamPerson};

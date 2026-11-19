@@ -508,7 +508,9 @@ account's token for `https://api.spaces.skype.com`; the shapes are those of `doc
   `…/cancel` and `…/respond`. Times are kept as instants and answered in UTC; an event keeps the zone it names
   (`eventTimeZone`, by the middle tier's names: `TurkeySt`) and `beta/me/calendarEvents/timeZoneSettingsWithOffset`
   names an IANA zone that way. What is kept of a sent event is a fixed list of the form's own fields; who
-  organizes it, who answered what and the meeting's links are the server's. A calendar request's body is at most
+  organizes it, who answered what and the meeting's links are the server's. An invitee's copy carries the invitee's
+  own reminder, Outlook's default of 15 minutes (`isReminderSet`, `reminderMinutesBeforeStart`), not the organizer's.
+  A calendar request's body is at most
   1 MiB (an event's text can be long); a larger one is refused (400 `BadRequest`).
 - **A series** (`eventRecurrencePattern`, `eventRecurrenceRange`) is one row, read as its occurrences: the rule
   runs on the clock of the series' own zone (the `rrule` crate), so an occurrence keeps its time of day across a

@@ -4,8 +4,8 @@
 
 use serde_json::{Value, json};
 use teams_proto::{
-    Attendee, CalendarAnswerError, CalendarEvent, CalendarView, EventKind, EventRead, EventResponse, EventTime,
-    FloatingTime, MAX_CALENDAR_WINDOW_MS, Read, Service, ShowAs, TimeZoneSettings, join_url_chat,
+    Attendee, CalendarAnswerError, CalendarEvent, CalendarView, EventKind, EventRead, EventReminder, EventResponse,
+    EventTime, FloatingTime, MAX_CALENDAR_WINDOW_MS, Read, Service, ShowAs, TimeZoneSettings, join_url_chat,
 };
 
 fn event() -> Value {
@@ -503,4 +503,34 @@ fn an_event_read_whole_gives_each_attendee_s_answer_and_whether_they_are_optiona
             (None, false),
         ]
     );
+}
+
+#[test]
+fn an_event_s_reminder_reads_as_set_off_or_unknown() {
+    let with = |fields: Value| {
+        let mut raw = event();
+        raw.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+        created(&raw).reminder
+    };
+    assert_eq!(
+        with(json!({"isReminderSet": true, "reminderMinutesBeforeStart": 15})),
+        EventReminder::Before(15)
+    );
+    assert_eq!(
+        with(json!({"isReminderSet": true, "reminderMinutesBeforeStart": 0})),
+        EventReminder::Before(0)
+    );
+    assert_eq!(
+        with(json!({"isReminderSet": false, "reminderMinutesBeforeStart": 15})),
+        EventReminder::Off
+    );
+    for unknown in [
+        json!({}),
+        json!({"reminderMinutesBeforeStart": 15}),
+        json!({"isReminderSet": true}),
+        json!({"isReminderSet": true, "reminderMinutesBeforeStart": -5}),
+        json!({"isReminderSet": "yes", "reminderMinutesBeforeStart": 15}),
+    ] {
+        assert_eq!(with(unknown.clone()), EventReminder::Unknown, "{unknown}");
+    }
 }

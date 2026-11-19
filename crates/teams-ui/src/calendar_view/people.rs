@@ -822,6 +822,7 @@ fn busy_shown(busy: &BusyTime, owner: &Rc<str>) -> Option<Shown> {
         attendees: Vec::new(),
         series_master_id: None,
         channel_meeting: None,
+        reminder: teams_core::EventReminder::Unknown,
     };
     let mut shown = Shown::of(Rc::new(event))?;
     shown.owner = Some(Rc::clone(owner));

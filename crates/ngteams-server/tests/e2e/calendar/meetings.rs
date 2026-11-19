@@ -1,8 +1,8 @@
 use teams_core::{EngineError, EventWrite};
 use teams_proto::chat::ChatReads;
 use teams_proto::{
-    CalendarEvent, EventAttendee, EventKind, EventResponse, EventTime, FullEvent, MeetingCode, RsvpAnswer,
-    ScheduledMeeting, ShowAs, Weekday,
+    CalendarEvent, EventAttendee, EventKind, EventReminder, EventResponse, EventTime, FullEvent, MeetingCode,
+    RsvpAnswer, ScheduledMeeting, ShowAs, Weekday,
 };
 
 use super::events::weekly;
@@ -114,6 +114,7 @@ impl Planning {
         let dan = Seat::new(server, "dan@own.test", "Dan").await;
         let mut draft = draft("Planning", PLANNING, 30);
         draft.online = true;
+        draft.reminder_minutes = Some(30);
         draft.attendees = vec![
             invited("Bert@own.test", "Bert", Some(&bert.mri), true),
             invited("cora@own.test", "Cora", None, false),
@@ -135,6 +136,7 @@ impl Planning {
     async fn names_its_meeting(&self, tenant: &str) {
         let created = &self.created;
         assert!(created.online && created.is_organizer);
+        assert_eq!(created.reminder, EventReminder::Before(30));
         let prefix = format!("{ORIGIN}/l/meetup-join/19%3Ameeting_");
         assert!(self.link.starts_with(&prefix), "{}", self.link);
         assert!(teams_proto::is_meeting_chat_id(&self.chat), "{}", self.chat);
@@ -199,7 +201,10 @@ impl Planning {
             assert_eq!(event.organizer_name.as_deref(), Some("Ada"));
             assert_eq!(event.join_url.as_deref(), Some(self.link.as_str()));
             assert_eq!(event.meeting_chat.as_deref(), Some(self.chat.as_str()));
+            // an invitee's reminder is their own, Outlook's default, not the organizer's
+            assert_eq!(event.reminder, EventReminder::Before(15));
         }
+        assert_eq!(week(&self.ada).await[0].reminder, EventReminder::Before(30));
         self.nobody_else_has_it().await;
     }
 
