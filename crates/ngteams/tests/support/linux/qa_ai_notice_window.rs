@@ -1109,10 +1109,26 @@ fn notice_font_15_narrow_and_ring(user: &mut User<'_>) -> SandboxResult {
     user.ok("font 15")?;
     thread::sleep(SETTLE);
     notice_fits(user, 15)?;
-    for button in ["off", "keep"] {
+    user.park()?;
+    thread::sleep(SETTLE);
+    let baseline = user.look()?;
+    let dialog = dialog_of(&baseline).ok_or("no dialog on the screen")?;
+    let keep = primary_button(&baseline, dialog).ok_or("no primary button")?;
+    let buttons = Rect {
+        x: dialog.x,
+        y: keep.y.saturating_sub(8),
+        w: dialog.w,
+        h: keep.h + 16,
+    };
+    for (button, on_keep) in [("off", false), ("keep", true)] {
         user.press("Tab")?;
         user.park()?;
         thread::sleep(SETTLE);
+        let ring = changed_in(&baseline, &user.look()?, buttons);
+        say(&format!("  font 15, Tab to {button}: ring {ring:?}"));
+        ensure(ring.is_some_and(|ring| (ring.center().0 >= keep.x) == on_keep), || {
+            format!("font 15: Tab does not put the focus ring on {button}: {ring:?}")
+        })?;
         user.shot(&format!("notice-font-15-ring-{button}-light"))?;
         user.ok("theme-dark")?;
         thread::sleep(SETTLE);

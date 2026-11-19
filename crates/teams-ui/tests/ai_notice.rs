@@ -1,6 +1,7 @@
 //! The AI notice as a modal dialog, in the kit's root (which takes Tab), as the app opens it over the shell: it takes
 //! the keyboard when it shows, Tab and Shift+Tab stay in it, Enter or Space on a button answers it, nothing behind it
-//! takes a key while it waits, and the whole notice fits the window at the largest font.
+//! takes a key while it waits except the keys of the call that rings or is up, and the whole notice fits the window at
+//! the largest font.
 
 #![cfg(test)]
 
@@ -12,11 +13,13 @@ mod common;
 
 use std::sync::Arc;
 
-use common::Rig;
+use common::{LAB_B, Rig};
 use gpui::{
     AppContext as _, Bounds, Entity, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, Pixels, ScrollDelta,
     ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext, point, px, size,
 };
+use teams_core::{CallAction, CallId, CallStatus, Event, IncomingCall, RegistrationReport};
+use teams_proto::Mri;
 use teams_ui::ViewTrace;
 use teams_ui::settings::{FirstRunState, Settings, SettingsModel};
 use teams_ui::shell::{Shell, ShellParts};
@@ -142,6 +145,54 @@ fn nothing_behind_the_notice_takes_a_key_and_the_keys_come_back_after_the_answer
         cx.update(|_, cx| shell.read(cx).switcher().is_some()),
         "the shell has the keyboard again after the answer"
     );
+}
+
+#[test]
+fn a_call_that_rings_while_the_notice_waits_is_answered_or_declined_from_the_keys() {
+    let rig = Rig::start_with(|cx| teams_ui::Models::with_calls(None, cx));
+    let (shell, cx) = notice_window(&rig, waiting(theme_font()));
+    rig.send(Event::CallingRegistration(RegistrationReport::Registered));
+    let incoming = |number: u64| {
+        rig.send(Event::IncomingCall(IncomingCall {
+            call: CallId::for_tests(number),
+            caller: Mri::new(LAB_B),
+            caller_name: None,
+            group_chat: None,
+        }));
+    };
+    let actions = || rig.core.call_actions.lock().unwrap().clone();
+    incoming(1);
+    press(cx, "ctrl-shift-d");
+    assert_eq!(
+        actions(),
+        [CallAction::Decline {
+            call: CallId::for_tests(1)
+        }]
+    );
+    incoming(2);
+    press(cx, "ctrl-shift-s");
+    assert_eq!(
+        actions()[1],
+        CallAction::Answer {
+            call: CallId::for_tests(2)
+        }
+    );
+    rig.send(Event::Call {
+        call: CallId::for_tests(2),
+        status: CallStatus::Connected,
+    });
+    press(cx, "ctrl-shift-h");
+    assert_eq!(
+        actions()[2],
+        CallAction::HangUp {
+            call: CallId::for_tests(2)
+        }
+    );
+    // a new call does not start from behind the notice
+    press(cx, "ctrl-shift-c");
+    assert_eq!(actions().len(), 3);
+    assert!(bounds(cx, "ai-notice").is_some(), "the notice still waits");
+    assert_eq!(answer(&shell, cx), None);
 }
 
 #[test]

@@ -1190,8 +1190,8 @@ impl Shell {
         cx.notify();
     }
 
-    /// Takes the window's keyboard: the chat's compose box when it is drawn ([`Shell::compose_drawn`]), else the shell
-    /// (an account switched to). A focus left on something not drawn reaches no action's handler: GPUI dispatches
+    /// Takes the window's keyboard: the AI notice while it waits, else the chat's compose box when it is drawn
+    /// ([`Shell::compose_drawn`]), else the shell (an account switched to). A focus left on something not drawn reaches no action's handler: GPUI dispatches
     /// from the window's root instead.
     pub fn take_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings.read(cx).awaiting_ai_notice() {
@@ -3553,14 +3553,21 @@ pub(crate) fn pane_header_titled(lead: Option<AnyElement>, title: AnyElement, pa
 }
 
 impl Shell {
-    fn call_keys(shell: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
+    /// The keys of the call that rings or is up: answer, decline, hang up, mute. They also work while the AI notice
+    /// waits, because its backdrop covers the call bar's buttons.
+    fn current_call_keys(shell: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
         shell
-            .on_action(cx.listener(|this, _: &CallChat, _, cx| this.call_chat(cx)))
-            .on_action(cx.listener(|this, _: &JoinCall, _, cx| this.join_call(cx)))
             .on_action(cx.listener(|this, _: &AnswerCall, _, cx| this.ask_call(Ask::Answer, cx)))
             .on_action(cx.listener(|this, _: &DeclineCall, _, cx| this.ask_call(Ask::Decline, cx)))
             .on_action(cx.listener(|this, _: &HangUpCall, _, cx| this.ask_call(Ask::HangUp, cx)))
             .on_action(cx.listener(|this, _: &ToggleMuteCall, _, cx| this.ask_call(Ask::ToggleMute, cx)))
+    }
+
+    /// The other call keys: start or join a call, captions, the camera.
+    fn call_keys(shell: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
+        shell
+            .on_action(cx.listener(|this, _: &CallChat, _, cx| this.call_chat(cx)))
+            .on_action(cx.listener(|this, _: &JoinCall, _, cx| this.join_call(cx)))
             .on_action(cx.listener(|this, _: &ToggleCaptionsCall, _, cx| this.ask_call(Ask::ToggleCaptions, cx)))
             .on_action(cx.listener(|this, _: &ToggleCameraCall, _, cx| {
                 this.ask_call(Ask::ToggleCamera, cx);
@@ -3594,6 +3601,7 @@ impl Render for Shell {
         let card = self.card_layer(window, cx);
         let first_run = self.first_run_layer(window, cx);
         let modal = self.settings.read(cx).awaiting_ai_notice();
+        let shows_calls = self.models.calls.read(cx).shows();
         div()
             .key_context(CONTEXT)
             .track_focus(&self.focus)
@@ -3602,12 +3610,11 @@ impl Render for Shell {
             .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| this.used(cx)))
             .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _, cx| this.used(cx)))
             .map(|shell| Self::font_keys(shell, cx))
-            // nothing behind the AI notice takes a key while it waits
+            // the shell's own keys stop while the AI notice waits
             .when(!modal, |shell| Self::shell_keys(shell, cx))
             // the call keys only in a build that shows calls: elsewhere they reach whatever else takes them
-            .when(!modal && self.models.calls.read(cx).shows(), |shell| {
-                Self::call_keys(shell, cx)
-            })
+            .when(shows_calls, |shell| Self::current_call_keys(shell, cx))
+            .when(!modal && shows_calls, |shell| Self::call_keys(shell, cx))
             .relative()
             .size_full()
             .flex()
