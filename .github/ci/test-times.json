@@ -62,6 +62,7 @@
     "ngteams/test/qa_narrow_compose_window": 185,
     "ngteams/test/qa_new_chat_kept_window": 164,
     "ngteams/test/qa_ring_cancel_window": 62,
+    "ngteams/test/qa_stickers_window": 130,
     "ngteams/test/reactors_pixels": 1,
     "ngteams/test/reactors_window": 41,
     "ngteams/test/read_only": 1,

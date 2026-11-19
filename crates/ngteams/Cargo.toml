@@ -219,6 +219,11 @@ name = "qa_compose_toolbar_window"
 harness = false
 
 [[test]]
+# QA of task 649: Teams stickers that people send, in the app's window over the mock
+name = "qa_stickers_window"
+harness = false
+
+[[test]]
 # QA of task 579: the AI notice and the "Use AI features" switch in the app's window over the mock
 name = "qa_ai_notice_window"
 harness = false
