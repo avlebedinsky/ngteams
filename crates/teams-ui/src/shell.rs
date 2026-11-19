@@ -2106,7 +2106,7 @@ impl Shell {
         if words.is_empty() {
             return;
         }
-        self.show_toast_words(words.into(), ToastLook::Plain, cx);
+        self.show_toast_words(words, ToastLook::Plain, cx);
     }
 
     /// A toast that says something was done (`words`): Teams' check, the words and a close button, at the bottom

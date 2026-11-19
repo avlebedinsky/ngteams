@@ -222,7 +222,8 @@ impl MessageText {
             pictures_on(cloud, &mut text.nodes);
         }
         let cards = self.cards.map(|cards| cards.0).unwrap_or_default();
-        Self::build(cloud, text, self.mentioned, &self.bots).map(|text| text.with_files(self.files).with_cards(cards).with_shared(self.shared))
+        Self::build(cloud, text, self.mentioned, &self.bots)
+            .map(|text| text.with_files(self.files).with_cards(cards).with_shared(self.shared))
     }
 
     /// Plain text as one paragraph, no mention.
@@ -417,7 +418,11 @@ impl TryFrom<Stored> for MessageText {
                 .map(|(item_id, mri)| (item_id, Mri::new(mri))),
             &bots,
         )
-        .map(|text| text.with_files(stored.files).with_cards(stored.cards).with_shared(stored.shared))
+        .map(|text| {
+            text.with_files(stored.files)
+                .with_cards(stored.cards)
+                .with_shared(stored.shared)
+        })
     }
 }
 

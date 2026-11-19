@@ -1619,6 +1619,28 @@ fn a_message_sharing_a_file_on_posts_its_entry_and_keeps_it_when_stored() -> Tes
 }
 
 #[test]
+fn a_shared_file_and_an_app_card_survive_storage_and_cloud_conversion() -> TestResult {
+    let file = shared_files(Some(&Value::Array(grid_entries()?))).files.remove(1);
+    let entry = share_entry(&Cloud::Microsoft, &file, Some("anonymous")).ok_or("an entry")?;
+    let card = teams_proto::chat::AppCard::new(
+        "00000000-0000-4000-8000-0000000000a0".to_owned(),
+        "Made-up Finder".to_owned(),
+        None,
+        "application/vnd.microsoft.card.adaptive".to_owned(),
+        json!({"type": "AdaptiveCard", "body": []}),
+    );
+    let text = MessageText::plain("Made-up share note")?
+        .with_shared(vec![entry.clone()])
+        .with_cards(vec![card.clone()]);
+    let restored: MessageText = serde_json::from_value(serde_json::to_value(&text)?)?;
+    assert_eq!(restored, text);
+    assert_eq!(restored.shared(), std::slice::from_ref(&entry));
+    assert_eq!(restored.cards(), std::slice::from_ref(&card));
+    assert_eq!(restored.for_cloud(&Cloud::Microsoft)?, text);
+    Ok(())
+}
+
+#[test]
 fn a_share_refuses_any_link_that_the_file_reader_discarded() -> TestResult {
     let file = shared_files(Some(&Value::Array(grid_entries()?))).files.remove(1);
     let good = share_entry(&Cloud::Microsoft, &file, Some("anonymous")).ok_or("an entry")?;
