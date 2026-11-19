@@ -25,7 +25,7 @@ use support::{A_TONE, B_TONE, CONNECT_WAIT, file_devices, recording, start, wait
 use teams_media::devices::file::{FrameCounter, StillSource};
 use teams_media::devices::{Devices as _, VideoSink, VideoSource};
 use teams_media::sdp::{NgcSdp, NgcSession, SharingLine, VideoLines};
-use teams_media::session::{MediaSession, SHARING_LINE, SessionEvent, VideoParts};
+use teams_media::session::{MediaSession, SCREEN_IDLE_REPEAT, SCREEN_SETTLE, SHARING_LINE, SessionEvent, VideoParts};
 use teams_media::test_turn::TurnServer;
 use teams_media::video::codec::EncoderSettings;
 use teams_media::video::convert::MaxSize;
@@ -237,11 +237,9 @@ fn a_still_screen_shared_again_reaches_the_far_end() {
 
 /// A still screen shared, stopped and shared again on a group call's sharing line reaches the far end each time, as in
 /// a 1:1 call.
-#[test]
-fn a_still_screen_shared_again_on_a_group_call_s_sharing_line_reaches_the_far_end() {
-    let turn = TurnServer::start().unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let (mut mixer, mut a) = (end(&turn, "b", dir.path()), end(&turn, "a", dir.path()));
+/// A group call between `mixer` (its offer, as the mixer's) and `a`, whose answer turns the sharing line to send:
+/// connected.
+fn group_call(mixer: &mut End, a: &mut End) {
     mixer.dialect.set_video(VideoLines::Group { slots: 2 });
     a.dialect.set_video(VideoLines::Group { slots: 2 });
     let offer = mixer.session.offer_group(2).unwrap();
@@ -256,6 +254,14 @@ fn a_still_screen_shared_again_on_a_group_call_s_sharing_line_reaches_the_far_en
     mixer.session.set_sharing_lines(mixer.dialect.sharing_mids());
     mixer.session.accept_answer(read).unwrap();
     wait_for(&a.session, &SessionEvent::Connected, CONNECT_WAIT);
+}
+
+#[test]
+fn a_still_screen_shared_again_on_a_group_call_s_sharing_line_reaches_the_far_end() {
+    let turn = TurnServer::start().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (mut mixer, mut a) = (end(&turn, "b", dir.path()), end(&turn, "a", dir.path()));
+    group_call(&mut mixer, &mut a);
     for round in 1..=2 {
         let before = mixer.share.counts().frames;
         a.session.share_group_screen(still_screen()).unwrap();
@@ -283,6 +289,53 @@ fn a_still_screen_shared_again_on_a_group_call_s_sharing_line_reaches_the_far_en
         "the still screen goes on in the other session: {} frames",
         shown - before
     );
+}
+
+/// A still screen on a group call's sharing line settles to a picture a second, which keeps libwebrtc's receivers from
+/// asking for keyframes. A keyframe forced then (as for a request libwebrtc left unanswered) is made of the last
+/// picture, which goes again at once and reaches the far end.
+#[test]
+fn a_still_group_share_settles_to_a_picture_a_second_and_a_forced_keyframe_reaches_the_far_end() {
+    let turn = TurnServer::start().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (mut mixer, mut a) = (end(&turn, "b", dir.path()), end(&turn, "a", dir.path()));
+    group_call(&mut mixer, &mut a);
+    a.session.share_group_screen(still_screen()).unwrap();
+    let shown = wait_any_frames(&mixer.share, STILL_SHOWN);
+    assert!(
+        shown >= STILL_SHOWN,
+        "the far end shows A's still screen: {shown} frames"
+    );
+
+    std::thread::sleep(SCREEN_SETTLE + Duration::from_secs(1));
+    let settled = mixer.share.counts().frames;
+    std::thread::sleep(SCREEN_IDLE_REPEAT * 4);
+    let idle = mixer.share.counts().frames - settled;
+    assert!(
+        (2..=6).contains(&idle),
+        "a settled still screen sends a picture a second: {idle} in 4 s"
+    );
+    let counts = a.session.screen_sender_counts().expect("the screen's sender counts");
+    assert_eq!(
+        counts.plis + counts.firs,
+        0,
+        "the far end asks for no keyframe: {counts:?}"
+    );
+
+    let before = mixer.share.counts().frames;
+    a.session.force_screen_keyframe();
+    let limit = Instant::now() + Duration::from_secs(5);
+    let mut after = counts;
+    while Instant::now() < limit && after.keyframes <= counts.keyframes {
+        std::thread::sleep(Duration::from_millis(50));
+        after = a.session.screen_sender_counts().unwrap_or(after);
+    }
+    assert!(
+        after.keyframes > counts.keyframes,
+        "a keyframe forced: {counts:?} then {after:?}"
+    );
+    let shown = wait_any_frames(&mixer.share, before + 1);
+    assert!(shown > before, "the forced keyframe's picture reaches the far end");
 }
 
 /// The value of attribute `name` in `section`.

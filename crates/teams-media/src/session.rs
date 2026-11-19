@@ -65,10 +65,13 @@ pub use crate::rtc::{SHARING_LINE, SdpAnswer, SdpOffer};
 pub(crate) use crate::video::convert::to_buffer as to_rtc_buffer;
 use control::Control;
 pub use control::SourceRequest;
+#[cfg(feature = "test-support")]
+pub use keyframes::SenderCounts;
 use video::{CameraLoop, ScreenLoop, VideoShared};
-pub use video::{RemoteSinks, VideoParts, VideoStats};
+pub use video::{RemoteSinks, SCREEN_IDLE_REPEAT, SCREEN_SETTLE, VideoParts, VideoStats};
 
 mod control;
+mod keyframes;
 mod video;
 
 /// How long the capture thread waits for the microphone before it checks whether to stop.
@@ -630,6 +633,7 @@ impl MediaSession {
         let stop = Arc::new(AtomicBool::new(false));
         let looped = ScreenLoop {
             shared: Arc::clone(&self.shared),
+            peer: Arc::clone(&self.peer),
             source,
             screen,
             stop: Arc::clone(&stop),
@@ -677,6 +681,7 @@ impl MediaSession {
         let stop = Arc::new(AtomicBool::new(false));
         let looped = ScreenLoop {
             shared: Arc::clone(&self.shared),
+            peer: Arc::clone(&self.peer),
             source,
             screen,
             stop: Arc::clone(&stop),
@@ -687,6 +692,21 @@ impl MediaSession {
         video.screen = Some((stop, handle));
         self.peer.set_group_screen_sending(true);
         Ok(())
+    }
+
+    /// Has the screen thread force a keyframe of the shared screen at its next read of its sender's counts, as for a
+    /// request libwebrtc left unanswered (tests: a far end of libwebrtc's never sends one that libwebrtc ignores).
+    #[cfg(feature = "test-support")]
+    pub fn force_screen_keyframe(&self) {
+        self.shared.video.force_keyframe.store(true, Ordering::Relaxed);
+    }
+
+    /// What libwebrtc counted of the shared screen's sender: the far end's requests for a keyframe, and the keyframes
+    /// made. None while no screen goes out.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn screen_sender_counts(&self) -> Option<SenderCounts> {
+        self.peer.screen_sender().as_ref().and_then(SenderCounts::read)
     }
 
     /// Stops sending the shared screen and gives it back, so that it goes on in the session that replaces this one (the

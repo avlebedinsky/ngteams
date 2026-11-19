@@ -213,22 +213,33 @@ impl<'a> Index<'a> {
     /// Every stream's counts, by its report's id.
     fn counts(&self) -> HashMap<String, Counts> {
         let inbound = self.inbound.iter().map(|stream| {
-            let counts = Counts {
-                bytes: stream.inbound.bytes_received,
-                packets: stream.received.packets_received,
-                lost: stream.received.packets_lost,
-            };
+            let counts = received_counts(stream);
             (stream.rtc.id.clone(), counts)
         });
         let outbound = self.outbound.iter().map(|stream| {
-            let counts = Counts {
-                bytes: stream.sent.bytes_sent,
-                packets: stream.sent.packets_sent,
-                lost: 0,
-            };
+            let counts = sent_counts(stream);
             (stream.rtc.id.clone(), counts)
         });
         inbound.chain(outbound).collect()
+    }
+}
+
+/// A received stream's counts: its bytes with their RTP headers and padding, as they come on the wire.
+fn received_counts(stream: &InboundRtpStats) -> Counts {
+    Counts {
+        bytes: stream.inbound.bytes_received + stream.inbound.header_bytes_received,
+        packets: stream.received.packets_received,
+        lost: stream.received.packets_lost,
+    }
+}
+
+/// A sent stream's counts: its bytes with their RTP headers and padding (libwebrtc pads a video stream to keep its
+/// bandwidth estimate), as they go on the wire.
+fn sent_counts(stream: &OutboundRtpStats) -> Counts {
+    Counts {
+        bytes: stream.sent.bytes_sent + stream.outbound.header_bytes_sent,
+        packets: stream.sent.packets_sent,
+        lost: 0,
     }
 }
 
@@ -340,11 +351,7 @@ fn received(index: &Index<'_>, lines: &Lines, kind: Kind, rates: &Rates<'_>) -> 
     let mut moved = Moved::default();
     let mut health = StreamHealth::default();
     for stream in &streams {
-        let counts = Counts {
-            bytes: stream.inbound.bytes_received,
-            packets: stream.received.packets_received,
-            lost: stream.received.packets_lost,
-        };
+        let counts = received_counts(stream);
         moved = moved + rates.moved(&stream.rtc.id, counts);
         health.packets += stream.received.packets_received;
         health.jitter_ms = larger(health.jitter_ms, ms(stream.received.jitter));
@@ -376,11 +383,7 @@ fn sent(index: &Index<'_>, lines: &Lines, kind: Kind, rates: &Rates<'_>) -> Opti
     let mut moved = Moved::default();
     let mut health = StreamHealth::default();
     for stream in &streams {
-        let counts = Counts {
-            bytes: stream.sent.bytes_sent,
-            packets: stream.sent.packets_sent,
-            lost: 0,
-        };
+        let counts = sent_counts(stream);
         moved = moved + rates.moved(&stream.rtc.id, counts);
         health.packets += stream.sent.packets_sent;
         if let Some(remote) = index.remote_of(&stream.rtc.id) {
@@ -407,11 +410,7 @@ fn sent(index: &Index<'_>, lines: &Lines, kind: Kind, rates: &Rates<'_>) -> Opti
 /// audio's jitter, the far end's reported loss.
 fn network(index: &Index<'_>, rates: &Rates<'_>) -> NetworkHealth {
     let received = index.inbound.iter().fold(Moved::default(), |moved, stream| {
-        let counts = Counts {
-            bytes: stream.inbound.bytes_received,
-            packets: stream.received.packets_received,
-            lost: stream.received.packets_lost,
-        };
+        let counts = received_counts(stream);
         moved + rates.moved(&stream.rtc.id, counts)
     });
     let jitter = index
@@ -592,6 +591,29 @@ mod tests {
         assert_eq!(health.audio.sent.unwrap().bitrate_kbps, Some(8.0));
         assert_eq!(health.video.received.unwrap().bitrate_kbps, Some(400.0));
         assert!(health.network.received_loss_percent.is_some());
+    }
+
+    #[test]
+    fn a_still_screen_s_rate_counts_the_padding_and_headers_it_sends() {
+        // a still screen: 40 bytes of pictures in 2 s, and 10 000 bytes of RTP headers and libwebrtc's padding
+        let sending = |bytes, header, packets| {
+            let mut screen = outbound("OS", "video", "9", (bytes, packets), true);
+            screen.outbound.header_bytes_sent = header;
+            let mut viewed = inbound("IS", "video", "8", (bytes, packets, 0));
+            viewed.inbound.header_bytes_received = header;
+            [RtcStats::OutboundRtp(screen), RtcStats::InboundRtp(viewed)]
+        };
+        let lines = Lines {
+            sharing: vec!["8".to_owned()],
+            screen: Some("9".to_owned()),
+        };
+        let mut reader = HealthReader::default();
+        let start = Instant::now();
+        reader.read(&sending(20_000, 5_000, 100), &lines, start);
+        let health = reader.read(&sending(20_040, 15_000, 150), &lines, start + Duration::from_secs(2));
+        // (40 + 10 000) bytes in 2 s
+        assert_eq!(health.sharing.sent.unwrap().bitrate_kbps, Some(40.16));
+        assert_eq!(health.sharing.received.unwrap().bitrate_kbps, Some(40.16));
     }
 
     #[test]

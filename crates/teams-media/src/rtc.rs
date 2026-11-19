@@ -637,6 +637,19 @@ impl Peer {
         true
     }
 
+    /// The sender our screen goes out on: a group call's sharing line while the screen goes out on it, else our
+    /// screen's own line.
+    pub(crate) fn screen_sender(&self) -> Option<RtpSender> {
+        if let Some(screen) = self.group_screen().as_ref().filter(|screen| screen.sending) {
+            return Some(screen.sender.clone());
+        }
+        self.screen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|screen| screen.transceiver.sender())
+    }
+
     /// Whether our screen goes out on a group call's sharing line.
     pub(crate) fn group_screen_sending(&self) -> bool {
         self.group_screen().as_ref().is_some_and(|screen| screen.sending)

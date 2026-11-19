@@ -8,10 +8,12 @@
 //!   session goes on.
 //! - **The screen thread** runs while the account shares its screen ([`super::MediaSession::share_screen`]): each
 //!   frame turned into I420 at most [`SCREEN_MAX`] and handed to the sharing line's source. A screen cast sends a frame
-//!   only when the screen changes, and the encoder makes a keyframe only of a frame it gets: so while no new frame
-//!   comes, the last picture goes again every [`SCREEN_REPEAT`], and a viewer that asks for a keyframe (one that joins,
-//!   the viewers of a share that starts again, a loss) gets one of a screen that holds still. A screen whose stream
-//!   ends (the user stopped it at the desktop) ends the thread, told as `DeviceClosed(Screen)`.
+//!   only when the screen changes. For [`SCREEN_SETTLE`] after a change or a keyframe the last picture goes again every
+//!   [`SCREEN_REPEAT`], so the encoder refines it; then every [`SCREEN_IDLE_REPEAT`] only. The encoder makes a keyframe
+//!   only of a frame it gets: when the far end asks for one (a viewer that joins, the viewers of a share that starts
+//!   again, a loss) the last picture goes again at once, and a request that libwebrtc leaves unanswered gets a
+//!   keyframe forced ([`super::keyframes`]). A screen whose stream ends (the user
+//!   stopped it at the desktop) ends the thread, told as `DeviceClosed(Screen)`.
 //! - **A decoding thread** runs for each video track the far end sends on: libwebrtc decodes, and each picture goes to
 //!   its video line's sink (made the first time the line brings a frame, [`RemoteSinks`]) once the session's video
 //!   started; a sharing line's to [`crate::rtc::SHARING_LINE`]'s; a line the negotiated SDP doesn't name (a group
@@ -29,6 +31,7 @@ use libwebrtc::video_source::native::NativeVideoSource;
 use libwebrtc::video_stream::native::NativeVideoStream;
 use libwebrtc::video_track::RtcVideoTrack;
 
+use super::keyframes::{KEYFRAME_POLL, KeyframeWatch, SenderCounts, Step};
 use crate::devices::{DeviceError, VideoFrame, VideoSink, VideoSource};
 use crate::rtc::{LineMap, Next, Peer, next_within};
 use crate::video::codec::EncoderSettings;
@@ -41,6 +44,11 @@ use super::{SessionDevice, SessionEvent, Shared};
 const FRAME_WAIT: Duration = Duration::from_millis(100);
 /// How long a shared screen goes without a new frame before its last picture goes again (see the module docs).
 pub const SCREEN_REPEAT: Duration = Duration::from_millis(200);
+/// How long after a change or a keyframe the last picture of a shared screen goes again every [`SCREEN_REPEAT`].
+pub const SCREEN_SETTLE: Duration = Duration::from_secs(2);
+/// How often the last picture of a shared screen that settled goes again: within libwebrtc's receivers' wait for a
+/// frame (3 s, after which they ask for a keyframe), as Chrome's screen share repeats a still picture.
+pub const SCREEN_IDLE_REPEAT: Duration = Duration::from_secs(1);
 /// The largest picture of a screen sent: a bigger screen is scaled down to fit.
 pub const SCREEN_MAX: MaxSize = MaxSize {
     width: 1920,
@@ -105,6 +113,8 @@ pub(super) struct VideoShared {
     received: AtomicU64,
     shown: AtomicU64,
     screen_sent: AtomicU64,
+    /// A keyframe of the shared screen is to be forced at the screen thread's next read of its counts (tests).
+    pub(super) force_keyframe: AtomicBool,
     /// The sinks of the far end's video, by line, once the video started.
     sinks: Mutex<Option<LineSinks>>,
     /// The decoding threads.
@@ -265,24 +275,59 @@ impl CameraLoop {
 /// The screen thread.
 pub(super) struct ScreenLoop {
     pub(super) shared: Arc<Shared>,
+    pub(super) peer: Arc<Peer>,
     pub(super) source: NativeVideoSource,
     pub(super) screen: Box<dyn VideoSource>,
     pub(super) stop: Arc<AtomicBool>,
+}
+
+/// The last picture of the shared screen: since when it settles (the screen changed, or a keyframe of it went), and
+/// when it last went.
+struct Still {
+    picture: VideoFrame,
+    settles: Instant,
+    sent: Instant,
+}
+
+impl Still {
+    fn new(picture: VideoFrame) -> Self {
+        let now = Instant::now();
+        Self {
+            picture,
+            settles: now,
+            sent: now,
+        }
+    }
+
+    /// Whether the picture goes again now, the screen being still (see the module docs).
+    fn repeats(&self) -> bool {
+        let every = if self.settles.elapsed() < SCREEN_SETTLE {
+            SCREEN_REPEAT
+        } else {
+            SCREEN_IDLE_REPEAT
+        };
+        self.sent.elapsed() >= every
+    }
 }
 
 impl ScreenLoop {
     /// Sends the screen's frames until the thread is stopped; the screen, unless its stream ended.
     pub(super) fn run(mut self) -> Option<Box<dyn VideoSource>> {
         let mut first = true;
-        // the last picture sent, and when it last went
-        let mut last: Option<(VideoFrame, Instant)> = None;
+        let mut last: Option<Still> = None;
+        let mut keyframes = KeyframeWatch::default();
+        let mut polled = Instant::now();
         while !self.stop.load(Ordering::Relaxed) && !self.shared.stopping() {
+            if polled.elapsed() >= KEYFRAME_POLL {
+                polled = Instant::now();
+                self.answer(&mut keyframes, last.as_mut());
+            }
             let frame = match self.screen.next_frame(FRAME_WAIT) {
                 Ok(Some(frame)) => frame,
                 Ok(None) => {
-                    if let Some((picture, at)) = last.as_mut().filter(|(_, at)| at.elapsed() >= SCREEN_REPEAT) {
-                        self.send(picture);
-                        *at = Instant::now();
+                    if let Some(still) = last.as_mut().filter(|still| still.repeats()) {
+                        self.send(&still.picture);
+                        still.sent = Instant::now();
                     }
                     continue;
                 }
@@ -305,15 +350,56 @@ impl ScreenLoop {
                 continue;
             };
             self.send(&i420);
-            last = Some((i420, Instant::now()));
+            last = Some(Still::new(i420));
         }
         Some(match last {
-            Some((picture, _)) => Box::new(Resumed {
-                last: Some(picture),
+            Some(still) => Box::new(Resumed {
+                last: Some(still.picture),
                 screen: self.screen,
             }),
             None => self.screen,
         })
+    }
+
+    /// Answers the far end's requests for a keyframe, as the sender's counts show them ([`super::keyframes`]): the last
+    /// picture goes again, as a keyframe forced when libwebrtc left a request unanswered.
+    fn answer(&self, watch: &mut KeyframeWatch, last: Option<&mut Still>) {
+        let Some(sender) = self.peer.screen_sender() else {
+            return;
+        };
+        let Some(counts) = SenderCounts::read(&sender) else {
+            return;
+        };
+        let read = watch.read(counts, Instant::now());
+        let step = if self.shared.video.force_keyframe.swap(false, Ordering::Relaxed) {
+            Step::Force
+        } else {
+            read
+        };
+        match step {
+            Step::Wait => return,
+            Step::Resend => log::debug!(
+                "the far end asks for a keyframe of the shared screen: FIR {}, PLI {}; {} keyframes",
+                counts.firs,
+                counts.plis,
+                counts.keyframes
+            ),
+            Step::Force => {
+                log::info!(
+                    "a keyframe of the shared screen asked for and not made: one forced (FIR {}, PLI {}; {} keyframes)",
+                    counts.firs,
+                    counts.plis,
+                    counts.keyframes
+                );
+                sender.generate_key_frame();
+            }
+        }
+        if let Some(still) = last {
+            self.send(&still.picture);
+            // the keyframe is refined as a change is, for the viewer that asked for it
+            still.sent = Instant::now();
+            still.settles = still.sent;
+        }
     }
 
     /// Hands `picture` (I420) to the sharing line's source.
