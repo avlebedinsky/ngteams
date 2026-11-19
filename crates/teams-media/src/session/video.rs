@@ -12,7 +12,7 @@
 //!   [`SCREEN_REPEAT`], so the encoder refines it; then every [`SCREEN_IDLE_REPEAT`] only. The encoder makes a keyframe
 //!   only of a frame it gets: when the far end asks for one (a viewer that joins, the viewers of a share that starts
 //!   again, a loss) the last picture goes again at once, and a request that libwebrtc leaves unanswered gets a
-//!   keyframe forced ([`super::keyframes`]). A screen whose stream ends (the user
+//!   keyframe forced; so does each second of the share's first seconds, unasked ([`super::keyframes`]). A screen whose stream ends (the user
 //!   stopped it at the desktop) ends the thread, told as `DeviceClosed(Screen)`.
 //! - **A decoding thread** runs for each video track the far end sends on: libwebrtc decodes, and each picture goes to
 //!   its video line's sink (made the first time the line brings a frame, [`RemoteSinks`]) once the session's video
@@ -31,7 +31,7 @@ use libwebrtc::video_source::native::NativeVideoSource;
 use libwebrtc::video_stream::native::NativeVideoStream;
 use libwebrtc::video_track::RtcVideoTrack;
 
-use super::keyframes::{KEYFRAME_POLL, KeyframeWatch, SenderCounts, Step};
+use super::keyframes::{KEYFRAME_POLL, KeyframeWatch, SenderCounts, StartKeyframes, Step};
 use crate::devices::{DeviceError, VideoFrame, VideoSink, VideoSource};
 use crate::rtc::{LineMap, Next, Peer, next_within};
 use crate::video::codec::EncoderSettings;
@@ -317,10 +317,12 @@ impl ScreenLoop {
         let mut last: Option<Still> = None;
         let mut keyframes = KeyframeWatch::default();
         let mut polled = Instant::now();
+        let mut start = StartKeyframes::new(polled);
         while !self.stop.load(Ordering::Relaxed) && !self.shared.stopping() {
             if polled.elapsed() >= KEYFRAME_POLL {
                 polled = Instant::now();
-                self.answer(&mut keyframes, last.as_mut());
+                let unasked = start.due(polled);
+                self.answer(&mut keyframes, unasked, last.as_mut());
             }
             let frame = match self.screen.next_frame(FRAME_WAIT) {
                 Ok(Some(frame)) => frame,
@@ -362,20 +364,29 @@ impl ScreenLoop {
     }
 
     /// Answers the far end's requests for a keyframe, as the sender's counts show them ([`super::keyframes`]): the last
-    /// picture goes again, as a keyframe forced when libwebrtc left a request unanswered.
-    fn answer(&self, watch: &mut KeyframeWatch, last: Option<&mut Still>) {
+    /// picture goes again, as a keyframe forced when libwebrtc left a request unanswered, or `unasked` in the share's
+    /// first seconds.
+    fn answer(&self, watch: &mut KeyframeWatch, unasked: bool, last: Option<&mut Still>) {
         let Some(sender) = self.peer.screen_sender() else {
             return;
         };
         let Some(counts) = SenderCounts::read(&sender) else {
             return;
         };
-        let read = watch.read(counts, Instant::now());
-        let step = if self.shared.video.force_keyframe.swap(false, Ordering::Relaxed) {
-            Step::Force
-        } else {
-            read
-        };
+        if watch.last() != Some(counts) {
+            log::debug!(
+                "the shared screen's sender: FIR {}, PLI {}; {} keyframes",
+                counts.firs,
+                counts.plis,
+                counts.keyframes
+            );
+        }
+        let mut step = watch.read(counts, Instant::now());
+        if self.shared.video.force_keyframe.swap(false, Ordering::Relaxed) {
+            step = Step::Force;
+        } else if unasked && step == Step::Wait {
+            step = Step::Start;
+        }
         match step {
             Step::Wait => return,
             Step::Resend => log::debug!(
@@ -384,6 +395,10 @@ impl ScreenLoop {
                 counts.plis,
                 counts.keyframes
             ),
+            Step::Start => {
+                log::debug!("a keyframe of the shared screen forced in its first seconds");
+                sender.generate_key_frame();
+            }
             Step::Force => {
                 log::info!(
                     "a keyframe of the shared screen asked for and not made: one forced (FIR {}, PLI {}; {} keyframes)",

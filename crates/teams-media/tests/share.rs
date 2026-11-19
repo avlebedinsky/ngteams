@@ -25,7 +25,9 @@ use support::{A_TONE, B_TONE, CONNECT_WAIT, file_devices, recording, start, wait
 use teams_media::devices::file::{FrameCounter, StillSource};
 use teams_media::devices::{Devices as _, VideoSink, VideoSource};
 use teams_media::sdp::{NgcSdp, NgcSession, SharingLine, VideoLines};
-use teams_media::session::{MediaSession, SCREEN_IDLE_REPEAT, SCREEN_SETTLE, SHARING_LINE, SessionEvent, VideoParts};
+use teams_media::session::{
+    MediaSession, SCREEN_IDLE_REPEAT, SCREEN_SETTLE, SHARING_LINE, START_KEYFRAMES_FOR, SessionEvent, VideoParts,
+};
 use teams_media::test_turn::TurnServer;
 use teams_media::video::codec::EncoderSettings;
 use teams_media::video::convert::MaxSize;
@@ -307,7 +309,8 @@ fn a_still_group_share_settles_to_a_picture_a_second_and_a_forced_keyframe_reach
         "the far end shows A's still screen: {shown} frames"
     );
 
-    std::thread::sleep(SCREEN_SETTLE + Duration::from_secs(1));
+    // past the share's first seconds, whose keyframes go unasked, and the settling after the last of them
+    std::thread::sleep(START_KEYFRAMES_FOR + SCREEN_SETTLE + Duration::from_secs(1));
     let settled = mixer.share.counts().frames;
     std::thread::sleep(SCREEN_IDLE_REPEAT * 4);
     let idle = mixer.share.counts().frames - settled;

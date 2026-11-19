@@ -18,6 +18,9 @@ use libwebrtc::stats::RtcStats;
 
 /// How often the screen thread reads its sender's counts.
 pub(super) const KEYFRAME_POLL: Duration = Duration::from_millis(250);
+/// For how long after a share starts, and how often, a keyframe is forced unasked (see [`StartKeyframes`]).
+pub const START_KEYFRAMES_FOR: Duration = Duration::from_secs(8);
+pub(super) const START_KEYFRAME_EVERY: Duration = Duration::from_secs(1);
 /// How long a request for a keyframe can stay without one before a keyframe is forced. libwebrtc encodes the next
 /// frame as the keyframe it owes, and the screen thread sends one at the request: well within this.
 pub(super) const ANSWER_WAIT: Duration = Duration::from_millis(500);
@@ -73,6 +76,8 @@ pub(super) enum Step {
     Resend,
     /// A request went unanswered: a keyframe is forced, of the last picture sent again.
     Force,
+    /// A keyframe forced unasked in a share's first seconds ([`StartKeyframes`]), of the last picture sent again.
+    Start,
 }
 
 /// The requests for a keyframe that wait for one, read from the sender's counts ([`KeyframeWatch::read`]).
@@ -84,6 +89,11 @@ pub(super) struct KeyframeWatch {
 }
 
 impl KeyframeWatch {
+    /// The counts of the last read.
+    pub(super) fn last(&self) -> Option<SenderCounts> {
+        self.last
+    }
+
     /// Takes the counts read at `now`: what to do about the requests they show.
     pub(super) fn read(&mut self, counts: SenderCounts, now: Instant) -> Step {
         let Some(last) = self.last.replace(counts) else {
@@ -108,6 +118,32 @@ impl KeyframeWatch {
             self.waits = None;
             Step::Force
         })
+    }
+}
+
+/// The keyframes forced in a share's first seconds, unasked: one every [`START_KEYFRAME_EVERY`] for
+/// [`START_KEYFRAMES_FOR`]. The mixer forwards a share to a viewer from a keyframe that comes after the viewer asked for it (its `sr`, a few
+/// seconds after the share starts), and it does not always ask the sharer for one: the viewers then see nothing. Teams
+/// for the web makes a keyframe about every second in a share's first seconds, unasked, as these do.
+#[derive(Debug)]
+pub(super) struct StartKeyframes {
+    started: Instant,
+    forced: u32,
+}
+
+impl StartKeyframes {
+    pub(super) fn new(started: Instant) -> Self {
+        Self { started, forced: 0 }
+    }
+
+    /// Whether a keyframe is due at `now` (and counts it as forced).
+    pub(super) fn due(&mut self, now: Instant) -> bool {
+        let next = START_KEYFRAME_EVERY * (self.forced + 1);
+        let due = next <= START_KEYFRAMES_FOR && now.duration_since(self.started) >= next;
+        if due {
+            self.forced += 1;
+        }
+        due
     }
 }
 
@@ -185,6 +221,27 @@ mod tests {
             Step::Wait,
             "once only"
         );
+    }
+
+    #[test]
+    fn a_share_s_first_seconds_force_a_keyframe_each_second() {
+        let start = Instant::now();
+        let mut keyframes = StartKeyframes::new(start);
+        assert!(!keyframes.due(start + START_KEYFRAME_EVERY / 2));
+        let forced: u32 = (1..=40)
+            .map(|step| start + KEYFRAME_POLL * step)
+            .map(|now| u32::from(keyframes.due(now)))
+            .sum();
+        assert_eq!(forced, 8, "one a second for the first seconds, then none");
+        assert!(!keyframes.due(start + START_KEYFRAME_EVERY * 60));
+    }
+
+    #[test]
+    fn the_last_read_is_kept() {
+        let mut watch = KeyframeWatch::default();
+        assert_eq!(watch.last(), None);
+        watch.read(counts(1, 2, 3), Instant::now());
+        assert_eq!(watch.last(), Some(counts(1, 2, 3)));
     }
 
     #[test]

@@ -65,6 +65,7 @@ pub use crate::rtc::{SHARING_LINE, SdpAnswer, SdpOffer};
 pub(crate) use crate::video::convert::to_buffer as to_rtc_buffer;
 use control::Control;
 pub use control::SourceRequest;
+pub use keyframes::START_KEYFRAMES_FOR;
 #[cfg(feature = "test-support")]
 pub use keyframes::SenderCounts;
 use video::{CameraLoop, ScreenLoop, VideoShared};
