@@ -21,7 +21,9 @@
 //!   initials are in the middle of the circle, and all of them are inside it.
 //! - **Faces in other views** (round 3): the chat list's faces (48 px), and New message's suggestions (32 px) for
 //!   people, for group chats of two words and for one of one word, in both themes. The initials are in the middle of
-//!   the circle and inside it, on one line, at the size Teams gives the face, with one or two letters.
+//!   the circle and inside it, on one line, at the size Teams gives the face, with one or two letters. All the
+//!   faces of one list have one size of initials. "Start a group chat" from a chat's people, with "lab" typed: its
+//!   people and chats (32 px) have the same initials.
 //! - **Share**: one and three people, one and three group chats, one and two channels (the mock's teams have two
 //!   live channels). Each target gets one post with the file's entry and the message, and the chat shows the file's
 //!   card. A bold word and an emoji go out as rich text. The toast says "You've shared <file>".
@@ -61,6 +63,7 @@ use teams_mock::{
 use teams_proto::{Author, Client as ChatClient, Credentials, HttpTransport, Mri};
 use teams_store::Store;
 use teams_trouter::{Options, Trouter, TrouterCredentials};
+use teams_ui::chat_people::Picked;
 use teams_ui::chat_view::{Body, ChatView, MessageItem};
 use teams_ui::new_chat::Suggested;
 use teams_ui::rich_text::Block;
@@ -199,7 +202,8 @@ fn walk(sandbox: &Sandbox, service: &Service, runtime: &tokio::runtime::Runtime,
         ctx.outside()?;
         ctx.send_error()?;
         ctx.list_faces()?;
-        ctx.new_message_faces()
+        ctx.new_message_faces()?;
+        ctx.start_group_faces()
     })();
     if let Err(error) = outcome {
         return Err(run.fail(sandbox, &*error));
@@ -1012,9 +1016,22 @@ const CONVERSATION: Rect = Rect {
 };
 /// A group chat of one word: its face has one letter.
 const ONE_WORD: &str = "Harbourcrew";
+/// A named group chat that "lab" finds, with a round face.
+const LAB_GROUP: &str = "Lab alerts";
 /// How many times larger a zoomed shot of a face is, and the margin round the face it keeps.
 const FACE_ZOOM: u32 = 6;
 const FACE_MARGIN: u32 = 6;
+/// The chat header's "View and add participants", and its flyout's "Start a group chat" under the 1:1 chat's two
+/// people.
+const PEOPLE_BUTTON: (u32, u32) = (1243, 71);
+const START_GROUP: (u32, u32) = (1098, 258);
+/// The suggestions of "Start a group chat", inside the picker's border, under its box.
+const GROUP_PICKER: Rect = Rect {
+    x0: 726,
+    y0: 362,
+    x1: 1086,
+    y1: 700,
+};
 
 impl Walk<'_> {
     /// The faces with initials in the chat list (48 px), in both themes: the initials in the middle of the circle,
@@ -1065,6 +1082,61 @@ impl Walk<'_> {
         Ok(())
     }
 
+    /// The chat's people (the header's button), "Start a group chat" and "lab" typed: its suggestions (people and
+    /// chats, 32 px faces) in both themes, as [`Self::list_faces`] checks them, one size for all.
+    fn start_group_faces(&mut self) -> SandboxResult {
+        self.run.open(PERSON_B.chat)?;
+        thread::sleep(SETTLE);
+        self.run.click(PEOPLE_BUTTON.0, PEOPLE_BUTTON.1)?;
+        self.people_until("the people flyout open", |open, _, _| open)?;
+        self.run.click(START_GROUP.0, START_GROUP.1)?;
+        self.people_until("the picker open", |_, picking, _| picking)?;
+        self.run.input.type_text("lab")?;
+        let found = self.people_until("suggestions for \"lab\"", |_, _, names| {
+            names.iter().any(|name| name == "Lab C") && names.iter().any(|name| name == LAB_GROUP)
+        })?;
+        step(&format!("Start a group chat: \"lab\" suggests {found:?}"));
+        for dark in [false, true] {
+            self.run.theme(dark)?;
+            thread::sleep(SETTLE);
+            let name = format!("qa543-start-group-lab-{}.png", theme_name(dark));
+            self.run.shot(self.sandbox, &name)?;
+            self.check_faces((GROUP_PICKER, SUGGESTION_FACE), (2, Some(2)), &name)?;
+        }
+        self.run.theme(false)?;
+        self.run.input.key(keys::ESC)?;
+        self.run.input.key(keys::ESC)?;
+        self.people_until("the people flyout closed", |open, _, _| !open)?;
+        step("Start a group chat's suggestions: one size of initials for people and chats");
+        Ok(())
+    }
+
+    /// Waits up to [`WAIT`] for the chat's people flyout as `wanted` takes it (open, its picker open, the picker's
+    /// suggestions' names); the names.
+    fn people_until(
+        &mut self,
+        what: &str,
+        wanted: impl Fn(bool, bool, &[String]) -> bool,
+    ) -> SandboxResult<Vec<String>> {
+        let start = Instant::now();
+        loop {
+            let answer = self.run.question("people")?;
+            let read: Value = serde_json::from_str(&answer)?;
+            let names: Vec<String> = read["suggestions"]
+                .as_array()
+                .map(|names| names.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+                .unwrap_or_default();
+            let open = read["open"].as_bool().unwrap_or_default();
+            if wanted(open, read["picking"].as_bool().unwrap_or_default(), &names) {
+                return Ok(names);
+            }
+            if start.elapsed() > WAIT {
+                return Err(format!("{what}: never came; last {answer}").into());
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     /// Waits up to [`WAIT`] for New message as `wanted` takes it (open, its suggestions' names); the names.
     fn new_message_until(
         &mut self,
@@ -1091,8 +1163,8 @@ impl Walk<'_> {
     }
 
     /// The round faces `side` px across in `area` of the last shot: at least `at_least` of them, each with initials
-    /// (of `letters` letters, when given) in the middle of the circle and inside it, on one line, at Teams' size.
-    /// A zoomed shot of each face goes next to the shot.
+    /// (of `letters` letters, when given) in the middle of the circle and inside it, on one line, at Teams' size,
+    /// all of one size. A zoomed shot of each face goes next to the shot.
     fn check_faces(
         &self,
         (area, side): (Rect, u32),
@@ -1107,6 +1179,7 @@ impl Walk<'_> {
                 faces.len()
             ));
         }
+        let mut heights = Vec::new();
         for (at, face) in faces.iter().enumerate() {
             keep_face_zoomed(shot, *face, &format!("{}-face{at}", shot_name.trim_end_matches(".png")))?;
             let Some((ink, drawn)) = face_ink(shot, *face) else {
@@ -1117,6 +1190,7 @@ impl Walk<'_> {
                 "a face {face:?}: initials {ink:?}, {drawn} letter(s), {} px high ({shot_name})",
                 ink.height()
             ));
+            heights.push(ink.height());
             // the middles are doubled, so they stay whole numbers
             let off_x = (ink.x0 + ink.x1).abs_diff(face.x0 + face.x1);
             let off_y = (ink.y0 + ink.y1).abs_diff(face.y0 + face.y1);
@@ -1130,9 +1204,9 @@ impl Walk<'_> {
                     "the circle of the face {face:?} cuts its initials {ink:?} ({shot_name})"
                 ));
             }
-            // capitals stand about 0.7 of the text's size: on one line, at the size Teams gives the face
+            // capitals stand about 0.7 to 0.8 of the text's size: on one line, at the size Teams gives the face
             let text = teams_initials_size(side);
-            if ink.height() * 10 < text * 6 || ink.height() * 10 > text * 9 {
+            if ink.height() * 10 < text * 7 || ink.height() * 10 > text * 9 {
                 note(format!(
                     "the initials {ink:?} on the face {face:?} are {} px high, not those of Teams' {text} px text on \
                      one line ({shot_name})",
@@ -1144,6 +1218,14 @@ impl Walk<'_> {
                     "the face {face:?} shows {drawn} letter(s), not {letters:?} ({shot_name})"
                 ));
             }
+        }
+        // a round letter rises 1 px over a flat one
+        if let (Some(low), Some(high)) = (heights.iter().min(), heights.iter().max())
+            && high - low > 1
+        {
+            note(format!(
+                "the initials on the faces of {side} px are {heights:?} px high, not one size ({shot_name})"
+            ));
         }
         Ok(())
     }
@@ -2122,6 +2204,8 @@ impl Service {
         }
         // a group chat of one word, so New message shows a face of one letter (round 3)
         mock.add_group(ONE_WORD, &[LAB_A, LAB_B]).ok_or("no group made")?;
+        // a named group chat that "lab" finds next to a person, so "Start a group chat" shows both faces (round 3)
+        mock.add_group(LAB_GROUP, &[LAB_A, LAB_B]).ok_or("no group made")?;
         // b and the outsider say something in their 1:1 chats with a, so the chats are named after them
         for (chat, who) in [(AB_CHAT, (LAB_B, "Lab B")), (AX_CHAT, (OUTSIDER, "Outsider X"))] {
             mock.add_message(chat, who, "RichText/Html", "<p>Made-up hello</p>")
@@ -2805,6 +2889,21 @@ fn on_shell(shell: &Entity<Shell>, verb: &str, cx: &mut App) -> String {
                     })
                     .collect();
                 json!({"open": true, "suggestions": names})
+            },
+        ),
+        "people" => shell.read(cx).people().map_or_else(
+            || json!({"open": false, "picking": false, "suggestions": []}),
+            |view| {
+                let view = view.read(cx);
+                let names: Vec<String> = view
+                    .suggestions()
+                    .iter()
+                    .map(|picked| match picked {
+                        Picked::Person(person) => person.name.to_string(),
+                        Picked::Chat(row) => row.name.to_string(),
+                    })
+                    .collect();
+                json!({"open": true, "picking": view.picking(), "suggestions": names})
             },
         ),
         other => json!(format!("unknown {other}")),
