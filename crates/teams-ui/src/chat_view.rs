@@ -294,6 +294,7 @@ pub fn init(cx: &mut App) {
         return;
     }
     cx.set_global(Bound);
+    menu_keys::bind(cx);
     let context = Some(CONTEXT);
     cx.bind_keys([
         KeyBinding::new("up", SelectPrevious, context),
@@ -4241,12 +4242,7 @@ impl ChatView {
                     .position(at.bottom_right())
                     .snap_to_window_with_margin(px(8.0))
                     .child(
-                        div()
-                            .pt_1()
-                            .flex()
-                            .items_end()
-                            .gap_1()
-                            .on_key_down(cx.listener(Self::menu_key))
+                        Self::menu_keys_on(div().pt_1().flex().items_end().gap_1(), cx)
                             .children(more.flatten())
                             .children(translation_menu)
                             .child(menu),

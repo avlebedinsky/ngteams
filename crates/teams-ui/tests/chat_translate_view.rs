@@ -1010,3 +1010,48 @@ fn escape_in_the_translation_list_closes_it_alone_and_its_settings_row_takes_ent
     assert!(settings.get(), "Settings opens the settings' page");
     assert_eq!(options_of(&view, cx), None);
 }
+
+/// The plain chat in the kit's root, as the app's window holds it (the root binds Tab and Shift+Tab), `1001` selected
+/// with the keys.
+fn rooted_keyed_chat(rig: &Rig) -> (Entity<ChatView>, &'static mut VisualTestContext) {
+    rig.core.messages.lock().unwrap().insert(
+        AB.to_owned(),
+        vec![
+            message("1002", 2_000, LAB_A, "Lunch?"),
+            message("1001", 1_000, LAB_B, "Hello"),
+        ],
+    );
+    rig.cx.update(teams_ui::window::init);
+    let parts = parts::parts(rig, Settings::default(), Arc::new(ViewTrace::off()));
+    let app: &'static mut TestAppContext = Box::leak(Box::new(rig.cx.clone()));
+    let (root, cx) = app.add_window_view(|window, cx| {
+        let view = cx.new(|cx| ChatView::new(parts, AB.to_owned(), window, cx));
+        teams_ui::window::KitRoot::new(view, window, cx)
+    });
+    let view = cx.update(|_, cx| root.read(cx).view().clone().downcast::<ChatView>().unwrap());
+    cx.simulate_resize(size(px(800.0), px(600.0)));
+    draw(cx);
+    select_by_keys(&view, cx, "1001");
+    (view, cx)
+}
+
+#[test]
+fn tab_and_shift_tab_in_the_menu_close_it_and_give_the_keys_back() {
+    let rig = Rig::start();
+    let (view, cx) = rooted_keyed_chat(&rig);
+    for tab in ["tab", "shift-tab"] {
+        keys(cx, &["shift-f10"]);
+        assert_eq!(options_of(&view, cx).as_deref(), Some("1001"));
+        assert!(!list_focused(&view, cx), "the keys are in the menu");
+        keys(cx, &[tab]);
+        assert_eq!(options_of(&view, cx), None, "{tab} closes the menu");
+        assert!(list_focused(&view, cx), "{tab}: the keys are back on the message list");
+    }
+    // with Translation's list open, Tab closes the menu and the list
+    keys(cx, &["shift-f10", "down", "right"]);
+    assert!(cx.debug_bounds("message-translation-menu").is_some());
+    keys(cx, &["tab"]);
+    assert_eq!(options_of(&view, cx), None);
+    assert!(cx.debug_bounds("message-translation-menu").is_none());
+    assert!(list_focused(&view, cx), "the keys are back on the message list");
+}

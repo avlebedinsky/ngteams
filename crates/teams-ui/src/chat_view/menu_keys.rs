@@ -1,17 +1,36 @@
 //! The keyboard in a message's "More options" menu, as Teams' context menu takes it: Shift+F10 or the menu key opens
 //! the menu of the selected message, its first row under the keys. Up and Down move through the rows of the menu or of
 //! the list beside it, Home and End to the ends, Enter or Space picks. Right on "Translation" or "More actions" opens
-//! its list, its first row under the keys; Left or Escape there closes the list and goes back to its row. Escape or
-//! Tab in the menu closes it. The focus goes back to the message list when the menu closes from the keys, or when a
-//! row picked from the keys leaves it nowhere.
+//! its list, its first row under the keys; Left or Escape there closes the list and goes back to its row. Escape, Tab
+//! or Shift+Tab in the menu closes it. The focus goes back to the message list when the menu closes from the keys, or
+//! when a row picked from the keys leaves it nowhere.
+//!
+//! The kit's root binds Tab and Shift+Tab, and a binding takes a key before any key listener hears it: the menu's own
+//! key context ([`CONTEXT`]) binds them to [`LeaveMenu`], which takes precedence over the root's.
 
 use std::cell::Cell;
 use std::rc::Rc;
 
-use gpui::{App, Bounds, Context, FocusHandle, KeyDownEvent, Pixels, Window};
+use gpui::{
+    App, Bounds, Context, Div, FocusHandle, InteractiveElement as _, KeyBinding, KeyDownEvent, Pixels, Window, actions,
+};
 
 use super::{ChatView, MessageAction, SideList};
 use crate::keyboard;
+
+actions!(teams_ui, [LeaveMenu]);
+
+/// The key context of the menu and the list beside it.
+pub(super) const CONTEXT: &str = "MessageMenu";
+
+/// Binds Tab and Shift+Tab in the menu ([`CONTEXT`]): they close it.
+pub(super) fn bind(cx: &mut App) {
+    let context = Some(CONTEXT);
+    cx.bind_keys([
+        KeyBinding::new("tab", LeaveMenu, context),
+        KeyBinding::new("shift-tab", LeaveMenu, context),
+    ]);
+}
 
 /// Where the keys go once the menu or its list is drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,9 +109,9 @@ impl ChatView {
     }
 
     /// A key in the menu or in the list beside it.
-    pub(super) fn menu_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn menu_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let keys = &self.menu_keys;
-        if event.keystroke.modifiers.modified() && event.keystroke.key != "tab" {
+        if event.keystroke.modifiers.modified() {
             return;
         }
         let in_side = self.side_list.is_some() && keys.side.contains_focused(window, cx);
@@ -117,17 +136,33 @@ impl ChatView {
                 }
                 cx.notify();
             }
-            "escape" | "tab" => {
-                self.options = None;
-                self.side_list = None;
-                self.menu_keys.due = None;
-                self.menu_keys.keyed = false;
-                self.menu_keys.back.give_back(window, cx);
-                cx.notify();
-            }
+            "escape" => self.close_menu_by_keys(window, cx),
             _ => return,
         }
         cx.stop_propagation();
+    }
+
+    /// The menu's keys on `holder`, which holds the menu and the list beside it.
+    pub(super) fn menu_keys_on(holder: Div, cx: &mut Context<Self>) -> Div {
+        holder
+            .key_context(CONTEXT)
+            .on_key_down(cx.listener(Self::menu_key))
+            .on_action(cx.listener(Self::leave_menu))
+    }
+
+    /// Tab or Shift+Tab in the menu or in the list beside it ([`LeaveMenu`]).
+    fn leave_menu(&mut self, _: &LeaveMenu, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_menu_by_keys(window, cx);
+    }
+
+    /// Closes the menu and its list, and gives the focus back to where it was when the menu opened.
+    fn close_menu_by_keys(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.options = None;
+        self.side_list = None;
+        self.menu_keys.due = None;
+        self.menu_keys.keyed = false;
+        self.menu_keys.back.give_back(window, cx);
+        cx.notify();
     }
 
     /// A list opener's row picked from the keys: its list's first row takes them once it is drawn.
