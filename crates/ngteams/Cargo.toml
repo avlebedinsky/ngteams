@@ -179,7 +179,7 @@ name = "qa_message_extensions_window"
 harness = false
 
 [[test]]
-# QA of task 429: the message box in a narrow call chat, a narrow window and a thread, in the UI sandbox
+# QA of tasks 429 and 581: the message box in a narrow call chat, a narrow window and a thread, and its edge, in the UI sandbox
 name = "qa_narrow_compose_window"
 harness = false
 
