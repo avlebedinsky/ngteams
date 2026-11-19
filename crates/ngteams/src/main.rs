@@ -79,26 +79,6 @@ fn window_runner(runner: Runner) -> Runner {
     runner
 }
 
-/// Holds the sign-in window's engine worker from the start, so an update that replaces the files can't swap it under
-/// this run.
-fn pin_sign_in_worker() {
-    #[cfg(target_os = "linux")]
-    if let Err(error) = teams_wpe_client::worker::pin_worker() {
-        eprintln!("teams: {error}");
-    }
-    #[cfg(target_os = "macos")]
-    if let Err(error) = teams_signin::window::pin_worker() {
-        eprintln!("teams: {error}");
-    }
-    // off the main thread: after a restart of Windows, Defender reads the whole file again before it opens
-    #[cfg(windows)]
-    std::thread::spawn(|| {
-        if let Err(error) = teams_signin::window::pin_worker() {
-            eprintln!("teams: {error}");
-        }
-    });
-}
-
 /// How the app ended.
 enum Outcome {
     Quit,
@@ -200,6 +180,26 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Holds the sign-in window's engine worker from the start, so an update that replaces the files can't swap it under
+/// this run.
+fn pin_sign_in_worker() {
+    #[cfg(target_os = "linux")]
+    if let Err(error) = teams_wpe_client::worker::pin_worker() {
+        eprintln!("teams: {error}");
+    }
+    #[cfg(target_os = "macos")]
+    if let Err(error) = teams_signin::window::pin_worker() {
+        eprintln!("teams: {error}");
+    }
+    // off the main thread: after a restart of Windows, Defender reads the whole file again before it opens
+    #[cfg(windows)]
+    std::thread::spawn(|| {
+        if let Err(error) = teams_signin::window::pin_worker() {
+            eprintln!("teams: {error}");
+        }
+    });
 }
 
 /// The installer's run of the app ([`ngteams::prepare`]). The installer goes on also when this run fails.

@@ -788,6 +788,7 @@ struct Rig<'a> {
     frame: Option<Rect>,
     /// niri's id of the call window.
     window_id: Option<u64>,
+    previous_windows: Vec<u64>,
     shots: usize,
 }
 
@@ -807,6 +808,7 @@ impl<'a> Rig<'a> {
             sharing: false,
             frame: None,
             window_id: None,
+            previous_windows: Vec::new(),
             shots: 0,
         })
     }
@@ -856,7 +858,7 @@ impl<'a> Rig<'a> {
         let before = opened(self.app.trace.catch_up());
         self.wait_call("ringing", |row| row.ringing)?;
         self.caller_picture(shown)?;
-        self.window_id = None;
+        self.expect_call_window()?;
         self.ctl.request(None, Request::Answer)?;
         self.wait_call("connected", |row| row.state == "connected")?;
         self.app
@@ -971,27 +973,46 @@ impl<'a> Rig<'a> {
         self.frame.ok_or_else(|| "the call window wasn't found".into())
     }
 
-    /// The size niri gives the window with the keyboard (the call window).
+    fn compositor_windows(&self) -> SandboxResult<Vec<serde_json::Value>> {
+        let text = self.sandbox.niri_msg(&["-j", "windows"])?;
+        serde_json::from_str(&text).map_err(Into::into)
+    }
+
+    fn expect_call_window(&mut self) -> SandboxResult {
+        self.previous_windows = self
+            .compositor_windows()?
+            .iter()
+            .filter_map(|window| window["id"].as_u64())
+            .collect();
+        self.window_id = None;
+        self.frame = None;
+        Ok(())
+    }
+
+    /// The size niri gives the call window, after it maps the new window.
     #[expect(
         clippy::cast_possible_truncation,
         reason = "niri's logical px are whole numbers on a scale of 1"
     )]
     fn window_size(&mut self) -> SandboxResult<(i32, i32)> {
-        let text = self.sandbox.niri_msg(&["-j", "windows"])?;
-        let windows: serde_json::Value = serde_json::from_str(&text)?;
-        let list = windows.as_array().ok_or_else(|| format!("no windows: {text}"))?;
+        let windows = self.compositor_windows()?;
         let window = match self.window_id {
-            Some(id) => list.iter().find(|window| window["id"].as_u64() == Some(id)),
-            None => list.iter().find(|window| window["is_focused"] == true),
+            Some(id) => windows.iter().find(|window| window["id"].as_u64() == Some(id)),
+            // The opened trace can precede the map, while the main window still has focus.
+            None => windows.iter().find(|window| {
+                window["id"]
+                    .as_u64()
+                    .is_some_and(|id| !self.previous_windows.contains(&id))
+            }),
         }
-        .ok_or_else(|| format!("no call window: {text}"))?;
+        .ok_or_else(|| format!("no call window: {windows:?}"))?;
         self.window_id = window["id"].as_u64();
         let size = &window["layout"]["window_size"];
         let at = |index: usize| {
             size[index]
                 .as_f64()
                 .map(|value| value.round() as i32)
-                .ok_or_else(|| format!("no window size: {text}"))
+                .ok_or_else(|| format!("no window size: {windows:?}"))
         };
         Ok((at(0)?, at(1)?))
     }

@@ -65,7 +65,7 @@ fn joined_from_the_banner(rig: &mut Rig<'_>) -> SandboxResult {
     };
     let before = opened(rig.app.trace.catch_up());
     let joins = joins_of_a(rig, &conversation);
-    rig.window_id = None;
+    rig.expect_call_window()?;
     rig.sandbox.bus().invoke_action(banner.id, "join")?;
     wait_until(WAIT, || (joins_of_a(rig, &conversation) > joins).then_some(()))
         .ok_or("the banner's Join reached no join of the Meet now on the mock")?;
