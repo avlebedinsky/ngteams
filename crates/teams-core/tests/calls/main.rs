@@ -24,6 +24,7 @@ mod flows;
 mod group;
 mod health;
 mod in_call;
+mod meeting_push;
 mod meeting_state;
 mod recording;
 mod share;

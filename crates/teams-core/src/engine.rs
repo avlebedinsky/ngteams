@@ -450,6 +450,9 @@ pub enum Event {
     /// An invitation rings here (the call tracker offered it): answer it or decline it ([`CallAction::Answer`],
     /// [`CallAction::Decline`]); nothing does otherwise. One call at a time: none rings while a call is up.
     IncomingCall(IncomingCall),
+    /// The calling service pushed a meeting's start ([`teams_call::meeting_push`]): who started which meeting, for its
+    /// banner. Nothing is answered or joined for it.
+    MeetingStarted(teams_call::meeting_push::MeetingStartPush),
     /// An offered invitation's ring ended before the account answered or declined it (as delivered: the caller
     /// cancelled, it was answered elsewhere, it timed out), or the engine let it go.
     RingEnded { call: CallId, end: RemoteEnd },

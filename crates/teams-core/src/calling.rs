@@ -807,6 +807,15 @@ where
                 }
             }
             PushEvent::Call(delivery) => {
+                if let Some(start) = teams_call::meeting_push::read(&delivery.delivery.body) {
+                    log::debug!(
+                        "calling push: a meeting started ({:?}) in {}, call {}",
+                        start.kind,
+                        start.thread,
+                        start.call_id
+                    );
+                    self.emit(Event::MeetingStarted(start));
+                }
                 let key = DeliveryKey {
                     connection: delivery.delivery.connection.clone(),
                     id: delivery.delivery.id,

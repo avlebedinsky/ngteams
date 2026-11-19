@@ -103,13 +103,14 @@ pub use sync::{
 pub use team_admin::{TeamChange, TeamMember, TeamWritten};
 pub use team_apps::AppListing;
 pub use teams::{ChatListing, READING_TEAMS, TEAMS_MAX_AGE, TEAMS_RETRY, TeamsReadError};
+pub use teams_call::meeting_push::{MeetingStartPush, StartKind as MeetingStartKind};
 /// A call, how it ended and how its services ended it, as [`Event::Call`] and [`Event::RingEnded`] tell them.
 pub use teams_call::{CallError, CallId, End, Identity, RemoteEnd};
 pub use teams_call::{MeetingState, Recording, Transcription};
 pub use teams_proto::{
-    Attendee, CalendarEvent, ChannelEventRef, ChannelMeetup, EventAttendee, EventDraft, EventKind, EventResponse,
-    EventShowAs, EventTime, FloatingTime, FullEvent, MeetingChannel, MeetingCode, MeetingDetails, MeetingInfo,
-    Organizer, RsvpAnswer, ScheduledMeeting, ShowAs, ZonedTime, join_url_chat,
+    Attendee, CalendarEvent, ChannelEventRef, ChannelMeetup, EventAttendee, EventDraft, EventKind, EventReminder,
+    EventResponse, EventShowAs, EventTime, FloatingTime, FullEvent, MeetingChannel, MeetingCode, MeetingDetails,
+    MeetingInfo, Organizer, RsvpAnswer, ScheduledMeeting, ShowAs, ZonedTime, join_url_chat,
 };
 /// How a registration of the push channel's endpoint went, as [`Event::Registration`] tells it.
 pub use teams_trouter::RegistrationReport;
