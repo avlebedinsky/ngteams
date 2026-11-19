@@ -124,6 +124,9 @@ pub struct FakeCore {
     pub older: Mutex<HashMap<String, Vec<Vec<Message>>>>,
     pub hold_older: Mutex<bool>,
     pub held_older: Mutex<Vec<Answer<Option<Synced>>>>,
+    /// While set, a read of the kept translations is held in `held_translations` for the test to send.
+    pub hold_translations: Mutex<bool>,
+    pub held_translations: Mutex<Vec<Answer<Vec<StoredTranslation>>>>,
     pub previews: Mutex<HashMap<String, Message>>,
     /// Conversations never synced: `history_complete` answers `None` for them; for any other, whether `older` has
     /// no page left.
@@ -1195,6 +1198,11 @@ impl Core for FakeCore {
     }
 
     fn translations(&self, conversation: String, language: String, ids: Vec<String>) -> Reply<Vec<StoredTranslation>> {
+        if *locked(&self.hold_translations) {
+            let (answer, reply) = Reply::later();
+            locked(&self.held_translations).push(answer);
+            return reply;
+        }
         self.answer("translations", || {
             locked(&self.translations)
                 .iter()

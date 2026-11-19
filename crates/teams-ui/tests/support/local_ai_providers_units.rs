@@ -369,3 +369,27 @@ fn turning_ai_off_keeps_an_api_listing_unsent_and_on_again_lists_anew(cx: &mut g
     assert_eq!(listed.and_then(Result::ok).map(|models| models.len()), Some(3));
     assert_eq!(asked.load(Ordering::SeqCst), 1);
 }
+
+#[gpui::test]
+fn a_listing_asked_before_ai_went_off_and_on_again_does_not_take_the_new_ones_place(cx: &mut gpui::TestAppContext) {
+    let (base, asked) = listing_mock();
+    let mut provider = api("api-1", Backend::Compatible, false);
+    provider.base_url = Some(base);
+
+    assert!(cx.update(|cx| ApiModels::of(&provider, cx)).is_none(), "being listed");
+    cx.update(|cx| super::super::AiSwitch::publish(false, cx));
+    cx.update(|cx| super::super::AiSwitch::publish(true, cx));
+    assert!(cx.update(|cx| ApiModels::of(&provider, cx)).is_none(), "listed anew");
+    let mut listed = None;
+    for _ in 0..500 {
+        cx.executor().allow_parking();
+        cx.run_until_parked();
+        listed = cx.update(|cx| ApiModels::of(&provider, cx));
+        if listed.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(listed.and_then(Result::ok).map(|models| models.len()), Some(3));
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+}

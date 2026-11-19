@@ -190,15 +190,16 @@ fn failure(backend: Backend, model: &str, error: ApiError) -> Failure {
     }
 }
 
-/// The models `provider`'s API lists (`/v1/models`), in the order it gives them (this blocks: a request runs).
+/// The models `provider`'s API lists (`/v1/models`), in the order it gives them (this blocks: a request runs), unless
+/// `stop` is set before the request is sent.
 ///
 /// # Errors
-/// No key, the API refused, or it could not be reached.
-pub fn list_models(provider: &Provider, keys: &AiKeys) -> Result<Vec<Listed>, Failure> {
-    listing(provider, keys).map_err(|failure| failure.of(&provider.name))
+/// No key, the API refused, it could not be reached, or [`Failure::Off`] when `stop` was set.
+pub fn list_models(provider: &Provider, keys: &AiKeys, stop: &AtomicBool) -> Result<Vec<Listed>, Failure> {
+    listing(provider, keys, stop).map_err(|failure| failure.of(&provider.name))
 }
 
-fn listing(provider: &Provider, keys: &AiKeys) -> Result<Vec<Listed>, Failure> {
+fn listing(provider: &Provider, keys: &AiKeys, stop: &AtomicBool) -> Result<Vec<Listed>, Failure> {
     let backend = provider.kind;
     let target = ApiTarget {
         provider: provider.id.clone(),
@@ -210,6 +211,10 @@ fn listing(provider: &Provider, keys: &AiKeys) -> Result<Vec<Listed>, Failure> {
     };
     let key = target.key(backend)?;
     let api = Api::new(kind(backend), &target.base_url, key).map_err(|error| failure(backend, "", error))?;
+    // the key read can wait for the keyring to unlock, and AI can go off meanwhile
+    if stop.load(Ordering::SeqCst) {
+        return Err(Failure::Off);
+    }
     let models = api.models(LISTING).map_err(|error| failure(backend, "", error))?;
     Ok(models
         .into_iter()

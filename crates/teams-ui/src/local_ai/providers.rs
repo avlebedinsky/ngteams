@@ -526,15 +526,18 @@ impl ApiModels {
         held.listed.remove(&provider.id);
         held.asking.insert(provider.id.clone(), provider.clone());
         let stop = Arc::clone(&held.stop);
-        let asked = provider.clone();
+        let (asked, stopped) = (provider.clone(), Arc::clone(&stop));
         let keys = AiKeys::of(cx);
         let listing = cx
             .background_executor()
-            .spawn(async move { Self::list_unless(&stop, &asked, &keys) });
+            .spawn(async move { Self::list_unless(&stopped, &asked, &keys) });
         let asked = provider.clone();
         cx.spawn(async move |cx: &mut AsyncApp| {
             let listing = listing.await;
-            cx.update(|cx| Self::listed(asked, listing, cx));
+            // a listing asked before AI went off must not take the place of the one asked after it came on again
+            if !stop.load(Ordering::SeqCst) {
+                cx.update(|cx| Self::listed(asked, listing, cx));
+            }
         })
         .detach();
     }
@@ -560,11 +563,11 @@ impl ApiModels {
         if stop.load(Ordering::SeqCst) {
             return Err(Failure::Off);
         }
-        api::list_models(provider, keys)
+        api::list_models(provider, keys, stop)
     }
 
-    /// The AI features went off: a listing not sent yet is not sent, and one that answers later is dropped, so that
-    /// the next [`ApiModels::of`] lists again. A request already sent cannot be called back.
+    /// The AI features went off: a listing not sent yet is not sent, and one that answers later is dropped (also after
+    /// AI is on again), so that the next [`ApiModels::of`] lists again. A request already sent cannot be called back.
     pub(super) fn stop_listing(cx: &mut App) {
         if cx.has_global::<Self>() {
             let held = cx.global_mut::<Self>();

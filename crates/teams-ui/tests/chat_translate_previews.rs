@@ -295,11 +295,18 @@ fn a_store_read_that_ends_while_ai_is_off_leaves_the_tool_unpaused() {
     let newest = history(&rig.core)[0].clone();
     rig.translate(CHAT, Some("de"));
     let previews = rig.previews();
+    *rig.core.hold_translations.lock().unwrap() = true;
     rig.want(&previews, vec![newest.clone()]);
-    use_ai(&mut rig, false);
     rig.app
         .executor()
         .advance_clock(teams_ui::chat_translate::previews::GATHER);
+    rig.app.run_until_parked();
+    let read = rig.core.held_translations.lock().unwrap().pop();
+    let read = read.expect("the store read is in flight");
+
+    use_ai(&mut rig, false);
+    *rig.core.hold_translations.lock().unwrap() = false;
+    read.send(Ok(Vec::new()));
     rig.app.run_until_parked();
     assert!(questions(rig.dir.path()).is_empty(), "no tool asked while AI is off");
 

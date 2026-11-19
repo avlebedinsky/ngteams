@@ -14,7 +14,7 @@ use serde_json::Value;
 use teams_auth::secrets::Secret;
 
 use super::*;
-use crate::local_ai::providers::{AiKeys, ApiTarget, MemoryKeys, Provider, pick_from};
+use crate::local_ai::providers::{AiKeys, ApiTarget, KeyVault, MemoryKeys, Provider, pick_from};
 use crate::local_ai::{Launch, Target, Tool, ToolChoice, Tools};
 
 /// The synthetic key every test gives.
@@ -562,7 +562,12 @@ fn each_api_lists_its_models() {
         r#"{"data":[{"id":"claude-sonnet-5-5","display_name":"Claude Sonnet 5.5"},{"id":"claude-haiku-5-5"}],"has_more":false}"#
             .to_owned(),
     )]);
-    let listed = list_models(&provider(Backend::Anthropic, &mock.base), &keys_with_key()).unwrap();
+    let listed = list_models(
+        &provider(Backend::Anthropic, &mock.base),
+        &keys_with_key(),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
     assert_eq!(listed.len(), 2);
     assert_eq!(
         (listed[0].id.as_str(), listed[0].name.as_str()),
@@ -580,6 +585,7 @@ fn each_api_lists_its_models() {
     let listed = list_models(
         &provider(Backend::OpenAi, &format!("{}/v1", mock.base)),
         &keys_with_key(),
+        &AtomicBool::new(false),
     )
     .unwrap();
     assert_eq!(listed[0].id, "gpt-6-luna");
@@ -590,9 +596,51 @@ fn each_api_lists_its_models() {
         r#"{"error":{"message":"Incorrect API key provided","code":"invalid_api_key"}}"#.to_owned(),
     )]);
     assert_eq!(
-        list_models(&provider(Backend::OpenAi, &mock.base), &keys_with_key()),
+        list_models(
+            &provider(Backend::OpenAi, &mock.base),
+            &keys_with_key(),
+            &AtomicBool::new(false)
+        ),
         Err(Failure::SignedOut(Backend::OpenAi).of("Synthetic"))
     );
+}
+
+/// A keyring that the AI features go off during, as while it waits to be unlocked.
+struct OffWhileRead {
+    keys: MemoryKeys,
+    stop: Arc<AtomicBool>,
+}
+
+impl KeyVault for OffWhileRead {
+    fn get(&self, provider: &str) -> Result<Option<Secret>, String> {
+        self.stop.store(true, Ordering::SeqCst);
+        self.keys.get(provider)
+    }
+
+    fn put(&self, provider: &str, key: &Secret) -> Result<(), String> {
+        self.keys.put(provider, key)
+    }
+
+    fn delete(&self, provider: &str) -> Result<(), String> {
+        self.keys.delete(provider)
+    }
+}
+
+#[test]
+fn a_listing_is_not_sent_when_ai_goes_off_while_the_key_is_read() {
+    let mock = Mock::new(vec![(200, "application/json", r#"{"data":[]}"#.to_owned())]);
+    let stop = Arc::new(AtomicBool::new(false));
+    let vault = OffWhileRead {
+        keys: MemoryKeys::default(),
+        stop: Arc::clone(&stop),
+    };
+    vault.put("api-1", &Secret::new(KEY)).unwrap();
+    let keys = AiKeys::new(Arc::new(vault));
+    assert_eq!(
+        list_models(&provider(Backend::Anthropic, &mock.base), &keys, &stop),
+        Err(Failure::Off)
+    );
+    assert!(mock.taken().is_empty());
 }
 
 #[test]
@@ -629,7 +677,12 @@ fn a_failure_of_an_api_provider_names_it() {
         .unwrap_err();
     assert_eq!(failure.message(), refused);
     // the editor's "Test connection"
-    assert_eq!(list_models(&named, &keys_with_key()).unwrap_err().message(), refused);
+    assert_eq!(
+        list_models(&named, &keys_with_key(), &AtomicBool::new(false))
+            .unwrap_err()
+            .message(),
+        refused
+    );
     // no key in the keyring: before any request
     let mut launch = launch;
     if let Target::Api(api) = &mut launch.target {
