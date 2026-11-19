@@ -1,4 +1,4 @@
-//! QA of task 543 (rounds 1 and 2), in the UI sandbox: "Share this file" on a file card, as a user opens and uses it
+//! QA of task 543 (rounds 1 to 3), in the UI sandbox: "Share this file" on a file card, as a user opens and uses it
 //! (`harness = false`: GPUI runs on the process's main thread).
 //!
 //! The parent runs the mock (`teams-mock`). Lab account c posts a message with a video and a document to a chat with
@@ -17,6 +17,8 @@
 //!   preview" in both themes, and the wheel scrolls it. A click on the last row, a click on the third row, and Down
 //!   and Enter pick the row the user sees. In a narrow window the list stays over the dialog, a click picks, and a
 //!   query with no match says so.
+//! - **Chip faces** (round 3): the face of a named group chat's chip and of a person's chip, in both themes. The
+//!   initials are in the middle of the circle, and all of them are inside it.
 //! - **Share**: one and three people, one and three group chats, one and two channels (the mock's teams have two
 //!   live channels). Each target gets one post with the file's entry and the message, and the chat shows the file's
 //!   card. A bold word and an emoji go out as rich text. The toast says "You've shared <file>".
@@ -184,6 +186,7 @@ fn walk(sandbox: &Sandbox, service: &Service, runtime: &tokio::runtime::Runtime,
         ctx.open_and_keys()?;
         ctx.many_matches()?;
         ctx.narrow()?;
+        ctx.chip_faces()?;
         ctx.one_person()?;
         ctx.three_people()?;
         ctx.groups()?;
@@ -851,6 +854,135 @@ impl Walk<'_> {
             .find_map(|x| surface_box(shot, (x, y)).filter(|b| b.width() > 300 && b.height() > 300))
             .ok_or_else(|| format!("no dialog on the screen ({name})").into())
     }
+}
+
+// --- round 3: the faces of the chips ---
+
+/// A chip's face across, px: a named group chat's (the dialog's own face) and a person's (the kit's small avatar).
+const GROUP_FACE: u32 = 20;
+const PERSON_FACE: u32 = 24;
+/// How far the middle of the initials can be from the middle of the face, px.
+const OFF_MIDDLE: u32 = 2;
+/// The part of the screen a zoomed shot of a chip shows, and how many times larger it is.
+const CHIP_CROP: (u32, u32) = (200, 40);
+const ZOOM: u32 = 5;
+
+impl Walk<'_> {
+    /// The face of a named group chat's chip and of a person's chip, in both themes: the initials in the middle of the
+    /// circle, all of them inside it, as Teams draws them.
+    fn chip_faces(&mut self) -> SandboxResult {
+        let east = self
+            .service
+            .groups
+            .iter()
+            .copied()
+            .find(|to| to.name == "Made-up crew east")
+            .ok_or("no group \"Made-up crew east\"")?;
+        for (to, side, kind) in [(east, GROUP_FACE, "group"), (PERSON_B, PERSON_FACE, "person")] {
+            self.open_from_video()?;
+            self.pick(to)?;
+            for dark in [false, true] {
+                self.run.theme(dark)?;
+                thread::sleep(SETTLE);
+                let name = format!("qa543-chip-{kind}-{}.png", if dark { "dark" } else { "light" });
+                let found = self.dialog_box(&name)?;
+                self.check_chip_face(found, (side, dark), &name)?;
+            }
+            self.run.theme(false)?;
+            self.unpick()?;
+            self.run.input.key(keys::ESC)?;
+            self.run.dialog_until("the dialog closed", |d| !d.open)?;
+        }
+        step("chip faces: the initials in the middle of the circle");
+        Ok(())
+    }
+
+    /// The initials on the face of the first chip (`side` px across, in Teams Dark when `dark`) are in the middle of
+    /// the circle and inside it. A zoomed shot of the chip goes next to the shot.
+    fn check_chip_face(&self, found: Rect, (side, dark): (u32, bool), shot_name: &str) -> SandboxResult {
+        let shot = &self.run.last;
+        let (_, middle) = box_at(found);
+        keep_zoomed(shot, (found.x0 + 30, middle - CHIP_CROP.1 / 2), shot_name)?;
+        let Some(face) = chip_face(shot, found, side, dark) else {
+            note(format!(
+                "no chip with a face of {side} px in the recipients' box ({shot_name})"
+            ));
+            return Ok(());
+        };
+        let Some(ink) = initials_ink(shot, face, dark) else {
+            note(format!("the chip's face {face:?} draws no initials ({shot_name})"));
+            return Ok(());
+        };
+        step(&format!("the chip's face {face:?}, its initials {ink:?} ({shot_name})"));
+        // the middles are doubled, so they stay whole numbers
+        let off_x = (ink.x0 + ink.x1).abs_diff(face.x0 + face.x1);
+        let off_y = (ink.y0 + ink.y1).abs_diff(face.y0 + face.y1);
+        let inside = ink.x0 >= face.x0 + 2 && ink.y0 >= face.y0 + 2 && ink.x1 + 2 <= face.x1 && ink.y1 + 2 <= face.y1;
+        if off_x > 2 * OFF_MIDDLE || off_y > 2 * OFF_MIDDLE || !inside {
+            note(format!(
+                "the initials {ink:?} on the chip's face {face:?} are not in the middle of the circle, or the circle \
+                 cuts them ({shot_name})"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The face of the first chip in the recipients' box of the dialog at `found`, `side` px across. The chip's surface
+/// starts on the box's middle row. The face is 2 px in from it, in the middle of the chip's height.
+fn chip_face(shot: &image::RgbImage, found: Rect, side: u32, dark: bool) -> Option<Rect> {
+    let surface = if dark { DARK.surface } else { LIGHT.surface };
+    let on_chip = |x: u32, y: u32| near(at(shot, x, y), surface, 3);
+    let (_, middle) = box_at(found);
+    let left = (found.x0 + 30..found.x0 + 90).find(|&x| on_chip(x, middle))?;
+    // a column in the gap between the face and the name: only the chip's surface
+    let gap = left + 2 + side + 3;
+    let top = (middle - 20..=middle).rev().take_while(|&y| on_chip(gap, y)).last()?;
+    let bottom = (middle..=middle + 20).take_while(|&y| on_chip(gap, y)).last()?;
+    let x0 = left + 2;
+    let y0 = (top + bottom + 1).checked_sub(side)? / 2;
+    Some(Rect {
+        x0,
+        y0,
+        x1: x0 + side,
+        y1: y0 + side,
+    })
+}
+
+/// The box round the ink of the initials on `face`: darker than the face's tint in Teams Light, lighter in Teams
+/// Dark. `None` when there are too few such pixels for a letter.
+fn initials_ink(shot: &image::RgbImage, face: Rect, dark: bool) -> Option<Rect> {
+    let ink = |pixel: [u8; 3]| {
+        let light = pixel.iter().map(|&c| u32::from(c)).sum::<u32>() / 3;
+        if dark { light > 120 } else { light < 170 }
+    };
+    let pixels: Vec<(u32, u32)> = (face.y0..face.y1)
+        .flat_map(|y| (face.x0..face.x1).map(move |x| (x, y)))
+        .filter(|&(x, y)| ink(at(shot, x, y)))
+        .collect();
+    if pixels.len() < 8 {
+        return None;
+    }
+    Some(Rect {
+        x0: pixels.iter().map(|&(x, _)| x).min()?,
+        y0: pixels.iter().map(|&(_, y)| y).min()?,
+        x1: pixels.iter().map(|&(x, _)| x).max()? + 1,
+        y1: pixels.iter().map(|&(_, y)| y).max()? + 1,
+    })
+}
+
+/// The part of `shot` at `(x, y)` that [`CHIP_CROP`] gives, [`ZOOM`] times larger, kept as `<shot>-zoom.png` where
+/// the shots go.
+fn keep_zoomed(shot: &image::RgbImage, (x, y): (u32, u32), shot_name: &str) -> SandboxResult {
+    let (width, height) = CHIP_CROP;
+    let crop = image::imageops::crop_imm(shot, x, y, width, height).to_image();
+    let zoomed = image::imageops::resize(&crop, width * ZOOM, height * ZOOM, image::imageops::FilterType::Nearest);
+    let name = format!("{}-zoom.png", shot_name.trim_end_matches(".png"));
+    zoomed.save(shots_dir()?.join(&name))?;
+    if let Some(evidence) = std::env::var_os(EVIDENCE_ENV) {
+        zoomed.save(PathBuf::from(evidence).join(&name))?;
+    }
+    Ok(())
 }
 
 // --- the shares ---
