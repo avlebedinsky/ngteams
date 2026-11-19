@@ -1321,8 +1321,8 @@ fn blocks(draw: &Draw<'_>, path: &mut Vec<usize>, blocks: &[Block]) -> Vec<AnyEl
 
 /// A picture of the message's own, as Teams draws one: in its frame of the border colour, bounded by Teams' sizes and
 /// the bubble's width, its aspect ratio kept (`crate::inline`); its placeholder when it can't be shown. A click on it
-/// opens it in the picture viewer when the view opens pictures (its scope's [`Scope::open`]), on the element (and
-/// test selector) `<id>-open-<path>`.
+/// opens it in the picture viewer when the view opens pictures (its scope's [`Scope::open`]) and it isn't a sticker
+/// (Teams opens none), on the element (and test selector) `<id>-open-<path>`; a sticker has no such element.
 fn picture_block(draw: &Draw<'_>, path: &[usize], picture: &PictureBlock) -> AnyElement {
     // a picture's placeholder isn't selectable: a picture is never copied as text
     let fallback = text_block(draw, path, &picture.fallback, None);
