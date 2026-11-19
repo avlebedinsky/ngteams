@@ -32,7 +32,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use gpui::{App, AppContext as _, AsyncApp, Context, Entity, Global, Task};
+use gpui::{App, AppContext as _, AsyncApp, Context, Entity, Global, Subscription, Task};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
@@ -668,6 +668,8 @@ pub struct RecapSummary {
     receiving: Option<Task<()>>,
     ticking: Option<Task<()>>,
     limits: Limits,
+    /// The AI switch: turned off, the summary being made stops, also after its recap closed.
+    _ai_switch: Subscription,
 }
 
 /// The parts' summaries this run, by their key.
@@ -690,7 +692,7 @@ impl RecapSummary {
         }
         let state = cached(key, dir.as_deref(), cx).map_or(State::Idle, State::Done);
         let limits = cx.try_global::<SummaryLimits>().copied().unwrap_or_default().0;
-        let made = cx.new(|_| Self {
+        let made = cx.new(|cx| Self {
             key: key.to_owned(),
             dir,
             state,
@@ -698,6 +700,7 @@ impl RecapSummary {
             receiving: None,
             ticking: None,
             limits,
+            _ai_switch: cx.observe_global::<crate::local_ai::AiSwitch>(Self::follow_ai_switch),
         });
         cx.default_global::<Summaries>().0.insert(key.to_owned(), made.clone());
         made
@@ -759,6 +762,12 @@ impl RecapSummary {
         self.stop();
         self.state = cached(&self.key, self.dir.as_deref(), cx).map_or(State::Idle, State::Done);
         cx.notify();
+    }
+
+    fn follow_ai_switch(&mut self, cx: &mut Context<Self>) {
+        if !crate::local_ai::enabled(cx) && matches!(self.state, State::Running { .. }) {
+            self.cancel(cx);
+        }
     }
 
     fn stop(&mut self) {

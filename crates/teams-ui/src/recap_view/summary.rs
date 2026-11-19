@@ -130,19 +130,6 @@ impl RecapView {
         }
     }
 
-    /// The AI switch turned off: every summary being made stops.
-    pub(super) fn follow_ai_switch(&mut self, cx: &mut Context<Self>) {
-        if crate::local_ai::enabled(cx) {
-            return;
-        }
-        for (summary, _) in self.summaries.values() {
-            if matches!(summary.read(cx).state(), State::Running { .. }) {
-                summary.update(cx, RecapSummary::cancel);
-            }
-        }
-        cx.notify();
-    }
-
     /// Try again after a tool was missing: the tools looked for again, then the summary made.
     pub fn find_tools_and_summarize(&mut self, cx: &mut Context<Self>) {
         Tools::look_again(cx);

@@ -14,6 +14,8 @@
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -61,6 +63,11 @@ pub struct Catalog {
 
 impl Global for Catalog {}
 
+/// The listing that runs now: set, it stops before its next tool and ends the one that runs.
+struct Listing(Arc<AtomicBool>);
+
+impl Global for Listing {}
+
 impl Catalog {
     /// These models (tests, the UI tour).
     #[must_use]
@@ -103,19 +110,27 @@ impl Catalog {
 
     /// Asks the app's tools for their models again (they changed), in the background; empty until they answer.
     pub fn relist(cx: &mut App) {
-        cx.set_global(Self::default());
+        Self::stop_listing(cx);
         if !super::enabled(cx) {
+            if cx.has_global::<Self>() {
+                cx.remove_global::<Self>();
+            }
             return;
         }
+        cx.set_global(Self::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        cx.set_global(Listing(Arc::clone(&stop)));
         let tools = Tools::of(cx);
-        let asked = tools.clone();
+        let (asked, stopped) = (tools.clone(), Arc::clone(&stop));
         // on the background executor (a pool thread; the test scheduler's own in tests)
-        let listing = cx.background_executor().spawn(async move { Self::list(&asked) });
+        let listing = cx
+            .background_executor()
+            .spawn(async move { Self::list_until(&asked, &stopped) });
         cx.spawn(async move |cx: &mut AsyncApp| {
             let catalog = listing.await;
             cx.update(|cx| {
-                // a listing of tools since found again is stale
-                if cx.try_global::<Tools>() == Some(&tools) {
+                // a listing stopped is partial, and one of tools since found again is stale
+                if !stop.load(Ordering::SeqCst) && cx.try_global::<Tools>() == Some(&tools) {
                     cx.set_global(catalog);
                 }
             });
@@ -123,17 +138,36 @@ impl Catalog {
         .detach();
     }
 
+    /// Stops the listing that runs (the AI features went off). A catalog not listed yet is forgotten, so that the
+    /// next [`Catalog::of`] lists again.
+    pub(super) fn stop_listing(cx: &mut App) {
+        if let Some(Listing(stop)) = cx.try_global::<Listing>() {
+            stop.store(true, Ordering::SeqCst);
+        }
+        if cx.try_global::<Self>().is_some_and(|catalog| !catalog.listed) {
+            cx.remove_global::<Self>();
+        }
+    }
+
     /// Asks each tool in `tools` for its models (blocking: a tool runs).
     #[must_use]
     pub fn list(tools: &Tools) -> Self {
+        Self::list_until(tools, &AtomicBool::new(false))
+    }
+
+    /// As [`Catalog::list`], until `stop` is set.
+    fn list_until(tools: &Tools, stop: &AtomicBool) -> Self {
         let mut catalog = Self {
             listed: true,
             ..Self::default()
         };
         for (backend, program) in &tools.found {
+            if stop.load(Ordering::SeqCst) {
+                break;
+            }
             match backend {
-                Backend::Claude => catalog.claude = list_claude(program, &claude_home()),
-                Backend::Codex => catalog.codex = list_codex(program, &codex_home()),
+                Backend::Claude => catalog.claude = list_claude(program, &claude_home(), stop),
+                Backend::Codex => catalog.codex = list_codex(program, &codex_home(), stop),
                 Backend::Anthropic | Backend::OpenAi | Backend::Compatible => {}
             }
         }
@@ -142,19 +176,19 @@ impl Catalog {
 }
 
 /// Claude Code's models: its cached catalog under `home`, else the aliases its `--help` names.
-fn list_claude(program: &Path, home: &Path) -> Vec<Listed> {
+fn list_claude(program: &Path, home: &Path, stop: &AtomicBool) -> Vec<Listed> {
     let models = newest_claude_catalog(home)
         .map(|text| claude_catalog(&text))
         .unwrap_or_default();
     if !models.is_empty() {
         return models;
     }
-    run(program, &["--help"]).map_or_else(Vec::new, |help| claude_help(&help))
+    run(program, &["--help"], stop).map_or_else(Vec::new, |help| claude_help(&help))
 }
 
 /// The Codex CLI's models: `codex debug models`, else its cache under `home`.
-fn list_codex(program: &Path, home: &Path) -> Vec<Listed> {
-    let models = run(program, &["debug", "models"])
+fn list_codex(program: &Path, home: &Path, stop: &AtomicBool) -> Vec<Listed> {
+    let models = run(program, &["debug", "models"], stop)
         .map(|text| codex_catalog(&text))
         .unwrap_or_default();
     if !models.is_empty() {
@@ -331,13 +365,13 @@ fn capitalized(word: &str) -> String {
         .unwrap_or_default()
 }
 
-/// What `program args` prints, when it ends well within [`LISTING`].
-fn run(program: &Path, args: &[&str]) -> Option<String> {
-    run_within(program, args, LISTING)
+/// What `program args` prints, when it ends well within [`LISTING`] and before `stop` is set.
+fn run(program: &Path, args: &[&str], stop: &AtomicBool) -> Option<String> {
+    run_within(program, args, LISTING, stop)
 }
 
-/// What `program args` prints, when it ends well within `wait`.
-fn run_within(program: &Path, args: &[&str], wait: Duration) -> Option<String> {
+/// What `program args` prints, when it ends well within `wait` and before `stop` is set.
+fn run_within(program: &Path, args: &[&str], wait: Duration, stop: &AtomicBool) -> Option<String> {
     let mut command = Command::new(program);
     command
         .args(args)
@@ -356,7 +390,9 @@ fn run_within(program: &Path, args: &[&str], wait: Duration) -> Option<String> {
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            Ok(None) if Instant::now() < deadline && !stop.load(Ordering::SeqCst) => {
+                thread::sleep(Duration::from_millis(20));
+            }
             _ => {
                 child.stop();
                 break None;

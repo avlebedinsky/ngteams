@@ -419,7 +419,6 @@ fn translated_into(status: &Status) -> Option<gpui::Div> {
     )
 }
 
-/// A row of "Translate to": a language, or Off (`None`).
 /// "Translate to": Off, then each language, `current` checked.
 fn translate_menu(menu: PopupMenu, settings: &Entity<SettingsModel>, current: Option<&'static str>) -> PopupMenu {
     let menu = menu.item(translate_item(settings.clone(), None, "Off", current));
@@ -432,6 +431,7 @@ fn translate_menu(menu: PopupMenu, settings: &Entity<SettingsModel>, current: Op
         .max_h(px(360.0))
 }
 
+/// A row of "Translate to": a language, or Off (`None`).
 fn translate_item(
     settings: Entity<SettingsModel>,
     code: Option<&'static str>,

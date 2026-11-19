@@ -101,7 +101,7 @@ fn claude_s_newest_cached_catalog_is_read_else_its_help() {
     );
     // no catalog: the help's aliases
     let home = dir.path().join("home");
-    assert_eq!(list_claude(&program, &home).len(), 3);
+    assert_eq!(list_claude(&program, &home, &AtomicBool::new(false)).len(), 3);
     let cache = home.join("cache").join("model-catalog");
     fs::create_dir_all(&cache).unwrap();
     fs::write(
@@ -113,7 +113,7 @@ fn claude_s_newest_cached_catalog_is_read_else_its_help() {
     .unwrap();
     fs::write(cache.join("new-cc.json"), CLAUDE_CATALOG).unwrap();
     fs::write(cache.join("other-surface.json"), "{}").unwrap();
-    let models = list_claude(&program, &home);
+    let models = list_claude(&program, &home, &AtomicBool::new(false));
     assert_eq!(models.len(), 7);
     assert!(
         models.iter().any(|model| model.name == "Alpha 9"),
@@ -133,16 +133,19 @@ fn codex_lists_its_models_itself_else_from_its_cache() {
         "codex",
         &format!("[ \"$1 $2\" = \"debug models\" ] && cat '{}'", catalog.display()),
     );
-    assert_eq!(list_codex(&program, &home).len(), 3);
+    assert_eq!(list_codex(&program, &home, &AtomicBool::new(false)).len(), 3);
     // the listing fails: the cache
     let failing = fake(dir.path(), "codex-failing", "exit 1");
-    assert!(list_codex(&failing, &home).is_empty());
+    assert!(list_codex(&failing, &home, &AtomicBool::new(false)).is_empty());
     fs::write(
         home.join("models_cache.json"),
         CODEX_CATALOG.replace("GPT-One", "Cached One"),
     )
     .unwrap();
-    assert_eq!(list_codex(&failing, &home)[0].name, "Cached One");
+    assert_eq!(
+        list_codex(&failing, &home, &AtomicBool::new(false))[0].name,
+        "Cached One"
+    );
 }
 
 #[test]
@@ -150,10 +153,16 @@ fn a_listing_that_hangs_is_given_up() {
     let dir = tempfile::tempdir().unwrap();
     let program = fake(dir.path(), "slow", "echo early; sleep 600");
     let started = Instant::now();
-    assert_eq!(run_within(&program, &[], Duration::from_millis(200)), None);
+    assert_eq!(
+        run_within(&program, &[], Duration::from_millis(200), &AtomicBool::new(false)),
+        None
+    );
     assert!(started.elapsed() < Duration::from_secs(10));
     let quick = fake(dir.path(), "quick", "echo \"$@\"");
-    assert_eq!(run(&quick, &["debug", "models"]).as_deref(), Some("debug models\n"));
+    assert_eq!(
+        run(&quick, &["debug", "models"], &AtomicBool::new(false)).as_deref(),
+        Some("debug models\n")
+    );
 }
 
 #[gpui::test]
@@ -177,6 +186,37 @@ fn the_catalog_lists_each_installed_tool_and_the_app_s_is_listed_in_the_backgrou
     let set = Catalog::with(vec![listed_one()], Vec::new());
     cx.update(|cx| cx.set_global(set.clone()));
     assert_eq!(cx.update(Catalog::of), set);
+}
+
+#[test]
+fn a_listing_stopped_ends_its_tool_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let program = fake(dir.path(), "slow", "echo early; sleep 600");
+    let started = Instant::now();
+    assert_eq!(run_within(&program, &[], LISTING, &AtomicBool::new(true)), None);
+    assert!(started.elapsed() < Duration::from_secs(10));
+}
+
+#[gpui::test]
+fn turning_ai_off_stops_the_listing_and_on_again_lists_anew(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let catalog = dir.path().join("catalog.json");
+    fs::write(&catalog, CODEX_CATALOG).unwrap();
+    let starts = dir.path().join("starts.log");
+    let body = format!("echo start >> '{}'\ncat '{}'", starts.display(), catalog.display());
+    let codex = fake(dir.path(), "codex", &body);
+    cx.update(|cx| cx.set_global(Tools::with(vec![(Backend::Codex, codex)])));
+
+    cx.update(Catalog::of);
+    cx.update(|cx| super::super::AiSwitch::publish(false, cx));
+    cx.run_until_parked();
+    assert!(!starts.exists(), "no tool started once AI went off");
+    assert!(!cx.update(Catalog::of).is_listed());
+
+    cx.update(|cx| super::super::AiSwitch::publish(true, cx));
+    cx.update(Catalog::of);
+    cx.run_until_parked();
+    assert_eq!(cx.update(Catalog::of).models(Backend::Codex).len(), 3);
 }
 
 #[gpui::test]

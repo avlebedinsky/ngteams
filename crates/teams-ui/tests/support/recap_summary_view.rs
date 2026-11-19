@@ -198,3 +198,35 @@ fn the_ai_summary_says_how_to_get_a_tool_and_why_one_failed() {
     click(cx, "recap-summary-dismiss");
     assert!(drawn(cx, "recap-summary-offer"));
 }
+
+#[test]
+fn turning_ai_off_stops_a_summary_being_made_also_after_its_recap_closed() {
+    let rig = rig(false);
+    let dir = tempfile::tempdir().unwrap();
+    // a tool that never answers
+    let program = script(dir.path(), "read -r line\nsleep 60\n");
+    installed(&rig, Tools::with(vec![(Backend::Claude, program)]));
+    let (shell, cx) = shell_window(&rig, fixtures::MEETING);
+    click(cx, "chat-tab-recap");
+    click(cx, "recap-pane-summary");
+    click(cx, "recap-summary-generate");
+    assert!(drawn(cx, "recap-summary-running"));
+    // another chat closes the recap; then AI goes off and on again
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.open_chat(fixtures::TRANSCRIPT_ONLY.to_owned(), window, cx);
+        });
+    });
+    draw(cx);
+    assert!(cx.update(|_, cx| shell.read(cx).recap_view().is_none()));
+    cx.update(|_, cx| teams_ui::local_ai::AiSwitch::publish(false, cx));
+    draw(cx);
+    cx.update(|_, cx| teams_ui::local_ai::AiSwitch::publish(true, cx));
+    reopen(&shell, cx);
+    click(cx, "chat-tab-recap");
+    // the summary stopped: the transcript shows, and the summary is offered again
+    assert!(drawn(cx, "recap-pane-transcript shown"));
+    click(cx, "recap-pane-summary");
+    assert!(!drawn(cx, "recap-summary-running"));
+    assert!(drawn(cx, "recap-summary-generate"));
+}

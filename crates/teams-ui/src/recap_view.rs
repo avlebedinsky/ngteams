@@ -181,7 +181,7 @@ pub struct RecapView {
     note: Option<SharedString>,
     focus: FocusHandle,
     _typed: Subscription,
-    /// The AI switch: turned off, a summary being made stops.
+    /// The AI switch: the pane shown follows it (a summary being made stops by itself).
     _ai_switch: Subscription,
     reading: Option<Task<()>>,
     /// The app's settings: the tool summaries are made with, and where they are kept.
@@ -235,7 +235,7 @@ impl RecapView {
             note: None,
             focus: cx.focus_handle(),
             _typed: typed,
-            _ai_switch: cx.observe_global::<crate::local_ai::AiSwitch>(Self::follow_ai_switch),
+            _ai_switch: cx.observe_global::<crate::local_ai::AiSwitch>(|_, cx| cx.notify()),
             reading: None,
             settings: None,
             pane: None,

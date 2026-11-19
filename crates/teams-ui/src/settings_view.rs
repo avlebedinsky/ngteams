@@ -1579,14 +1579,14 @@ fn level_label(level: LogLevel) -> &'static str {
     }
 }
 
-/// A line under a row, in `color`, its test selector `selector`.
 /// What "Save live captions of every call" does, under it.
+pub const SAVE_CAPTIONS_NOTE: &str = "Turns captions on in every call and saves them on this computer as the call's \
+                                      transcript, with its AI summary. Teams and the others in the call see nothing.";
 /// What "Use AI features" does.
 pub const USE_AI_NOTE: &str = "Correct and translate messages, translate chats and captions, and summarize recaps \
                                with your own Claude Code, Codex or API key. When off, no text goes to an AI provider.";
-pub const SAVE_CAPTIONS_NOTE: &str = "Turns captions on in every call and saves them on this computer as the call's \
-                                      transcript, with its AI summary. Teams and the others in the call see nothing.";
 
+/// A line under a row, in `color`, its test selector `selector`.
 fn caption(selector: &'static str, color: u32) -> gpui::Div {
     div()
         .debug_selector(move || selector.to_owned())

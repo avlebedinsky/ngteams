@@ -14,7 +14,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// What starts AI work without the switch: only `local_ai` may write these.
-const GATED: [&str; 6] = [
+const GATED: [&str; 7] = [
+    "pick_from(",
     "Target::Program(",
     "Target::Api(",
     "ApiTarget {",
@@ -23,10 +24,15 @@ const GATED: [&str; 6] = [
     "list_models(",
 ];
 
-/// The callers outside `local_ai` that may write one of [`GATED`], each because it asks the switch itself.
-const ASKS_ITSELF: [(&str, &str); 1] = [
+/// The callers outside `local_ai` that may write one of [`GATED`], each once, in a function that asks the switch
+/// first.
+const ASKS_ITSELF: [(&str, &str, &str); 1] = [
     // "Test connection" in the AI providers' settings
-    ("teams-ui/src/settings_view/ai_providers.rs", "list_models("),
+    (
+        "teams-ui/src/settings_view/ai_providers.rs",
+        "list_models(",
+        "pub fn test_connection(",
+    ),
 ];
 
 /// The entry points of `local_ai` that can start a tool or ask an API: each asks the switch first.
@@ -74,12 +80,9 @@ fn only_local_ai_starts_ai_work_and_every_other_caller_goes_through_the_switch()
         for gated in GATED.iter().filter(|gated| text.contains(**gated)) {
             let allowed = ASKS_ITSELF
                 .iter()
-                .any(|(path, call)| shown.ends_with(path) && call == gated);
-            if allowed {
-                assert!(
-                    text.contains("local_ai::enabled(cx)"),
-                    "{shown} writes {gated} without asking the switch"
-                );
+                .find(|(path, call, _)| shown.ends_with(path) && call == gated);
+            if let Some((_, _, function)) = allowed {
+                asks_first_then_calls_once(&text, function, gated, &shown);
             } else {
                 bypasses.push(format!("{shown}: {gated}"));
             }
@@ -90,6 +93,26 @@ fn only_local_ai_starts_ai_work_and_every_other_caller_goes_through_the_switch()
         "AI work started outside local_ai, past \"Use AI features\": get the target from local_ai::pick \
          instead: {bypasses:#?}"
     );
+}
+
+/// `text` writes `gated` once, in `function`, whose body asks the switch first.
+fn asks_first_then_calls_once(text: &str, function: &str, gated: &str, shown: &str) {
+    assert_eq!(
+        text.matches(gated).count(),
+        1,
+        "{shown} writes {gated} more than once: ask the switch at each call"
+    );
+    let start = text
+        .find(function)
+        .unwrap_or_else(|| panic!("{shown} has no {function}"));
+    let body = &text[start..];
+    let end = body.find("\n    }\n").unwrap_or(body.len());
+    let first: String = body.lines().take(4).collect::<Vec<_>>().join("\n");
+    assert!(
+        first.contains("local_ai::enabled(cx)"),
+        "{shown}: {function} does not ask the switch first:\n{first}"
+    );
+    assert!(body[..end].contains(gated), "{shown} writes {gated} outside {function}");
 }
 
 #[test]

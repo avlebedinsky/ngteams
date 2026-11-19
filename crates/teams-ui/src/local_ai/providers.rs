@@ -320,7 +320,12 @@ impl ApiTarget {
 ///
 /// # Errors
 /// No provider can do the work (Automatic), or the one chosen is gone, turned off, not installed or without a key.
-pub fn pick_from(list: &[Provider], tools: &Tools, keys: &AiKeys, choice: &ToolChoice) -> Result<Picked, Failure> {
+pub(crate) fn pick_from(
+    list: &[Provider],
+    tools: &Tools,
+    keys: &AiKeys,
+    choice: &ToolChoice,
+) -> Result<Picked, Failure> {
     let provider = match choice {
         ToolChoice::Automatic => list
             .iter()
@@ -361,10 +366,10 @@ pub fn pick_from(list: &[Provider], tools: &Tools, keys: &AiKeys, choice: &ToolC
     })
 }
 
-/// The provider `choice` comes to in the app (see [`pick_from`]): the gate of all AI work.
+/// The provider `choice` comes to in the app (as `pick_from` picks): the gate of all AI work.
 ///
 /// # Errors
-/// The AI features are off ([`Failure::Off`]); else as [`pick_from`].
+/// The AI features are off ([`Failure::Off`]); else as `pick_from`.
 pub fn pick(choice: &ToolChoice, cx: &mut App) -> Result<Picked, Failure> {
     if !super::enabled(cx) {
         return Err(Failure::Off);

@@ -448,6 +448,9 @@ impl AiSwitch {
     pub fn publish(on: bool, cx: &mut App) {
         if cx.try_global::<Self>() != Some(&Self(on)) {
             cx.set_global(Self(on));
+            if !on {
+                Catalog::stop_listing(cx);
+            }
         }
     }
 }

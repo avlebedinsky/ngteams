@@ -168,7 +168,8 @@ pub struct Previews {
     deferred: HashMap<Key, (Message, Instant)>,
     sweeping: Option<Task<()>>,
     queue: VecDeque<(Key, Message)>,
-    preparing: Option<Task<()>>,
+    /// The batch whose context is being read, by its keys.
+    preparing: Option<(Vec<Key>, Task<()>)>,
     running: Option<Running>,
     /// One tool process per language, with what reads its outcomes.
     sessions: HashMap<&'static str, (Session, Task<()>)>,
@@ -478,7 +479,11 @@ impl Previews {
     /// Closes the tool processes; the batch they worked on is asked again when it is shown again.
     fn stop_tools(&mut self) {
         self.sessions.clear();
-        self.preparing = None;
+        if let Some((keys, _)) = self.preparing.take() {
+            for key in keys {
+                self.pending.remove(&key);
+            }
+        }
         if let Some(running) = self.running.take() {
             for (_, key, _) in running.items {
                 self.pending.remove(&key);
@@ -639,11 +644,13 @@ impl Previews {
         chosen.reverse();
         let core = Arc::clone(&self.core);
         self.idle = None;
-        self.preparing = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
+        let keys = chosen.iter().map(|(key, ..)| key.clone()).collect();
+        let task = cx.spawn(async move |this, cx: &mut AsyncApp| {
             let prepared = prepare(&*core, &conversation, language, &chosen).await;
             let keys = chosen.into_iter().map(|(key, _, _, shells)| (key, shells)).collect();
             let _ = this.update(cx, |this, cx| this.start(language, prepared, keys, cx));
-        }));
+        });
+        self.preparing = Some((keys, task));
     }
 
     /// Hands a prepared batch (what the tool is told of its chat, its context and its items) to the language's tool,
