@@ -108,6 +108,7 @@ Every release is on the [releases page](https://github.com/nickalie/ngteams/rele
 | Arch Linux | `ngteams-*-x86_64.pkg.tar.zst` | `sudo pacman -U ./ngteams-*-x86_64.pkg.tar.zst` |
 | Anything with glibc 2.39 or newer | `ngteams-*-linux-x86_64.tar.gz` | unpack it and run `ngteams/install.sh` (no root, see below) |
 | | `ngteams-*-linux-x86_64.AppImage` | `chmod +x` it and run it |
+| NixOS, or Nix on Linux x86_64 | this repository's flake | `nix profile install github:nickalie/ngteams#ngteams` (see below) |
 
 **Updates**: ngteams checks for a newer release once an hour. When there is one, it downloads it in the background and checks it against the release's `SHA256SUMS`. Then **Restart to update** appears in its title bar: select it, and ngteams installs the update and restarts. If a call is going on or you have a message you haven't sent, the button says so and waits: end the call or send the message, then select it again. A download that fails is tried again at the next check. On Windows, ngteams closes and the new installer upgrades it and opens it again.
 
@@ -141,6 +142,57 @@ sudo apparmor_parser -r /etc/apparmor.d/ngteams
 ```
 
 For the tarball, run its `ngteams/install.sh` instead of the first line.
+
+**On NixOS, or with Nix**, use the flake in this repository. It installs the release's own Linux binaries and runs
+them in an FHS environment, so the sign-in window and its downloaded WPE WebKit work as on other distributions. To
+try it with no install:
+
+```sh
+nix run github:nickalie/ngteams
+```
+
+To install it in your Nix profile:
+
+```sh
+nix profile install github:nickalie/ngteams#ngteams
+```
+
+For NixOS or Home Manager, add the flake as an input named `ngteams` to your configuration's flake, and turn on its
+module:
+
+```nix
+{
+  inputs.ngteams.url = "github:nickalie/ngteams";
+  inputs.ngteams.inputs.nixpkgs.follows = "nixpkgs";
+
+  outputs = { nixpkgs, ngteams, ... }: {
+    nixosConfigurations.my-host = nixpkgs.lib.nixosSystem {
+      modules = [
+        ./configuration.nix
+        ngteams.nixosModules.default
+        { programs.ngteams.enable = true; }
+      ];
+    };
+  };
+}
+```
+
+For Home Manager, add `ngteams.homeManagerModules.default` to your Home Manager modules instead, with
+`programs.ngteams.enable = true;`. Both modules also have `programs.ngteams.package`. The NixOS module installs ngteams
+for all users and turns on `hardware.graphics` (as `mkDefault`). The modules do not choose a keyring for you: ngteams
+needs a Secret Service, for example `services.gnome.gnome-keyring.enable = true;` on NixOS, or KeePassXC. The FHS
+environment needs user namespaces, which NixOS permits by default.
+
+**Updates with Nix**: ngteams cannot replace files in the Nix store. When a newer release is out, **Update available**
+appears in its title bar. Its tooltip gives the command to run, and a click copies it:
+
+| Installed with | Update with |
+|---|---|
+| `nix profile install` | `nix profile upgrade ngteams` |
+| the NixOS module | `nix flake update ngteams && sudo nixos-rebuild switch --flake .`, in your system flake's folder |
+| the Home Manager module | `nix flake update ngteams && home-manager switch --flake .`, in your Home Manager flake's folder |
+
+The flake gets each new release some minutes after the release is published.
 
 **From source** on Arch, the system it's developed on:
 

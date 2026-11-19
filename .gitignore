@@ -11,3 +11,5 @@ captures/
 .claude/skills/sound-pack
 /.ci-cache/
 __pycache__/
+/result
+/result-*
