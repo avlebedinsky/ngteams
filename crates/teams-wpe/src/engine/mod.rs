@@ -7,6 +7,7 @@
 
 mod ime;
 mod interaction;
+mod nix;
 mod page;
 mod platform;
 mod spares;
@@ -131,6 +132,7 @@ fn start(config: &HostConfig) -> Result<Display, String> {
     for scheme in &config.schemes {
         context.register_uri_scheme(scheme);
     }
+    context.add_read_only_paths(&nix::sandbox_paths());
     if let Some(extensions) = &config.extensions {
         context.set_web_process_extensions(&extensions.directory, &extensions.data, &extensions.sandbox_paths);
     }

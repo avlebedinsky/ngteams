@@ -838,7 +838,13 @@ impl WebContext {
         let variant = unsafe { glib::ffi::g_variant_new_string(data.as_ptr()) };
         // SAFETY: a live context; it sinks the floating variant.
         unsafe { webkit::webkit_web_context_set_web_process_extensions_initialization_user_data(raw, variant) };
-        for path in sandbox_paths {
+        self.add_read_only_paths(sandbox_paths);
+    }
+
+    /// Makes each of `paths` visible (read-only) inside the web processes' sandbox.
+    pub(crate) fn add_read_only_paths(&self, paths: &[std::path::PathBuf]) {
+        let raw = self.to_glib_none().0;
+        for path in paths {
             let path = c_string(&path.to_string_lossy());
             // SAFETY: a live context and a NUL-terminated path it copies.
             unsafe { webkit::webkit_web_context_add_path_to_sandbox(raw, path.as_ptr(), glib::ffi::GTRUE) };
