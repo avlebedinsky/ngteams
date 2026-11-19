@@ -192,7 +192,10 @@ const UPGRADE_CHECKS: [Check; 3] = [
 ];
 
 /// A bad value in the file.
-const BAD_CHECKS: [Check; 1] = [("bad_value_asks_again", bad_value_asks_again)];
+const BAD_CHECKS: [Check; 2] = [
+    ("notice_font_15_narrow_and_ring", notice_font_15_narrow_and_ring),
+    ("bad_value_asks_again", bad_value_asks_again),
+];
 
 /// What an earlier build kept: the first run confirmed, the largest font, no `ai_features`.
 const UPGRADE_FILE: &str = "first_run = \"confirmed\"\nmessage_translate_to = \"German\"\nfont_size = 24\n";
@@ -1097,12 +1100,36 @@ fn upgrade_shows_the_notice(user: &mut User<'_>) -> SandboxResult {
 /// At the largest font, and in a narrow window, the whole notice shows: its dialog inside the window, its buttons
 /// inside the dialog.
 fn notice_large_font_and_narrow(user: &mut User<'_>) -> SandboxResult {
+    notice_fits(user, 24)
+}
+
+/// At font 15 the notice fits at each width too, and the focus ring shows on each of its buttons in turn.
+fn notice_font_15_narrow_and_ring(user: &mut User<'_>) -> SandboxResult {
+    user.until("the notice", notice_shown)?;
+    user.ok("font 15")?;
+    thread::sleep(SETTLE);
+    notice_fits(user, 15)?;
+    for button in ["off", "keep"] {
+        user.press("Tab")?;
+        user.park()?;
+        thread::sleep(SETTLE);
+        user.shot(&format!("notice-font-15-ring-{button}-light"))?;
+        user.ok("theme-dark")?;
+        thread::sleep(SETTLE);
+        user.shot(&format!("notice-font-15-ring-{button}-dark"))?;
+        user.ok("theme-light")?;
+        thread::sleep(SETTLE);
+    }
+    Ok(())
+}
+
+fn notice_fits(user: &mut User<'_>, font: u16) -> SandboxResult {
     let mut clipped = Vec::new();
     for width in [1280, 720, 520] {
         if width != 1280 {
             user.resize(width)?;
         }
-        user.shots(&format!("notice-font-24-{width}"))?;
+        user.shots(&format!("notice-font-{font}-{width}"))?;
         let shot = user.look()?;
         let dialog = dialog_of(&shot).ok_or("no dialog")?;
         let keep = primary_button(&shot, dialog);
@@ -1117,7 +1144,7 @@ fn notice_large_font_and_narrow(user: &mut User<'_>) -> SandboxResult {
     user.resize(1280)?;
     ensure(clipped.is_empty(), || {
         format!(
-            "the notice does not fit the 800 px high window at font 24: {}",
+            "the notice does not fit the 800 px high window at font {font}: {}",
             clipped.join("; ")
         )
     })
@@ -1424,7 +1451,7 @@ fn on_shell(shell: &Entity<Shell>, verb: &str, window: &mut Window, cx: &mut App
         ["confirm-first-run"] => model.update(cx, teams_ui::SettingsModel::confirm_first_run),
         // what a click on the switch does
         ["ai", on] => model.update(cx, |model, cx| {
-            model.change(|settings| settings.ai_features = Some(*on == "on"), cx)
+            model.change(|settings| settings.ai_features = Some(*on == "on"), cx);
         }),
         ["open-ab"] => shell.update(cx, |shell, cx| shell.open_chat(AB_CHAT.to_owned(), window, cx)),
         ["open-settings", page] => {
@@ -1478,6 +1505,12 @@ fn on_shell(shell: &Entity<Shell>, verb: &str, window: &mut Window, cx: &mut App
             });
         }
         ["focus"] => return focus_of(shell, window, cx),
+        ["font", size] => {
+            let size = size.parse().unwrap_or(teams_ui::theme::FONT_SIZE);
+            model.update(cx, |model, cx| {
+                model.change(|settings| settings.appearance.font_size = size, cx);
+            });
+        }
         _ => return format!("unknown {verb}"),
     }
     "ok".to_owned()

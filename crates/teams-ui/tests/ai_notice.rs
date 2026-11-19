@@ -1,0 +1,183 @@
+//! The AI notice as a modal dialog, in the kit's root (which takes Tab), as the app opens it over the shell: it takes
+//! the keyboard when it shows, Tab and Shift+Tab stay in it, Enter or Space on a button answers it, nothing behind it
+//! takes a key while it waits, and the whole notice fits the window at the largest font.
+
+#![cfg(test)]
+
+#[expect(
+    dead_code,
+    reason = "the helpers every test file shares; these tests use some of them"
+)]
+mod common;
+
+use std::sync::Arc;
+
+use common::Rig;
+use gpui::{
+    AppContext as _, Bounds, Entity, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, Pixels, ScrollDelta,
+    ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext, point, px, size,
+};
+use teams_ui::ViewTrace;
+use teams_ui::settings::{FirstRunState, Settings, SettingsModel};
+use teams_ui::shell::{Shell, ShellParts};
+use teams_ui::window::KitRoot;
+
+/// The settings of a start that asks about the AI features: the first run's screen confirmed, no answer yet.
+fn waiting(font_size: u16) -> SettingsModel {
+    let mut settings = Settings {
+        first_run: FirstRunState::Confirmed,
+        ..Settings::default()
+    };
+    settings.appearance.font_size = font_size;
+    SettingsModel::in_memory(settings).requiring_first_run()
+}
+
+/// The shell in the kit's root, as the app opens it: the window follows the settings' font size, and the shell is
+/// told to take the keyboard.
+fn notice_window(rig: &Rig, settings: SettingsModel) -> (Entity<Shell>, &'static mut VisualTestContext) {
+    rig.cx.update(teams_ui::window::init);
+    let settings = rig.cx.update(|cx| cx.new(|_| settings));
+    rig.cx
+        .update(|cx| teams_ui::theme::follow_settings(&settings, cx))
+        .detach();
+    let parts = ShellParts {
+        core: rig.cx.read(|cx| rig.bridge.read(cx).core()),
+        models: rig.models.clone(),
+        settings: settings.clone(),
+        trace: Arc::new(ViewTrace::off()),
+    };
+    let app: &'static mut TestAppContext = Box::leak(Box::new(rig.cx.clone()));
+    let (root, cx) = app.add_window_view(|window, cx| {
+        let shell = cx.new(|cx| Shell::new(parts, window, cx));
+        KitRoot::new(shell, window, cx)
+    });
+    let shell = cx.update(|_, cx| root.read(cx).view().clone().downcast::<Shell>().unwrap());
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.take_focus(window, cx)));
+    draw(cx);
+    (shell, cx)
+}
+
+fn draw(cx: &mut VisualTestContext) {
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.run_until_parked();
+}
+
+fn bounds(cx: &mut VisualTestContext, selector: &str) -> Option<Bounds<Pixels>> {
+    draw(cx);
+    cx.debug_bounds(Box::leak(selector.to_owned().into_boxed_str()))
+}
+
+/// Presses each key of `keys` (down and up, as a person does: a focused button is clicked on the key's release).
+fn press(cx: &mut VisualTestContext, keys: &str) {
+    for spec in keys.split(' ') {
+        let keystroke = Keystroke::parse(spec).unwrap();
+        draw(cx);
+        cx.simulate_event(KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.simulate_event(KeyUpEvent { keystroke });
+        cx.run_until_parked();
+    }
+}
+
+fn theme_font() -> u16 {
+    teams_ui::theme::FONT_SIZE
+}
+
+fn answer(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<bool> {
+    cx.update(|_, cx| shell.read(cx).settings().read(cx).settings().ai_features)
+}
+
+fn inside(inner: Bounds<Pixels>, outer: Bounds<Pixels>) -> bool {
+    inner.left() >= outer.left()
+        && inner.right() <= outer.right()
+        && inner.top() >= outer.top()
+        && inner.bottom() <= outer.bottom()
+}
+
+#[test]
+fn the_notice_takes_the_keyboard_and_tab_and_shift_tab_stay_in_it() {
+    // Tab from the notice: "Turn AI features off", then "Keep AI features on", then round again; Shift+Tab backwards
+    let cases = [
+        ("tab enter", false),
+        ("tab tab enter", true),
+        ("tab tab tab space", false),
+        ("shift-tab enter", true),
+        ("shift-tab shift-tab space", false),
+        ("tab tab tab tab tab shift-tab enter", true),
+    ];
+    for (keys, on) in cases {
+        let rig = Rig::start();
+        let (shell, cx) = notice_window(&rig, waiting(theme_font()));
+        assert!(bounds(cx, "ai-notice").is_some(), "the notice waits");
+        press(cx, keys);
+        assert_eq!(answer(&shell, cx), Some(on), "{keys} answers {on}");
+        assert!(bounds(cx, "ai-notice").is_none(), "{keys}: the notice is gone");
+    }
+}
+
+#[test]
+fn nothing_behind_the_notice_takes_a_key_and_the_keys_come_back_after_the_answer() {
+    let rig = Rig::start();
+    let (shell, cx) = notice_window(&rig, waiting(theme_font()));
+    press(cx, "ctrl-k");
+    assert!(
+        cx.update(|_, cx| shell.read(cx).switcher().is_none()),
+        "Ctrl+K opens nothing behind the notice"
+    );
+    assert!(bounds(cx, "ai-notice").is_some());
+    // the zoom works over the notice: the user can make it readable
+    press(cx, "ctrl-=");
+    let font = cx.update(|_, cx| shell.read(cx).settings().read(cx).settings().appearance.font_size);
+    assert_eq!(font, theme_font() + 1);
+    press(cx, "tab enter");
+    assert_eq!(answer(&shell, cx), Some(false));
+    press(cx, "ctrl-k");
+    assert!(
+        cx.update(|_, cx| shell.read(cx).switcher().is_some()),
+        "the shell has the keyboard again after the answer"
+    );
+}
+
+#[test]
+fn the_whole_notice_fits_the_window_at_the_largest_font_and_its_points_scroll() {
+    let largest = *teams_ui::theme::FONT_SIZES.end();
+    let rig = Rig::start();
+    let (_, cx) = notice_window(&rig, waiting(largest));
+    for (width, height) in [(1280.0, 800.0), (720.0, 800.0), (520.0, 800.0), (520.0, 480.0)] {
+        cx.simulate_resize(size(px(width), px(height)));
+        let window = Bounds::new(point(px(0.0), px(0.0)), size(px(width), px(height)));
+        let dialog = bounds(cx, "ai-notice").expect("the notice");
+        assert!(
+            inside(dialog, window),
+            "{width}x{height}: the notice {dialog:?} is inside the window"
+        );
+        for button in ["ai-notice-off", "ai-notice-on"] {
+            let found = bounds(cx, button).expect("the button");
+            assert!(
+                inside(found, dialog),
+                "{width}x{height}: {button} {found:?} is inside {dialog:?}"
+            );
+        }
+    }
+    // 520 × 480: the points do not fit, and the wheel scrolls them
+    let body = bounds(cx, "ai-notice-body").expect("the points");
+    let later = bounds(cx, "ai-notice-later").expect("the last line");
+    assert!(later.bottom() > body.bottom(), "the points are higher than their box");
+    cx.simulate_event(ScrollWheelEvent {
+        position: body.center(),
+        delta: ScrollDelta::Pixels(point(px(0.0), px(-2000.0))),
+        modifiers: Modifiers::none(),
+        touch_phase: TouchPhase::Moved,
+    });
+    let scrolled = bounds(cx, "ai-notice-later").expect("the last line");
+    assert!(
+        scrolled.bottom() <= body.bottom(),
+        "the wheel brings the last line into the box"
+    );
+}

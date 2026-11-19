@@ -66,7 +66,7 @@ use teams_proto::ManualAvailability;
 
 use crate::accounts::{AccountTile, Accounts};
 use crate::activity_view::{ActivityParts, ActivityView, ActivityViewEvent};
-use crate::ai_notice::AiNotice;
+use crate::ai_notice::{AiNotice, Answered};
 use crate::bridge::Core;
 use crate::calendar_view::{CalendarView, CalendarViewEvent};
 use crate::call_view::CallBar;
@@ -395,7 +395,7 @@ pub struct Shell {
     people: chat_people::State,
     /// The window's profile card, while one is open, and the pointer's way over faces and names.
     cards: profile_card::State,
-    _subscriptions: [Subscription; 13],
+    _subscriptions: [Subscription; 14],
 }
 
 /// What the chat's header shows, as the trace tells it: the chat, its other member's presence (a 1:1 chat's), and
@@ -435,6 +435,9 @@ impl Shell {
         let (settings_view, test_call_asked) = Self::make_settings_view(&core, &settings, &trace, cx);
         let first_run = cx.new(|cx| FirstRun::new(settings.clone(), cx));
         let ai_notice = cx.new(|cx| AiNotice::new(settings.clone(), cx));
+        let answered = cx.subscribe_in(&ai_notice, window, |this: &mut Self, _, _: &Answered, window, cx| {
+            this.take_focus(window, cx);
+        });
         // the app publishes it at start too; a shell made by itself (tests, the tour) follows its own settings
         crate::local_ai::AiSwitch::publish(settings.read(cx).uses_ai(), cx);
         let (calendar, calendar_events) = Self::calendar(&core, &models, &trace, &settings, window, cx);
@@ -512,6 +515,7 @@ impl Shell {
                 calendar_events,
                 searched,
                 new_message_asked,
+                answered,
             ],
         }
     }
@@ -1190,6 +1194,10 @@ impl Shell {
     /// (an account switched to). A focus left on something not drawn reaches no action's handler: GPUI dispatches
     /// from the window's root instead.
     pub fn take_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.read(cx).awaiting_ai_notice() {
+            self.ai_notice.read(cx).focus_handle().clone().focus(window, cx);
+            return;
+        }
         match self.compose_drawn(cx) {
             Some(compose) => compose.update(cx, |compose, cx| compose.focus(window, cx)),
             None => self.focus.focus(window, cx),
@@ -2783,7 +2791,7 @@ impl Shell {
         });
     }
 
-    /// The handlers of the shell's own keys (the switcher, the search, the accounts, the zoom) on its root.
+    /// The handlers of the shell's own keys (the switcher, the search, the accounts, the pages) on its root.
     fn shell_keys(shell: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
         shell
             .on_action(cx.listener(|this, _: &ToggleSwitcher, window, cx| this.toggle_switcher(window, cx)))
@@ -2797,9 +2805,6 @@ impl Shell {
             .on_action(cx.listener(|this, _: &ToggleListPane, _, cx| this.toggle_list_pane(cx)))
             .on_action(cx.listener(|this, _: &NextAccount, _, cx| this.cycle_account(true, cx)))
             .on_action(cx.listener(|this, _: &PreviousAccount, _, cx| this.cycle_account(false, cx)))
-            .on_action(cx.listener(|this, _: &FontLarger, _, cx| this.step_font(Some(1), cx)))
-            .on_action(cx.listener(|this, _: &FontSmaller, _, cx| this.step_font(Some(-1), cx)))
-            .on_action(cx.listener(|this, _: &FontReset, _, cx| this.step_font(None, cx)))
             .on_action(cx.listener(|this, _: &ShowActivity, window, cx| this.show_activity(window, cx)))
             .on_action(cx.listener(|this, _: &ShowChats, window, cx| this.show_chats(window, cx)))
             .on_action(cx.listener(|this, _: &ShowCalendar, window, cx| this.show_calendar(window, cx)))
@@ -2808,6 +2813,14 @@ impl Shell {
                     this.open_settings_page(Page::General, window, cx);
                 }),
             )
+    }
+
+    /// The font size keys, which also work while the AI notice waits.
+    fn font_keys(shell: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
+        shell
+            .on_action(cx.listener(|this, _: &FontLarger, _, cx| this.step_font(Some(1), cx)))
+            .on_action(cx.listener(|this, _: &FontSmaller, _, cx| this.step_font(Some(-1), cx)))
+            .on_action(cx.listener(|this, _: &FontReset, _, cx| this.step_font(None, cx)))
     }
 
     /// Opens the switcher, or closes it when it is open.
@@ -3579,7 +3592,8 @@ impl Render for Shell {
         let toast = self.toast_view(palette, cx);
         let more_apps = self.more_apps_view(palette, cx);
         let card = self.card_layer(window, cx);
-        let first_run = self.first_run_layer(cx);
+        let first_run = self.first_run_layer(window, cx);
+        let modal = self.settings.read(cx).awaiting_ai_notice();
         div()
             .key_context(CONTEXT)
             .track_focus(&self.focus)
@@ -3587,9 +3601,13 @@ impl Render for Shell {
             .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, _, cx| this.used(cx)))
             .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| this.used(cx)))
             .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _, cx| this.used(cx)))
-            .map(|shell| Self::shell_keys(shell, cx))
+            .map(|shell| Self::font_keys(shell, cx))
+            // nothing behind the AI notice takes a key while it waits
+            .when(!modal, |shell| Self::shell_keys(shell, cx))
             // the call keys only in a build that shows calls: elsewhere they reach whatever else takes them
-            .when(self.models.calls.read(cx).shows(), |shell| Self::call_keys(shell, cx))
+            .when(!modal && self.models.calls.read(cx).shows(), |shell| {
+                Self::call_keys(shell, cx)
+            })
             .relative()
             .size_full()
             .flex()
@@ -3618,12 +3636,17 @@ impl Render for Shell {
 }
 
 impl Shell {
-    /// The first run's screen, then the AI notice, over everything while one waits for the user.
-    fn first_run_layer(&self, cx: &App) -> Option<gpui::Div> {
+    /// The first run's screen, then the AI notice, over everything while one waits for the user. The notice holds the
+    /// keyboard while it waits: whatever took it, the next frame gives it back.
+    fn first_run_layer(&self, window: &mut Window, cx: &mut App) -> Option<gpui::Div> {
         let settings = self.settings.read(cx);
         let view: AnyView = if settings.awaiting_first_run() {
             self.first_run.clone().into()
         } else if settings.awaiting_ai_notice() {
+            let focus = self.ai_notice.read(cx).focus_handle().clone();
+            if !focus.is_focused(window) && !focus.contains_focused(window, cx) {
+                focus.focus(window, cx);
+            }
             self.ai_notice.clone().into()
         } else {
             return None;
