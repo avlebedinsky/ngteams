@@ -165,7 +165,32 @@ fn initials_size(side: f32) -> f32 {
         ..=28.0 => 12.0,
         ..=40.0 => 14.0,
         ..=56.0 => 16.0,
-        ..=96.0 => 24.0,
-        _ => 28.0,
+        ..=96.0 => 20.0,
+        _ => 24.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::initials_size;
+
+    #[test]
+    fn custom_initials_take_fluent_s_text_size_for_the_side() {
+        let sizes = [
+            (16.0, 10.0),
+            (20.0, 10.0),
+            (24.0, 10.0),
+            (28.0, 12.0),
+            (32.0, 14.0),
+            (40.0, 14.0),
+            (48.0, 16.0),
+            (56.0, 16.0),
+            (64.0, 20.0),
+            (96.0, 20.0),
+            (120.0, 24.0),
+        ];
+        for (side, text) in sizes {
+            assert!((initials_size(side) - text).abs() < f32::EPSILON, "a face of {side} px");
+        }
     }
 }

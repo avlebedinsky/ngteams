@@ -122,9 +122,8 @@ const PANE_WIDTH: f32 = 320.0;
 const CHAT_WIDTH: f32 = 360.0;
 /// The window's width under which the toolbar's controls show their icons alone, px.
 const COMPACT_BELOW: f32 = 860.0;
-/// The avatar of the one the call rings, holds or ended with: the kit's large one (80 px), whose initials it sizes and
-/// centres (a custom size leaves them small, at its top left). A tile without video sizes its face to the tile
-/// ([`faces::face_side`], `CallStage::tile_face`).
+/// The avatar of the one the call rings, holds or ended with: the kit's large one (80 px), with the kit's large
+/// initials. A tile without video sizes its face to the tile ([`faces::face_side`], `CallStage::tile_face`).
 const BIG_AVATAR: Size = Size::Large;
 /// [`BIG_AVATAR`]'s side, px (the kit's large avatar).
 const BIG_AVATAR_PX: f32 = 80.0;
