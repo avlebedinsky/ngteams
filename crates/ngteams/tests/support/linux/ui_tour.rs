@@ -10,7 +10,8 @@
 //! thumbnails, in Teams Dark and Light, its first video played in its card and paused, "Share this file" from a
 //! video's card (empty, its "More actions", two recipients and a message, the format bar and emoji picker, shared, and
 //! Copy link's "Link created"); a message of lines, small
-//! pictures and a block of code, in Teams Dark and Light; a picture opened in the picture viewer, fitted and zoomed;
+//! pictures and a block of code, in Teams Dark and Light; stickers alone with no bubble, in Teams Dark and Light; a
+//! picture opened in the picture viewer, fitted and zoomed;
 //! the 12-hour time format and a chat's times on it; a group chat's presence; the "Chats" section's See more, what it
 //! brings and a chat opened from below the rows shown; New message, its To: line's suggestions, the chat two people
 //! already have and a group name, in Teams Dark and Light; a favourite channel opened from "Favorites", a post's hover
@@ -194,7 +195,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 325 + 8 + 5 + 15 + 6 + 12 + 10 + 5] = [
+const STEPS: [Step; 5 + 327 + 8 + 5 + 15 + 6 + 12 + 10 + 5] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -1990,6 +1991,17 @@ const STEPS: [Step; 5 + 325 + 8 + 5 + 15 + 6 + 12 + 10 + 5] = [
         model.update(cx, |model, cx| {
             model.change(|settings| settings.appearance.theme = teams_ui::theme::LIGHT_KEY, cx);
         });
+    }),
+    // stickers from Teams' own packs in the "Lab stickers" chat (`seed_stickers`), as Teams draws them: b's under b's
+    // words and a's own, each alone at its 180 by 180 with no bubble; in Teams Dark, then in Teams Light
+    ("chat-sticker-dark", |shell, window, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
+        if let Some(chat) = STICKER_CHAT.get().cloned() {
+            shell.update(cx, |shell, cx| shell.open_chat(chat, window, cx));
+        }
+    }),
+    ("chat-sticker", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
     }),
     // messages a tenant's policy blocked, as Teams shows them: a's own with its text and file put back from the
     // service's copy under the red notice and its link, b's with the notice alone (a file type, then a policy); in
@@ -5043,6 +5055,7 @@ impl MockLab {
         seed_activity(&mock)?;
         seed_forwards(&mock, &runtime)?;
         seed_cards(&mock)?;
+        seed_stickers(&mock, &runtime)?;
         seed_blocked(&mock)?;
         seed_profile_cards(&mock, &runtime);
         let dir = tempfile::tempdir()?;
@@ -5655,6 +5668,75 @@ fn made_up_phone() -> image::RgbaImage {
     fill(94, 300, 66, 80, [200, 200, 210]);
     fill(14, 400, 226, 50, [90, 200, 210]);
     picture
+}
+
+/// The "Lab stickers" chat `seed_stickers` made.
+static STICKER_CHAT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// A made-up sticker on Teams' sticker CDN (served by the mock as that CDN would), as a message names it.
+const STICKER_SRC: &str = "https://teams.public.onecdn.static.microsoft/evergreen-assets/stickerassets/madeup-250x250/en-us/MadeUp_Hi.gif?v=5";
+
+/// A "Lab stickers" chat of a and b: b's words, then b's sticker as the service gives one back (the bare `img`), then
+/// a's own as the web client sent it (in its `readonly` element), both the same made-up sticker.
+fn seed_stickers(mock: &ChatServiceMock, runtime: &tokio::runtime::Runtime) -> SandboxResult {
+    let mut gif = Vec::new();
+    write_made_up_sticker(&mut gif)?;
+    runtime.block_on(mock.serve_bytes(
+        "/evergreen-assets/stickerassets/madeup-250x250/en-us/MadeUp_Hi.gif",
+        "image/gif",
+        gif,
+    ));
+    let chat = mock.add_group("Lab stickers", &[LAB_A, LAB_B]).ok_or("no chat made")?;
+    mock.post_as(LAB_B, &chat, "<p>Made-up sticker test</p>")
+        .ok_or("b's words refused")?;
+    let read_back = format!(
+        "<p>&nbsp;</p>\r\n<img src=\"{STICKER_SRC}\" height=\"180\" alt=\"A made-up sticker says hi\" width=\"180\" \
+         itemtype=\"http://schema.skype.com/Sticker\">\r\n<p>&nbsp;</p>"
+    );
+    mock.post_as(LAB_B, &chat, &read_back).ok_or("b's sticker refused")?;
+    let sent = format!(
+        "<p>&nbsp;</p><readonly aria-label=\"A made-up sticker says hi\" contenteditable=\"false\" \
+         itemtype=\"http://schema.skype.com/Sticker\" title=\"A made-up sticker says hi\"><img src=\"{STICKER_SRC}\" \
+         height=\"180\" alt=\"A made-up sticker says hi\" width=\"180\" data-image-type=\"standard\" \
+         data-image-mode=\"single\" itemtype=\"http://schema.skype.com/Sticker\"></readonly><p>&nbsp;</p>"
+    );
+    mock.post_as(LAB_A, &chat, &sent).ok_or("a's sticker refused")?;
+    STICKER_CHAT.set(chat).map_err(|_| "the sticker chat was set twice")?;
+    Ok(())
+}
+
+/// A made-up animated sticker, 180 by 180 on a clear ground: a yellow face whose mouth opens and closes over four
+/// frames, a blue speech mark beside it.
+fn write_made_up_sticker(out: &mut Vec<u8>) -> SandboxResult {
+    let mut encoder = image::codecs::gif::GifEncoder::new(out);
+    encoder.set_repeat(image::codecs::gif::Repeat::Infinite)?;
+    for at in 0u32..4 {
+        let mut frame = image::RgbaImage::from_pixel(180, 180, image::Rgba([0, 0, 0, 0]));
+        for y in 0..180u32 {
+            for x in 0..180u32 {
+                let (dx, dy) = (i64::from(x) - 80, i64::from(y) - 100);
+                let face = dx * dx + dy * dy <= 60 * 60;
+                let rim = face && dx * dx + dy * dy >= 56 * 56;
+                let eye = (dx + 20).pow(2) + (dy + 15).pow(2) <= 64 || (dx - 20).pow(2) + (dy + 15).pow(2) <= 64;
+                let open = 4 + i64::from(at % 2) * 10;
+                let mouth = dx.abs() <= 22 && (dy - 22).abs() <= open / 2 + 2;
+                let mark = (130..170).contains(&x) && (20..55).contains(&y);
+                let colour = if rim || eye || (face && mouth) {
+                    [60, 40, 20, 255]
+                } else if face {
+                    [250, 200, 40, 255]
+                } else if mark {
+                    [70, 110, 220, 255]
+                } else {
+                    continue;
+                };
+                frame.put_pixel(x, y, image::Rgba(colour));
+            }
+        }
+        let delay = image::Delay::from_numer_denom_ms(250, 1);
+        encoder.encode_frame(image::Frame::from_parts(frame, 0, 0, delay))?;
+    }
+    Ok(())
 }
 
 /// The Workflows bot, as it posts its cards.
