@@ -343,6 +343,9 @@ pub struct Settings {
     /// A meeting someone else started where the account is invited, or a group chat's meeting, shows a banner with
     /// Join (Teams' "Meeting started notification", on by default; [`crate::meeting_alert`]).
     pub meeting_started: bool,
+    /// A calendar meeting shows a reminder before it starts, at its reminder time, and again as it starts
+    /// ([`crate::meeting_reminder`]); on by default.
+    pub meeting_reminders: bool,
     /// Minutes without use after which the account's availability stops being reported (Task 20,
     /// [`crate::own_presence`]), within [`IDLE_MINUTES`].
     pub idle_minutes: u32,
@@ -618,6 +621,7 @@ impl Default for Settings {
             first_run: FirstRunState::Waiting,
             notifications: Notifications::default(),
             meeting_started: true,
+            meeting_reminders: true,
             idle_minutes: DEFAULT_IDLE_MINUTES,
             manual_status: ManualStatus::default(),
             log_level: LogLevel::default(),
@@ -659,6 +663,7 @@ pub mod keys {
     pub const AI_FEATURES: &str = "ai_features";
     pub const NOTIFICATIONS: &str = "notifications";
     pub const MEETING_STARTED: &str = "meeting_started_notification";
+    pub const MEETING_REMINDERS: &str = "meeting_reminders";
     pub const IDLE_MINUTES: &str = "idle_minutes";
     pub const MANUAL_STATUS: &str = "manual_status";
     pub const LOG_LEVEL: &str = "log_level";
@@ -1007,15 +1012,16 @@ fn take_appearance(appearance: &mut Appearance, key: &str, value: &Value) -> Res
 }
 
 /// The settings that [`take_switch`] takes.
-const SWITCHES: [&str; 4] = [
+const SWITCHES: [&str; 5] = [
     keys::VIDEO_CALLS,
     keys::SAVE_CALL_CAPTIONS,
     keys::MEETING_STARTED,
+    keys::MEETING_REMINDERS,
     keys::AI_FEATURES,
 ];
 
-/// Takes an on/off switch: video in calls, saving every call's captions, the meeting started notification, or "Use AI
-/// features".
+/// Takes an on/off switch: video in calls, saving every call's captions, the meeting started notification, the meeting
+/// reminders, or "Use AI features".
 fn take_switch(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem> {
     if key == keys::AI_FEATURES {
         let on = value.as_bool().ok_or(Problem::BadValue {
@@ -1028,6 +1034,7 @@ fn take_switch(settings: &mut Settings, key: &str, value: &Value) -> Result<(), 
     let (key, switch) = match key {
         keys::VIDEO_CALLS => (keys::VIDEO_CALLS, &mut settings.video_calls),
         keys::MEETING_STARTED => (keys::MEETING_STARTED, &mut settings.meeting_started),
+        keys::MEETING_REMINDERS => (keys::MEETING_REMINDERS, &mut settings.meeting_reminders),
         _ => (keys::SAVE_CALL_CAPTIONS, &mut settings.save_call_captions),
     };
     *switch = value.as_bool().ok_or(Problem::BadValue {
@@ -1164,6 +1171,7 @@ pub fn render(settings: &Settings) -> String {
         (keys::VIDEO_CALLS, settings.video_calls),
         (keys::SAVE_CALL_CAPTIONS, settings.save_call_captions),
         (keys::MEETING_STARTED, settings.meeting_started),
+        (keys::MEETING_REMINDERS, settings.meeting_reminders),
     ] {
         table.insert(key.to_owned(), Value::Boolean(on));
     }

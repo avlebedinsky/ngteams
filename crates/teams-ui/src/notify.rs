@@ -96,6 +96,9 @@ pub const ANSWER_ACTION: &str = "answer";
 pub const DECLINE_ACTION: &str = "decline";
 /// A started meeting's notification's action: join it ([`crate::meeting_alert`]).
 pub const JOIN_ACTION: &str = "join";
+/// A meeting reminder's actions ([`crate::meeting_reminder`]): remind again later, stop reminding.
+pub const SNOOZE_ACTION: &str = "snooze";
+pub const DISMISS_ACTION: &str = "dismiss";
 /// What a sender without a name is called.
 pub const SOMEONE: &str = "Someone";
 
@@ -114,6 +117,8 @@ pub enum NoticeKind {
     Activity,
     /// A meeting someone started, with Join ([`crate::meeting_alert`]).
     Meeting,
+    /// A calendar meeting's reminder, with Join, Snooze and Dismiss ([`crate::meeting_reminder`]).
+    Reminder,
 }
 
 impl NoticeKind {
@@ -127,6 +132,7 @@ impl NoticeKind {
             Self::Call => "call",
             Self::Activity => "activity",
             Self::Meeting => "meeting",
+            Self::Reminder => "reminder",
         }
     }
 }
@@ -278,8 +284,11 @@ impl Notifier {
             } => this.arrived(conversation, message, *source, cx),
             FeedEvent::Read { conversation } | FeedEvent::Changed { conversation } => this.read(conversation, cx),
             FeedEvent::Down { heard } => this.went_down(*heard),
-            // the account's own presence's, nothing to notify
-            FeedEvent::Registered | FeedEvent::PushStopped | FeedEvent::OwnReport { .. } => {}
+            // the account's own presence's and a meeting's own banner's ([`crate::meeting_alert`]): nothing to notify
+            FeedEvent::Registered
+            | FeedEvent::PushStopped
+            | FeedEvent::OwnReport { .. }
+            | FeedEvent::MeetingPushed(_) => {}
         });
         let previews = Previews::of(&core, &settings, cx);
         Self {

@@ -9,6 +9,17 @@
 //!   its start to [`LATE_MS`] after its end, as Teams checks the calendar: "<name> started the meeting", titled with
 //!   the meeting's subject. Teams shows none for a channel's ad-hoc Meet now or a meeting not on the calendar.
 //!
+//! **The calling push** ([`FeedEvent::MeetingPushed`], `teams_call::meeting_push`): a meeting's start the calling
+//! service pushes to its members, whether or not they opened its chat, shows the same banner for a meeting chat's or a
+//! channel's meeting, titled with the push's subject; "<name> is waiting in the lobby. Join the meeting to let them
+//! in." for someone waiting in its lobby. The calendar must hold the meeting about now, as above, unless it can't be
+//! read: then it shows, as Teams does. One call (its id) shows one banner, from the push or the chat's start, whichever
+//! came first.
+//!
+//! **The window's card**: each banner shows in the window as well ([`MeetingAlert::cards`], drawn by the shell), for
+//! [`CARD_TIME`], or until it is acted on or closed; without a notification server (or one that refused it) only the
+//! card shows.
+//!
 //! It shows its starter's picture as the engine has it stored, as a message's banner shows its sender's
 //! ([`crate::notify::picture`]); none is waited for from the network.
 //!
@@ -31,7 +42,7 @@
 //! end clears it: a start whose read says otherwise leaves what an invitation named.
 //!
 //! What it does is traced (`meeting-notification shown`/`closed`/`joined`/`opened`, with the chat and the kind), never
-//! a name or a title.
+//! a name or a title; each decision is logged at debug level by the chat's id ("meeting banner: …").
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -39,8 +50,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::NaiveDateTime;
 use gpui::{App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Subscription};
-use teams_core::CalendarEvent;
-use teams_core::Source;
+use teams_core::{CalendarEvent, MeetingStartKind, MeetingStartPush, Source};
 use teams_proto::chat::{ChatEvent, chat_event, meeting_times};
 use teams_proto::{MeetingInfo, is_group_chat_id, is_meeting_chat_id, is_team_thread_id};
 use teams_store::{Message, StoredPicture};
@@ -60,8 +70,13 @@ use crate::trace::{TraceLine, ViewTrace};
 pub const FRESH_MS: i64 = 5 * 60 * 1000;
 /// How long before a meeting's scheduled start its start shows a banner, in ms.
 pub const EARLY_MS: i64 = 15 * 60 * 1000;
-/// How long after a meeting's scheduled end its start still shows a banner, in ms.
-pub const LATE_MS: i64 = 15 * 60 * 1000;
+/// How long after a meeting's scheduled end its start still shows a banner, in ms (Teams'
+/// `meetingStartedNotificationV2Settings.minutesAfter` default).
+pub const LATE_MS: i64 = 5 * 60 * 1000;
+/// How long the window's card of a started meeting shows (Teams' banner time).
+pub const CARD_TIME: std::time::Duration = std::time::Duration::from_secs(20);
+/// The ids of banners only the window's card shows start here, apart from a notification server's.
+pub const LOCAL_IDS: u32 = 0xF000_0000;
 /// What a meeting without a subject is called.
 pub const NO_TITLE: &str = "Meeting";
 
@@ -186,6 +201,24 @@ pub enum MeetingJoin {
         title: String,
         meeting: Option<MeetingInfo>,
     },
+    /// A calendar meeting's ([`crate::meeting_reminder`]): its pre-join as the calendar's Join opens it, by its chat and
+    /// organizer, else by its chat, else its link in the browser.
+    Calendar {
+        chat: Option<String>,
+        meeting: Option<MeetingInfo>,
+        title: String,
+        link: Option<String>,
+    },
+}
+
+/// A started meeting's banner as the window shows it, a card with Join, its chat (but for a channel's) and Dismiss.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StartedCard {
+    /// The banner's id: its actions go to [`MeetingAlert::activated`] with it.
+    pub id: u32,
+    pub title: String,
+    pub body: String,
+    pub opens_chat: bool,
 }
 
 /// What the alert asks of the desktop.
@@ -203,6 +236,10 @@ struct ShownBanner {
     conversation: String,
     call: Option<String>,
     join: MeetingJoin,
+    title: String,
+    body: String,
+    /// Whether the window still shows its card.
+    card: bool,
 }
 
 /// A banner decided on, to show: its notice, without its starter's `picture` until that is decoded.
@@ -219,6 +256,12 @@ struct Pending {
     start: String,
     call: Option<String>,
     ends: Ends,
+}
+
+/// What told of a start: the chat service's call start in the chat, or the calling service's push.
+enum Origin {
+    Chat,
+    Push(Box<MeetingStartPush>),
 }
 
 /// How many call ends a chat had: all of them, and those naming no call (which end whatever call ran).
@@ -247,12 +290,17 @@ pub struct MeetingAlert {
     shown: HashMap<u32, ShownBanner>,
     /// The starts a banner was decided for (their chat and message), so each shows once.
     seen: HashSet<(String, String)>,
+    /// The calls a banner was decided for, by their id: the chat service's start and the calling push of one call
+    /// show one banner.
+    started_calls: HashSet<String>,
     /// How many call ends each chat had.
     ends: HashMap<String, Ends>,
     /// The calls that ended, by their chat and call id.
     ended: HashSet<(String, String)>,
     /// The reads of the group chats' running calls.
     running: HashMap<String, RunningRead>,
+    /// The last id given to a banner only the window's card shows.
+    next_local: u32,
     _feed: Subscription,
     _calls: Subscription,
 }
@@ -275,15 +323,14 @@ impl MeetingAlert {
         trace: Arc<ViewTrace>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let feed = cx.subscribe(&models.feed, |this: &mut Self, _, event, cx| {
-            if let FeedEvent::Arrived {
+        let feed = cx.subscribe(&models.feed, |this: &mut Self, _, event, cx| match event {
+            FeedEvent::Arrived {
                 conversation,
                 message,
                 source,
-            } = event
-            {
-                this.arrived(conversation, message, *source, cx);
-            }
+            } => this.arrived(conversation, message, *source, cx),
+            FeedEvent::MeetingPushed(start) => this.pushed(start, cx),
+            _ => {}
         });
         let calls = cx.observe(&models.calls, |this: &mut Self, _, cx| this.close_joined(cx));
         let this = Self {
@@ -294,9 +341,11 @@ impl MeetingAlert {
             server: None,
             shown: HashMap::new(),
             seen: HashSet::new(),
+            started_calls: HashSet::new(),
             ends: HashMap::new(),
             ended: HashSet::new(),
             running: HashMap::new(),
+            next_local: LOCAL_IDS,
             _feed: feed,
             _calls: calls,
         };
@@ -330,6 +379,7 @@ impl MeetingAlert {
         self.trace
             .record(&TraceLine::new("meeting-notification", done).conversation(&shown.conversation));
         self.close(id, cx);
+        cx.notify();
         cx.emit(event);
         true
     }
@@ -360,16 +410,68 @@ impl MeetingAlert {
                     start: message.id.clone(),
                     call,
                 };
-                let due = fresh(source, message.arrival_time, now_ms())
-                    && may_show(self.core.me(), place, starter.as_deref())
+                let fresh = fresh(source, message.arrival_time, now_ms());
+                let theirs = may_show(self.core.me(), place, starter.as_deref());
+                let due = fresh
+                    && theirs
                     && !self.ended_since(&pending)
-                    && self.seen.insert((conversation.to_owned(), message.id.clone()));
-                if due && self.on_now(cx).is_some() && !self.in_call(conversation, cx) {
-                    self.decide(pending, place, starter, cx);
+                    && self.seen.insert((conversation.to_owned(), message.id.clone()))
+                    && pending
+                        .call
+                        .as_ref()
+                        .is_none_or(|call| self.started_calls.insert(call.clone()));
+                let on = self.on_now(cx);
+                let in_call = self.in_call(conversation, cx);
+                log::debug!(
+                    "meeting banner: a call start in {conversation} ({place:?}, {source:?}): fresh={fresh} \
+                     someone_else's={theirs} due={due} banners_on={on} in_call={in_call}"
+                );
+                if due && on && !in_call {
+                    self.decide(pending, place, starter, Origin::Chat, cx);
                 }
             }
         }
         self.read_running(conversation, ended, cx);
+    }
+
+    /// The calling service pushed a meeting's start: a meeting's (its chat's or a channel's), someone waiting in its
+    /// lobby, or a group chat's Meet now. Each call shows once, whichever of this and the chat's start came first.
+    fn pushed(&mut self, start: &MeetingStartPush, cx: &mut Context<Self>) {
+        let conversation = start.thread.as_str();
+        let place = if is_team_thread_id(conversation) {
+            StartedIn::Channel
+        } else if start.kind == MeetingStartKind::Huddle && is_group_chat_id(conversation) {
+            StartedIn::GroupChat { huddle: true }
+        } else {
+            StartedIn::MeetingChat
+        };
+        let theirs = may_show(self.core.me(), place, start.starter.as_deref());
+        let pending = Pending {
+            ends: self.ends_in(conversation),
+            conversation: conversation.to_owned(),
+            start: format!("push:{}", start.call_id),
+            call: Some(start.call_id.clone()),
+        };
+        let due = theirs && !self.ended_since(&pending) && self.started_calls.insert(start.call_id.clone());
+        let on = self.on_now(cx);
+        let in_call = self.in_call(conversation, cx);
+        log::debug!(
+            "meeting banner: a pushed start in {conversation} ({:?}, call {}): someone_else's={theirs} due={due} \
+             banners_on={on} in_call={in_call}",
+            start.kind,
+            start.call_id
+        );
+        if due && on && !in_call {
+            let starter = start.starter.clone();
+            self.decide(pending, place, starter, Origin::Push(Box::new(start.clone())), cx);
+        }
+    }
+
+    /// A start of `pending`'s call showed no banner: a later start of that call (the push, or the chat's) may.
+    fn forget_call(&mut self, pending: &Pending) {
+        if let Some(call) = &pending.call {
+            self.started_calls.remove(call);
+        }
     }
 
     fn ends_in(&self, conversation: &str) -> Ends {
@@ -435,17 +537,16 @@ impl MeetingAlert {
         .detach();
     }
 
-    /// The server, when a banner may show now: its Join works here (a build that shows calls, not the read-only mode)
-    /// and the settings let it.
-    fn on_now(&self, cx: &App) -> Option<Arc<dyn NotificationServer>> {
+    /// Whether a banner may show now: its Join works here (a build that shows calls, not the read-only mode) and the
+    /// settings let it.
+    fn on_now(&self, cx: &App) -> bool {
         let joins = self.calls.read(cx).shows() && !self.core.read_only();
-        let on = joins
+        joins
             && banners_on(
                 self.settings.read(cx).settings(),
                 self.core.me(),
                 notify::muted_in_call(cx),
-            );
-        self.server.clone().filter(|_| on)
+            )
     }
 
     /// Whether the account is in the call of `conversation` (or going into it) now.
@@ -457,10 +558,22 @@ impl MeetingAlert {
 
     /// Reads what the banner needs (the chat's name, the calendar, the channel's preferences), then shows it if it is
     /// still due; one whose call ended while it was being shown is closed again.
-    fn decide(&self, pending: Pending, place: StartedIn, starter: Option<String>, cx: &mut Context<Self>) {
+    fn decide(
+        &self,
+        pending: Pending,
+        place: StartedIn,
+        starter: Option<String>,
+        origin: Origin,
+        cx: &mut Context<Self>,
+    ) {
         let core = Arc::clone(&self.core);
         cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let Some(mut banner) = banner(&*core, &pending, place, starter).await else {
+            let Some(mut banner) = banner(&*core, &pending, place, starter, &origin).await else {
+                log::debug!(
+                    "meeting banner: none for {}: not due by its reads",
+                    pending.conversation
+                );
+                let _ = this.update(cx, |this, _| this.forget_call(&pending));
                 return;
             };
             // an end that came before a restart is in the store only
@@ -468,16 +581,20 @@ impl MeetingAlert {
                 .call_ended(pending.conversation.clone(), pending.start.clone())
                 .await;
             if stored_end.unwrap_or(false) {
+                log::debug!("meeting banner: none for {}: its call ended", pending.conversation);
+                let _ = this.update(cx, |this, _| this.forget_call(&pending));
                 return;
             }
             let server = this
                 .update(cx, |this, cx| {
-                    this.on_now(cx)
-                        .filter(|_| !this.in_call(&pending.conversation, cx) && !this.ended_since(&pending))
+                    let due =
+                        this.on_now(cx) && !this.in_call(&pending.conversation, cx) && !this.ended_since(&pending);
+                    due.then(|| this.server.clone())
                 })
                 .ok()
                 .flatten();
             let Some(server) = server else {
+                log::debug!("meeting banner: none for {}: no longer due", pending.conversation);
                 return;
             };
             if let Some(picture) = banner.picture.take() {
@@ -486,17 +603,24 @@ impl MeetingAlert {
                     .spawn(async move { BannerPicture::of_person(&picture) })
                     .await;
             }
-            let Ok(id) = server.show(&banner.notice, 0).await else {
-                return;
+            // the window's card shows it even when the desktop has no notification server or it refused one
+            let shown = match &server {
+                Some(server) => server.show(&banner.notice, 0).await.ok(),
+                None => None,
             };
+            if shown.is_none() {
+                log::debug!("meeting banner: no desktop notification for {}", pending.conversation);
+            }
             let kept = this.update(cx, |this, cx| {
                 let due = !this.ended_since(&pending) && !this.in_call(&pending.conversation, cx);
                 if due {
+                    let id = shown.unwrap_or_else(|| this.local_id());
+                    log::debug!("meeting banner: shown for {}", pending.conversation);
                     this.shown_banner(id, banner, pending.call.clone(), cx);
                 }
                 due
             });
-            if !kept.unwrap_or(false) {
+            if let (false, Some(server), Some(id)) = (kept.unwrap_or(false), server, shown) {
                 server.close(id).await;
             }
         })
@@ -509,6 +633,7 @@ impl MeetingAlert {
             MeetingJoin::GroupChat { .. } => "group-chat",
             MeetingJoin::MeetingChat { .. } => "meeting-chat",
             MeetingJoin::Channel { .. } => "channel",
+            MeetingJoin::Calendar { .. } => "calendar",
         };
         self.trace.record(
             &TraceLine::new("meeting-notification", "shown")
@@ -528,13 +653,63 @@ impl MeetingAlert {
                 conversation,
                 call,
                 join: banner.join,
+                title: banner.notice.summary,
+                body: banner.notice.body,
+                card: true,
             },
         );
+        // the window's card goes after Teams' banner time; the desktop's stays as its server keeps it
+        cx.spawn(async move |this, cx: &mut AsyncApp| {
+            cx.background_executor().timer(CARD_TIME).await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(shown) = this.shown.get_mut(&id) {
+                    shown.card = false;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// An id for a banner only the window's card shows (no desktop notification): from [`LOCAL_IDS`] up, apart from
+    /// a notification server's.
+    fn local_id(&mut self) -> u32 {
+        self.next_local = self.next_local.max(LOCAL_IDS).wrapping_add(1).max(LOCAL_IDS);
+        self.next_local
+    }
+
+    /// The banners the window shows as cards now, the newest last.
+    #[must_use]
+    pub fn cards(&self) -> Vec<StartedCard> {
+        let mut cards: Vec<StartedCard> = self
+            .shown
+            .iter()
+            .filter(|(_, shown)| shown.card)
+            .map(|(id, shown)| StartedCard {
+                id: *id,
+                title: shown.title.clone(),
+                body: shown.body.clone(),
+                opens_chat: !is_team_thread_id(&shown.conversation),
+            })
+            .collect();
+        cards.sort_by_key(|card| card.id);
+        cards
+    }
+
+    /// The card of banner `id` was dismissed: the banner closes, the desktop's too.
+    pub fn dismiss(&mut self, id: u32, cx: &mut Context<Self>) {
+        if let Some(shown) = self.shown.remove(&id) {
+            self.trace
+                .record(&TraceLine::new("meeting-notification", "closed").conversation(&shown.conversation));
+            self.close(id, cx);
+            cx.notify();
+        }
     }
 
     /// Closes the banners of `conversation` whose call ended (`call`, the call its end named): that call's, or every
     /// one when the end named no call; a banner whose start named no call closes at any end.
-    fn close_ended(&mut self, conversation: &str, call: Option<&str>, cx: &App) {
+    fn close_ended(&mut self, conversation: &str, call: Option<&str>, cx: &mut Context<Self>) {
         let ids: Vec<u32> = self
             .shown
             .iter()
@@ -548,7 +723,7 @@ impl MeetingAlert {
     }
 
     /// Closes the banners of `conversation`: the account is in its call.
-    fn close_in(&mut self, conversation: &str, cx: &App) {
+    fn close_in(&mut self, conversation: &str, cx: &mut Context<Self>) {
         let ids: Vec<u32> = self
             .shown
             .iter()
@@ -558,7 +733,10 @@ impl MeetingAlert {
         self.close_ids(conversation, ids, cx);
     }
 
-    fn close_ids(&mut self, conversation: &str, ids: Vec<u32>, cx: &App) {
+    fn close_ids(&mut self, conversation: &str, ids: Vec<u32>, cx: &mut Context<Self>) {
+        if !ids.is_empty() {
+            cx.notify();
+        }
         for id in ids {
             self.shown.remove(&id);
             self.trace
@@ -581,7 +759,7 @@ impl MeetingAlert {
     }
 
     fn close(&self, id: u32, cx: &App) {
-        if let Some(server) = self.server.clone() {
+        if let Some(server) = self.server.clone().filter(|_| id < LOCAL_IDS) {
             cx.background_spawn(server.close(id)).detach();
         }
     }
@@ -589,12 +767,27 @@ impl MeetingAlert {
 
 /// The banner of `pending`'s start (`place`, by `starter`), as the reads say; `None` when none is due: a
 /// meeting the calendar doesn't hold now, a muted channel, reads that failed.
-async fn banner(core: &dyn Core, pending: &Pending, place: StartedIn, starter: Option<String>) -> Option<Banner> {
+async fn banner(
+    core: &dyn Core,
+    pending: &Pending,
+    place: StartedIn,
+    starter: Option<String>,
+    origin: &Origin,
+) -> Option<Banner> {
     let conversation = &pending.conversation;
-    let (name, picture) = match starter {
+    let pushed = match origin {
+        Origin::Push(start) => Some(&**start),
+        Origin::Chat => None,
+    };
+    let (mut name, picture) = match starter {
         Some(starter) => person(core, starter).await,
         None => (SOMEONE.to_owned(), None),
     };
+    if name == SOMEONE
+        && let Some(given) = pushed.and_then(|start| start.starter_name.clone())
+    {
+        name = given;
+    }
     let (summary, body, join) = match place {
         StartedIn::GroupChat { huddle: false } => return None,
         StartedIn::GroupChat { huddle: true } => (
@@ -605,28 +798,7 @@ async fn banner(core: &dyn Core, pending: &Pending, place: StartedIn, starter: O
             },
         ),
         StartedIn::MeetingChat | StartedIn::Channel => {
-            if place == StartedIn::Channel && channel_muted(core, conversation).await {
-                return None;
-            }
-            let event = calendar_meeting(core, conversation, &pending.start).await?;
-            let title = if event.subject.trim().is_empty() {
-                chat_name(core, conversation).await
-            } else {
-                event.subject.clone()
-            };
-            let join = if place == StartedIn::Channel {
-                MeetingJoin::Channel {
-                    channel: conversation.to_owned(),
-                    title: title.clone(),
-                    meeting: event.meeting.clone(),
-                }
-            } else {
-                MeetingJoin::MeetingChat {
-                    chat: conversation.to_owned(),
-                    title: title.clone(),
-                }
-            };
-            (title, format!("{name} started the meeting"), join)
+            scheduled_banner(core, pending, place == StartedIn::Channel, &name, pushed).await?
         }
     };
     Some(Banner {
@@ -640,6 +812,67 @@ async fn banner(core: &dyn Core, pending: &Pending, place: StartedIn, starter: O
         join,
         picture,
     })
+}
+
+/// A meeting chat's or a channel's (`channel`) banner, by `name`: its title, its line and its Join; `None` for a muted
+/// channel, or a meeting the calendar doesn't hold about now (a push's, only when the calendar can be read).
+async fn scheduled_banner(
+    core: &dyn Core,
+    pending: &Pending,
+    channel: bool,
+    name: &str,
+    pushed: Option<&MeetingStartPush>,
+) -> Option<(String, String, MeetingJoin)> {
+    let conversation = &pending.conversation;
+    if channel && channel_muted(core, conversation).await {
+        log::debug!("meeting banner: none for {conversation}: the channel is muted");
+        return None;
+    }
+    let found = if let Some(start) = pushed {
+        // a push shows when the calendar can't be read, as Teams does
+        calendar_lookup(core, conversation, start.message.as_deref()).await
+    } else {
+        Ok(calendar_meeting(core, conversation, &pending.start).await)
+    };
+    if matches!(found, Ok(None)) {
+        log::debug!("meeting banner: none for {conversation}: not on the calendar about now");
+        return None;
+    }
+    let event = found.ok().flatten();
+    let subject = pushed
+        .and_then(|start| start.subject.clone())
+        .or_else(|| event.as_ref().map(|event| event.subject.clone()))
+        .filter(|subject| !subject.trim().is_empty());
+    let title = match subject {
+        Some(subject) => subject,
+        None => chat_name(core, conversation).await,
+    };
+    let join = if channel {
+        let meeting = event.and_then(|event| event.meeting).or_else(|| {
+            pushed.and_then(|start| {
+                Some(MeetingInfo {
+                    organizer_id: start.organizer.clone()?,
+                    tenant_id: start.tenant.clone()?,
+                })
+            })
+        });
+        MeetingJoin::Channel {
+            channel: conversation.to_owned(),
+            title: title.clone(),
+            meeting,
+        }
+    } else {
+        MeetingJoin::MeetingChat {
+            chat: conversation.to_owned(),
+            title: title.clone(),
+        }
+    };
+    let body = if pushed.is_some_and(|start| start.kind == MeetingStartKind::Lobby) {
+        format!("{name} is waiting in the lobby. Join the meeting to let them in.")
+    } else {
+        format!("{name} started the meeting")
+    };
+    Some((title, body, join))
 }
 
 /// The account's calendar event of the meeting in `conversation` running now ([`scheduled_now`]): the stored calendar
@@ -656,15 +889,25 @@ async fn calendar_meeting(core: &dyn Core, conversation: &str, start: &str) -> O
     } else {
         None
     };
+    calendar_lookup(core, conversation, post.as_deref())
+        .await
+        .ok()
+        .flatten()
+}
+
+/// The account's calendar event of the meeting in `conversation` (a channel's: its `post`) running now
+/// ([`scheduled_now`]): the stored calendar first, else the service's. `Err` when neither holds it and the service's
+/// can't be read.
+async fn calendar_lookup(core: &dyn Core, conversation: &str, post: Option<&str>) -> Result<Option<CalendarEvent>, ()> {
     let now = now_ms();
     let local = chrono::Local::now().naive_local();
     let window = (now - 24 * 60 * 60 * 1000, now + 24 * 60 * 60 * 1000);
     let stored = core.stored_calendar(window.0, window.1).await.unwrap_or_default();
-    if let Some(event) = scheduled_now(&stored, conversation, post.as_deref(), local) {
-        return Some(event.clone());
+    if let Some(event) = scheduled_now(&stored, conversation, post, local) {
+        return Ok(Some(event.clone()));
     }
-    let read = core.calendar(window.0, window.1).await.ok()?;
-    scheduled_now(&read, conversation, post.as_deref(), local).cloned()
+    let read = core.calendar(window.0, window.1).await.map_err(|_| ())?;
+    Ok(scheduled_now(&read, conversation, post, local).cloned())
 }
 
 /// Whether the channel `channel`'s notifications are muted; one whose preferences can't be read counts as muted, as a

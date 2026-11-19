@@ -1133,14 +1133,28 @@ impl SettingsView {
             ),
             group(
                 Some("Meetings"),
-                vec![row(
-                    "Meeting started notification",
-                    Some("A notification with Join when a meeting you're invited to, or one in a group chat, starts."),
-                    self.switch("meeting-started", settings.meeting_started, |settings, on| {
-                        settings.meeting_started = on;
-                    }),
-                    palette,
-                )],
+                vec![
+                    row(
+                        "Meeting started notification",
+                        Some(
+                            "A notification with Join when a meeting you're invited to, or one in a group chat, starts.",
+                        ),
+                        self.switch("meeting-started", settings.meeting_started, |settings, on| {
+                            settings.meeting_started = on;
+                        }),
+                        palette,
+                    ),
+                    row(
+                        "Meeting reminders",
+                        Some(
+                            "A reminder with Join before a meeting on your calendar starts, at the meeting's reminder time.",
+                        ),
+                        self.switch("meeting-reminders", settings.meeting_reminders, |settings, on| {
+                            settings.meeting_reminders = on;
+                        }),
+                        palette,
+                    ),
+                ],
                 palette,
             ),
         ];

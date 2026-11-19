@@ -60,6 +60,7 @@ fn changed() -> Settings {
         first_run: FirstRunState::Confirmed,
         notifications: Notifications::Mentions,
         meeting_started: false,
+        meeting_reminders: false,
         idle_minutes: 15,
         manual_status: ManualStatus::DoNotDisturb,
         log_level: LogLevel::Debug,

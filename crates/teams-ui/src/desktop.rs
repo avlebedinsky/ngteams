@@ -65,6 +65,7 @@ use crate::call_alert::{CallAlert, CallAlertEvent};
 use crate::call_sounds::CallSounds;
 use crate::call_window::{AccountNamer, CallWindows, CallWindowsEvent};
 use crate::meeting_alert::{MeetingAlert, MeetingAlertEvent};
+use crate::meeting_reminder::{MeetingReminders, ReminderEvent};
 #[cfg(target_os = "linux")]
 use crate::notify::BusNotifications;
 use crate::notify::{DEFAULT_ACTION, NotificationServer, Notifier, NotifierEvent};
@@ -157,11 +158,12 @@ struct Slot {
     notifier: Entity<Notifier>,
     call_alert: Entity<CallAlert>,
     meeting_alert: Entity<MeetingAlert>,
+    meeting_reminders: Entity<MeetingReminders>,
     /// The sounds of its calls: held for as long as the account is.
     _call_sounds: Entity<CallSounds>,
     own_presence: Entity<OwnPresence>,
     tray: Entity<Tray>,
-    _subscriptions: [Subscription; 3],
+    _subscriptions: [Subscription; 4],
 }
 
 /// The app on the desktop (see the module docs). A GPUI entity.
@@ -381,6 +383,7 @@ impl Desktop {
             }
         });
         let (meeting_alert, meeting_asked) = Self::meeting_alert(&shell, &key, cx);
+        let (meeting_reminders, reminder_asked) = Self::meeting_reminders(&shell, &key, cx);
         let own_presence = cx.new(|cx| {
             OwnPresence::new(
                 Arc::clone(&shell.core),
@@ -399,10 +402,11 @@ impl Desktop {
             notifier,
             call_alert,
             meeting_alert,
+            meeting_reminders,
             _call_sounds: call_sounds,
             own_presence,
             tray,
-            _subscriptions: [opening, alerted, meeting_asked],
+            _subscriptions: [opening, alerted, meeting_asked, reminder_asked],
         }
     }
 
@@ -431,6 +435,57 @@ impl Desktop {
             }
         });
         (alert, asked)
+    }
+
+    /// Account `key`'s meeting reminders over `shell`, what they ask done in its shell.
+    fn meeting_reminders(
+        shell: &ShellParts,
+        key: &str,
+        cx: &mut Context<Self>,
+    ) -> (Entity<MeetingReminders>, Subscription) {
+        let reminders = cx.new(|cx| {
+            MeetingReminders::new(
+                Arc::clone(&shell.core),
+                shell.settings.clone(),
+                shell.models.calls.clone(),
+                Arc::clone(&shell.trace),
+                cx,
+            )
+        });
+        let key = key.to_owned();
+        let asked = cx.subscribe(&reminders, move |this: &mut Self, _, event, cx| match event {
+            ReminderEvent::Open { chat: Some(chat) } => this.open_chat_of(&key, chat.clone(), cx),
+            ReminderEvent::Open { chat: None } => {
+                this.switch(&key, cx);
+                this.in_shell(cx, Shell::show_calendar);
+            }
+            ReminderEvent::Join(join) => {
+                let join = join.clone();
+                this.switch(&key, cx);
+                this.in_shell(cx, move |shell, window, cx| shell.join_from_banner(join, window, cx));
+            }
+        });
+        (reminders, asked)
+    }
+
+    /// Hands each shell of the window its account's meeting notices, which it shows as cards.
+    fn hand_notices(&self, cx: &mut Context<Self>) {
+        let Some(window) = self.window else { return };
+        let Some(root) = window
+            .update(cx, |kit, _, _| kit.view().clone().downcast::<Root>().ok())
+            .ok()
+            .flatten()
+        else {
+            return;
+        };
+        let shells = root.read(cx).shells().to_vec();
+        for shell in shells {
+            let key = shell.read(cx).account().to_owned();
+            if let Some(slot) = self.slots.iter().find(|slot| slot.key == key) {
+                let (alert, reminders) = (slot.meeting_alert.clone(), slot.meeting_reminders.clone());
+                shell.update(cx, |shell, cx| shell.set_meeting_notices(alert, reminders, cx));
+            }
+        }
     }
 
     /// Adds `slot` to the desktop: to the accounts, to the item's total, to the window's shells and to the bus's
@@ -479,6 +534,7 @@ impl Desktop {
             });
         }
         self.slots.push(slot);
+        self.hand_notices(cx);
     }
 
     /// Adds an account the app started (its engine's request side, models, name and what tells it apart), sharing the
@@ -696,6 +752,7 @@ impl Desktop {
             None => window::open(cx, app_id, title, self.parts.shell.clone())?,
         };
         self.window = Some(window);
+        self.hand_notices(cx);
         self.root = window
             .update(cx, |kit, _, _| kit.view().clone().downcast::<Root>().ok())
             .ok()
@@ -983,6 +1040,13 @@ impl Desktop {
                 return;
             }
         }
+        let reminders: Vec<Entity<MeetingReminders>> =
+            self.slots.iter().map(|slot| slot.meeting_reminders.clone()).collect();
+        for reminder in reminders {
+            if reminder.update(cx, |reminder, cx| reminder.activated(id, action, cx)) {
+                return;
+            }
+        }
         if action != DEFAULT_ACTION {
             return;
         }
@@ -999,6 +1063,8 @@ fn hand_server(slot: &Slot, server: &Arc<dyn NotificationServer>, cx: &mut App) 
         .update(cx, |notifier, _| notifier.set_server(Arc::clone(server)));
     slot.meeting_alert
         .update(cx, |alert, _| alert.set_server(Arc::clone(server)));
+    slot.meeting_reminders
+        .update(cx, |reminders, _| reminders.set_server(Arc::clone(server)));
     slot.call_alert
         .update(cx, |alert, cx| alert.set_server(Arc::clone(server), cx));
 }

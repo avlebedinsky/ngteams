@@ -598,31 +598,56 @@ ring:
 
 - **A group chat's Meet now** (`huddleGroupCall`): titled with the chat's topic, else its members' given names
   ("Ann, Bob +2"), else a placeholder; its line "<name> started a meeting"; its buttons **Join** (into the chat's
-  running call, with no pre-join) and **Open chat**. None shows for a chat the user muted.
+  running call, with no pre-join) and **Message** (the chat). None shows for a chat the user muted.
 - **A meeting** (a meeting chat's, or a channel's): titled with the meeting's subject; its line "<name> started the
   meeting" (Teams' strings `{{meetingCaller}} started the meeting`, `{{audioDropInCaller}} started a meeting`);
-  **Join** (the meeting's join, as from the calendar) and, but for a channel's, **Open chat**.
+  **Join** (the meeting's join, as from the calendar) and, but for a channel's, **Message**.
 - None shows when the user started it (the starter is the user), when the user is in that call already, for a live
   event, or when the switch is off. Each call's start shows once.
 
-The web client learns of a meeting's start two ways: a calling push (an event of its own on the calling endpoint,
-which no lab capture holds yet) and the chat service's call start in the meeting's chat (the `Event/Call`
-`callStarted` message, [chat.md](chat.md#system-messages)). From the chat service's it shows the banner only when the
-user's calendar holds that meeting (its `skypeTeamsData` naming the chat, and for a channel's the post) within a window
-around the meeting's scheduled time, and only for a scheduled meeting: a channel's ad-hoc Meet now and a meeting not
-on the calendar give none.
+The web client learns of a meeting's start two ways (read 2026-11-19 from the bundle a lab profile keeps):
 
-The native client follows the chat service's way for both (`teams_ui::meeting_alert`): a call start delivered in a
-group chat with `huddleGroupCall`, or in a meeting chat or a channel while the account's calendar holds the meeting
-from 15 minutes before its start to 15 minutes after its end (Teams' window lives in its remote configuration, not
-captured). A group chat's plain group call rings its members instead ([The invitation](#the-invitation)). Join of a
+- **The calling push**, at the calling endpoint's root (not a call's callback), as the incoming call's invitation
+  comes: `{"evt": 128, "gp": <base64 JSON>}`, or `"cp"`: the JSON zlib-deflated, then base64. 128 is the bundle's
+  `MEETING_STARTED_NOTIFICATION`; it handles 115 (an active call started), 116 (no active calls) and 129 (a call's
+  update) the same way and shows nothing for them. The JSON: `notificationType` (`MeetingStart`,
+  `MeetingStartFromLobby`: someone waits in the lobby and nobody who admits is in, `HuddleMeetingStart`: a group
+  chat's Meet now), `callId`, `threadId` (the meeting's chat, or the channel), `messageId` (a channel meeting's post;
+  `"0"` for a meeting with its own chat), `subject`, `groupCallInitiator` and `groupCallInitiatorDisplayName` (who
+  started it, by MRI and name), `firstUserToJoinModality` (whom the push names when it gives no starter's name),
+  `meetingInfo` (`tenantId`, `organizerId`, `replyChainMessageId`) and `meetingData` (`meetingCode`, `passcode`).
+  It comes to a member of the meeting whether or not they opened its chat.
+- **The chat service's call start** in the meeting's chat (the `Event/Call` `callStarted` message,
+  [chat.md](chat.md#system-messages)), turned into the same notification of type `MeetingStartFromChatSvc`; shown only
+  when the running call is a scheduled meeting's.
+
+Before it shows one, the web client checks: the setting (Settings → Notifications and activity → Meetings, "Meeting
+started notification", on unless set off), that the user isn't in that call, that the user didn't start it (chat
+service only), and each call once (the same chat and message within 60 s, the same call within 24 hours). It finds the
+meeting on the user's calendar by its chat (`skypeTeamsData`'s `cid`) and, for a channel's, its post (`mid` or
+`rid`), and shows it only from 15 minutes before its start to 5 minutes after its end (remote configuration
+`meetingStartedNotificationV2Settings.minutesBefore`/`minutesAfter`, those defaults). For the push, a meeting the
+calendar holds outside that window, or not at all, shows none, but one whose calendar can't be read shows; the chat
+service's start always needs the calendar's match. A muted chat is checked only for a Meet now. The banner: the
+subject (else the calendar's, else "(No title)"), "{{meetingCaller}} started the meeting" (the lobby's: "{{meetingCaller}}
+is waiting in the lobby. Join the meeting to let them in."; a Meet now's: "{{audioDropInCaller}} started a meeting"),
+Join and Message (a channel's: Join only), shown 20 s, with a ring of its own.
+
+The native client reads both (`teams_call::meeting_push`, `teams_ui::meeting_alert`): the push of a meeting in a
+meeting chat or a channel shows its banner as above (the push's starter, else the name it gives; the lobby's words for
+`MeetingStartFromLobby`); the chat service's start does so for a group chat's `huddleGroupCall`, and for a meeting
+chat's or a channel's start while the account's calendar holds the meeting from 15 minutes before its start to 5
+minutes after its end. One call (its `callId`) shows one banner, whichever came first. The window shows the banner as
+a card as well, for Teams' 20 s; the desktop's notice stays as its server keeps it. A group chat's plain group call
+rings its members instead ([The invitation](#the-invitation)). Join of a
 group chat's meeting goes where its start says it runs (`<conversationUrl>`, `teams_proto::running_call`): nobody was
 rung, so no invitation named the conversation, and the join is the one a callee makes after its ring ended
 ([Joining a running call](#joining-a-running-call)). The chat's header shows Join while the chat's stored call
 events hold a start no newer end ends, read from the store (at start, and after each start or end), since a catch-up
 brings a page's messages in no set order. The banner closes at its own call's end (one naming its start's `<callId>`,
 or one naming no call), not at another call's in the same chat, and none shows for a start whose end the store holds
-already (`teams_proto::start_ended`).
+already (`teams_proto::start_ended`). Each decision is logged at debug level by the chat's id ("meeting banner: …").
+No lab capture holds the push yet (Linux lab runs wait for the server's keyring): its keys are the bundle's.
 
 ## The lobby
 

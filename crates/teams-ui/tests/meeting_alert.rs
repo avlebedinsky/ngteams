@@ -83,9 +83,14 @@ fn huddle(starter: &str) -> String {
 }
 
 fn start() -> String {
+    start_of("call-1")
+}
+
+/// A meeting's start of call `call`.
+fn start_of(call: &str) -> String {
     format!(
         "<partlist alt =\"\"></partlist><callEventType>callStarted</callEventType>\
-         <conversationUrl>{LINK}</conversationUrl><callId>call-1</callId>"
+         <conversationUrl>{LINK}</conversationUrl><callId>{call}</callId>"
     )
 }
 
@@ -172,6 +177,7 @@ fn running_meeting(chat: Option<&str>, channel: Option<&str>) -> CalendarEvent {
             post: Some("scheduled-post".to_owned()),
             ical_uid: "made-up-uid".to_owned(),
         }),
+        reminder: teams_core::EventReminder::Unknown,
     }
 }
 
@@ -425,7 +431,8 @@ fn a_meeting_s_chat_shows_a_banner_only_while_the_calendar_holds_its_meeting() {
             channel: false,
         }]
     );
-    a.arrive(call_event(MEETING, "3", LAB_B, start()), Source::Delivery);
+    // another call's start (one call shows one banner)
+    a.arrive(call_event(MEETING, "3", LAB_B, start_of("call-2")), Source::Delivery);
     assert!(a.activate(2, JOIN_ACTION));
     assert_eq!(
         a.asked.lock().unwrap()[1],
@@ -607,4 +614,127 @@ fn a_channel_meet_now_does_not_borrow_a_scheduled_meetings_banner() {
     a.arrive(call_event(CHANNEL, "3", LAB_B, start()), Source::Delivery);
     assert_eq!(a.server.shown().len(), 1, "the scheduled post's own call");
     assert_eq!(a.server.shown()[0].summary, "Weekly sync");
+}
+
+/// A meeting's start the calling service pushes, by `starter`, in `thread`, of call `call`.
+fn pushed(kind: teams_core::MeetingStartKind, thread: &str, call: &str, starter: &str) -> teams_core::MeetingStartPush {
+    teams_core::MeetingStartPush {
+        kind,
+        call_id: call.to_owned(),
+        thread: thread.to_owned(),
+        message: None,
+        subject: Some("Weekly sync".to_owned()),
+        starter: Some(starter.to_owned()),
+        starter_name: None,
+        organizer: Some("00000000-0000-4000-8000-00000000000b".to_owned()),
+        tenant: Some("00000000-0000-4000-8000-0000000000d0".to_owned()),
+    }
+}
+
+impl Alerting {
+    fn push(&self, start: teams_core::MeetingStartPush) {
+        self.rig.events.send(Event::MeetingStarted(start)).unwrap();
+        self.rig.cx.run_until_parked();
+    }
+
+    fn cards(&self) -> Vec<teams_ui::meeting_alert::StartedCard> {
+        self.rig.cx.read(|cx| self.alert.read(cx).cards())
+    }
+}
+
+#[test]
+fn a_pushed_start_of_a_meeting_on_the_calendar_shows_a_banner_whose_join_opens_its_prejoin() {
+    let a = Alerting::start(Settings::default());
+    a.calendar(running_meeting(Some(MEETING), None));
+    a.push(pushed(teams_core::MeetingStartKind::Meeting, MEETING, "call-1", LAB_B));
+    assert_eq!(
+        a.server.shown(),
+        [Notice {
+            conversation: MEETING.to_owned(),
+            kind: NoticeKind::Meeting,
+            summary: "Weekly sync".to_owned(),
+            body: "Bee started the meeting".to_owned(),
+            picture: None,
+        }]
+    );
+    // the window shows it as a card too
+    let cards = a.cards();
+    assert_eq!(cards.len(), 1);
+    assert_eq!((cards[0].id, cards[0].title.as_str()), (1, "Weekly sync"));
+    assert!(a.activate(1, JOIN_ACTION));
+    assert_eq!(
+        *a.asked.lock().unwrap(),
+        [MeetingAlertEvent::Join(MeetingJoin::MeetingChat {
+            chat: MEETING.to_owned(),
+            title: "Weekly sync".to_owned(),
+        })]
+    );
+    assert!(a.cards().is_empty());
+    // the chat service's start of the same call shows no second one
+    a.arrive(call_event(MEETING, "1", LAB_B, start()), Source::Delivery);
+    assert_eq!(a.server.shown().len(), 1);
+}
+
+#[test]
+fn the_chat_s_start_and_the_push_of_one_call_show_one_banner() {
+    let a = Alerting::start(Settings::default());
+    a.calendar(running_meeting(Some(MEETING), None));
+    a.arrive(call_event(MEETING, "1", LAB_B, start()), Source::Delivery);
+    a.push(pushed(teams_core::MeetingStartKind::Meeting, MEETING, "call-1", LAB_B));
+    assert_eq!(a.server.shown().len(), 1);
+}
+
+#[test]
+fn a_pushed_start_shows_none_off_the_calendar_and_one_when_the_calendar_cant_be_read() {
+    let a = Alerting::start(Settings::default());
+    a.push(pushed(teams_core::MeetingStartKind::Meeting, MEETING, "call-1", LAB_B));
+    assert!(a.server.shown().is_empty(), "not on the calendar");
+    a.rig
+        .core
+        .calendar
+        .lock()
+        .unwrap()
+        .answers
+        .push_back(Err(teams_core::EngineError::CalendarUnread));
+    a.push(pushed(teams_core::MeetingStartKind::Meeting, MEETING, "call-2", LAB_B));
+    let shown = a.server.shown();
+    assert_eq!(shown.len(), 1, "the calendar couldn't be read: shown, as Teams does");
+    assert_eq!(shown[0].summary, "Weekly sync");
+}
+
+#[test]
+fn a_pushed_lobby_wait_says_who_waits_and_the_account_s_own_start_shows_none() {
+    let a = Alerting::start(Settings::default());
+    a.calendar(running_meeting(Some(MEETING), None));
+    a.push(pushed(teams_core::MeetingStartKind::Meeting, MEETING, "call-1", LAB_A));
+    assert!(a.server.shown().is_empty(), "the account's own");
+    a.push(pushed(teams_core::MeetingStartKind::Lobby, MEETING, "call-2", LAB_B));
+    assert_eq!(
+        a.server.shown()[0].body,
+        "Bee is waiting in the lobby. Join the meeting to let them in."
+    );
+}
+
+#[test]
+fn a_pushed_start_shows_none_while_the_switch_is_off() {
+    let a = Alerting::start(Settings {
+        meeting_started: false,
+        ..Settings::default()
+    });
+    a.calendar(running_meeting(Some(MEETING), None));
+    a.push(pushed(teams_core::MeetingStartKind::Meeting, MEETING, "call-1", LAB_B));
+    assert!(a.server.shown().is_empty());
+    assert!(a.cards().is_empty());
+}
+
+#[test]
+fn a_meeting_that_ended_more_than_five_minutes_ago_shows_none() {
+    let a = Alerting::start(Settings::default());
+    let mut over = running_meeting(Some(MEETING), None);
+    let now = now_ms();
+    over.start = EventTime::Instant(now - 60 * 60_000);
+    over.end = EventTime::Instant(now - 6 * 60_000);
+    a.calendar(over);
+    a.push(pushed(teams_core::MeetingStartKind::Meeting, MEETING, "call-1", LAB_B));
+    assert!(a.server.shown().is_empty());
 }

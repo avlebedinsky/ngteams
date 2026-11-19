@@ -27,7 +27,8 @@ use gpui::{App, AsyncApp, SystemNotification, SystemNotificationAction, SystemNo
 
 use super::Desktop;
 use crate::notify::{
-    ANSWER_ACTION, BannerFiles, DECLINE_ACTION, DEFAULT_ACTION, JOIN_ACTION, Notice, NoticeKind, NotificationServer,
+    ANSWER_ACTION, BannerFiles, DECLINE_ACTION, DEFAULT_ACTION, DISMISS_ACTION, JOIN_ACTION, Notice, NoticeKind,
+    NotificationServer, SNOOZE_ACTION,
 };
 use crate::tray::TrayIcon;
 
@@ -133,6 +134,18 @@ fn system_notification(notice: &Notice, tag: String) -> SystemNotification {
             id: JOIN_ACTION.into(),
             label: "Join".into(),
         }]
+    } else if notice.kind == NoticeKind::Reminder {
+        [
+            (JOIN_ACTION, "Join"),
+            (SNOOZE_ACTION, "Snooze"),
+            (DISMISS_ACTION, "Dismiss"),
+        ]
+        .into_iter()
+        .map(|(id, label)| SystemNotificationAction {
+            id: id.into(),
+            label: label.into(),
+        })
+        .collect()
     } else {
         Vec::new()
     };
@@ -148,7 +161,7 @@ fn system_notification(notice: &Notice, tag: String) -> SystemNotification {
 fn action_of(response: &SystemNotificationResponse) -> Option<&str> {
     match response.action_id.as_deref() {
         None => Some(DEFAULT_ACTION),
-        Some(action @ (ANSWER_ACTION | DECLINE_ACTION | JOIN_ACTION)) => Some(action),
+        Some(action @ (ANSWER_ACTION | DECLINE_ACTION | JOIN_ACTION | SNOOZE_ACTION | DISMISS_ACTION)) => Some(action),
         Some(_) => None,
     }
 }
@@ -267,10 +280,14 @@ fn notifications(desktop: &WeakEntity<Desktop>, files: Option<BannerFiles>, cx: 
 const CALL_CATEGORY: &str = "ngteams-call";
 /// The category of a notification with Join: a started meeting's.
 const MEETING_CATEGORY: &str = "ngteams-meeting";
+/// The category of a notification with Join, Snooze and Dismiss: a meeting reminder's.
+const REMINDER_CATEGORY: &str = "ngteams-reminder";
 
 /// The category of a notification offering `actions` (some).
 fn category_of(actions: &[SystemNotificationAction]) -> &'static str {
-    if actions.iter().any(|action| action.id.as_ref() == JOIN_ACTION) {
+    if actions.iter().any(|action| action.id.as_ref() == SNOOZE_ACTION) {
+        REMINDER_CATEGORY
+    } else if actions.iter().any(|action| action.id.as_ref() == JOIN_ACTION) {
         MEETING_CATEGORY
     } else {
         CALL_CATEGORY

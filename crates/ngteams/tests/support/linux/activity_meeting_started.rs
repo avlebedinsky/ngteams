@@ -3,16 +3,18 @@
 //! minutes ago to 25 minutes from now), as the service answers a calendar read.
 //!
 //! - b's Meet now in the a–b–c group chat: a's banner, titled with the chat, "Lab B started a meeting", with Join and
-//!   Open chat; Join asks the calls to join the chat's running meeting (the test engine has no calling, so the
+//!   Message; Join asks the calls to join the chat's running meeting (the test engine has no calling, so the
 //!   refusal's banner then shows and is closed; `large_call_window`'s `meet-now` step joins on the mock's calling) and
-//!   the banner closes; Open chat opens the chat; the meeting's end closes a banner still up; while it runs the chat's
+//!   the banner closes; Message opens the chat; the meeting's end closes a banner still up; while it runs the chat's
 //!   header offers Join, after its end not.
 //! - A meeting on the calendar started by b, in its meeting chat and in a channel: a banner titled with its subject,
-//!   "Lab B started the meeting"; Join opens the meeting's pre-join, Open chat the chat or the channel.
+//!   "Lab B started the meeting"; Join opens the meeting's pre-join, Message the chat or the channel.
 //! - No banner for a's own Meet now, b's group call or 1:1 call, a channel's Meet now, a meeting chat's meeting not on
 //!   the calendar, with Do not disturb, notifications Off, a call's Mute notifications, a muted channel, or Settings →
 //!   Notifications → "Meeting started notification" off (its page shot in Teams Light and Dark).
 //! - A catch-up after the push channel came back, or asked for, shows no banner again.
+//! - A meeting on the calendar 12 minutes from now, its reminder 15 minutes before (#664): its reminder "Starts in 12
+//!   minutes" with Join, Snooze and Dismiss, and the window's card (shot in Teams Light and Dark); Dismiss closes both.
 //! - Across restarts of the app on one data dir ([`restart_runs`]): an old Meet now running brings no banner, the
 //!   header offers Join after a restart, and no longer once it ended, also after the next restart.
 
@@ -41,6 +43,7 @@ const MEETING_CHAT: &str = "19:meeting_MadeUpStartedMeeting@thread.v2";
 const UNSCHEDULED_CHAT: &str = "19:meeting_MadeUpUnscheduled@thread.v2";
 const SUBJECT: &str = "Made-up planning review";
 const CHANNEL_SUBJECT: &str = "Made-up channel review";
+const REMINDED_SUBJECT: &str = "Made-up design review";
 /// The channel meeting's post, as its calendar event names it.
 const CHANNEL_POST: &str = "1760000000999";
 /// The child mode of the restart runs, and the data dir they share.
@@ -55,7 +58,7 @@ static MOUNTED: AtomicU64 = AtomicU64::new(0);
 /// The call of the Meet now running when the restart runs start.
 const RUNNING_CALL: &str = "50";
 
-pub(super) const CHECKS: [Check; 19] = [
+pub(super) const CHECKS: [Check; 20] = [
     (
         "meet_now_in_a_group_chat_shows_a_banner_with_join",
         someone_else_s_meet_now,
@@ -83,6 +86,10 @@ pub(super) const CHECKS: [Check; 19] = [
     ("catch_up_after_a_reconnect_shows_no_banner_again", reconnect),
     ("meeting_started_switch_off_shows_no_banner", switch_off),
     ("meeting_started_setting_light_and_dark", setting_shots),
+    (
+        "meeting_reminder_shows_with_join_snooze_and_dismiss_light_and_dark",
+        reminder,
+    ),
     ("meeting_s_end_after_join_leaves_nothing_running", tidy),
 ];
 
@@ -158,9 +165,10 @@ pub(super) fn mock_reply(verb: &str, rest: &str, probe: &Probe) -> Option<Value>
                 .then(|| format!("{chat};messageid={CHANNEL_POST}"));
             posted(mock, chain.as_deref().unwrap_or(chat), (LAB_B, "Lab B"), &content)
         }
-        // `calendar`: the calendar's next reads hold the meeting chat's and the channel's meetings, now
+        // `calendar`: the calendar's next reads hold the meeting chat's and the channel's meetings, now, and the
+        // reminded meeting, soon
         "calendar" => {
-            let events = json!([meeting_event(), channel_event()]);
+            let events = json!([meeting_event(), channel_event(), reminded_event()]);
             let answer = json!({"type": "Microsoft.SkypeSpaces.MiddleTier.Models.CalendarEvent", "value": events});
             // mounted off the window's thread: a mount waits for the mock's held requests to end
             let held = Arc::clone(&probe.mock);
@@ -218,6 +226,26 @@ pub(super) fn window_reply(verb: &str, rest: &str, shell: &Entity<Shell>, cx: &m
                 "prejoin": calls.prejoin().and_then(|prejoin| prejoin.to_join.chat().map(str::to_owned)),
                 "prejoin_meeting": calls.prejoin().is_some_and(|prejoin| prejoin.to_join.meeting().is_some()),
             })
+        }
+        // the reminders read the service's calendar now
+        "reminders-refresh" => {
+            let reminders = shell.read(cx).meeting_reminders().cloned();
+            if let Some(reminders) = &reminders {
+                reminders.update(cx, teams_ui::meeting_reminder::MeetingReminders::refresh);
+            }
+            json!({"refreshed": reminders.is_some()})
+        }
+        // the titles of the reminders the window shows as cards
+        "reminder-cards" => {
+            let cards: Vec<String> = shell
+                .read(cx)
+                .meeting_reminders()
+                .map(|reminders| reminders.read(cx).cards(cx))
+                .unwrap_or_default()
+                .into_iter()
+                .map(|card| card.title)
+                .collect();
+            json!({"cards": cards})
         }
         "cancel-prejoin" => {
             calls.update(cx, teams_ui::Calls::cancel_prejoin);
@@ -316,6 +344,18 @@ fn event_now(id: &str, subject: &str, (thread, post): (&str, &str)) -> Value {
         "attendees": [{"name": "Lab B", "address": "lab-b@lab.example.com"}, {"name": "Lab A", "address": "a@example.com"}],
         "skypeTeamsMeetingUrl": link,
     })
+}
+
+/// The reminded meeting: in a's meeting chat, from 12 minutes from now, its reminder 15 minutes before.
+fn reminded_event() -> Value {
+    let mut event = event_now("AAMkMadeUpReminded", REMINDED_SUBJECT, (MEETING_CHAT, "0"));
+    let now = chrono::Utc::now();
+    event["startTime"] = json!(iso(now + chrono::Duration::minutes(12)));
+    event["endTime"] = json!(iso(now + chrono::Duration::minutes(42)));
+    event["isReminderSet"] = json!(true);
+    event["reminderMinutesBeforeStart"] = json!(15);
+    event["skypeTeamsData"] = json!(json!({"cid": MEETING_CHAT, "type": 0}).to_string());
+    event
 }
 
 fn meeting_event() -> Value {
@@ -422,7 +462,7 @@ fn someone_else_s_meet_now(qa: &mut Qa<'_>) -> SandboxResult {
         format!("the banner isn't titled with the chat: {:?}", banner.summary)
     })?;
     ensure(
-        offers(&banner, "join", "Join") && offers(&banner, "default", "Open chat"),
+        offers(&banner, "join", "Join") && offers(&banner, "default", "Message"),
         || format!("the banner's actions: {:?}", banner.actions),
     )?;
     qa.shot("meeting-started-banner-shown")?;
@@ -440,7 +480,7 @@ fn someone_else_s_meet_now(qa: &mut Qa<'_>) -> SandboxResult {
     Ok(())
 }
 
-/// The banner's Open chat (its body's click) opens the group chat and closes the banner.
+/// The banner's Message (its body's click) opens the group chat and closes the banner.
 fn open_chat(qa: &mut Qa<'_>) -> SandboxResult {
     qa.chord(&[ui_sandbox::input::Modifier::Ctrl], '1')?;
     let shown = qa.sandbox.bus().notifications().len();
@@ -449,7 +489,7 @@ fn open_chat(qa: &mut Qa<'_>) -> SandboxResult {
     qa.sandbox.bus().invoke_action(banner.id, "default")?;
     qa.state_until("the group chat open", |state| state["chat"] == ABC_CHAT)?;
     qa.shot("meeting-started-open-chat")?;
-    closed(qa, banner.id, "after Open chat")?;
+    closed(qa, banner.id, "after Message")?;
     qa.ask("push-meet-now-end 5")?;
     Ok(())
 }
@@ -520,7 +560,7 @@ fn unscheduled_meeting(qa: &mut Qa<'_>) -> SandboxResult {
     Ok(())
 }
 
-/// The calendar's meeting started by b: its subject, "Lab B started the meeting", Join and Open chat; Join opens its
+/// The calendar's meeting started by b: its subject, "Lab B started the meeting", Join and Message; Join opens its
 /// pre-join on its chat.
 fn scheduled_meeting(qa: &mut Qa<'_>) -> SandboxResult {
     calendar_now(qa)?;
@@ -538,7 +578,7 @@ fn scheduled_meeting(qa: &mut Qa<'_>) -> SandboxResult {
     )
     .and_then(|()| {
         ensure(
-            offers(&banner, "join", "Join") && offers(&banner, "default", "Open chat"),
+            offers(&banner, "join", "Join") && offers(&banner, "default", "Message"),
             || format!("the banner's actions: {:?}", banner.actions),
         )
     });
@@ -684,6 +724,53 @@ fn setting_shots(qa: &mut Qa<'_>) -> SandboxResult {
     let dark = qa.shot("meeting-started-setting-dark");
     qa.ask("theme light")?;
     dark.map(|_| ())
+}
+
+/// The reminded meeting on the calendar: its reminder "Starts in 12 minutes" with Join, Snooze and Dismiss, on the
+/// desktop and as the window's card (shot in Teams Light and Dark); Dismiss closes both.
+fn reminder(qa: &mut Qa<'_>) -> SandboxResult {
+    calendar_now(qa)?;
+    qa.ctl_json(&["open", "chat", ABC_CHAT])?;
+    let reminded = |qa: &Qa<'_>| {
+        qa.sandbox
+            .bus()
+            .notifications()
+            .into_iter()
+            .rev()
+            .find(|notice| notice.summary == REMINDED_SUBJECT)
+    };
+    qa.ask("reminders-refresh")?;
+    let notice = wait_until(Duration::from_secs(20), || reminded(qa)).ok_or("no reminder of the meeting")?;
+    say(&format!(
+        "the reminder: {:?}, actions {:?}",
+        notice.body, notice.actions
+    ));
+    ensure(notice.body.starts_with("Starts in 1"), || {
+        format!("the reminder says {:?}", notice.body)
+    })?;
+    ensure(
+        offers(&notice, "join", "Join") && offers(&notice, "snooze", "Snooze") && offers(&notice, "dismiss", "Dismiss"),
+        || format!("the reminder's actions: {:?}", notice.actions),
+    )?;
+    let carded = |qa: &Qa<'_>| {
+        qa.ask("reminder-cards").is_ok_and(|cards| {
+            cards["cards"]
+                .as_array()
+                .is_some_and(|titles| titles.iter().any(|title| title == REMINDED_SUBJECT))
+        })
+    };
+    ensure(carded(qa), || {
+        format!("no reminder card: {:?}", qa.ask("reminder-cards"))
+    })?;
+    qa.shot("meeting-reminder-light")?;
+    qa.ask("theme dark")?;
+    let dark = qa.shot("meeting-reminder-dark");
+    qa.ask("theme light")?;
+    dark?;
+    qa.sandbox.bus().invoke_action(notice.id, "dismiss")?;
+    closed(qa, notice.id, "after Dismiss")?;
+    wait_until(BANNER_WAIT, || (!carded(qa)).then_some(())).ok_or("the card stayed after Dismiss")?;
+    Ok(())
 }
 
 /// Every call these checks started has ended: the header offers no Join, the window back on the chats.

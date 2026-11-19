@@ -109,6 +109,7 @@ mod apps;
 mod bot_chat;
 mod channel_management;
 mod chat_people;
+mod meeting_cards;
 mod meeting_tabs;
 mod new_chat;
 mod profile_card;
@@ -327,6 +328,8 @@ pub struct Shell {
     chat: Option<Entity<ChatView>>,
     /// A meeting chat's tabs: the one shown, its Recap and Shared views.
     meeting_tabs: meeting_tabs::MeetingTabs,
+    /// The account's meeting notices the window shows as cards, once the desktop hands them in.
+    meeting_notices: Option<meeting_cards::MeetingNotices>,
     /// Unsaved composers keep their text, reply and in-flight uploads when another chat is opened.
     drafts: std::collections::HashMap<String, Entity<crate::compose::Compose>>,
     /// The channel opened in the conversation pane, with the names its header shows.
@@ -476,6 +479,7 @@ impl Shell {
             chat,
             drafts: std::collections::HashMap::new(),
             meeting_tabs: meeting_tabs::MeetingTabs::default(),
+            meeting_notices: None,
             channel: None,
             channel_listed: false,
             channel_meetup: None,
@@ -1174,6 +1178,28 @@ impl Shell {
                 cx,
             ),
             MeetingJoin::Channel { channel, .. } => self.open_channel_id(channel, window, cx),
+            MeetingJoin::Calendar {
+                chat: Some(chat),
+                meeting: Some(meeting),
+                title,
+                ..
+            } => self.open_prejoin(
+                MeetingToJoin::Chat {
+                    chat,
+                    meeting,
+                    title,
+                    post: None,
+                },
+                cx,
+            ),
+            MeetingJoin::Calendar {
+                chat: Some(chat),
+                title,
+                link,
+                ..
+            } => self.join_meeting_chat(chat, Some(title), link, cx),
+            MeetingJoin::Calendar { link: Some(link), .. } => cx.open_url(&link),
+            MeetingJoin::Calendar { .. } => {}
         }
     }
 
@@ -3641,6 +3667,7 @@ impl Render for Shell {
         let share_dialog = self.share_dialog_view();
         let team_dialog = self.team_dialog_view();
         let toast = self.toast_view(palette, cx);
+        let meeting_cards = self.meeting_cards_view(palette, cx);
         let more_apps = self.more_apps_view(palette, cx);
         let card = self.card_layer(window, cx);
         let first_run = self.first_run_layer(window, cx);
@@ -3683,6 +3710,7 @@ impl Render for Shell {
             .children(more_apps)
             .children(card)
             .children(toast)
+            .children(meeting_cards)
             .children(first_run)
     }
 }

@@ -144,6 +144,7 @@ pub mod local_ai;
 pub mod manage_team;
 pub mod meeting_alert;
 pub mod meeting_recap;
+pub mod meeting_reminder;
 pub mod message_correct;
 pub mod models;
 pub mod motion;
