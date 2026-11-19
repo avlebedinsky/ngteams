@@ -4000,8 +4000,6 @@ fn toggle_first_video(cx: &mut App) {
     }
 }
 
-/// Shows the hover bar of the last message of b's (`own` false) or a's that offers actions, as the pointer over it
-/// would, nothing selected.
 /// Edits the account's last message in its chat, as its Edit action does.
 fn edit_last_own(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) {
     let Some(chat) = shell.read(cx).chat().cloned() else {
@@ -4018,6 +4016,8 @@ fn edit_last_own(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) {
     }
 }
 
+/// Shows the hover bar of the last message of b's (`own` false) or a's that offers actions, as the pointer over it
+/// would, nothing selected.
 fn hover_last(shell: &Entity<Shell>, own: bool, cx: &mut App) {
     let Some(chat) = shell.read(cx).chat().cloned() else {
         return;
