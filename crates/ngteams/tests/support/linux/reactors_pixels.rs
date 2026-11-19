@@ -37,7 +37,8 @@ impl Rect {
     }
 }
 
-/// The pixels of `after` drawn in the palette's selection colour that weren't in `before`: the pill under the keys.
+/// The largest patch of pixels of `after` drawn in the palette's selection colour that weren't in `before`: the pill
+/// under the keys. A smoothed pixel of a face's initials in the card can have that colour too.
 pub fn highlighted(before: &Path, after: &Path) -> SandboxResult<Rect> {
     let wanted = teams_ui::theme::LIGHT_PALETTE.selection.to_be_bytes();
     let near = |pixel: &image::Rgb<u8>| {
@@ -48,8 +49,63 @@ pub fn highlighted(before: &Path, after: &Path) -> SandboxResult<Rect> {
             .all(|(&got, &want)| got.abs_diff(want) <= 6)
     };
     let (before, after) = (image::open(before)?.to_rgb8(), image::open(after)?.to_rgb8());
-    bounds_of(&after, |x, y, pixel| near(pixel) && !near(before.get_pixel(x, y)))
+    largest_patch(&after, |x, y, pixel| near(pixel) && !near(before.get_pixel(x, y)))
         .ok_or_else(|| "no pill drawn in the selection colour".into())
+}
+
+/// The bounds of the largest patch of pixels that `taken` takes, joined side by side or corner to corner, if any.
+fn largest_patch(shot: &image::RgbImage, taken: impl Fn(u32, u32, &image::Rgb<u8>) -> bool) -> Option<Rect> {
+    let (width, height) = shot.dimensions();
+    let index = |x: u32, y: u32| y as usize * width as usize + x as usize;
+    let mut seen = vec![false; width as usize * height as usize];
+    let mut best: Option<(usize, Rect)> = None;
+    for (x, y, pixel) in shot.enumerate_pixels() {
+        if seen[index(x, y)] || !taken(x, y, pixel) {
+            continue;
+        }
+        seen[index(x, y)] = true;
+        let (mut count, mut patch) = (
+            0,
+            Rect {
+                x0: x,
+                y0: y,
+                x1: x + 1,
+                y1: y + 1,
+            },
+        );
+        let mut stack = vec![(x, y)];
+        while let Some((px, py)) = stack.pop() {
+            count += 1;
+            patch = Rect {
+                x0: patch.x0.min(px),
+                y0: patch.y0.min(py),
+                x1: patch.x1.max(px + 1),
+                y1: patch.y1.max(py + 1),
+            };
+            for (nx, ny) in neighbours((px, py), (width, height)) {
+                if !seen[index(nx, ny)] && taken(nx, ny, shot.get_pixel(nx, ny)) {
+                    seen[index(nx, ny)] = true;
+                    stack.push((nx, ny));
+                }
+            }
+        }
+        if best.is_none_or(|(most, _)| count > most) {
+            best = Some((count, patch));
+        }
+    }
+    best.map(|(_, patch)| patch)
+}
+
+/// The pixels round `(x, y)` that are on a screen `width` by `height`.
+fn neighbours((x, y): (u32, u32), (width, height): (u32, u32)) -> impl Iterator<Item = (u32, u32)> {
+    (-1_i64..=1)
+        .flat_map(|dy| (-1_i64..=1).map(move |dx| (dx, dy)))
+        .filter(|&step| step != (0, 0))
+        .filter_map(move |(dx, dy)| {
+            let nx = u32::try_from(i64::from(x) + dx).ok()?;
+            let ny = u32::try_from(i64::from(y) + dy).ok()?;
+            (nx < width && ny < height).then_some((nx, ny))
+        })
 }
 
 /// The changed pixels beside `pill`, outside its highlight, within the largest card's reach.

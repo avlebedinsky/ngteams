@@ -194,7 +194,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 324 + 8 + 5 + 15 + 12 + 10] = [
+const STEPS: [Step; 5 + 325 + 8 + 5 + 15 + 12 + 10] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -1271,11 +1271,16 @@ const STEPS: [Step; 5 + 324 + 8 + 5 + 15 + 12 + 10] = [
             });
         });
     }),
+    // the same in Teams Light: the header's face with its initials
+    ("picture-viewer-zoomed", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
+    }),
     // c's messages with files (`seed_files`), the newest at the bottom: a grid of five cards, two in a row, the videos'
     // with their thumbnails as Graph and the media host (the mock) gave them, the zip's and the document's with their
     // type's icon, in Teams Dark
     ("chat-files-dark", |shell, window, cx| {
         picture_viewer::close(cx);
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
         shell.update(cx, |shell, cx| shell.open_chat(AC_CHAT.to_owned(), window, cx));
     }),
     // the first video played in its card, its bytes from the mock's download link (`seed_files`): loading, then
@@ -1516,9 +1521,9 @@ const STEPS: [Step; 5 + 324 + 8 + 5 + 15 + 12 + 10] = [
     ("chat-files-first", |shell, _, cx| show_first_message(shell, cx)),
     ("chat-files-few", |shell, _, cx| show_message(shell, 1, cx)),
     ("chat-files-grid", |shell, _, cx| show_message(shell, 3, cx)),
-    // "Share this file" again, in Teams Light
+    // "Share this file" again, in Teams Light, not the system's: the later Dark steps set only the theme key
     ("share-file", |shell, window, cx| {
-        fixed_theme(shell, None, cx);
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
         open_share_file(shell, window, cx);
     }),
     ("share-file-more", open_share_file_more),
@@ -1903,9 +1908,10 @@ const STEPS: [Step; 5 + 324 + 8 + 5 + 15 + 12 + 10] = [
         });
     }),
     // two messages b sent in the a–b–c chat, forwarded to a by the outsider (`seed_forwards`): each in Teams' card
-    // under the arrow, b's avatar and name and the original's time, the second's picture drawn in it
+    // under the arrow, b's avatar and name and the original's time, the second's picture drawn in it, in Teams Light
     ("chat-forward", |shell, window, cx| {
         event_form::close(cx);
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
         shell.update(cx, |shell, cx| shell.open_chat(AX_CHAT.to_owned(), window, cx));
     }),
     // the right-click menu of the forwarded note's link, as a right-click on it opens it: Copy link and Open link; in
