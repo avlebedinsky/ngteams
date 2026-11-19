@@ -1043,12 +1043,12 @@ fn ai_keys_and_language(user: &mut User<'_>) -> SandboxResult {
     Ok(())
 }
 
-/// Where the customize list's rows are after a right click on the main box's Attach at 1280 px: the list opens up and to
-/// the right of the pointer, moved left to stay in the window.
+/// Where the customize list's rows are after a right click on the main box's Attach at 1280 px: the list opens over the
+/// toolbar's buttons and to the right of the pointer, moved left to stay in the window.
 const LIST_X: i32 = 1110;
-const LIST_EMOJI_Y: i32 = 589;
-const LIST_PLUS_Y: i32 = 701;
-const LIST_SEND_Y: i32 = 729;
+const LIST_EMOJI_Y: i32 = 576;
+const LIST_PLUS_Y: i32 = 688;
+const LIST_SEND_Y: i32 = 716;
 
 fn open_list_on_attach(user: &mut User<'_>) -> SandboxResult {
     user.right_click(main_tool(3))?;
@@ -1541,7 +1541,10 @@ fn hide_for_restart(user: &mut User<'_>) -> SandboxResult {
     user.until("the list", |state| main_box(state)["customize"] == true)?;
     user.take_row_by_up(4)?;
     user.until("Emoji hidden", |state| hidden_is(state, &["emoji"]))?;
-    user.take_row_by_up(2)?;
+    // Emoji's row stays selected: Loop is two rows below it
+    for key in ["down", "down", "enter"] {
+        user.press(key)?;
+    }
     user.until("Loop hidden", |state| hidden_is(state, &["emoji", "loop"]))?;
     user.press("escape")?;
     user.close_menus("chat")?;
