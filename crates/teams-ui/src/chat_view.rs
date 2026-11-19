@@ -158,6 +158,7 @@ mod bots;
 pub mod channel;
 mod email;
 mod events;
+mod menu_keys;
 pub mod reactors;
 mod saved;
 mod translate;
@@ -185,7 +186,8 @@ actions!(
         PickFourth,
         PickMore,
         CopySelected,
-        TranslateSelected
+        TranslateSelected,
+        OpenSelectedMenu
     ]
 );
 
@@ -224,6 +226,10 @@ const BUBBLE_INSET: f32 = 16.0;
 const MARK_COLUMN: f32 = 28.0;
 /// A message's header's height, rem: the avatar beside it starts below it, level with the bubble.
 const HEADER_REMS: f32 = 1.5;
+/// The line over a follow-up message's bubble that holds its translation mark, px (Teams' is 20).
+const MARK_LINE: f32 = 20.0;
+/// How far the hover bar keeps from the bubble's edge while that line shows, px: past the mark.
+const MARK_CLEARANCE: f32 = 28.0;
 /// Messages read from the store at a time; older ones load when fewer rows than this are above the view.
 pub const PAGE: usize = 50;
 /// A sender's messages within this long of the one before are grouped under one name and time, ms.
@@ -305,6 +311,9 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("5", PickMore, context),
         KeyBinding::new("secondary-c", CopySelected, context),
         KeyBinding::new("t", TranslateSelected, context),
+        // Teams' context menu keys; macOS takes the same Shift+F10
+        KeyBinding::new("shift-f10", OpenSelectedMenu, context),
+        KeyBinding::new("menu", OpenSelectedMenu, context),
         KeyBinding::new("right", reactors::NextReaction, context),
         KeyBinding::new("left", reactors::PreviousReaction, context),
         KeyBinding::new("space", reactors::PressReaction, context),
@@ -1134,9 +1143,8 @@ pub struct ChatView {
     options_at: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The list the open more-options menu shows beside it ("More actions" or "Translation"), and its message.
     side_list: Option<(SideList, String)>,
-    /// Where the open list ("More actions" or "Translation") was last drawn: a click in it is not a click outside
-    /// the menu.
-    more_at: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The more-options menu's keyboard, and where its list was last drawn ([`menu_keys`]).
+    menu_keys: menu_keys::MenuKeys,
     /// The account's workflows that run from a message, read each time a message's menu opens.
     workflows: Option<Entity<crate::workflow_run::menu::MessageWorkflows>>,
     /// The message whose delete waits for its confirmation.
@@ -1317,7 +1325,7 @@ impl ChatView {
             options: None,
             options_at: Rc::default(),
             side_list: None,
-            more_at: Rc::default(),
+            menu_keys: menu_keys::MenuKeys::new(cx),
             workflows: None,
             deleting: None,
             resending: None,
@@ -3780,7 +3788,8 @@ impl ChatView {
             column.items_start()
         };
         let cycle = clock::cycle(cx);
-        // Teams' translation mark stands beside the time, or under the bubble when there is no header to hold it
+        // Teams' translation mark stands beside the time, or on a line of its own over the bubble when there is no
+        // header to hold it
         let mut mark = translation_mark(item, palette, cx);
         let cards = &self.models.cards;
         // an email post's header, reactions and rows are in its card, as Teams draws them
@@ -3797,10 +3806,19 @@ impl ChatView {
         };
         let (foot, footer) = match &item.email {
             Some(post) => (Some(self.email_foot(item, post, palette, cx)), None),
-            None => (None, footer_line(item, mark, &self.reactors, palette, cx)),
+            None => (None, footer_line(item, &self.reactors, palette, cx)),
         };
+        let mark_line = mark.filter(|_| follow_up_marked(item)).map(|mark| {
+            div()
+                .debug_selector(|| format!("translation-mark-line-{}", item.id))
+                .h(px(MARK_LINE))
+                .flex()
+                .items_center()
+                .child(mark)
+        });
         column
             .children(header)
+            .children(mark_line)
             .child(bubble_line(
                 item,
                 InChat {
@@ -4119,7 +4137,14 @@ impl ChatView {
             .min_w(relative(1.0))
             .flex()
             .justify_end();
-        let place = if item.own { place.right_0() } else { place.left_0() };
+        // a follow-up's translation mark stands on its own line over the bubble, on the bubble's side: the bar keeps
+        // clear of it
+        let inset = px(if follow_up_marked(item) { MARK_CLEARANCE } else { 0.0 });
+        let place = if item.own {
+            place.right(inset)
+        } else {
+            place.left(inset)
+        };
         Some(place.child(bar).into_any_element())
     }
 
@@ -4148,6 +4173,7 @@ impl ChatView {
     fn options_overlay(&mut self, palette: Palette, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let Some(message) = self.options.clone() else {
             self.options_at.set(None);
+            self.settle_menu_keys(false, window, cx);
             return None;
         };
         let at = self.options_at.get()?;
@@ -4184,6 +4210,9 @@ impl ChatView {
         let menu = div()
             .id("message-menu")
             .debug_selector(|| "message-menu".to_owned())
+            .track_focus(&self.menu_keys.menu)
+            // a click in the menu leaves the focus where it is (the compose box, as in Teams)
+            .capture_any_mouse_down(|_, window, _| window.prevent_default())
             // Teams' menu widens for the workflows' names
             .w(px(if workflows.is_empty() {
                 MENU_WIDTH
@@ -4201,15 +4230,10 @@ impl ChatView {
             .shadow_lg()
             .occlude()
             .on_mouse_down_out(cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                // a click on its own button toggles it there; one in "More actions"' list is the menu's own
-                let in_list =
-                    this.side_list.is_some() && this.more_at.get().is_some_and(|list| list.contains(&event.position));
-                if !at.contains(&event.position) && !in_list {
-                    this.options = None;
-                    cx.notify();
-                }
+                this.click_out_of_menu(at, event, cx);
             }))
             .children(entries);
+        self.settle_menu_keys(true, window, cx);
         Some(
             deferred(
                 anchored()
@@ -4222,6 +4246,7 @@ impl ChatView {
                             .flex()
                             .items_end()
                             .gap_1()
+                            .on_key_down(cx.listener(Self::menu_key))
                             .children(more.flatten())
                             .children(translation_menu)
                             .child(menu),
@@ -4234,6 +4259,21 @@ impl ChatView {
 }
 
 impl ChatView {
+    /// A click outside the more-options menu, whose button is at `button`, closes it; a click on its own button toggles
+    /// it there, and one in the list beside it is the menu's own.
+    fn click_out_of_menu(&mut self, button: Bounds<Pixels>, event: &gpui::MouseDownEvent, cx: &mut Context<Self>) {
+        let in_list = self.side_list.is_some()
+            && self
+                .menu_keys
+                .side_at
+                .get()
+                .is_some_and(|list| list.contains(&event.position));
+        if !button.contains(&event.position) && !in_list {
+            self.options = None;
+            cx.notify();
+        }
+    }
+
     /// The menu's workflows group (the first [`crate::workflow_run::menu::MAIN_MENU`] workflows that run from a
     /// message) and "More actions", after a hairline.
     fn workflow_entries(
@@ -4265,8 +4305,15 @@ impl ChatView {
         let view = cx.entity().downgrade();
         let open = self.side_open(SideList::MoreActions, message);
         let shown = message.to_owned();
-        crate::workflow_run::menu::more_actions_row(open, palette, move |_, _, cx| {
-            let _ = view.update(cx, |this, cx| this.toggle_side_list(SideList::MoreActions, &shown, cx));
+        let handle = self.menu_keys.opener(SideList::MoreActions);
+        crate::workflow_run::menu::more_actions_row(open, handle, palette, move |event, _, cx| {
+            let keyed = event.is_keyboard();
+            let _ = view.update(cx, |this, cx| {
+                this.toggle_side_list(SideList::MoreActions, &shown, cx);
+                if keyed {
+                    this.side_list_keyed();
+                }
+            });
         })
     }
 
@@ -4285,8 +4332,9 @@ impl ChatView {
             return None;
         }
         let mut list = menu::panel("message-more-actions-menu", palette)
+            .track_focus(&self.menu_keys.side)
             .relative()
-            .child(measured(&self.more_at));
+            .child(measured(&self.menu_keys.side_at));
         let rest: Vec<_> = workflows.iter().skip(menu::MAIN_MENU).collect();
         for flow in &rest {
             let (flow_ref, message) = ((*flow).clone(), message.to_owned());
@@ -4440,7 +4488,7 @@ fn menu_entry(
         palette.foreground
     };
     let selector = format!("action-{}", action.name());
-    div()
+    let row = div()
         .id(ElementId::Name(selector.clone().into()))
         .debug_selector(move || selector.clone())
         .w_full()
@@ -4460,8 +4508,8 @@ fn menu_entry(
         }))
         .child(action.glyph().icon().size(px(14.0)))
         .child(div().flex_1().child(action.label()))
-        .children(key)
-        .into_any_element()
+        .children(key);
+    crate::keyboard::stop(format!("action-{}", action.name()), row, palette).into_any_element()
 }
 
 /// An outbox row's state under the message it concerns, with "send again" when it is offered.
@@ -5407,20 +5455,25 @@ fn muted(text: &'static str, palette: Palette) -> AnyElement {
         .into_any_element()
 }
 
+/// Whether the message's translation mark stands on its own line over its bubble: a follow-up's, with no header to
+/// hold it.
+fn follow_up_marked(item: &MessageItem) -> bool {
+    !item.header && item.email.is_none() && item.translation.is_some()
+}
+
 /// The reactions as Teams draws them, over the bubble's bottom edge from its text's inset: a pill per key (its count
 /// once more than one reacted, the account's own ringed in the brand colour; a click sets or takes back the account's
 /// own), then "Add reaction", which opens the reactions on the message. "Edited" stands here when there is no header
 /// to hold it.
 fn footer_line(
     item: &MessageItem,
-    mark: Option<AnyElement>,
     reactors: &reactors::Reactors,
     palette: Palette,
     cx: &mut Context<ChatView>,
 ) -> Option<AnyElement> {
     let edited =
         (item.edited && !item.header).then(|| edited_mark().text_xs().text_color(rgb(palette.muted_foreground)));
-    if edited.is_none() && mark.is_none() && item.reactions.is_empty() {
+    if edited.is_none() && item.reactions.is_empty() {
         return None;
     }
     let reactions = item
@@ -5439,7 +5492,6 @@ fn footer_line(
     };
     Some(
         line.children(edited)
-            .children(mark)
             .children(reactions)
             .children(add)
             .into_any_element(),
@@ -5597,6 +5649,7 @@ impl ChatView {
                 this.act_on_selected(MessageAction::Delete, window, cx);
             }))
             .on_action(cx.listener(|this, _: &TranslateSelected, _, cx| this.translate_selected(cx)))
+            .on_action(cx.listener(|this, _: &OpenSelectedMenu, window, cx| this.open_selected_menu(window, cx)))
             .on_action(cx.listener(|this, _: &ClearSelection, window, cx| this.escape(window, cx)))
             .on_action(cx.listener(|this, _: &ConfirmDelete, _, cx| this.confirm_delete(cx)))
     }
@@ -5685,6 +5738,14 @@ impl Render for ChatView {
             .children(self.bot_intro(palette))
             .children(pill);
         Self::file_drop_target(cx)
+            // Escape with a more-options menu open closes the menu first, as in Teams, wherever the focus is
+            .capture_action(cx.listener(|this, _: &ComposeEscape, _, cx| {
+                if this.options.take().is_some() {
+                    this.side_list = None;
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
             // Escape the compose box handed on (nothing to cancel there): the list takes the focus
             .on_action(cx.listener(|this, _: &ComposeEscape, window, cx| this.focus_messages(window, cx)))
             // a press anywhere in the view lets the selected text go (a press on text then starts a new selection;

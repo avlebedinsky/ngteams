@@ -210,26 +210,24 @@ impl ChatView {
             return None;
         }
         let message = message.to_owned();
-        Some(
-            div()
-                .id("action-refresh-card")
-                .debug_selector(|| "action-refresh-card".to_owned())
-                .w_full()
-                .h(px(32.0))
-                .px_2()
-                .flex()
-                .items_center()
-                .gap_2()
-                .rounded_md()
-                .cursor_pointer()
-                .text_sm()
-                .text_color(rgb(palette.foreground))
-                .hover(move |row| row.bg(rgb(palette.hover)))
-                .on_click(cx.listener(move |this, _, _, cx| this.refresh_card(&message, cx)))
-                .child(Glyph::REFRESH.icon().size(px(14.0)))
-                .child(div().flex_1().child(REFRESH_CARD))
-                .into_any_element(),
-        )
+        let row = div()
+            .id("action-refresh-card")
+            .debug_selector(|| "action-refresh-card".to_owned())
+            .w_full()
+            .h(px(32.0))
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded_md()
+            .cursor_pointer()
+            .text_sm()
+            .text_color(rgb(palette.foreground))
+            .hover(move |row| row.bg(rgb(palette.hover)))
+            .on_click(cx.listener(move |this, _, _, cx| this.refresh_card(&message, cx)))
+            .child(Glyph::REFRESH.icon().size(px(14.0)))
+            .child(div().flex_1().child(REFRESH_CARD));
+        Some(crate::keyboard::stop("action-refresh-card", row, palette).into_any_element())
     }
 
     /// The newest message's suggested actions over the compose box (see the module docs).

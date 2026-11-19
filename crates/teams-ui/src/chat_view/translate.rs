@@ -6,8 +6,7 @@
 //! the settings' page that holds the "Translate to" language. The selected message's key is T.
 
 use gpui::{
-    AnyElement, Context, IntoElement, ParentElement as _, Styled as _, Window, div, prelude::FluentBuilder as _, px,
-    rgb,
+    AnyElement, Context, InteractiveElement as _, IntoElement, ParentElement as _, Styled as _, Window, div, px,
 };
 use gpui_component::kbd::Kbd;
 
@@ -30,23 +29,21 @@ impl ChatView {
         let open = self.side_open(SideList::Translation, message);
         let view = cx.entity().downgrade();
         let shown = message.to_owned();
-        let row = menu::row(
+        Some(menu::opener_row(
             "action-translation",
-            Glyph::LANGUAGES.icon().size(px(14.0)).into_any_element(),
-            "Translation".to_owned(),
-            Some(Glyph::CHEVRON_RIGHT.icon().size(px(14.0)).into_any_element()),
+            (Glyph::LANGUAGES.icon().size(px(14.0)).into_any_element(), "Translation"),
+            (open, self.menu_keys.opener(SideList::Translation)),
             palette,
-            move |_, _, cx| {
-                let _ = view.update(cx, |this, cx| this.toggle_side_list(SideList::Translation, &shown, cx));
+            move |event, _, cx| {
+                let keyed = event.is_keyboard();
+                let _ = view.update(cx, |this, cx| {
+                    this.toggle_side_list(SideList::Translation, &shown, cx);
+                    if keyed {
+                        this.side_list_keyed();
+                    }
+                });
             },
-        );
-        Some(
-            div()
-                .rounded_md()
-                .when(open, |cell| cell.bg(rgb(palette.hover)))
-                .child(row)
-                .into_any_element(),
-        )
+        ))
     }
 
     /// The "Translation" list beside the menu, while it is open: what the message offers, with its key, then
@@ -92,8 +89,9 @@ impl ChatView {
         );
         Some(
             menu::panel("message-translation-menu", palette)
+                .track_focus(&self.menu_keys.side)
                 .relative()
-                .child(measured(&self.more_at))
+                .child(measured(&self.menu_keys.side_at))
                 .child(translate)
                 .child(menu::separator(palette))
                 .child(settings)

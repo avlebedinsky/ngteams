@@ -5,12 +5,13 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AsyncApp, Context, ElementId, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, div, px, rgb,
+    AnyElement, App, AsyncApp, Context, ElementId, FocusHandle, InteractiveElement as _, IntoElement,
+    ParentElement as _, StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, div, px, rgb,
 };
 
 use crate::bridge::Core;
 use crate::icons::Glyph;
+use crate::keyboard;
 use crate::theme::Palette;
 use crate::workflow_dialog::FlowRef;
 
@@ -62,7 +63,8 @@ impl MessageWorkflows {
     }
 }
 
-/// A menu row: an icon (or the Workflows app's picture), its words, and its click.
+/// A menu row: an icon (or the Workflows app's picture), its words, and its click. The keyboard reaches it: the
+/// message menu's keys move through its rows, and Enter or Space clicks the one they are on.
 pub fn row(
     id: impl Into<String>,
     leading: AnyElement,
@@ -71,6 +73,41 @@ pub fn row(
     palette: Palette,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
+    let id = id.into();
+    keyboard::stop(
+        id.clone(),
+        row_element(id, leading, words, trailing, palette, on_click),
+        palette,
+    )
+    .into_any_element()
+}
+
+/// A row that opens a list beside the menu ("More actions", "Translation"), with its chevron, lit while its list is
+/// open; `handle` is its focus, which the keys give back to it when its list closes.
+pub fn opener_row(
+    id: &'static str,
+    (leading, words): (AnyElement, &str),
+    (open, handle): (bool, &FocusHandle),
+    palette: Palette,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let chevron = Glyph::CHEVRON_RIGHT.icon().size(px(14.0)).into_any_element();
+    let row = row_element(id, leading, words.to_owned(), Some(chevron), palette, on_click);
+    div()
+        .rounded_md()
+        .when(open, |cell| cell.bg(rgb(palette.hover)))
+        .child(keyboard::stop(id, row, palette).handle(handle))
+        .into_any_element()
+}
+
+fn row_element(
+    id: impl Into<String>,
+    leading: AnyElement,
+    words: String,
+    trailing: Option<AnyElement>,
+    palette: Palette,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> gpui::Stateful<gpui::Div> {
     let id = id.into();
     let selector = id.clone();
     div()
@@ -91,7 +128,6 @@ pub fn row(
         .child(leading)
         .child(div().flex_1().min_w_0().truncate().child(words))
         .children(trailing)
-        .into_any_element()
 }
 
 /// A workflow's row: the Workflows app's icon and its name.
@@ -117,22 +153,17 @@ pub fn workflow_row(
 /// "More actions", with its chevron; chosen while its list is open.
 pub fn more_actions_row(
     open: bool,
+    handle: &FocusHandle,
     palette: Palette,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
-    let row = row(
+    opener_row(
         "message-more-actions",
-        div().flex_none().size(px(14.0)).into_any_element(),
-        "More actions".to_owned(),
-        Some(Glyph::CHEVRON_RIGHT.icon().size(px(14.0)).into_any_element()),
+        (div().flex_none().size(px(14.0)).into_any_element(), "More actions"),
+        (open, handle),
         palette,
         on_click,
-    );
-    div()
-        .rounded_md()
-        .when(open, |cell| cell.bg(rgb(palette.hover)))
-        .child(row)
-        .into_any_element()
+    )
 }
 
 /// "Create workflows", at the foot of "More actions".
@@ -173,4 +204,6 @@ pub fn panel(id: &'static str, palette: Palette) -> gpui::Stateful<gpui::Div> {
         .rounded_lg()
         .shadow_lg()
         .occlude()
+        // a click in it leaves the focus where it is (the compose box, as in Teams)
+        .capture_any_mouse_down(|_, window, _| window.prevent_default())
 }
