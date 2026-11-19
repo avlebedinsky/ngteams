@@ -58,6 +58,7 @@
     "ngteams/test/presence": 10,
     "ngteams/test/qa_app_card_window": 67,
     "ngteams/test/qa_bot_cards_window": 223,
+    "ngteams/test/qa_compose_toolbar_window": 330,
     "ngteams/test/qa_narrow_compose_window": 185,
     "ngteams/test/qa_new_chat_kept_window": 164,
     "ngteams/test/qa_ring_cancel_window": 62,

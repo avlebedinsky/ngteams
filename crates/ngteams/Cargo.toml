@@ -214,6 +214,11 @@ name = "qa_ai_providers_window"
 harness = false
 
 [[test]]
+# QA of task 584: the message box's toolbar, its AI button and the buttons that hide, in the app's window over the mock
+name = "qa_compose_toolbar_window"
+harness = false
+
+[[test]]
 # QA of task 579: the AI notice and the "Use AI features" switch in the app's window over the mock
 name = "qa_ai_notice_window"
 harness = false
