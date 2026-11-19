@@ -1,4 +1,4 @@
-//! QA of task 543 (round 1), in the UI sandbox: "Share this file" on a file card, as a user opens and uses it
+//! QA of task 543 (rounds 1 and 2), in the UI sandbox: "Share this file" on a file card, as a user opens and uses it
 //! (`harness = false`: GPUI runs on the process's main thread).
 //!
 //! The parent runs the mock (`teams-mock`). Lab account c posts a message with a video and a document to a chat with
@@ -13,6 +13,10 @@
 //! - **Keys**: Escape closes "More actions", then the emoji picker, then clears the box, then closes the dialog. A
 //!   query with no match. Up, Down and Enter pick a suggestion. Backspace in the empty box takes the last chip off.
 //!   Tab goes from the box to the message. Enter in the message shares, and Enter in the empty box shares.
+//! - **Suggestions over the dialog** (round 2): "Made-up" finds more than the list shows. The list is over "Message
+//!   preview" in both themes, and the wheel scrolls it. A click on the last row, a click on the third row, and Down
+//!   and Enter pick the row the user sees. In a narrow window the list stays over the dialog, a click picks, and a
+//!   query with no match says so.
 //! - **Share**: one and three people, one and three group chats, one and two channels (the mock's teams have two
 //!   live channels). Each target gets one post with the file's entry and the message, and the chat shows the file's
 //!   card. A bold word and an emoji go out as rich text. The toast says "You've shared <file>".
@@ -178,6 +182,8 @@ fn walk(sandbox: &Sandbox, service: &Service, runtime: &tokio::runtime::Runtime,
             doc_share_failed: false,
         };
         ctx.open_and_keys()?;
+        ctx.many_matches()?;
+        ctx.narrow()?;
         ctx.one_person()?;
         ctx.three_people()?;
         ctx.groups()?;
@@ -527,7 +533,7 @@ impl Walk<'_> {
         let dialog = self.run.dialog()?;
         step(&format!("\"Lab\" suggests {:?}", dialog.suggestions));
         self.run.shot(self.sandbox, "qa543-suggestions-light.png")?;
-        self.check_suggestions_shown(found, dialog.suggestions.len());
+        self.check_suggestions_shown(found, dialog.suggestions.len(), "qa543-suggestions-light.png");
         self.run.theme(true)?;
         thread::sleep(SETTLE);
         self.run.shot(self.sandbox, "qa543-suggestions-dark.png")?;
@@ -618,15 +624,15 @@ impl Walk<'_> {
 
     /// The rows under the first of `count` suggestions show on the list's surface (white in Teams Light), on the right
     /// of the rows where no word is drawn: the list is over everything under the box, as Teams draws it.
-    fn check_suggestions_shown(&mut self, found: Rect, count: usize) {
+    fn check_suggestions_shown(&mut self, found: Rect, count: usize, shot_name: &str) {
         let rows = u32::try_from(count.saturating_sub(1)).unwrap_or_default().min(4);
         if rows == 0 {
             return;
         }
         let region = Rect {
-            x0: found.x0 + 380,
+            x0: found.x1 - 220,
             y0: found.y0 + 215,
-            x1: found.x0 + 560,
+            x1: found.x1 - 40,
             y1: found.y0 + 215 + 52 * rows,
         };
         let shot = &self.run.last;
@@ -641,7 +647,7 @@ impl Walk<'_> {
         if u32::try_from(on_list).unwrap_or_default() * 10 < total * 9 {
             note(format!(
                 "the {count} suggestions are drawn under \"Message preview\": only {on_list} of {total} pixels where \
-                 their rows go show the list (qa543-suggestions-light.png)"
+                 their rows go show the list ({shot_name})"
             ));
         }
     }
@@ -675,6 +681,175 @@ impl Walk<'_> {
         self.run.click(x, y)?;
         self.run.dialog_until("the dialog closed by Close", |d| !d.open)?;
         Ok(())
+    }
+}
+
+// --- round 2: the suggestions over the dialog, many of them, and in a narrow window ---
+
+/// What finds more suggestions than the list shows without a scroll: the made-up chats, team and channel.
+const MANY: &str = "Made-up";
+/// The fewest suggestions [`MANY`] must find: more than the list's 300 px show.
+const MANY_AT_LEAST: usize = 6;
+/// The narrow main window's width: under the dialog's 600 px, so the dialog takes the window's width.
+const NARROW: u32 = 560;
+
+impl Walk<'_> {
+    /// "Made-up" in the box: more suggestions than fit, in both themes, over "Message preview". The wheel scrolls the
+    /// list to its end. A click on the last row, a click on the third row, and Down and Enter pick the row shown.
+    fn many_matches(&mut self) -> SandboxResult {
+        self.open_from_video()?;
+        let found = self.dialog_box("qa543-many-open-light.png")?;
+        let shown = self.type_many()?;
+        self.run.shot(self.sandbox, "qa543-many-light.png")?;
+        self.check_suggestions_shown(found, shown.len(), "qa543-many-light.png");
+        self.run.theme(true)?;
+        thread::sleep(SETTLE);
+        self.run.shot(self.sandbox, "qa543-many-dark.png")?;
+        self.run.theme(false)?;
+        thread::sleep(SETTLE);
+        let (x, y) = nth_suggestion(found, 2);
+        self.run.input.scroll(x, y, 10)?;
+        thread::sleep(SETTLE);
+        self.run.shot(self.sandbox, "qa543-many-scrolled-light.png")?;
+        let last = shown.last().map(|s| s.name.clone()).unwrap_or_default();
+        self.click_picks(last_suggestion(found), &last, "the last suggestion, scrolled to")?;
+        self.type_many()?;
+        let third = shown.get(2).map(|s| s.name.clone()).unwrap_or_default();
+        self.click_picks(nth_suggestion(found, 2), &third, "the third suggestion")?;
+        self.type_many()?;
+        for _ in 0..4 {
+            self.run.input.key(keys::DOWN)?;
+            thread::sleep(Duration::from_millis(80));
+        }
+        self.run.input.key(keys::ENTER)?;
+        thread::sleep(SETTLE);
+        let fourth = shown.get(3).map(|s| s.name.clone()).unwrap_or_default();
+        let picked = self.run.dialog()?.picked;
+        if picked.last() == Some(&fourth) {
+            step(&format!("Down four times and Enter pick {fourth:?}"));
+        } else {
+            note(format!("Down four times and Enter pick {picked:?}, not {fourth:?}"));
+        }
+        self.run.shot(self.sandbox, "qa543-many-picked-light.png")?;
+        self.unpick()?;
+        self.run.input.key(keys::ESC)?;
+        self.run.dialog_until("the dialog closed", |d| !d.open)?;
+        step("many suggestions: shown over the dialog, scrolled, picked by the pointer and the keys");
+        Ok(())
+    }
+
+    /// A narrow window with the dialog open: the suggestions over it in both themes, a click on the second row, and
+    /// "We couldn't find any matches."; then the window wide again.
+    fn narrow(&mut self) -> SandboxResult {
+        self.open_from_video()?;
+        self.resize(NARROW)?;
+        let found = self.dialog_in("qa543-narrow-open-light.png")?;
+        step(&format!("in the narrow window the dialog is at {found:?}"));
+        if found.x1 > NARROW {
+            note(format!(
+                "the dialog {found:?} reaches past the narrow window's right edge at {NARROW}"
+            ));
+        }
+        let shown = self.type_many()?;
+        self.run.shot(self.sandbox, "qa543-narrow-many-light.png")?;
+        self.check_suggestions_shown(found, shown.len(), "qa543-narrow-many-light.png");
+        self.run.theme(true)?;
+        thread::sleep(SETTLE);
+        self.run.shot(self.sandbox, "qa543-narrow-many-dark.png")?;
+        self.run.theme(false)?;
+        thread::sleep(SETTLE);
+        let second = shown.get(1).map(|s| s.name.clone()).unwrap_or_default();
+        self.click_picks(
+            nth_suggestion(found, 1),
+            &second,
+            "the second suggestion in the narrow window",
+        )?;
+        self.run.input.type_text("zzqxw")?;
+        thread::sleep(Duration::from_millis(900));
+        let dialog = self.run.dialog()?;
+        if !dialog.suggestions.is_empty() {
+            note(format!("\"zzqxw\" finds {:?} in the narrow window", dialog.suggestions));
+        }
+        self.run.shot(self.sandbox, "qa543-narrow-no-match-light.png")?;
+        self.run.theme(true)?;
+        thread::sleep(SETTLE);
+        self.run.shot(self.sandbox, "qa543-narrow-no-match-dark.png")?;
+        self.run.theme(false)?;
+        thread::sleep(SETTLE);
+        self.run.input.key(keys::ESC)?;
+        self.run.input.key(keys::ESC)?;
+        self.run.dialog_until("the dialog closed", |d| !d.open)?;
+        self.resize(SCREEN.0)?;
+        step("a narrow window: the suggestions over the dialog, a click picks, no match says so");
+        Ok(())
+    }
+
+    /// Types [`MANY`] in the empty box; the suggestions, once at least [`MANY_AT_LEAST`] show.
+    fn type_many(&mut self) -> SandboxResult<Vec<Suggestion>> {
+        self.run.input.type_text(MANY)?;
+        thread::sleep(Duration::from_millis(700));
+        let dialog = self
+            .run
+            .dialog_until(&format!("{MANY_AT_LEAST} suggestions for {MANY:?}"), |d| {
+                d.suggestions.len() >= MANY_AT_LEAST
+            })?;
+        step(&format!("{MANY:?} suggests {:?}", dialog.suggestions));
+        Ok(dialog.suggestions)
+    }
+
+    /// A click at `(x, y)` picks `name`; then Backspace takes its chip off again.
+    fn click_picks(&mut self, (x, y): (u32, u32), name: &str, what: &str) -> SandboxResult {
+        self.run.click(x, y)?;
+        thread::sleep(SETTLE);
+        let picked = self.run.dialog()?.picked;
+        if picked.last().map(String::as_str) == Some(name) {
+            step(&format!("a click on {what} ({x}, {y}) picks {name:?}"));
+        } else {
+            note(format!("a click on {what} ({x}, {y}) picks {picked:?}, not {name:?}"));
+        }
+        self.unpick()
+    }
+
+    /// The box is empty after a pick: Backspace takes the chip off. With no pick, Escape clears the box.
+    fn unpick(&mut self) -> SandboxResult {
+        if self.run.dialog()?.picked.is_empty() {
+            self.run.input.key(keys::ESC)?;
+            thread::sleep(SETTLE);
+            return Ok(());
+        }
+        self.run.input.key(keys::BACKSPACE)?;
+        self.run.dialog_until("the chip taken off", |d| d.picked.is_empty())?;
+        Ok(())
+    }
+
+    /// The compositor sizes the main window to `width` wide, as a user's drag does.
+    fn resize(&self, width: u32) -> SandboxResult {
+        let sandbox = self.sandbox;
+        sandbox.niri_msg(&["action", "set-column-width", &width.to_string()])?;
+        wait_until(WAIT, || {
+            let text = sandbox.niri_msg(&["-j", "windows"]).ok()?;
+            let windows: Value = serde_json::from_str(&text).ok()?;
+            windows
+                .as_array()?
+                .iter()
+                .any(|window| window["layout"]["window_size"][0].as_f64() == Some(f64::from(width)))
+                .then_some(())
+        })
+        .ok_or_else(|| format!("the window never took {width} px"))?;
+        thread::sleep(SETTLE * 2);
+        Ok(())
+    }
+
+    /// The dialog's box wherever the window is: the first light surface on the screen's middle row that is a box of
+    /// a dialog's size.
+    fn dialog_in(&mut self, name: &str) -> SandboxResult<Rect> {
+        self.run.shot(self.sandbox, name)?;
+        let shot = &self.run.last;
+        let y = SCREEN.1 / 2;
+        (0..shot.width())
+            .filter(|&x| near(at(shot, x, y), LIGHT.surface, 3))
+            .find_map(|x| surface_box(shot, (x, y)).filter(|b| b.width() > 300 && b.height() > 300))
+            .ok_or_else(|| format!("no dialog on the screen ({name})").into())
     }
 }
 
@@ -1149,6 +1324,14 @@ const fn emoji_button(d: Rect) -> (u32, u32) {
 const fn first_suggestion(d: Rect) -> (u32, u32) {
     (d.x0 + 150, d.y0 + 185)
 }
+/// The middle of the suggestion at `n` (from 0), with the list not scrolled.
+const fn nth_suggestion(d: Rect, n: u32) -> (u32, u32) {
+    (d.x0 + 150, d.y0 + 185 + 52 * n)
+}
+/// The last suggestion's middle with the list scrolled to its end: the list is at most 300 px high.
+const fn last_suggestion(d: Rect) -> (u32, u32) {
+    (d.x0 + 150, d.y0 + 423)
+}
 const fn box_at(d: Rect) -> (u32, u32) {
     (d.x1 - 200, d.y0 + 136)
 }
@@ -1451,6 +1634,14 @@ impl Service {
                 name: topic,
                 chat: Box::leak(chat.into_boxed_str()),
             });
+        }
+        // more chats that "Made-up" finds than the list shows without a scroll (round 2)
+        for (topic, members) in [
+            ("Made-up squad one", &[LAB_A, LAB_B][..]),
+            ("Made-up squad two", &[LAB_A, LAB_C][..]),
+            ("Made-up squad three", &[LAB_A, LAB_B, LAB_C][..]),
+        ] {
+            mock.add_group(topic, members).ok_or("no group made")?;
         }
         // b and the outsider say something in their 1:1 chats with a, so the chats are named after them
         for (chat, who) in [(AB_CHAT, (LAB_B, "Lab B")), (AX_CHAT, (OUTSIDER, "Outsider X"))] {

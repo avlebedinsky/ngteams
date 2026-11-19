@@ -770,9 +770,28 @@ impl Walk<'_> {
             note(format!("share on: {error}"));
         }
         self.check_owner_named(crowd.name);
+        self.check_owner_known_to(cara);
         thread::sleep(SETTLE);
         self.run.shot(self.sandbox, "qa543-own-shown-light.png")?;
         Ok(())
+    }
+
+    /// c, who has no chat with b, gets b's name for the card of b's file (round 2): c's chat view names a file's
+    /// owner by what c's engine finds about b.
+    fn check_owner_known_to(&self, cara: &Sender<'_>) {
+        let owner = self.sender.engine.handle.me().to_owned();
+        let named = wait_until(WAIT, || {
+            let person = cara.runtime.block_on(cara.engine.handle.person(owner.clone())).ok()?;
+            (person.name.as_deref() == Some(B.1)).then_some(())
+        });
+        if named.is_some() {
+            step(&format!("share on: c's engine names the owner {:?}", B.1));
+        } else {
+            let last = cara.runtime.block_on(cara.engine.handle.person(owner.clone()));
+            note(format!(
+                "share on: c's engine does not name b, the owner of the shared video: {last:?}"
+            ));
+        }
     }
 
     /// The card of `file` in the open chat names b as its owner: b sends nothing in that chat, and the card names b
