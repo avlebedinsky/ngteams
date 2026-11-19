@@ -18,6 +18,10 @@
 //!   placeholder (`Image`, with its `alt`), followed in a chat's message by a link that opens the message in Teams on
 //!   the web ([`layout_with_web_link`], [`message_web_link`]), as is a picture that can't be shown. A message of
 //!   emoticons alone ([`Rendered::emoticons_only`]) is drawn as Teams draws one: large, playing, without its bubble. A
+//!   sticker (`Node::Sticker`: one of Teams' own on its sticker CDN, or a picture sent to the media service) is a
+//!   picture block marked as one ([`PictureBlock::sticker`]), its label the placeholder's words, and no click opens it
+//!   in the picture viewer; a message of a sticker alone, the blank paragraphs around it left out
+//!   ([`Rendered::sticker_alone`]), is drawn as Teams draws one: at its size, without its bubble. A
 //!   list is [`Block::List`]: each item's blocks beside its marker (its number, or a bullet by how deep the list is
 //!   nested: disc, circle, square), indented as a browser indents one. A paragraph of no-break spaces alone (the web
 //!   client's `<p>&nbsp;</p>`, its blank line) is drawn as a blank line; one of ASCII whitespace alone, none. Line
@@ -49,7 +53,7 @@ use gpui::{
 use serde_json::{Value, json};
 use teams_proto::InlinePicture;
 use teams_proto::chat::{
-    Code, Field, FontSize, Image, List, Marks, Mention, MentionKind, Node, Quote, RichText, SpanStyle, Table,
+    Code, Field, FontSize, Image, List, Marks, Mention, MentionKind, Node, Quote, RichText, SpanStyle, Sticker, Table,
     WEB_CLIENT,
 };
 
@@ -186,6 +190,11 @@ impl TextBlock {
             && self.emoticons.is_empty()
     }
 
+    /// A blank line: whitespace alone, a no-break space too (the web client's `<p>&nbsp;</p>`), nothing else.
+    fn is_blank_line(&self) -> bool {
+        self.text.trim().is_empty() && !self.pieces.iter().any(|(_, style)| style.image) && self.emoticons.is_empty()
+    }
+
     /// The text as a reader would copy it: each emoticon's place given its emoji.
     #[must_use]
     pub fn plain(&self) -> String {
@@ -310,6 +319,8 @@ pub struct PictureBlock {
     pub alt: Option<String>,
     pub size: Option<(u32, u32)>,
     pub fallback: TextBlock,
+    /// A sticker's: no click opens it in the picture viewer, as Teams opens none.
+    pub sticker: bool,
 }
 
 /// A list: numbered from `start` when `ordered`, else bulleted; `level` how many lists it is in (its bullet's shape);
@@ -590,6 +601,24 @@ impl Rendered {
             .then_some(emoticons)
     }
 
+    /// Its sticker, when it shows nothing else (blank lines aside): a message Teams draws at the sticker's size,
+    /// without its bubble ([`Self::bare`]).
+    #[must_use]
+    pub fn sticker_alone(&self) -> Option<&PictureBlock> {
+        let mut stickers = self.blocks.iter().filter_map(|block| match block {
+            Block::Picture(picture) if picture.sticker => Some(picture),
+            _ => None,
+        });
+        let sticker = stickers.next()?;
+        let alone = stickers.next().is_none()
+            && self.blocks.iter().all(|block| match block {
+                Block::Picture(picture) => picture.sticker,
+                Block::Text(text) => text.is_blank_line(),
+                _ => false,
+            });
+        alone.then_some(sticker)
+    }
+
     /// Whether it shows pictures alone (one at least): a message Teams draws without its bubble ([`Self::bare`]).
     #[must_use]
     pub fn pictures_only(&self) -> bool {
@@ -603,17 +632,17 @@ impl Rendered {
     }
 
     /// The pictures it draws as its own (a forward's and a list's too, not a quote's), in the order they are drawn: the
-    /// ones a click opens in the picture viewer.
+    /// ones a click opens in the picture viewer (a sticker is none of them).
     #[must_use]
     pub fn pictures(&self) -> Vec<&PictureBlock> {
         fn walk<'r>(blocks: &'r [Block], into: &mut Vec<&'r PictureBlock>) {
             for block in blocks {
                 match block {
-                    Block::Picture(picture) => into.push(picture),
+                    Block::Picture(picture) if !picture.sticker => into.push(picture),
                     Block::List(list) => list.items.iter().for_each(|item| walk(item, into)),
                     Block::Table(table) => table.rows.iter().flatten().for_each(|cell| walk(&cell.blocks, into)),
                     Block::Forward(forward) => walk(&forward.blocks, into),
-                    Block::Text(_) | Block::Quote(_) | Block::Code(_) | Block::Rule => {}
+                    Block::Picture(_) | Block::Text(_) | Block::Quote(_) | Block::Code(_) | Block::Rule => {}
                 }
             }
         }
@@ -745,6 +774,9 @@ pub fn layout_with_web_link(text: &RichText, mentions: &Mentions, web_link: Opti
         bare: false,
         source: None,
     };
+    if rendered.sticker_alone().is_some() {
+        rendered.blocks.retain(|block| matches!(block, Block::Picture(_)));
+    }
     rendered.bare = rendered.emoticons_only().is_some() || rendered.pictures_only();
     rendered
 }
@@ -843,6 +875,7 @@ impl<'a> Builder<'a> {
                     self.link = outer;
                 }
                 Node::Image(image) => self.image(image),
+                Node::Sticker(sticker) => self.sticker(sticker),
                 Node::Quote(quote) => self.quote(quote),
                 Node::List(list) => self.list(list),
                 Node::Table(table) => self.table(table),
@@ -955,10 +988,26 @@ impl<'a> Builder<'a> {
                 alt: image.alt.clone(),
                 size: image.size,
                 fallback: fallback.current,
+                sticker: false,
             }));
             return;
         }
         self.placeholder(image.alt.as_deref());
+    }
+
+    /// A sticker: drawn as a picture is ([`Self::image`]), its label its words, marked as a sticker's.
+    fn sticker(&mut self, sticker: &Sticker) {
+        let image = Image {
+            alt: sticker.label.clone().or_else(|| sticker.image.alt.clone()),
+            ..sticker.image.clone()
+        };
+        let before = self.blocks.len();
+        self.image(&image);
+        if self.blocks.len() > before
+            && let Some(Block::Picture(picture)) = self.blocks.last_mut()
+        {
+            picture.sticker = true;
+        }
     }
 
     /// An image's placeholder, with the link to the message after it ([`layout_with_web_link`]).
@@ -1286,8 +1335,12 @@ fn picture_block(draw: &Draw<'_>, path: &[usize], picture: &PictureBlock) -> Any
         frame,
         fallback,
     );
-    // a click on it opens it in the picture viewer, when the view opens pictures
-    if let Some(open) = draw.scope.and_then(|scope| scope.open.clone()) {
+    // a click on it opens it in the picture viewer, when the view opens pictures (a sticker never)
+    if let Some(open) = draw
+        .scope
+        .and_then(|scope| scope.open.clone())
+        .filter(|_| !picture.sticker)
+    {
         let src = picture.src.clone();
         drawn = drawn.opening(
             SharedString::from(format!("{}-open-{path:?}", draw.id)),

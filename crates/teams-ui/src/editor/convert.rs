@@ -373,6 +373,21 @@ impl<S: BuildHasher> Loader<'_, S> {
         Ok(())
     }
 
+    /// An image with `alt`: an emoticon (`emoji`) is edited as its emoji; any other picture (a sticker too) is no text,
+    /// so a message with one isn't edited, and a pasted one is its `alt`.
+    fn image(&mut self, emoji: bool, alt: Option<&str>, context: &Context) -> Result<(), CantLoad> {
+        if emoji {
+            // Teams' own editor keeps a message with emoticons editable; this one has no emoticon run, so an
+            // emoticon is edited (and goes back) as its emoji
+            self.push(alt.unwrap_or_default(), context.attrs.clone(), context);
+        } else if self.load != Load::Paste {
+            return Err(CantLoad::Image);
+        } else if let Some(alt) = alt {
+            self.push(alt, context.attrs.clone(), context);
+        }
+        Ok(())
+    }
+
     fn node(&mut self, node: &Node, context: &Context) -> Result<(), CantLoad> {
         match node {
             Node::Text { text, marks } => {
@@ -394,18 +409,9 @@ impl<S: BuildHasher> Loader<'_, S> {
                 inner.attrs.span = inner.attrs.span.under(*style);
                 self.walk(children, &inner)?;
             }
-            Node::Image(image) => {
-                if image.is_emoji() {
-                    // Teams' own editor keeps a message with emoticons editable; this one has no emoticon run, so an
-                    // emoticon is edited (and goes back) as its emoji
-                    let alt = image.alt.clone().unwrap_or_default();
-                    self.push(&alt, context.attrs.clone(), context);
-                } else if self.load != Load::Paste {
-                    return Err(CantLoad::Image);
-                } else if let Some(alt) = &image.alt {
-                    self.push(alt, context.attrs.clone(), context);
-                }
-            }
+            Node::Image(image) => self.image(image.is_emoji(), image.alt.as_deref(), context)?,
+            // a sticker is a picture: a message of one isn't edited, and a pasted one is its label
+            Node::Sticker(sticker) => self.image(false, sticker.label.as_deref(), context)?,
             Node::Paragraph(children) => self.block(children, context)?,
             Node::Heading { level, children } => {
                 let inner = Context {

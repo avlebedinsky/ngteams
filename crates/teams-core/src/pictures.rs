@@ -1,7 +1,8 @@
 //! Pictures messages show, read when a view shows one ([`InlinePicture`]): a picture pasted into a message
 //! ([`teams_proto::MessagePicture`]: a `GET` of the picture's view from the account's AMS base, the way the web client
 //! reads it), a GIF picked from Teams' GIF picker ([`teams_proto::GiphyPicture`]: a `GET` of the GIF from Giphy's
-//! media host, no token), or a link preview's picture ([`teams_proto::LinkPreviewPicture`]: a `GET` of the async
+//! media host, no token), a sticker from Teams' own packs ([`teams_proto::StickerPicture`]: a `GET` of its GIF from
+//! Teams' sticker CDN, no token), or a link preview's picture ([`teams_proto::LinkPreviewPicture`]: a `GET` of the async
 //! gateway's thumbnail of it), as [`crate::emoticons`] reads reactions' animations; and an app's tile, the picture its
 //! definition's `largeImageUrl` names ([`teams_proto::AppPicture`]: a `GET` from Microsoft's CDN, no token), which
 //! Activity draws for the app's items. Each kind is kept apart, by its own key.
@@ -198,12 +199,18 @@ pub(crate) trait PictureRead: Read + Clone + Eq + Hash + 'static {
 }
 
 impl PictureRead for InlinePicture {
-    /// The AMS object and its view, the GIF's id and file, or the page's picture a link preview's thumbnail is of
+    /// The AMS object and its view, the GIF's id and file, the sticker's folder, locale and file, or the page's picture a link preview's thumbnail is of
     /// (never the link the message names: the account's AMS base reads it, whichever host the message names).
     fn cache_key(&self) -> String {
         match self {
             Self::Ams(picture) => format!("ams/{}/{}", picture.object(), picture.view()),
             Self::Giphy(picture) => format!("giphy/{}/{}", picture.id(), picture.file()),
+            Self::Sticker(picture) => format!(
+                "sticker/{}/{}/{}",
+                picture.folder(),
+                picture.locale().unwrap_or_default(),
+                picture.file()
+            ),
             Self::LinkPreview(picture) => format!("urlp/thumbnail/{}", picture.picture()),
         }
     }
