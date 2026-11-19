@@ -1103,10 +1103,10 @@ fn keyboard_only(user: &mut User<'_>) -> SandboxResult {
         ensure(boxed["language_open"] == false, || {
             format!("stop {tabs} is a hidden one: Enter opened the language menu: {boxed}")
         })?;
-        // the stops are Format, Emoji, Attach, More options, then Send
-        if tabs == 5 {
+        // the stops are Format, Emoji, Attach, "+", More options, then Send
+        if tabs == 6 {
             ensure(text_of(boxed).is_empty(), || {
-                format!("Enter on stop 5 did not send: {boxed}")
+                format!("Enter on stop 6 did not send: {boxed}")
             })?;
         }
         seen.push(format!(

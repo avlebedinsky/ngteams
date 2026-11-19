@@ -109,7 +109,7 @@ const HOVER: [u8; 3] = [240, 240, 240];
 /// Where the chat's pane starts on the 1280-wide screen: the rail and the chat list are left of it.
 const PANE_X: u32 = 455;
 /// The compose box's "+" (Actions and apps) on the 1280-wide screen, a one-line box.
-const PLUS: (u32, u32) = (1064, 749);
+const PLUS: (u32, u32) = (1163, 749);
 
 /// The fixture's apps (`teams_mock::extension_apps_answer`) and their bots.
 const FINDER_APP: &str = "00000000-0000-4000-8000-00000000e001";
@@ -805,7 +805,7 @@ const FINDER_INVOKE_END: &str = "00000000eb01/invoke";
 // --- an action app's dialog ---
 
 /// The flyout's left edge: it opens up and left from the "+", 340 px wide.
-const FLYOUT_X0: u32 = 740;
+const FLYOUT_X0: u32 = 839;
 /// The flyout's "New record" tab, from the flyout's left edge and its top.
 const NEW_RECORD_TAB: (u32, u32) = (128, 54);
 

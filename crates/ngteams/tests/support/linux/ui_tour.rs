@@ -4533,7 +4533,7 @@ fn with_new_chat(shell: &Entity<Shell>, cx: &mut App, change: impl FnOnce(&mut N
 fn hide_compose_tools(shell: &Entity<Shell>, tools: &[ComposeTool], cx: &mut App) {
     let model = shell.read(cx).settings().clone();
     model.update(cx, |model, cx| {
-        model.change(|settings| settings.compose_hidden = tools.to_vec(), cx)
+        model.change(|settings| settings.compose_hidden = tools.to_vec(), cx);
     });
 }
 
