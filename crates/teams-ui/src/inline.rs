@@ -14,7 +14,8 @@
 //!   line, never wider than the width there is. A tall one (twice as high as wide) or a small one (lower than
 //!   [`PICTURE_BOX`]) sits in a square frame of [`PICTURE_BOX`], fitted (a small one at its own size); any other one is
 //!   [`PICTURE_BOX`] high; a wide one (twice as wide as high) keeps its own size, at most [`WIDE_MAX_WIDTH`] wide and,
-//!   once larger than Teams' bounds, [`PICTURE_BOX`] high. The empty frame stands in while it is read. One the engine
+//!   once larger than Teams' bounds, [`PICTURE_BOX`] high. A sticker in a narrower room is scaled down whole, its
+//!   frame with it ([`Picture::whole`]), so its square frame stays square. The empty frame stands in while it is read. One the engine
 //!   has none of, or none can be asked of (no engine), is drawn as the message's fallback (its placeholder text). Once
 //!   shown, a click on it opens it in the picture viewer when its view opens pictures ([`Picture::opening`]:
 //!   `crate::picture_viewer`), a pointing hand over it; a press on it starts no text selection.
@@ -577,6 +578,8 @@ pub struct Picture {
     /// What a click on it does once it is shown (the picture viewer opened on it), and the element id (and test
     /// selector) of what takes the click.
     open: Option<(SharedString, OnOpen)>,
+    /// Scaled down whole in a narrow room, its frame with it ([`Shape::whole_in`]).
+    whole: bool,
     child: Option<AnyElement>,
 }
 
@@ -601,8 +604,16 @@ impl Picture {
             frame,
             fallback: Some(fallback),
             open: None,
+            whole: false,
             child: None,
         }
+    }
+
+    /// In a room narrower than it, scaled down whole, its frame with it, as Teams scales a sticker ([`Shape::whole_in`]).
+    #[must_use]
+    pub fn whole(mut self) -> Self {
+        self.whole = true;
+        self
     }
 
     /// It opened by `open` on a click once it is shown, a pointing hand over it; `id` names the element that takes the
@@ -667,8 +678,9 @@ impl Element for Picture {
             }
             PictureState::Shown(image, own) => (Some(image), self.given.unwrap_or(own), own),
         };
+        let whole = self.whole;
         let layout = window.request_measured_layout(Style::default(), move |known, available, _, _| {
-            Shape::of(given, own, room(known, available)).outer()
+            Shape::in_room(given, own, room(known, available), whole).outer()
         });
         (layout, Laid::Measured(image, given, own))
     }
@@ -691,7 +703,8 @@ impl Element for Picture {
             Laid::Measured(image, given, own) => {
                 // shaped for the width of its block, which a block or flex parent stretches to the width there is,
                 // and never taller than its block, should its block be lower
-                let shape = Shape::of(*given, *own, Some(bounds.size.width)).within_height(bounds.size.height);
+                let shape =
+                    Shape::in_room(*given, *own, Some(bounds.size.width), self.whole).within_height(bounds.size.height);
                 let drawn = image.as_ref().map(|image| {
                     // an id of its own: GPUI keeps a GIF's frame in the element's state; its size given outright, so
                     // the image's own aspect ratio sets nothing
@@ -848,6 +861,35 @@ impl Shape {
         }
     }
 
+    /// [`Self::whole_in`] when `whole`, else [`Self::of`].
+    fn in_room(given: (u32, u32), own: (u32, u32), room: Option<Pixels>, whole: bool) -> Self {
+        if whole {
+            Self::whole_in(given, own, room)
+        } else {
+            Self::of(given, own, room)
+        }
+    }
+
+    /// The shape of a picture as [`Self::of`] gives it with no bound of width, then scaled down whole, its frame's
+    /// aspect ratio kept, so that its frame with its border is at most `room` wide: a sticker's square frame stays
+    /// square around its picture.
+    #[must_use]
+    pub fn whole_in(given: (u32, u32), own: (u32, u32), room: Option<Pixels>) -> Self {
+        let shape = Self::of(given, own, None);
+        let Some(room) = room else { return shape };
+        if shape.outer().width <= room || shape.frame.width <= px(0.0) {
+            return shape;
+        }
+        shape.scaled(((room - px(2.0 * FRAME_BORDER)) / shape.frame.width).max(0.0))
+    }
+
+    fn scaled(self, scale: f32) -> Self {
+        Self {
+            frame: size(self.frame.width * scale, self.frame.height * scale),
+            image: size(self.image.width * scale, self.image.height * scale),
+        }
+    }
+
     /// It scaled down, its aspect ratio kept, so that its frame with its border is at most `height` high.
     #[must_use]
     pub fn within_height(self, height: Pixels) -> Self {
@@ -855,11 +897,7 @@ impl Shape {
         if outer <= height || outer <= px(0.0) {
             return self;
         }
-        let scale = (height / outer).max(0.0);
-        Self {
-            frame: size(self.frame.width * scale, self.frame.height * scale),
-            image: size(self.image.width * scale, self.image.height * scale),
-        }
+        self.scaled((height / outer).max(0.0))
     }
 
     /// Its frame's size with its border.

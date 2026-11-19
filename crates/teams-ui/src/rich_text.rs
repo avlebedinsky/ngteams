@@ -20,8 +20,9 @@
 //!   emoticons alone ([`Rendered::emoticons_only`]) is drawn as Teams draws one: large, playing, without its bubble. A
 //!   sticker (`Node::Sticker`: one of Teams' own on its sticker CDN, or a picture sent to the media service) is a
 //!   picture block marked as one ([`PictureBlock::sticker`]), its label the placeholder's words, and no click opens it
-//!   in the picture viewer; a message of a sticker alone, the blank paragraphs around it left out
-//!   ([`Rendered::sticker_alone`]), is drawn as Teams draws one: at its size, without its bubble. A
+//!   in the picture viewer, and in a narrow room it is scaled down whole, its frame with it; a message of a sticker
+//!   alone, the blank paragraphs around it left out ([`Rendered::sticker_alone`]), is drawn as Teams draws one: at its
+//!   size, without its bubble. A
 //!   list is [`Block::List`]: each item's blocks beside its marker (its number, or a bullet by how deep the list is
 //!   nested: disc, circle, square), indented as a browser indents one. A paragraph of no-break spaces alone (the web
 //!   client's `<p>&nbsp;</p>`, its blank line) is drawn as a blank line; one of ASCII whitespace alone, none. Line
@@ -1335,6 +1336,9 @@ fn picture_block(draw: &Draw<'_>, path: &[usize], picture: &PictureBlock) -> Any
         frame,
         fallback,
     );
+    if picture.sticker {
+        drawn = drawn.whole();
+    }
     // a click on it opens it in the picture viewer, when the view opens pictures (a sticker never)
     if let Some(open) = draw
         .scope
