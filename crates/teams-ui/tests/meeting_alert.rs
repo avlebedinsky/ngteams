@@ -48,6 +48,8 @@ struct Alerting {
     server: Arc<FakeServer>,
     asked: Arc<Mutex<Vec<MeetingAlertEvent>>>,
     written: Written,
+    /// The server not handed in yet (`start_without_server`).
+    late: Option<Arc<dyn NotificationServer>>,
 }
 
 fn now_ms() -> i64 {
@@ -186,8 +188,17 @@ impl Alerting {
         Self::start_over(settings, None, Vec::new())
     }
 
+    /// The alert with no server until [`Self::hand_server`], as the app's desktop hands it in once its bus is up.
+    fn start_without_server(settings: Settings) -> Self {
+        Self::start_on(settings, None, Vec::new(), true)
+    }
+
     /// The alert over a store that holds `stored` already, its banners held back by `gate`.
     fn start_over(settings: Settings, gate: Option<Arc<Gate>>, stored: Vec<Message>) -> Self {
+        Self::start_on(settings, gate, stored, false)
+    }
+
+    fn start_on(settings: Settings, gate: Option<Arc<Gate>>, stored: Vec<Message>, late: bool) -> Self {
         let rig = Rig::start_with(|cx| Models::with_calls(None, cx));
         rig.core.conversations.lock().unwrap().extend([
             chat(AB, ConversationKind::OneToOne, None),
@@ -222,7 +233,9 @@ impl Alerting {
         let alert = rig.cx.update(|cx| {
             let alert = cx.new(|cx| {
                 let mut alert = MeetingAlert::new(core, &models, settings, trace, cx);
-                alert.set_server(given);
+                if !late {
+                    alert.set_server(Arc::clone(&given), cx);
+                }
                 alert
             });
             cx.subscribe(&alert, move |_, event, _| recorded.lock().unwrap().push(event.clone()))
@@ -236,7 +249,17 @@ impl Alerting {
             server,
             asked,
             written,
+            late: late.then_some(given),
         }
+    }
+
+    /// The desktop hands in the server now.
+    fn hand_server(&mut self) {
+        let server = self.late.take().unwrap();
+        self.rig
+            .cx
+            .update(|cx| self.alert.update(cx, |alert, cx| alert.set_server(server, cx)));
+        self.rig.cx.run_until_parked();
     }
 
     fn arrive(&self, message: Message, source: Source) {
@@ -673,6 +696,37 @@ fn a_pushed_start_of_a_meeting_on_the_calendar_shows_a_banner_whose_join_opens_i
     // the chat service's start of the same call shows no second one
     a.arrive(call_event(MEETING, "1", LAB_B, start()), Source::Delivery);
     assert_eq!(a.server.shown().len(), 1);
+}
+
+#[test]
+fn a_banner_shown_before_the_server_came_goes_to_the_desktop_once_it_comes() {
+    let mut a = Alerting::start_without_server(Settings::default());
+    a.calendar(running_meeting(Some(MEETING), None));
+    a.push(pushed(teams_core::MeetingStartKind::Meeting, MEETING, "call-1", LAB_B));
+    a.arrive(call_event(TRIO, "1", LAB_B, huddle(LAB_B)), Source::Delivery);
+    let cards = a.cards();
+    assert_eq!(cards.len(), 2, "the window's cards show at once");
+    // the card dismissed before the server came sends nothing
+    let trio = cards.iter().find(|card| card.title == "Lab trio").unwrap().id;
+    a.rig
+        .cx
+        .update(|cx| a.alert.update(cx, |alert, cx| alert.dismiss(trio, cx)));
+    a.hand_server();
+    let shown = a.server.shown();
+    assert_eq!(shown.len(), 1, "{shown:?}");
+    assert_eq!(shown[0].summary, "Weekly sync");
+    // the card keeps its place and takes the server's id: the desktop's Join acts on it
+    let cards = a.cards();
+    assert_eq!((cards.len(), cards[0].id), (1, 1));
+    assert!(a.activate(1, JOIN_ACTION));
+    assert!(a.cards().is_empty());
+    assert_eq!(a.server.closed(), [1]);
+    // the card goes after Teams' banner time as one sent in time does
+    a.push(pushed(teams_core::MeetingStartKind::Meeting, MEETING, "call-2", LAB_B));
+    assert_eq!(a.cards().len(), 1);
+    a.rig.cx.executor().advance_clock(teams_ui::meeting_alert::CARD_TIME);
+    a.rig.cx.run_until_parked();
+    assert!(a.cards().is_empty());
 }
 
 #[test]

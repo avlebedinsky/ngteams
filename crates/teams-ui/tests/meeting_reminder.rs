@@ -42,6 +42,8 @@ struct Reminding {
     written: Written,
     /// Lets one held answer of the server go (`start_held`).
     release: Option<async_channel::Sender<()>>,
+    /// The server not handed in yet (`start_without_server`).
+    late: Option<Arc<dyn NotificationServer>>,
 }
 
 /// A notification server slow to answer: each show is recorded at once, its id answered once released.
@@ -102,15 +104,21 @@ fn meeting(id: &str, start: i64, reminder: EventReminder) -> CalendarEvent {
 impl Reminding {
     /// The reminders over a calendar of the events `events` makes from now (ms) on the test clock.
     fn start(settings: Settings, events: impl FnOnce(i64) -> Vec<CalendarEvent>) -> Self {
-        Self::start_on(settings, events, false)
+        Self::start_on(settings, events, false, false)
     }
 
     /// As [`Self::start`], the server answering each show only when [`Self::release`] lets it.
     fn start_held(settings: Settings, events: impl FnOnce(i64) -> Vec<CalendarEvent>) -> Self {
-        Self::start_on(settings, events, true)
+        Self::start_on(settings, events, true, false)
     }
 
-    fn start_on(settings: Settings, events: impl FnOnce(i64) -> Vec<CalendarEvent>, held: bool) -> Self {
+    /// As [`Self::start`], the server handed in only by [`Self::hand_server`], as the app's desktop does once its bus
+    /// is up.
+    fn start_without_server(settings: Settings, events: impl FnOnce(i64) -> Vec<CalendarEvent>) -> Self {
+        Self::start_on(settings, events, false, true)
+    }
+
+    fn start_on(settings: Settings, events: impl FnOnce(i64) -> Vec<CalendarEvent>, held: bool, late: bool) -> Self {
         let rig = Rig::start_with(|cx| Models::with_calls(None, cx));
         let now = rig.cx.read(meeting_reminder::wall_ms);
         let events = events(now);
@@ -139,7 +147,9 @@ impl Reminding {
         let reminders = rig.cx.update(|cx| {
             let reminders = cx.new(|cx| {
                 let mut reminders = MeetingReminders::new(core, settings, calls, trace, cx);
-                reminders.set_server(given);
+                if !late {
+                    reminders.set_server(Arc::clone(&given), cx);
+                }
                 reminders
             });
             cx.subscribe(&reminders, move |_, event, _| {
@@ -156,7 +166,18 @@ impl Reminding {
             asked,
             written,
             release: held.then_some(release),
+            late: late.then_some(given),
         }
+    }
+
+    /// The desktop hands in the server now.
+    fn hand_server(&mut self) {
+        let server = self.late.take().unwrap();
+        self.rig.cx.update(|cx| {
+            self.reminders
+                .update(cx, |reminders, cx| reminders.set_server(server, cx));
+        });
+        self.rig.cx.run_until_parked();
     }
 
     /// The held server answers its oldest show.
@@ -232,6 +253,37 @@ impl Reminding {
 
 fn first_line(body: &str) -> &str {
     body.lines().next().unwrap_or_default()
+}
+
+#[test]
+fn a_reminder_due_before_the_server_came_goes_to_the_desktop_once_it_comes() {
+    let mut r = Reminding::start_without_server(Settings::default(), |now| {
+        vec![
+            meeting("planning", now + 10 * MINUTE, EventReminder::Before(15)),
+            meeting("dismissed", now + 12 * MINUTE, EventReminder::Before(15)),
+        ]
+    });
+    assert_eq!(r.cards().len(), 2, "the window shows both at once");
+    let dismissed = r
+        .cards()
+        .into_iter()
+        .find(|card| card.occasion.event == "dismissed")
+        .unwrap();
+    r.rig.cx.update(|cx| {
+        r.reminders
+            .update(cx, |reminders, cx| reminders.dismiss(&dismissed.occasion, cx));
+    });
+    r.wait(1);
+    assert!(r.server.shown().is_empty(), "no server yet");
+    r.hand_server();
+    let shown = r.server.shown();
+    assert_eq!(shown.len(), 1, "the one not dismissed: {shown:?}");
+    assert_eq!(first_line(&shown[0].body), "Starts in 9 minutes");
+    r.wait(2);
+    assert_eq!(r.server.shown().len(), 1, "sent once");
+    // its notice acts as one sent in time (the fake server's first id)
+    assert!(r.activate(1, DISMISS_ACTION));
+    assert!(r.cards().is_empty());
 }
 
 #[test]

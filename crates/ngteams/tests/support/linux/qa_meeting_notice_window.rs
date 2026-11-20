@@ -1097,7 +1097,7 @@ const AT_START: [(&str, &str); 5] = [
     (LATE_SUBJECT, "Starting now"),
 ];
 
-const REMINDER_CHECKS: [Check; 14] = [
+const REMINDER_CHECKS: [Check; 16] = [
     (
         "reminders_due_at_start_show_as_cards_at_their_own_time_the_default_and_late",
         start_cards,
@@ -1108,6 +1108,14 @@ const REMINDER_CHECKS: [Check; 14] = [
         no_reminders,
     ),
     ("cards_in_light_dark_a_larger_font_and_narrow_windows", card_shots),
+    (
+        "many_cards_at_a_larger_font_stay_whole_below_the_chat_header",
+        cards_at_font_20,
+    ),
+    (
+        "cards_leave_the_compose_box_free_and_fit_narrow_windows",
+        cards_clear_of_compose,
+    ),
     ("card_snoozes_and_dismiss_close_the_cards", card_actions),
     ("card_snooze_one_minute_brings_it_back_after_a_minute", one_minute_back),
     (
@@ -1197,6 +1205,109 @@ fn card_shots(qa: &mut Qa<'_>) -> SandboxResult {
     }
     narrow(qa, i32::try_from(SCREEN.0)?)?;
     Ok(())
+}
+
+/// Where the window drew the cards: the stack, the chat's messages area (between its header and its compose box),
+/// the window's size, how many cards showed and how many "+N more" held back.
+struct Layout {
+    stack: [f64; 4],
+    area: [f64; 4],
+    viewport: [f64; 2],
+    shown: u64,
+    more: u64,
+}
+
+fn rect(value: &Value) -> Option<[f64; 4]> {
+    let all: Vec<f64> = value.as_array()?.iter().filter_map(Value::as_f64).collect();
+    all.try_into().ok()
+}
+
+fn layout(qa: &mut Qa<'_>) -> SandboxResult<Layout> {
+    thread::sleep(SETTLE);
+    let answer = qa.ask("layout")?;
+    let (Some(stack), Some(area)) = (rect(&answer["stack"]), rect(&answer["area"])) else {
+        return Err(format!("no cards or no chat drawn: {answer}").into());
+    };
+    let viewport = [
+        answer["viewport"][0].as_f64().unwrap_or_default(),
+        answer["viewport"][1].as_f64().unwrap_or_default(),
+    ];
+    Ok(Layout {
+        stack,
+        area,
+        viewport,
+        shown: answer["shown"].as_u64().unwrap_or_default(),
+        more: answer["more"].as_u64().unwrap_or_default(),
+    })
+}
+
+/// What is wrong with `layout`: cards over the chat's header or its compose box, or out of the window.
+fn misplaced(layout: &Layout) -> Vec<String> {
+    let [x, y, w, h] = layout.stack;
+    let [_, area_y, _, area_h] = layout.area;
+    let mut wrong = Vec::new();
+    if y < area_y {
+        wrong.push(format!(
+            "the cards' top {y} is above the messages' top {area_y} (the chat's header)"
+        ));
+    }
+    if y + h > area_y + area_h {
+        wrong.push(format!(
+            "the cards' bottom {} is below the messages' bottom {} (the compose box)",
+            y + h,
+            area_y + area_h
+        ));
+    }
+    if x < 0.0 || x + w > layout.viewport[0] {
+        wrong.push(format!(
+            "the cards {x}..{} leave the window 0..{}",
+            x + w,
+            layout.viewport[0]
+        ));
+    }
+    wrong
+}
+
+/// Five reminders at font 20: at most three cards and "+2 more", each whole between the chat's header and its compose
+/// box, the stack not cut by its scroll.
+fn cards_at_font_20(qa: &mut Qa<'_>) -> SandboxResult {
+    qa.ask("chats")?;
+    qa.ask("font 20")?;
+    let cards = qa.cards()?.len();
+    let layout = layout(qa)?;
+    qa.shot("reminders-font-20-placed")?;
+    qa.ask("font 14")?;
+    let mut wrong = misplaced(&layout);
+    let shown = usize::try_from(layout.shown)?;
+    if shown > teams_ui::shell::MAX_MEETING_CARDS || shown + usize::try_from(layout.more)? != cards {
+        wrong.push(format!("{shown} cards shown and {} more, of {cards}", layout.more));
+    }
+    let room = layout.area[3] - 32.0;
+    if layout.stack[3] >= room - 1.0 {
+        wrong.push(format!(
+            "the stack fills its room ({} of {room}): a card is cut",
+            layout.stack[3]
+        ));
+    }
+    ensure(wrong.is_empty(), || wrong.join("; "))
+}
+
+/// At the window's width and narrower ones: the cards leave the compose box's row free and stay in the window.
+fn cards_clear_of_compose(qa: &mut Qa<'_>) -> SandboxResult {
+    qa.ask("chats")?;
+    let mut wrong = Vec::new();
+    for width in [SCREEN.0, 640, 480, 400] {
+        narrow(qa, i32::try_from(width)?)?;
+        let layout = layout(qa)?;
+        qa.shot(&format!("reminders-placed-width-{width}"))?;
+        wrong.extend(
+            misplaced(&layout)
+                .into_iter()
+                .map(|why| format!("at {width} px: {why}")),
+        );
+    }
+    narrow(qa, i32::try_from(SCREEN.0)?)?;
+    ensure(wrong.is_empty(), || wrong.join("; "))
 }
 
 /// The compositor sizes the window `width` wide, as a user's drag does.
@@ -1319,9 +1430,18 @@ fn soon_reminders(qa: &mut Qa<'_>) -> SandboxResult {
     qa.closed(dismissed.id, "after the notice's Dismiss")?;
     qa.sandbox.bus().invoke_action(joined.id, "join")?;
     let prejoin = qa.prejoin_until(JOIN_CHAT);
+    // the pre-join (its window titled with the meeting's subject) comes to the front, over the main window its Join
+    // showed
+    let front = wait_until(BANNER_WAIT, || {
+        focused_title(qa).ok().filter(|title| title == JOINED_SUBJECT)
+    });
+    let focused = focused_title(qa);
     qa.shot("reminders-join-prejoin")?;
     qa.ask("cancel-prejoin")?;
     prejoin?;
+    ensure(front.is_some(), || {
+        format!("the window in front after Join is {focused:?}, not the pre-join")
+    })?;
     qa.closed(joined.id, "after the notice's Join")?;
     let cards = qa.cards()?;
     ensure(
@@ -1334,6 +1454,12 @@ fn soon_reminders(qa: &mut Qa<'_>) -> SandboxResult {
         soon.body.starts_with("Starts in 2 minutes") || soon.body.starts_with("Starts in 1 minute"),
         || format!("the reminder before the start says {:?}", soon.body),
     )
+}
+
+/// The title of the window the compositor has in front.
+fn focused_title(qa: &Qa<'_>) -> SandboxResult<String> {
+    let focused: Value = serde_json::from_str(&qa.sandbox.niri_msg(&["-j", "focused-window"])?)?;
+    Ok(text(&focused, "title"))
 }
 
 fn starting_now(qa: &mut Qa<'_>) -> SandboxResult {
@@ -1777,6 +1903,7 @@ fn answer(question: &str, shell: &Entity<Shell>, window: &mut gpui::Window, cx: 
             json!({"settings": true})
         }
         "ui" => ui_state(shell, cx),
+        "layout" => cards_layout(shell, window, cx),
         "cancel-prejoin" => {
             let calls = shell.read(cx).models().calls.clone();
             calls.update(cx, teams_ui::Calls::cancel_prejoin);
@@ -1810,6 +1937,29 @@ fn ui_state(shell: &Entity<Shell>, cx: &App) -> Value {
     json!({
         "chat": shell.chat().map(|chat| chat.read(cx).conversation().to_owned()),
         "prejoin": calls.prejoin().and_then(|prejoin| prejoin.to_join.chat().map(str::to_owned)),
+    })
+}
+
+/// Where the cards were drawn (`[x, y, width, height]`), the chat's messages area and the window's size.
+fn cards_layout(shell: &Entity<Shell>, window: &gpui::Window, cx: &App) -> Value {
+    let rect = |bounds: gpui::Bounds<gpui::Pixels>| {
+        json!([
+            f32::from(bounds.origin.x),
+            f32::from(bounds.origin.y),
+            f32::from(bounds.size.width),
+            f32::from(bounds.size.height)
+        ])
+    };
+    let shell = shell.read(cx);
+    let drawn = shell.meeting_cards_drawn();
+    let area = shell.chat().and_then(|chat| chat.read(cx).messages_area().get());
+    let viewport = window.viewport_size();
+    json!({
+        "stack": drawn.map(|drawn| rect(drawn.stack)),
+        "shown": drawn.map(|drawn| drawn.shown),
+        "more": drawn.map(|drawn| drawn.more),
+        "area": area.map(rect),
+        "viewport": [f32::from(viewport.width), f32::from(viewport.height)],
     })
 }
 
