@@ -503,18 +503,20 @@ impl Walk<'_> {
     }
 
     /// Opens the menu of `id` and its "Translation" list; where the list's rows are. `own`: the menu also offers
-    /// Delete, before Mark as unread and Translation.
+    /// Delete, before Mark as unread and Translation. A thread's reply offers no Mark as unread.
     fn open_list(&mut self, view: &str, id: &str, own: bool) -> SandboxResult<ListAt> {
         let (x, y) = self.open_menu(view, id)?;
         let menu = load(&self.run.shot(self.sandbox, "qa575-menu.png")?)?;
         let column = x.saturating_sub(100);
-        let top = border_top(&menu, column, y + 12..menu.height())
-            .or_else(|| border_top(&menu, column, y.saturating_sub(320).max(60)..y))
+        // a menu with no room under its button opens over it: its own hairlines are not its top
+        let top = panel_top(&menu, column, y + 12..menu.height())
+            .or_else(|| panel_top(&menu, column, y.saturating_sub(320).max(60)..y))
             .ok_or("no menu's top edge under its button")?;
         // the rows of Copy, Delete (the account's own), a hairline (1 px with 4 px over and under it), Mark as unread,
         // then Translation: 32 px with 2 px between, under 1 + 4 px
-        let index = if own { 3 } else { 2 };
-        let row_y = top + 1 + 4 + 34 * index + 11 + 16;
+        let marks = view != "thread";
+        let index = u32::from(own) + if marks { 2 } else { 1 };
+        let row_y = top + 1 + 4 + 34 * index + if marks { 11 } else { 0 } + 16;
         self.run.click(column, row_y)?;
         thread::sleep(SETTLE);
         let listed = load(&self.run.shot(self.sandbox, "qa575-list.png")?)?;
@@ -1487,6 +1489,12 @@ fn at(shot: &image::RgbImage, x: u32, y: u32) -> [u8; 3] {
 fn border_top(shot: &image::RgbImage, x: u32, rows: std::ops::Range<u32>) -> Option<u32> {
     rows.into_iter()
         .find(|&y| near(at(shot, x, y), BORDER, 4) && at(shot, x, y + 1) == SURFACE && at(shot, x, y + 2) == SURFACE)
+}
+
+/// The first `y` in `rows` of column `x` that is a panel's outer top edge: [`border_top`], not under [`SURFACE`].
+fn panel_top(shot: &image::RgbImage, x: u32, rows: std::ops::Range<u32>) -> Option<u32> {
+    rows.into_iter()
+        .find(|&y| border_top(shot, x, y..y + 1).is_some() && at(shot, x, y.saturating_sub(1)) != SURFACE)
 }
 
 /// The first `y` in `rows` of column `x` that is a line inside a panel: [`BORDER`] with [`SURFACE`] above and under.
