@@ -20,14 +20,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use image::RgbImage;
+// how long a reaction shows on a tile, as the app has it
+use teams_ui::calls::REACTION_SHOWN as ON_TILE;
 use ui_sandbox::SandboxResult;
 
 use super::pixels::{self, Rect};
 use super::qa_order::{PEOPLE, Page, Seen, colour_count, gallery, qa_call, qa_mri, speak, strip};
 use super::{Rig, SETTLE, View, save_shot, say};
 
-/// How long a reaction shows on a tile, as Teams has it.
-const ON_TILE: Duration = Duration::from_millis(4_250);
 /// How long a reaction floats.
 const FLOAT: Duration = Duration::from_millis(2_000);
 /// How many frames the made-up strip has: at the app's 24 a second it loops every 2 s, so two looks less than 2 s
@@ -175,7 +175,8 @@ fn summary(looks: &[Look]) -> String {
 }
 
 /// A made-up person's reaction `reaction` on their tile `tile`, watched for 6.8 s; sent again, at most three times
-/// in all, while fewer than three looks catch it (a busy machine's shots are slow).
+/// in all, while fewer than three looks catch it or no two looks one after the other catch it at its full opacity (a
+/// busy machine's shots are slow).
 fn watch_tile(rig: &mut Rig<'_>, tile: Rect, person: usize, reaction: &str) -> SandboxResult<Vec<Look>> {
     let mut looks = Vec::new();
     for _ in 0..3 {
@@ -183,11 +184,13 @@ fn watch_tile(rig: &mut Rig<'_>, tile: Rect, person: usize, reaction: &str) -> S
             react(rig, person, reaction)
         })?;
         let caught = looks.iter().filter(|look| look.from_start >= 400).count();
-        if caught >= 3 {
+        let steady = steady_pairs(&looks).count();
+        if caught >= 3 && steady >= 1 {
             break;
         }
         say(&format!(
-            "qa666: only {caught} looks caught {person}'s reaction on the tile: sent again"
+            "qa666: {caught} looks caught {person}'s reaction on the tile, {steady} pairs at its full opacity: sent \
+             again"
         ));
     }
     Ok(looks)
@@ -203,12 +206,10 @@ fn on_tile(looks: &[Look], playing: bool, case: &str) -> SandboxResult {
     if shown.is_empty() || shown.iter().any(|look| look.from_start < 400) {
         return Err(format!("{case}: the reaction isn't on the tile while it should be fully shown").into());
     }
-    // a change from a look that showed the reaction to the next that shows it too: its picture moved (the strip's
-    // frames loop every third of a second, so two looks can meet the same frame)
-    let moving = looks
-        .windows(2)
-        .filter(|pair| pair[0].from_start >= 400 && pair[1].from_start >= 400 && pair[1].from_last >= 150)
-        .count();
+    // a change between two looks that showed the reaction at its full opacity: its picture moved, as no fade
+    // changes it there (the strip of 48 frames loops every 2 s, so two looks less than 2 s apart show different
+    // frames)
+    let moving = steady_pairs(looks).filter(|pair| pair[1].from_last >= 150).count();
     if playing && moving < 1 {
         return Err(format!("{case}: the reaction's picture doesn't play ({moving} looks changed)").into());
     }
@@ -234,6 +235,18 @@ fn on_tile(looks: &[Look], playing: bool, case: &str) -> SandboxResult {
         return Err(format!("{case}: no look after the reaction's end").into());
     }
     Ok(())
+}
+
+/// The pairs of looks one after the other that both showed a reaction on a tile at its full opacity, not fading in
+/// or out: the app's fade-in ends at about 1.34 s and its fade-out starts at about 3.46 s. A shot is taken soon after
+/// its look starts, so the first look starts at 1.4 s or later and the second at 3.3 s or earlier.
+fn steady_pairs(looks: &[Look]) -> impl Iterator<Item = &[Look]> {
+    looks.windows(2).filter(|pair| {
+        pair[0].at >= Duration::from_millis(1_400)
+            && pair[1].at <= Duration::from_millis(3_300)
+            && pair[0].from_start >= 400
+            && pair[1].from_start >= 400
+    })
 }
 
 /// When what a reaction showed ended: after the start of the last look that showed it, before the end of the first
@@ -307,6 +320,8 @@ struct Float {
     stage: Rect,
     person: usize,
     playing: bool,
+    /// Over a share that moves under it: only the changes to a colour count (see [`coloured_changes`]).
+    over_share: bool,
 }
 
 impl Float {
@@ -314,9 +329,13 @@ impl Float {
     /// fewer than two looks catch it (a busy machine's shots are slow).
     fn check(&self, rig: &mut Rig<'_>, reaction: &str, shot: &str, case: &str) -> SandboxResult {
         for _ in 0..5 {
-            let (_, looks) = watch(rig, float_area(self.stage), Duration::from_millis(4_000), |rig| {
+            let area = float_area(self.stage);
+            let (before, mut looks) = watch(rig, area, Duration::from_millis(4_000), |rig| {
                 react(rig, self.person, reaction)
             })?;
+            if self.over_share {
+                coloured_changes(&before, &mut looks, area);
+            }
             if let Some(look) = looks.iter().find(|look| look.at > Duration::from_millis(700)) {
                 save_shot(rig, &look.shot, shot)?;
             }
@@ -329,6 +348,38 @@ impl Float {
             ));
         }
         Err(format!("{case}: no two looks caught the float in five tries").into())
+    }
+}
+
+/// Counts in `looks` only the changes from `before` to a colour, as the float's frames are and the mock's share
+/// (black, white and grey) never is: its moves under the float don't count.
+fn coloured_changes(before: &RgbImage, looks: &mut [Look], area: Rect) {
+    let coloured = |shot: &RgbImage, x: i32, y: i32| {
+        let (Ok(x), Ok(y)) = (u32::try_from(x), u32::try_from(y)) else {
+            return None;
+        };
+        (x < shot.width() && y < shot.height()).then(|| {
+            let p = shot.get_pixel(x, y).0;
+            (p, p.iter().max().unwrap_or(&0) - p.iter().min().unwrap_or(&0) > 80)
+        })
+    };
+    let mut last = before.clone();
+    for look in looks.iter_mut() {
+        let changes = |from: &RgbImage| {
+            pixels::blobs(area, |x, y| match (coloured(from, x, y), coloured(&look.shot, x, y)) {
+                (Some((a, _)), Some((b, true))) => a.iter().zip(b).map(|(a, b)| a.abs_diff(b)).max().unwrap_or(0) > 48,
+                _ => false,
+            })
+        };
+        let from_start = changes(before);
+        look.from_last = changes(&last).iter().map(|blob| blob.pixels).sum();
+        look.from_start = from_start.iter().map(|blob| blob.pixels).sum();
+        look.changed = from_start
+            .iter()
+            .filter(|blob| blob.pixels >= 20)
+            .map(|blob| blob.bounds)
+            .reduce(Rect::union);
+        last.clone_from(&look.shot);
     }
 }
 
@@ -455,6 +506,7 @@ fn gallery_reactions(rig: &mut Rig<'_>) -> SandboxResult {
         stage: page.stage.panel,
         person: away[0],
         playing: true,
+        over_share: false,
     };
     float.check(
         rig,
@@ -568,12 +620,24 @@ fn own_reaction(rig: &mut Rig<'_>) -> SandboxResult {
         .first()
         .ok_or_else(|| format!("no pictures in React's menu at {menu:?}"))?;
     say(&format!("qa666: React's menu at {menu:?}, its pictures {pictures:?}"));
-    let sent = rig.sent("sendMessage") + 1;
-    let (_, looks) = watch(rig, own, Duration::from_millis(6_800), |rig| {
-        rig.click(like)?;
-        rig.key("escape")
-    })?;
-    rig.wait_sent("sendMessage", sent, "React's Like")?;
+    // sent again, at most three times in all, while no two looks one after the other catch it at its full opacity
+    let mut looks = Vec::new();
+    for attempt in 0..3 {
+        if attempt > 0 {
+            rig.click(bar.react)?;
+            thread::sleep(SETTLE);
+        }
+        let sent = rig.sent("sendMessage") + 1;
+        (_, looks) = watch(rig, own, Duration::from_millis(6_800), |rig| {
+            rig.click(like)?;
+            rig.key("escape")
+        })?;
+        rig.wait_sent("sendMessage", sent, "React's Like")?;
+        if steady_pairs(&looks).count() >= 1 {
+            break;
+        }
+        say("qa666: no two looks caught the own reaction at its full opacity: sent again");
+    }
     if let Some(look) = looks.iter().find(|look| look.at > Duration::from_millis(2_200)) {
         save_shot(rig, &look.shot, "qa666-reaction-own-tile")?;
     }
@@ -611,6 +675,7 @@ fn speaker_reactions(rig: &mut Rig<'_>) -> SandboxResult {
         stage: page.stage.panel,
         person: away,
         playing: true,
+        over_share: false,
     };
     float.check(
         rig,
@@ -644,35 +709,23 @@ fn share_reactions(rig: &mut Rig<'_>) -> SandboxResult {
         .rev()
         .find(|index| !shown.contains(&Seen::Person(*index)))
         .ok_or("everyone shows in the strip")?;
-    // the float rises over the strip's column's foot or the share: the strip's column below its tiles is still
-    let column = Rect {
-        x: page.stage.panel.x,
-        y: page.stage.panel.bottom() - 260,
-        w: page.stage.panel.w,
-        h: 256,
+    // the float rises over the share, which moves under it: only the float's colours count
+    let float = Float {
+        stage: page.stage.panel,
+        person: away,
+        playing: true,
+        over_share: true,
     };
-    let (_, looks) = watch(rig, column, Duration::from_millis(4_000), |rig| {
-        react(rig, away, "heart")
-    })?;
-    if let Some(look) = looks.iter().find(|look| look.at > Duration::from_millis(700)) {
-        save_shot(rig, &look.shot, "qa666-reaction-share-float")?;
-    }
-    say(&format!(
-        "qa666 a float beside a share (the share moves under it): {}",
-        summary(&looks)
-    ));
+    float.check(rig, "heart", "qa666-reaction-share-float", "a float beside a share")?;
     focus(rig, true)?;
     thread::sleep(SETTLE);
-    let (_, looks) = watch(rig, column, Duration::from_millis(4_000), |rig| {
-        react(rig, person, "laugh")
-    })?;
-    if let Some(look) = looks.iter().find(|look| look.at > Duration::from_millis(700)) {
-        save_shot(rig, &look.shot, "qa666-reaction-focus-float")?;
-    }
-    say(&format!(
-        "qa666 a float over Focus on content (the share moves under it): {}",
-        summary(&looks)
-    ));
+    let float = Float { person, ..float };
+    float.check(
+        rig,
+        "laugh",
+        "qa666-reaction-focus-float",
+        "a float over Focus on content",
+    )?;
     focus(rig, false)?;
     if !rig.mock.share_made_up(&rig.call, &qa_mri(presenter), false) {
         return Err("the mock's share didn't stop".into());
@@ -724,6 +777,7 @@ fn still_reactions(rig: &mut Rig<'_>) -> SandboxResult {
         stage: page.stage.panel,
         person: away,
         playing: false,
+        over_share: false,
     };
     let floated = float.check(
         rig,

@@ -17,7 +17,8 @@
 //!   the call ends only when nobody is left.
 //! - **Sources**: each party's audio and main video source ids, its mixer's ([`crate::mixer::MixerPeer`]) when the
 //!   group video is on, none otherwise; its main video `sendrecv` once its media descriptions said so (its camera on),
-//!   `recvonly` before.
+//!   `recvonly` before. A made-up person always has a made-up audio source id (from 7000), also with the group video
+//!   off, so that the mixer can name that person as a dominant speaker.
 //!
 //! - **Roles and mutes**: a group call's starter is its organizer (`meetingRole`), everyone else a presenter, or an
 //!   attendee while only the organizer may present (`crate::meeting_options`); the organizer's Mute all marks everyone

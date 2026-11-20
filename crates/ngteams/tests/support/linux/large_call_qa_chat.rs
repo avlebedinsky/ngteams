@@ -9,7 +9,9 @@
 //! - The account's own message gives no dot and no bubble.
 //! - The bubble's Close puts it away at once (the dot stays); its "Mute these notifications" stops the next bubbles
 //!   (the dot still comes); More → Settings → "Show chat bubbles" brings them back.
-//! - Shots in Teams Dark, at a font of 18 px and in a small window; then the same in a 1:1 call.
+//! - Shots in Teams Dark, at a font of 18 px and in a small window.
+//! - The step `qa-chat-calls`: the bubble in a 1:1 call (not the dot: the mock's a-b chat counts nothing unread), and
+//!   the dot and the bubble in a Meet now.
 //!
 //! [`ChatServiceMock::post_as`]: teams_mock::ChatServiceMock::post_as
 
@@ -19,6 +21,8 @@ use std::time::{Duration, Instant};
 use image::RgbImage;
 use teams_ctl::protocol::{OpenTarget, Request, Response};
 use teams_mock::{AB_CHAT, ABC_CHAT, LAB_B, TIMED_OUT};
+// how long the bubble shows, as the app has it
+use teams_ui::call_stage::BUBBLE_FOR;
 use ui_sandbox::SandboxResult;
 
 use super::meet_now as meet;
@@ -26,8 +30,8 @@ use super::pixels::{self, Rect};
 use super::qa_order::{qa_call, speak};
 use super::{Rig, SETTLE, TOOLBAR_BAND, View, say};
 
-/// How long the bubble shows, as the app has it.
-const BUBBLE_FOR: Duration = Duration::from_secs(4);
+/// The width of the call's side pane (320 px) and the room around it, at the window's right.
+const PANE_BESIDE: i32 = 340;
 /// The bubble's size, as Teams draws it.
 const BUBBLE: (i32, i32) = (320, 70);
 
@@ -42,26 +46,13 @@ pub(super) fn qa_chat(rig: &mut Rig<'_>) -> SandboxResult {
     chat.bubble_opens_pane(rig, bubble)?;
     chat.own_message(rig)?;
     chat.close_and_mute(rig)?;
-    chat.looks(rig)?;
-    other_calls(rig)
+    chat.looks(rig)
 }
 
-/// The step `qa-chat-calls`: the dot and the bubble in a 1:1 call and in a Meet now.
+/// The step `qa-chat-calls`: the bubble in a 1:1 call; the dot and the bubble in a Meet now.
 pub(super) fn other_calls(rig: &mut Rig<'_>) -> SandboxResult {
     one_to_one(rig)?;
     meet_now(rig)
-}
-
-/// What the app counts unread in `chat` now, as `ngteamsctl unread` tells it.
-fn unread(rig: &mut Rig<'_>, chat: &str) -> SandboxResult<u64> {
-    match rig.ctl.request(None, Request::Unread)? {
-        Response::Unread(unread) => Ok(unread
-            .chats
-            .iter()
-            .find(|row| row.chat == chat)
-            .map_or(0, |row| row.count)),
-        other => Err(format!("unread: {other:?}").into()),
-    }
 }
 
 /// One shot of the stage's top: when it started and ended, and whether the bubble showed.
@@ -154,14 +145,20 @@ impl Chat {
 
     /// The bubble in `shot`, if any: what changed from the calm shot in the band at the stage's top.
     fn bubble(&self, rig: &Rig<'_>, shot: &RgbImage) -> SandboxResult<Option<Rect>> {
+        Self::bubble_from(rig, &self.calm, shot, 0)
+    }
+
+    /// The bubble in `shot`, if any: what changed from `reference` in the band at the stage's top, left of the
+    /// window's right `beside` px (a pane's).
+    fn bubble_from(rig: &Rig<'_>, reference: &RgbImage, shot: &RgbImage, beside: i32) -> SandboxResult<Option<Rect>> {
         let window = rig.window()?;
         let band = Rect {
             x: window.x + 4,
             y: window.y + TOOLBAR_BAND,
-            w: window.w - 8,
+            w: window.w - 8 - beside,
             h: 130,
         };
-        let changed = pixels::changes(&self.calm, shot, band)
+        let changed = pixels::changes(reference, shot, band)
             .into_iter()
             .filter(|blob| blob.pixels >= 30)
             .map(|blob| blob.bounds)
@@ -375,6 +372,10 @@ impl Chat {
         }
         rig.save("qa666-chat-pane-from-bubble")?;
         say("qa666: a click on the bubble opened the pane; the dot went");
+        // the stage left of the pane before b's next message: a bubble would change its top
+        rig.park()?;
+        thread::sleep(SETTLE);
+        let open = rig.shot()?;
         self.post(rig, "Here is the agenda")?;
         let start = Instant::now();
         while start.elapsed() < Duration::from_secs(5) {
@@ -382,6 +383,10 @@ impl Chat {
             if self.dot(&shot).is_some() {
                 rig.save("failed-qa666-dot-pane-open")?;
                 return Err("a dot on Chat while its pane is open".into());
+            }
+            if let Some(bubble) = Self::bubble_from(rig, &open, &shot, PANE_BESIDE)? {
+                rig.save("failed-qa666-bubble-pane-open")?;
+                return Err(format!("a bubble at {bubble:?} while the Chat pane is open").into());
             }
             thread::sleep(Duration::from_millis(200));
         }
@@ -393,7 +398,7 @@ impl Chat {
             rig.save("failed-qa666-dot-after-close")?;
             return Err("a dot on Chat after the pane read the messages and closed".into());
         }
-        say("qa666: no dot with the pane open, none after it closed");
+        say("qa666: no dot and no bubble with the pane open, no dot after it closed");
         Ok(())
     }
 
@@ -566,7 +571,7 @@ impl Chat {
     }
 }
 
-/// A 1:1 call: b's message dots Chat and bubbles.
+/// A 1:1 call: b's message bubbles (the dot is not checked here, see the comment in the body).
 fn one_to_one(rig: &mut Rig<'_>) -> SandboxResult {
     let leave = rig.leave_button("qa-chat group call")?;
     rig.leave(leave)?;
@@ -591,17 +596,9 @@ fn one_to_one(rig: &mut Rig<'_>) -> SandboxResult {
     chat.post(rig, "Can you hear me?")?;
     let (bubble, _) = chat.wait_bubble(rig, "b's message in the 1:1 call")?;
     rig.save("qa666-chat-one-to-one-bubble")?;
-    // the mock's a-b chat counts no message unread, in a call or not (seen in this QA): the dot is checked only when
-    // the app counts b's message unread
-    if unread(rig, AB_CHAT)? > 0 {
-        chat.wait_dot(rig, true, "b's message in the 1:1 call")?;
-        say(&format!("qa666: in the 1:1 call the bubble at {bubble:?} and the dot"));
-    } else {
-        say(&format!(
-            "qa666: in the 1:1 call the bubble at {bubble:?}; the mock's a-b chat counts nothing unread, so no dot is \
-             due"
-        ));
-    }
+    // only the bubble: on this mock the app's store counts b's message in the a-b chat as read (it sends no read
+    // receipt for it), so no dot comes (docs/backlog/1to1-call-chat-dot-on-mock.md)
+    say(&format!("qa666: in the 1:1 call the bubble at {bubble:?}"));
     rig.save("qa666-chat-one-to-one")?;
     let leave = rig.leave_button("qa-chat 1:1 call")?;
     rig.leave(leave)

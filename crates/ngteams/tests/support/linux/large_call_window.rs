@@ -106,8 +106,8 @@ const EVIDENCE_ENV: &str = "LARGE_CALL_EVIDENCE";
 const STEPS_ENV: &str = "LARGE_CALL_STEPS";
 /// The file in the sandbox dir the parent writes to have the child quit.
 const QUIT_TRIGGER: &str = "quit";
-/// The file in the sandbox dir the parent writes a theme's key into to have the settings take it, as the
-/// appearance page's tiles do.
+/// The file in the sandbox dir the parent writes a theme's key or an [`AppearanceChange`] into (animations on or off, a
+/// font size) to have the settings take it, as the appearance page does.
 const THEME_TRIGGER: &str = "theme";
 /// [`THEME_TRIGGER`]'s words for "Play animations" on and off, and the start of a font size's (`font-16`).
 const ANIMATIONS_ON: &str = "animations-on";
@@ -1124,20 +1124,8 @@ impl<'a> Rig<'a> {
     /// Saves the call window as it is now as `<name>.png` under `target/ui-shots/` and the evidence directory.
     fn save(&mut self, name: &str) -> SandboxResult {
         self.park()?;
-        let window = self.window()?;
         let shot = self.shot()?;
-        let cut = pixels::crop(&shot, window);
-        let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .parent()
-            .map_or_else(|| PathBuf::from("target"), Path::to_owned)
-            .join("ui-shots");
-        let mut dirs = vec![dir];
-        dirs.extend(std::env::var_os(EVIDENCE_ENV).map(PathBuf::from));
-        for dir in dirs {
-            fs::create_dir_all(&dir)?;
-            cut.save(dir.join(format!("{name}.png")))?;
-        }
-        Ok(())
+        save_shot(self, &shot, name)
     }
 
     /// With `LARGE_CALL_DEBUG` set, saves the window as it is now as `debug-<n>-<name>`.
@@ -1749,18 +1737,18 @@ impl Rig<'_> {
     }
 }
 
-/// Saves the call window as `shot` shows it, as [`Rig::save`] does.
+/// Saves the call window as `shot` shows it, in `ui-shots` and the evidence directory ([`EVIDENCE_ENV`]).
 fn save_shot(rig: &mut Rig<'_>, shot: &RgbImage, name: &str) -> SandboxResult {
     let window = rig.window()?;
     let cut = pixels::crop(shot, window);
-    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .parent()
-        .map_or_else(|| std::path::PathBuf::from("target"), std::path::Path::to_owned)
+        .map_or_else(|| PathBuf::from("target"), Path::to_owned)
         .join("ui-shots");
     let mut dirs = vec![dir];
-    dirs.extend(std::env::var_os(EVIDENCE_ENV).map(std::path::PathBuf::from));
+    dirs.extend(std::env::var_os(EVIDENCE_ENV).map(PathBuf::from));
     for dir in dirs {
-        std::fs::create_dir_all(&dir)?;
+        fs::create_dir_all(&dir)?;
         cut.save(dir.join(format!("{name}.png")))?;
     }
     Ok(())
@@ -2104,7 +2092,7 @@ fn child() -> SandboxResult {
     Ok(())
 }
 
-/// Each time the parent writes [`THEME_TRIGGER`]: the settings take the theme it names.
+/// Each time the parent writes [`THEME_TRIGGER`]: the settings take the appearance change or the theme it names.
 fn theme_when_asked(desktop: gpui::Entity<teams_ui::Desktop>, cx: &mut App) {
     let Some(dir) = std::env::var_os(ui_sandbox::SANDBOX_ENV) else {
         say("no sandbox dir");
