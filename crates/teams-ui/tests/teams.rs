@@ -898,6 +898,28 @@ fn a_post_after_last_read_that_continues_the_post_before_it_keeps_its_header_and
 }
 
 #[test]
+fn an_email_post_after_last_read_shows_new_in_its_card() {
+    let rig = rig();
+    let (shell, cx) = email_channel(&rig);
+    let view = posts(&shell, cx);
+    assert!(bounds(cx, &format!("post-new-{EMAIL}")).is_none());
+
+    hover(cx, POST);
+    click(cx, "message-more");
+    click(cx, "action-mark-unread");
+
+    assert_eq!(cx.update(|_, cx| view.read(cx).new_posts()), [POST, EMAIL]);
+    let [card, new] = bounds_in_one_frame(cx, [format!("bubble-{EMAIL}"), format!("post-new-{EMAIL}")]);
+    assert!(
+        card.left() <= new.left()
+            && new.right() <= card.right()
+            && card.top() <= new.top()
+            && new.bottom() <= card.bottom(),
+        "New {new:?} is in the email card {card:?}"
+    );
+}
+
+#[test]
 fn the_accounts_own_reply_in_a_thread_is_deleted_from_its_more_options_after_asking() {
     const MINE: &str = "1760000300200";
     let rig = rig();

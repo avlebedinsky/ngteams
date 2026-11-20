@@ -89,7 +89,7 @@ use teams_store::{
 };
 
 /// The most attempts a row gets since it was made or last resent ([`Store::resend`]), throttled ones included; after
-/// the last it is failed.
+/// the last it is failed. An unread mark ([`Command::UnreadMark`]) has no limit.
 pub const MAX_ATTEMPTS: u32 = 5;
 
 /// The most checks before a new attempt that can fail to sync since a row was made or last resent; at the last the row
@@ -103,7 +103,7 @@ pub const CHECK_RETRY_WAIT: Duration = Duration::from_secs(30);
 /// to [`RESEND_MAX_WAIT`].
 pub const RESEND_WAIT: Duration = Duration::from_secs(5);
 
-/// The longest an unread mark waits between attempts that don't reach the service.
+/// The longest an unread mark waits between attempts that don't reach the service, unless a throttle asks for longer.
 pub const RESEND_MAX_WAIT: Duration = Duration::from_secs(30);
 
 /// What an unread mark that a newer mark of its chat made out of date says.
@@ -556,7 +556,8 @@ enum Tried {
     Denied(String),
     /// Nothing went out, and nothing will: the row is failed.
     NotSent(String),
-    /// Nothing went out: the token request for it got no answer.
+    /// Nothing went out: the token request for it got no answer, or a 5xx (not a throttle) from Entra or authz
+    /// ([`token_service_down`]).
     Offline(String),
     /// Nothing went out yet: try again after `wait`.
     Throttled {
