@@ -594,8 +594,18 @@ fn the_page_the_user_turned_to_stays_while_someone_on_it_speaks() {
         second,
         "a tile in sight keeps its place, the page stays"
     );
+    // it stopped: back on the first page, it did not move while in sight
+    tell(&rig, 25, Some(0), &[]);
     click(stage, "call-strip-previous");
     assert!(!in_order(stage, 25).contains(&speaker));
+    // one who still speaks as the page turns away from it comes up
+    click(stage, "call-strip-next");
+    tell(&rig, 25, Some(0), &[speaker]);
+    later(&rig, stage, 2_000);
+    click(stage, "call-strip-previous");
+    later(&rig, stage, 0);
+    let first = in_order(stage, 25);
+    assert_eq!(&first[..2], &[0, speaker], "{first:?}");
 }
 
 #[test]
@@ -611,4 +621,22 @@ fn a_gallery_speaker_on_a_later_page_comes_to_the_first() {
     let moved = in_order(stage, 25);
     assert_eq!(moved.first(), Some(&17), "{moved:?}");
     assert_eq!(moved.len(), 8);
+}
+
+#[test]
+fn a_speaker_who_goes_out_of_sight_without_a_calls_event_still_comes_to_the_first_page() {
+    let rig = super::calling();
+    let stage = large_call(&rig, 25);
+    resize(stage, (1280.0, 800.0));
+    pick_gallery_size(stage, 16);
+    assert!(in_order(stage, 25).contains(&12), "12 starts in sight");
+    // 12 speaks in sight: it keeps its place
+    tell(&rig, 25, None, &[12]);
+    later(&rig, stage, 2_000);
+    assert!(in_order(stage, 25).contains(&12));
+    // a smaller gallery leaves 12 out with no calls event: it still comes up, it spoke long enough
+    pick_gallery_size(stage, 9);
+    later(&rig, stage, 0);
+    let moved = in_order(stage, 25);
+    assert_eq!(moved.first(), Some(&12), "{moved:?}");
 }

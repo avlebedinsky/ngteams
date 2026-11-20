@@ -192,7 +192,8 @@ struct StageTile {
     muted: bool,
     /// While its hand is up: its place in the line of hands, from 1 (0 while the line does not know it yet).
     hand: Option<usize>,
-    /// Its camera is on (View's Show videos first leads with these).
+    /// Its camera is on (with View's Show videos first, these come before the rest, after the presenter, the
+    /// speakers and the pinned one).
     video_on: bool,
     video: Option<Tile>,
 }
@@ -263,7 +264,8 @@ pub struct CallStage {
     speakers: order::Speakers,
     /// View's Hide me: the self view hidden.
     self_hidden: bool,
-    /// View's Show videos first: the tiles whose camera is on lead.
+    /// View's Show videos first: the tiles whose camera is on come before the rest (after the presenter, the speakers
+    /// and the pinned one).
     videos_first: bool,
     /// View's Max gallery size, the pages of the gallery and the strips shown, and the window's and the stage's size.
     paging: pages::Paging,
@@ -539,7 +541,7 @@ impl CallStage {
     /// Opens or closes the participants' pane, as People does.
     pub fn show_roster(&mut self, open: bool, cx: &mut Context<Self>) {
         if open {
-            self.pane = Pane::People;
+            self.open_pane(Pane::People, cx);
             self.effects = None;
             self.read_meeting(cx);
         } else if self.pane == Pane::People {
@@ -593,7 +595,7 @@ impl CallStage {
             let (settings, trace, call) = (self.settings.clone(), Arc::clone(&self.trace), self.call.get());
             self.effects =
                 Some(cx.new(|cx| EffectsPicker::new(settings, trace, PickerPlace::CallPane, cx).in_call(feed, call)));
-            self.pane = Pane::Effects;
+            self.open_pane(Pane::Effects, cx);
         }
         if !open && self.pane == Pane::Effects {
             self.pane = Pane::None;
@@ -656,7 +658,7 @@ impl CallStage {
             self.follow_speakers(active, cx);
             self.follow_chat_unread(cx);
             self.order_hands(active);
-            self.meeting_seen(active);
+            self.meeting_seen(active, cx);
             self.controls_follow(active, cx);
             self.record_problem_seen(cx);
         } else {

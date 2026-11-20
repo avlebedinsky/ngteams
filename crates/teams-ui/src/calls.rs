@@ -111,7 +111,8 @@ pub struct ActiveCall {
     pub hand_raised: bool,
     /// The account organizes the meeting: it may end it for everyone.
     pub organizer: bool,
-    /// The live reactions sent in the call lately, the newest last, each shown for [`REACTION_SHOWN`].
+    /// The live reactions sent in the call lately, the newest last, each kept for [`REACTION_SHOWN`] (on its sender's
+    /// tile; one that floats goes sooner).
     pub reactions: Vec<LiveReaction>,
     /// Since when the account holds the call (Teams' Hold), while it does ([`teams_core::Event::CallHeld`]).
     pub held: Option<Instant>,
@@ -182,7 +183,8 @@ fn is_call_event(event: &Event) -> bool {
     )
 }
 
-/// How long a live reaction shows on the stage, as Teams floats one up and away.
+/// How long a live reaction shows on its sender's tile, as Teams plays it there. A reaction that floats (its sender's
+/// tile is not on the stage) goes sooner, after the call stage's float time.
 pub const REACTION_SHOWN: Duration = Duration::from_millis(4_250);
 
 /// The most live reactions the stage shows at once.

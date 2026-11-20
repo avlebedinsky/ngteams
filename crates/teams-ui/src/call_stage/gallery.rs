@@ -72,7 +72,7 @@ impl CallStage {
         let focus = self.focus_of(&tiles).filter(|_| tiles.len() > 1);
         let in_strip = !shared && focus.is_some() && !self.self_hidden && !floats_beside_strip(area.0);
         // a page of tiles drawn below tells whose are in sight
-        self.speakers.drawn(None);
+        let sight_before = self.speakers.redraw();
         let body = if shared {
             self.share_stage(active, tiles, (title, area), palette, cx)
         } else if tiles.is_empty() {
@@ -82,6 +82,9 @@ impl CallStage {
         } else {
             self.gallery_stage(active, tiles, (area, in_gallery), palette, cx)
         };
+        if self.speakers.lost_sight(sight_before.as_deref()) {
+            self.look_at_speakers(None, cx);
+        }
         let own = if self.self_hidden || shared || in_gallery || in_strip {
             None
         } else {
@@ -575,7 +578,8 @@ impl CallStage {
         cx.notify();
     }
 
-    /// Leads with the tiles whose camera is on, or keeps the roster's order (View's Show videos first).
+    /// Puts the tiles whose camera is on before the rest, after the presenter, the speakers and the pinned one; off:
+    /// the rest in the roster's order (View's Show videos first).
     pub fn show_videos_first(&mut self, first: bool, cx: &mut Context<Self>) {
         self.videos_first = first;
         cx.notify();
@@ -1042,12 +1046,20 @@ impl CallStage {
             .iter()
             .filter(|participant| participant.speaking)
             .map(|participant| participant.mri.as_str());
-        let Some(due) = self.speakers.follow(speaking, now) else {
-            self.speakers.look = None;
-            return;
-        };
+        match self.speakers.follow(speaking, now) {
+            Some(due) => self.look_at_speakers(Some(due.saturating_duration_since(now)), cx),
+            // no page drawn since the order changed: the next one tells who is out of sight (see `lost_sight`)
+            None if self.speakers.blind() => {}
+            None => self.speakers.look = None,
+        }
+    }
+
+    /// Looks at who speaks again after `wait` (`None`: at once, as soon as the frame drawn now is done).
+    fn look_at_speakers(&mut self, wait: Option<Duration>, cx: &mut Context<Self>) {
         self.speakers.look = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-            cx.background_executor().timer(due.saturating_duration_since(now)).await;
+            if let Some(wait) = wait {
+                cx.background_executor().timer(wait).await;
+            }
             // a stage that is gone orders nothing
             let _ = this.update(cx, |this, cx| {
                 if let Some(active) = this.live(cx) {

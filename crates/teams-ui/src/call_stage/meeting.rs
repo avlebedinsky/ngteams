@@ -369,7 +369,7 @@ impl CallStage {
     }
 
     /// What the meeting told since last seen: a lock changed or a recording started shows its notice.
-    pub(super) fn meeting_seen(&mut self, active: &ActiveCall) {
+    pub(super) fn meeting_seen(&mut self, active: &ActiveCall, cx: &mut App) {
         let state = &active.meeting;
         if let Some(was) = self.lock_seen
             && was != state.locked
@@ -377,7 +377,7 @@ impl CallStage {
             self.lock_notice = Some(state.locked);
         }
         self.lock_seen = Some(state.locked);
-        self.recorder_seen(active);
+        self.recorder_seen(active, cx);
         if state.timer.is_some() {
             // the meeting runs a timer now: no draft of the account's own
             self.timer_draft = false;
@@ -532,7 +532,7 @@ impl CallStage {
     /// Opens or closes the Meeting info pane, as More → Meeting info does.
     pub fn show_meeting_info(&mut self, open: bool, cx: &mut Context<Self>) {
         if open {
-            self.pane = Pane::MeetingInfo;
+            self.open_pane(Pane::MeetingInfo, cx);
             self.effects = None;
         } else if self.pane == Pane::MeetingInfo {
             self.pane = Pane::None;

@@ -175,3 +175,49 @@ fn more_s_settings_turn_the_chat_bubbles_off_and_on_again() {
     wrote(&rig, TRIO, (LAB_B, 2, "two"), 2);
     assert!(drawn(stage, "call-chat-bubble"), "Show chat bubbles");
 }
+
+#[test]
+fn older_history_stored_during_the_call_shows_no_bubble() {
+    let rig = super::calling();
+    wrote(&rig, TRIO, (LAB_B, 50, "before the call"), 1);
+    let (trace, _) = trace();
+    let (_windows, stage) = in_group_call(&rig, &trace);
+    assert!(!drawn(stage, "call-chat-bubble"));
+    // a load of older history stores earlier unread messages: the count rises, but nothing new came
+    wrote(&rig, TRIO, (LAB_B, 10, "from yesterday"), 2);
+    assert!(!drawn(stage, "call-chat-bubble"), "no bubble for older history");
+    wrote(&rig, TRIO, (LAB_B, 9, "from the day before"), 3);
+    assert!(!drawn(stage, "call-chat-bubble"), "nor for its next page");
+    assert!(dot(stage).is_some(), "the dot counts them");
+    // a new message still bubbles
+    wrote(&rig, TRIO, (LAB_B, 60, "new"), 4);
+    assert!(drawn(stage, "call-chat-bubble"));
+}
+
+#[test]
+fn the_chat_kept_behind_another_pane_does_not_read_its_messages() {
+    let rig = super::calling();
+    let (trace, _) = trace();
+    let (windows, stage) = in_group_call(&rig, &trace);
+    let shown = || {
+        let handle = rig.cx.read(|cx| windows.read(cx).window()).unwrap();
+        rig.cx.read(|cx| {
+            let stage = handle
+                .read(cx)
+                .unwrap()
+                .view()
+                .clone()
+                .downcast::<teams_ui::call_stage::CallStage>()
+                .unwrap();
+            stage.read(cx).chat_view().map(|chat| chat.read(cx).is_shown())
+        })
+    };
+    click(stage, "call-chat");
+    assert_eq!(shown(), Some(true));
+    // People takes the Chat pane's place: the chat kept for later is not shown, so it sends no read receipt
+    click(stage, "call-roster");
+    assert!(!drawn(stage, "call-chat-pane"));
+    assert_eq!(shown(), Some(false), "hidden behind People");
+    click(stage, "call-chat");
+    assert_eq!(shown(), Some(true), "shown again with its pane");
+}

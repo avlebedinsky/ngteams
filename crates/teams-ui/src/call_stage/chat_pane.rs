@@ -25,6 +25,9 @@ pub(super) struct Unread {
     /// The count, once read for the chat.
     count: Option<u64>,
     counting: Option<Task<()>>,
+    /// The arrival time of the newest message known in the chat, once read: only a message newer than it gets a
+    /// bubble, so older history stored during the call (it raises the count too) shows none.
+    newest: Option<i64>,
     /// The newest message's bubble while it shows.
     bubble: Option<Bubble>,
     bubbling: Option<Task<()>>,
@@ -93,11 +96,13 @@ impl CallStage {
         if self.chat_unread.of.as_ref().is_none_or(|(of, _)| *of != chat) {
             return;
         }
-        // the first count of a call's chat is what came before the call: no bubble for it
+        // the first count of a call's chat is what came before the call: no bubble for it, but its newest message is
+        // where the new ones start
+        let first = self.chat_unread.count.is_none();
         let more = self.chat_unread.count.is_some_and(|before| count > before);
         self.chat_unread.count = Some(count);
-        if more {
-            self.bubble_newest(chat, cx);
+        if first || more {
+            self.read_newest(chat, more, cx);
         }
         cx.notify();
     }
@@ -107,28 +112,32 @@ impl CallStage {
         self.pane != Pane::Chat && self.chat_unread.count.unwrap_or(0) > 0
     }
 
-    /// Shows `chat`'s newest message in the bubble, when someone else sent it, the pane is closed and bubbles aren't
-    /// muted.
-    fn bubble_newest(&mut self, chat: String, cx: &mut Context<Self>) {
-        if self.pane == Pane::Chat || self.chat_unread.muted {
-            return;
-        }
-        let reply = self.core.messages(chat, None, 1);
+    /// Reads `chat`'s newest message. While `show`, it goes in the bubble when it is newer than all known before,
+    /// someone else sent it, the pane is closed and bubbles aren't muted.
+    fn read_newest(&mut self, chat: String, show: bool, cx: &mut Context<Self>) {
+        let reply = self.core.messages(chat.clone(), None, 1);
         let me = self.core.me().to_owned();
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             let Ok(page) = reply.await else { return };
             let Some(message) = page.messages.into_iter().next() else {
                 return;
             };
-            let Some(from) = message.sender.clone().filter(|from| *from != me) else {
-                return;
-            };
-            if !crate::chat_list::is_text(&message) {
-                return;
-            }
-            let line = SharedString::from(crate::chat_list::message_line(&message));
             // a stage that is gone shows no bubble
-            let _ = this.update(cx, |this, cx| this.bubble(message, (from, line), cx));
+            let _ = this.update(cx, |this, cx| {
+                let unread = &mut this.chat_unread;
+                if unread.of.as_ref().is_none_or(|(of, _)| *of != chat) {
+                    return;
+                }
+                let newer = unread.newest.is_none_or(|known| message.arrival_time > known);
+                unread.newest = unread.newest.max(Some(message.arrival_time));
+                let Some(from) = message.sender.clone().filter(|from| *from != me) else {
+                    return;
+                };
+                if show && newer && crate::chat_list::is_text(&message) {
+                    let line = SharedString::from(crate::chat_list::message_line(&message));
+                    this.bubble(message, (from, line), cx);
+                }
+            });
         })
         .detach();
     }
@@ -253,6 +262,18 @@ impl CallStage {
                 .child(crate::motion::fade(bubble, "call-chat-bubble-in", cx))
                 .into_any_element(),
         )
+    }
+
+    /// Shows `pane` beside the stage in place of the one open. The Chat pane's view, kept while another pane shows,
+    /// stops reading its chat: no read receipt goes for a message the user did not see.
+    pub(super) fn open_pane(&mut self, pane: Pane, cx: &mut App) {
+        if self.pane == Pane::Chat
+            && pane != Pane::Chat
+            && let Some(chat) = &self.chat
+        {
+            chat.update(cx, |chat, cx| chat.set_shown(false, cx));
+        }
+        self.pane = pane;
     }
 
     /// Opens or closes the Chat pane, as the toolbar's Chat does; its compose box takes the keyboard as it opens.

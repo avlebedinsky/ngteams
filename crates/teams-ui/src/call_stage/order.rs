@@ -57,13 +57,17 @@ impl Speakers {
             .filter(|(_, since)| ready(*since, self.moved) <= now)
             .map(|(mri, _)| mri.clone())
             .collect();
-        if !moving.is_empty() {
-            for mri in &moving {
-                self.floor.retain(|known| known != mri);
-                self.floor.insert(0, mri.clone());
-            }
+        let mut floor = self.floor.clone();
+        for mri in &moving {
+            floor.retain(|known| known != mri);
+            floor.insert(0, mri.clone());
+        }
+        // a speaker who leads already (on the first page, while the user views another) changes nothing and holds
+        // nobody back
+        if floor != self.floor {
+            self.floor = floor;
             self.moved = Some(now);
-            // what moved is in sight from the next page drawn on
+            // the next page drawn tells who is in sight now
             self.sight = None;
         }
         due.iter()
@@ -77,6 +81,26 @@ impl Speakers {
         self.sight
             .as_ref()
             .is_some_and(|sight| !sight.iter().any(|shown| shown == mri))
+    }
+
+    /// The stage starts to draw a frame: answers whose tiles it drew last, for [`Self::lost_sight`].
+    pub(super) fn redraw(&mut self) -> Option<Vec<String>> {
+        self.sight.take()
+    }
+
+    /// Whether someone who speaks went out of sight in this frame (in sight `before`, or no page showed then): the
+    /// page turned, the window got smaller, the gallery got smaller, or a share made the gallery a strip. Then
+    /// [`Self::follow`] must look again, because no calls event tells it.
+    pub(super) fn lost_sight(&self, before: Option<&[String]>) -> bool {
+        let unseen_before = |mri: &str| before.is_some_and(|before| !before.iter().any(|shown| shown == mri));
+        self.since
+            .iter()
+            .any(|(mri, _)| self.out_of_sight(mri) && !unseen_before(mri))
+    }
+
+    /// Whether the stage drew no page of tiles since the order last changed: nobody counts as out of sight yet.
+    pub(super) fn blind(&self) -> bool {
+        self.sight.is_none()
     }
 
     /// The stage drew these tiles (`None`: no page of tiles).
@@ -228,6 +252,57 @@ mod tests {
         assert_eq!(speakers.follow([A, B], at(start, 200)), Some(start + SETTLE));
         assert_eq!(speakers.follow([A, B], at(start, 1_200)), None);
         assert_eq!(floor(&speakers), vec![B, A]);
+    }
+
+    #[test]
+    fn a_speaker_who_leads_already_holds_nobody_back_while_the_user_views_another_page() {
+        let start = Instant::now();
+        let mut speakers = Speakers::default();
+        // the user views page 2 (A): B on page 1 and C on page 3 are out of sight
+        speakers.drawn(Some(vec![A.to_owned()]));
+        speakers.follow([B], start);
+        speakers.follow([B], start + SETTLE);
+        assert_eq!(floor(&speakers), vec![B]);
+        speakers.drawn(Some(vec![A.to_owned()]));
+        // B talks on, past the hold: B leads already, so the order stays and its time of change too
+        assert_eq!(speakers.follow([B], at(start, 5_000)), None);
+        assert_eq!(floor(&speakers), vec![B]);
+        assert!(!speakers.blind(), "the sight stays");
+        // C starts to speak: it moves when it settled, not a hold after B's talk
+        assert_eq!(speakers.follow([B, C], at(start, 5_500)), Some(at(start, 6_500)));
+        assert_eq!(speakers.follow([B, C], at(start, 6_500)), None);
+        assert_eq!(floor(&speakers), vec![C, B]);
+    }
+
+    #[test]
+    fn a_speaker_who_goes_out_of_sight_with_the_page_drawn_asks_for_a_look() {
+        let start = Instant::now();
+        let mut speakers = Speakers::default();
+        speakers.drawn(Some(vec![A.to_owned(), B.to_owned()]));
+        speakers.follow([B], start);
+        // the same page drawn again: nothing to look at
+        let before = speakers.redraw();
+        speakers.drawn(Some(vec![A.to_owned(), B.to_owned()]));
+        assert!(!speakers.lost_sight(before.as_deref()));
+        // a smaller page leaves B out
+        let before = speakers.redraw();
+        speakers.drawn(Some(vec![A.to_owned()]));
+        assert!(speakers.lost_sight(before.as_deref()));
+        // B stays out: it was out before, so no new look
+        let before = speakers.redraw();
+        speakers.drawn(Some(vec![A.to_owned()]));
+        assert!(!speakers.lost_sight(before.as_deref()));
+        // the first page drawn after a move (none drawn before) asks too
+        speakers.drawn(None);
+        let before = speakers.redraw();
+        speakers.drawn(Some(vec![A.to_owned()]));
+        assert!(speakers.lost_sight(before.as_deref()));
+        // C, out of sight, does not speak: no look
+        let mut quiet = Speakers::default();
+        quiet.drawn(Some(vec![A.to_owned()]));
+        let before = quiet.redraw();
+        quiet.drawn(Some(vec![B.to_owned()]));
+        assert!(!quiet.lost_sight(before.as_deref()));
     }
 
     #[test]
