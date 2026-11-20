@@ -88,10 +88,11 @@
 //!   chat's messages, each post's replies summed up under it ([`Replies`]), its compose box "Message in <channel>"
 //!   posting to the channel; a post's "Reply in thread" (on the hover bar, in place of a chat's
 //!   quote) or its summary opens its thread beside it ([`ChatViewEvent::OpenThread`]), a view of its own
-//!   ([`Place::Thread`]: the post and its replies, its box "Reply in thread" posting to the post's chain). Reactions,
-//!   edits, deletes, copying and workflows work as in a chat; a channel sends no read receipt and no typing, and its
-//!   box takes no file (a channel's files go to its team's site). What a channel's messages are besides a chat's
-//!   (meeting cards, a channel meeting's call, the channel's own events) is [`channel`]'s.
+//!   ([`Place::Thread`]: the post and its replies, its box "Reply in thread" posting to the post's chain). A post
+//!   marked unread here gets Teams' "Last read" divider over it and "New" beside its header and each later post's.
+//!   Reactions, edits, deletes, copying and workflows work as in a chat; a channel sends no read receipt and no
+//!   typing, and its box takes no file (a channel's files go to its team's site). What a channel's messages are
+//!   besides a chat's (meeting cards, a channel meeting's call, the channel's own events) is [`channel`]'s.
 //!
 //! What the view shows is traced (`chat-view shown`: the conversation, its newest message ids and their kinds;
 //! `chat-view revealed`: the message opened at; `quoted shown`: the message a quote went to; `typing shown`/`cleared`;
@@ -270,6 +271,10 @@ pub const OPEN_ON_THE_WEB: &str = "Open in Teams on the web";
 pub const VIEW_RECAP: &str = "View recap";
 /// The divider at the read horizon.
 pub const NEW_MESSAGES: &str = "New messages";
+/// The divider over a channel's post marked unread, as Teams words it.
+pub const LAST_READ: &str = "Last read";
+/// Beside the header of a channel's post after that divider, as Teams marks it.
+pub const NEW_POST: &str = "New";
 /// Older loads in a row that may bring nothing before rows near the top stop asking for more by themselves.
 pub const MAX_FRUITLESS: u32 = 3;
 /// How many older pages the view reads at most for a message it opens at that the store didn't hold
@@ -1802,6 +1807,15 @@ impl ChatView {
             Item::Message(message) => Some(&**message),
             _ => None,
         })
+    }
+
+    /// The posts Teams' "New" stands beside: a channel's posts after the "Last read" divider, the oldest first.
+    #[must_use]
+    pub fn new_posts(&self) -> Vec<String> {
+        self.message_items()
+            .filter(|item| item.header && self.new_post(item))
+            .map(|item| item.id.clone())
+            .collect()
     }
 
     /// How many messages the view holds.
@@ -3637,6 +3651,14 @@ impl ChatView {
         self.want_receipt(cx);
     }
 
+    /// Whether `item` is a channel's post after the "Last read" divider of a mark, which Teams marks "New".
+    fn new_post(&self, item: &MessageItem) -> bool {
+        self.place == Place::Channel
+            && self.marked.at.is_some_and(|at| item.arrival_time > at)
+            && counts_unread(&self.conversation, &item.message_type)
+            && item.body != Body::Deleted
+    }
+
     /// "Mark as unread" on `message`: the chat is unread from it on, the divider moves before it, and no read receipt
     /// goes while the view stays shown. A channel's post is marked by its thread's newest message, as Teams marks it.
     fn mark_unread(&mut self, message: &str, cx: &mut Context<Self>) {
@@ -3653,8 +3675,8 @@ impl ChatView {
             message.to_owned()
         };
         self.receipt = None;
-        // a channel's post shows "New", not the divider, as a channel opened again shows it
-        self.marked.at = (!self.place.in_channel()).then_some(arrival - 1);
+        // a channel's post gets "Last read" over it and "New" beside its header, as Teams marks it at once
+        self.marked.at = (!matches!(self.place, Place::Thread { .. })).then_some(arrival - 1);
         self.marked.standing = Standing::MadeHere;
         self.marked.made += 1;
         self.marked.writing += 1;
@@ -3811,7 +3833,7 @@ impl ChatView {
         match self.items.get(index) {
             Some(Item::Top(history)) => top_row(*history, &self.place, palette, cx),
             Some(Item::Day(day)) => day_row(*day, palette),
-            Some(Item::NewMessages) => new_messages_row(palette),
+            Some(Item::NewMessages) => new_messages_row(&self.place, palette),
             Some(Item::Message(item)) => {
                 let item = item.clone();
                 let row = self.message_row(&item, palette, cx);
@@ -3983,6 +4005,27 @@ impl ChatView {
         self.placed.faces.borrow().get(id).copied()
     }
 
+    /// A message's header ([`header_line`]), with Teams' "New" after it on a channel's new post.
+    fn header(
+        &self,
+        item: &MessageItem,
+        looks: (Palette, HourCycle),
+        mark: Option<AnyElement>,
+        cards: &Entity<profile_card::CardAsks>,
+    ) -> AnyElement {
+        let header = header_line(item, looks, mark, cards);
+        if !self.new_post(item) {
+            return header;
+        }
+        div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(header)
+            .child(new_post_mark(&item.id, looks.0))
+            .into_any_element()
+    }
+
     /// A message's column: its header, its bubble (with the "mentions you" mark beside it and its hover bar over its
     /// top while it is shown), its reactions over the bubble's bottom edge and its outbox notes.
     fn message_column(
@@ -4014,7 +4057,7 @@ impl ChatView {
             None => (
                 None,
                 item.header
-                    .then(|| header_line(item, (palette, cycle), mark.take(), cards)),
+                    .then(|| self.header(item, (palette, cycle), mark.take(), cards)),
             ),
         };
         let (foot, footer) = match &item.email {
@@ -4815,6 +4858,22 @@ pub fn message_key(item: &MessageItem) -> MessageKey {
     MessageKey::new((item.arrival_time, 0), item.id.clone())
 }
 
+/// Teams' "New" beside the header of a channel's post after the "Last read" divider; its test selector
+/// `post-new-<id>`.
+fn new_post_mark(id: &str, palette: Palette) -> AnyElement {
+    let selector = format!("post-new-{id}");
+    div()
+        .debug_selector(move || selector.clone())
+        .px_2()
+        .rounded_full()
+        .bg(rgb(palette.brand))
+        .text_color(rgb(palette.on_brand))
+        .text_xs()
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .child(NEW_POST)
+        .into_any_element()
+}
+
 /// A pending post's place among the view's messages for the text selection: after every message, by its row.
 fn pending_key(pending: &PendingItem) -> MessageKey {
     MessageKey::new((i64::MAX, pending.note.row), format!("pending-{}", pending.note.row))
@@ -5211,8 +5270,13 @@ fn day_row(day: NaiveDate, palette: Palette) -> AnyElement {
         .into_any_element()
 }
 
-fn new_messages_row(palette: Palette) -> AnyElement {
+fn new_messages_row(place: &Place, palette: Palette) -> AnyElement {
     let rule = || div().flex_1().h(px(1.0)).bg(rgb(palette.brand));
+    let label = if *place == Place::Channel {
+        LAST_READ
+    } else {
+        NEW_MESSAGES
+    };
     div()
         .debug_selector(|| "new-messages".to_owned())
         .w_full()
@@ -5224,7 +5288,7 @@ fn new_messages_row(palette: Palette) -> AnyElement {
         .text_xs()
         .text_color(rgb(palette.brand))
         .child(rule())
-        .child(NEW_MESSAGES)
+        .child(label)
         .child(rule())
         .into_any_element()
 }

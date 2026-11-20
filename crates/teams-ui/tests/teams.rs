@@ -16,7 +16,7 @@ use common::{LAB_A, LAB_B, Rig, Written};
 use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext};
 use teams_core::{Action, EngineError, Event, NameFrom, Person, READING_TEAMS};
 use teams_store::{ChannelKind, Message, Team, TeamChannel};
-use teams_ui::chat_view::{Body, ChatView, MessageAction, MessageItem, Place};
+use teams_ui::chat_view::{Body, ChatView, Item, LAST_READ, MessageAction, MessageItem, NEW_POST, Place};
 use teams_ui::settings::{Settings, SettingsModel};
 use teams_ui::shell::{Main, Shell, ShellParts};
 use teams_ui::sidebar::Section;
@@ -818,6 +818,43 @@ fn a_post_and_a_reply_take_the_accounts_reaction_in_the_channel_as_a_chats_messa
         .map(|(conversation, message, key)| (conversation.to_owned(), message.to_owned(), key.to_owned()));
     assert_eq!(reacted, expected);
     let _ = shell;
+}
+
+#[test]
+fn a_post_marked_unread_gets_last_read_over_it_and_new_beside_it_and_the_later_post() {
+    let rig = rig();
+    let (shell, cx) = opened(&rig, Arc::new(ViewTrace::off()));
+    let view = posts(&shell, cx);
+    assert!(bounds(cx, "new-messages").is_none());
+    hover(cx, POST);
+    click(cx, "message-more");
+    click(cx, "action-mark-unread");
+    let marked = rig.core.actions.lock().unwrap().last().cloned();
+    assert_eq!(
+        marked,
+        Some(Action::MarkUnread {
+            conversation: CHANNEL.to_owned(),
+            message_id: Some("1760000300200".to_owned()),
+        }),
+        "named by the thread's newest reply"
+    );
+    let before = cx.update(|_, cx| {
+        let items = view.read(cx).items();
+        let at = items.iter().position(|item| *item == Item::NewMessages)?;
+        match items.get(at + 1) {
+            Some(Item::Message(message)) => Some(message.id.clone()),
+            _ => None,
+        }
+    });
+    assert_eq!(before.as_deref(), Some(POST), "the divider over the post");
+    assert!(bounds(cx, "new-messages").is_some());
+    assert!(bounds(cx, &format!("post-new-{POST}")).is_some());
+    assert!(
+        bounds(cx, "post-new-1760000400000").is_some(),
+        "the later post is new too"
+    );
+    assert_eq!(cx.update(|_, cx| view.read(cx).new_posts()), [POST, "1760000400000"]);
+    assert_eq!((LAST_READ, NEW_POST), ("Last read", "New"));
 }
 
 #[test]
