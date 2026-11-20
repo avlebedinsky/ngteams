@@ -67,7 +67,7 @@ impl Shell {
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.status_focus.closed(window, cx);
                     this.close_status_menu(cx);
-                    this.with_accounts(cx, Accounts::change_picture);
+                    this.change_picture(cx);
                 })),
             palette,
         );
@@ -80,9 +80,7 @@ impl Shell {
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.status_focus.closed(window, cx);
                         this.close_status_menu(cx);
-                        this.with_accounts(cx, |accounts, key, cx| {
-                            accounts.use_profile_picture(key, cx).detach();
-                        });
+                        this.with_accounts(cx, Accounts::use_profile_picture);
                     })),
                 palette,
             )
@@ -95,6 +93,22 @@ impl Shell {
             .border_color(rgb(palette.border))
             .child(change)
             .children(profile)
+    }
+
+    /// "Change picture" of this shell's account. The menu is closed then, so a picture that can't be used is said in a
+    /// toast.
+    fn change_picture(&mut self, cx: &mut Context<Self>) {
+        let Some((accounts, _)) = &self.accounts else {
+            return;
+        };
+        let key = self.core.me().to_owned();
+        let changing = accounts.update(cx, |accounts, cx| accounts.change_picture(&key, cx));
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            if let Some(why) = changing.await {
+                let _ = this.update(cx, |this, cx| this.show_toast_text(why, cx));
+            }
+        })
+        .detach();
     }
 
     /// Runs `act` on the accounts with this shell's account.

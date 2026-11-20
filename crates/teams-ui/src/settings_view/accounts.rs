@@ -2,6 +2,7 @@
 //! "Use profile picture" ([`crate::account_picture`]), and "Add account" where the app adds accounts.
 //!
 //! Test selectors: `settings-account-<n>` (the row of the n-th account), `account-picture-change-<n>`,
+//! `account-picture-shows-<n>-<chosen|profile|initials>` (which picture the n-th account shows),
 //! `account-picture-profile-<n>`, `account-picture-problem-<n>` and `settings-add-account`.
 
 use gpui_component::button::ButtonVariants as _;
@@ -91,10 +92,10 @@ fn account_row(row: AccountRow, can_choose: bool, accounts: &Entity<Accounts>, p
         row.face.as_ref(),
         gpui_component::Size::Size(px(AVATAR)),
     );
-    let shows = match (row.chosen, row.face.is_some()) {
-        (true, _) => "Shows a picture you chose",
-        (false, true) => "Shows the profile picture",
-        (false, false) => "Shows the initials of the name",
+    let (shows, kind) = match (row.chosen, row.face.is_some()) {
+        (true, _) => ("Shows a picture you chose", "chosen"),
+        (false, true) => ("Shows the profile picture", "profile"),
+        (false, false) => ("Shows the initials of the name", "initials"),
     };
     let words = div()
         .flex_1()
@@ -122,7 +123,11 @@ fn account_row(row: AccountRow, can_choose: bool, accounts: &Entity<Accounts>, p
                 .debug_selector(move || format!("account-picture-shows-{index}"))
                 .text_xs()
                 .text_color(rgb(palette.muted_foreground))
-                .child(shows)
+                .child(
+                    div()
+                        .debug_selector(move || format!("account-picture-shows-{index}-{kind}"))
+                        .child(shows),
+                )
         }));
     let buttons = can_choose.then(|| picture_buttons(index, &row.key, row.chosen, accounts));
     let problem = row.problem.map(|why| {
@@ -170,7 +175,10 @@ fn picture_buttons(index: usize, key: &str, chosen: bool, accounts: &Entity<Acco
                 .label("Change picture")
                 .outline()
                 .small()
-                .on_click(move |_, _, cx| accounts.update(cx, |accounts, cx| accounts.change_picture(&key, cx))),
+                .on_click(move |_, _, cx| {
+                    // a picture that can't be used is said under the row (Accounts::picture_problem)
+                    accounts.update(cx, |accounts, cx| accounts.change_picture(&key, cx).detach());
+                }),
         )
     };
     let profile = chosen.then(|| {
@@ -182,7 +190,7 @@ fn picture_buttons(index: usize, key: &str, chosen: bool, accounts: &Entity<Acco
                 .ghost()
                 .small()
                 .on_click(move |_, _, cx| {
-                    accounts.update(cx, |accounts, cx| accounts.use_profile_picture(&key, cx).detach());
+                    accounts.update(cx, |accounts, cx| accounts.use_profile_picture(&key, cx));
                 }),
         )
     });

@@ -997,11 +997,16 @@ struct Pictured {
 
 impl Pictured {
     fn start(dir: &std::path::Path) -> Self {
+        Self::start_with(dir, Some(same_profile_picture()))
+    }
+
+    /// [`Self::start`] with `profile` as the profile picture of both accounts.
+    fn start_with(dir: &std::path::Path, profile: Option<teams_store::StoredPicture>) -> Self {
         let chosen = dir.join("chosen.png");
         std::fs::write(&chosen, png_of([30, 120, 220, 255], 64)).unwrap();
         let d = TwoAccounts::start_on(&Start {
             settings: Some(&dir.join("settings.toml")),
-            profile: Some(same_profile_picture()),
+            profile,
         });
         d.rig.cx.run_until_parked();
         Self { d, chosen }
@@ -1026,14 +1031,28 @@ impl Pictured {
 
     /// Keeps the picture file as account `key`'s picture, as the file chooser does.
     fn choose(&self, key: &str) {
-        let (chosen, accounts) = (self.chosen.clone(), self.accounts());
-        let using = self
-            .d
-            .rig
-            .cx
-            .update(|cx| accounts.update(cx, |accounts, cx| accounts.use_picture(key, chosen, cx)));
+        let using = self.start_choosing(key, &self.chosen);
         self.d.rig.cx.run_until_parked();
         drop(using);
+    }
+
+    /// Starts to keep the picture file at `path` as account `key`'s picture; it is saved when the test runs the
+    /// background work.
+    fn start_choosing(&self, key: &str, path: &std::path::Path) -> gpui::Task<Option<gpui::SharedString>> {
+        let (path, accounts) = (path.to_owned(), self.accounts());
+        self.d
+            .rig
+            .cx
+            .update(|cx| accounts.update(cx, |accounts, cx| accounts.use_picture(key, path, cx)))
+    }
+
+    /// Account `key`'s "Use profile picture".
+    fn use_profile_picture(&self, key: &str) {
+        let accounts = self.accounts();
+        self.d
+            .rig
+            .cx
+            .update(|cx| accounts.update(cx, |accounts, cx| accounts.use_profile_picture(key, cx)));
     }
 
     /// The user picks `path` in the file chooser that is open.
@@ -1045,6 +1064,22 @@ impl Pictured {
             Some(vec![picked])
         });
         self.d.rig.cx.run_until_parked();
+    }
+
+    /// A window open on Settings > Accounts.
+    fn accounts_page(&self) -> VisualTestContext {
+        let window = self.d.open();
+        let shell = self.shell(window);
+        self.d
+            .rig
+            .cx
+            .update(|cx| shell.update(cx, teams_ui::Shell::show_settings));
+        let mut cx = VisualTestContext::from_window(window.into(), &self.d.rig.cx);
+        cx.run_until_parked();
+        let page = cx.debug_bounds("settings-page-accounts").expect("Accounts is offered");
+        cx.simulate_click(page.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx
     }
 
     /// The shell the window shows.
@@ -1103,13 +1138,8 @@ fn use_profile_picture_shows_the_profile_picture_again_and_deletes_the_copy() {
     p.choose(LAB_B);
     assert!(p.pictures(LAB_B)[1].is_some());
 
-    let accounts = p.accounts();
-    let reset =
-        p.d.rig
-            .cx
-            .update(|cx| accounts.update(cx, |accounts, cx| accounts.use_profile_picture(LAB_B, cx)));
+    p.use_profile_picture(LAB_B);
     p.d.rig.cx.run_until_parked();
-    drop(reset);
 
     let [b_profile, b_chosen, b_face] = p.pictures(LAB_B);
     assert!(b_chosen.is_none());
@@ -1139,6 +1169,69 @@ fn an_account_removed_takes_its_chosen_picture_with_it() {
         Pictured::file_of(dir.path(), LAB_A).is_file(),
         "the other account keeps its picture"
     );
+}
+
+#[test]
+fn the_last_choice_stays_when_a_picture_still_being_saved_ends_after_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = Pictured::start(dir.path());
+    let red = dir.path().join("red.png");
+    std::fs::write(&red, png_of([220, 30, 30, 255], 64)).unwrap();
+
+    // a picture chosen, then "Use profile picture" before it was saved
+    let saving = p.start_choosing(LAB_B, &p.chosen);
+    p.use_profile_picture(LAB_B);
+    p.d.rig.cx.run_until_parked();
+    drop(saving);
+    assert!(p.pictures(LAB_B)[1].is_none(), "the profile picture shows");
+    assert!(
+        !Pictured::file_of(dir.path(), LAB_B).exists(),
+        "and stays after a restart"
+    );
+    assert!(p.d.traced("account", "picture-chosen").is_empty());
+
+    // two pictures chosen, one after the other, both saved at the same time: the second one stays
+    let first = p.start_choosing(LAB_B, &p.chosen);
+    let second = p.start_choosing(LAB_B, &red);
+    p.d.rig.cx.run_until_parked();
+    drop((first, second));
+    let shown = p.pictures(LAB_B)[1].clone().expect("a picture chosen");
+    let kept = std::fs::read(Pictured::file_of(dir.path(), LAB_B)).unwrap();
+    assert_eq!(
+        shown,
+        teams_ui::people::Picture::png(kept.clone()),
+        "the window shows what is kept"
+    );
+    let kept = image::load_from_memory(&kept).unwrap().to_rgba8();
+    assert_eq!(kept.get_pixel(8, 8).0, [220, 30, 30, 255], "the second picture is kept");
+    let files = std::fs::read_dir(dir.path().join(teams_ui::account_picture::DIR))
+        .unwrap()
+        .count();
+    assert_eq!(files, 1, "no part file left");
+}
+
+#[test]
+fn a_picture_still_being_saved_when_its_account_is_removed_is_not_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = Pictured::start(dir.path());
+
+    // its own settings are forgotten while the picture is saved; the tile stays until the engine stopped (and for the
+    // last account, the app quits with it)
+    let saving = p.start_choosing(LAB_B, &p.chosen);
+    let settings = p.d.rig.cx.read(|cx| p.d.desktop.read(cx).settings().clone());
+    p.d.rig.cx.update(|cx| {
+        settings.update(cx, |settings, cx| settings.forget_account(LAB_B, Some(LAB_A), cx));
+    });
+    p.d.rig.cx.run_until_parked();
+    drop(saving);
+
+    assert!(!Pictured::file_of(dir.path(), LAB_B).exists(), "no file left behind");
+    assert!(p.pictures(LAB_B)[1].is_none());
+    p.d.rig
+        .cx
+        .update(|cx| p.d.desktop.update(cx, |desktop, cx| desktop.remove_account(LAB_B, cx)));
+    p.d.rig.cx.run_until_parked();
+    assert!(!Pictured::file_of(dir.path(), LAB_B).exists());
 }
 
 #[test]
@@ -1178,20 +1271,28 @@ fn the_account_menu_changes_the_picture_and_goes_back_to_the_profile_picture() {
     cx.run_until_parked();
     assert!(p.pictures(LAB_B)[1].is_none());
     assert!(!Pictured::file_of(dir.path(), LAB_B).exists());
+
+    // a file that is no picture: the menu is closed, so a toast says why
+    let text = dir.path().join("notes.png");
+    std::fs::write(&text, "not a picture").unwrap();
+    toggle(&mut cx);
+    let change = cx.debug_bounds("status-menu-change-picture").unwrap();
+    cx.simulate_click(change.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    p.pick(&text);
+    cx.run_until_parked();
+    assert!(p.pictures(LAB_B)[1].is_none());
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).toast().cloned()).as_deref(),
+        Some("That file can't be used. Choose a PNG, JPEG, GIF or WebP picture.")
+    );
 }
 
 #[test]
 fn settings_accounts_lists_each_account_with_its_picture_buttons_and_says_why_a_file_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let p = Pictured::start(dir.path());
-    let window = p.d.open();
-    let shell = p.shell(window);
-    p.d.rig.cx.update(|cx| shell.update(cx, teams_ui::Shell::show_settings));
-    let mut cx = gpui::VisualTestContext::from_window(window.into(), &p.d.rig.cx);
-    cx.run_until_parked();
-    let page = cx.debug_bounds("settings-page-accounts").expect("Accounts is offered");
-    cx.simulate_click(page.center(), gpui::Modifiers::none());
-    cx.run_until_parked();
+    let mut cx = p.accounts_page();
     for n in 0..2 {
         assert!(
             cx.debug_bounds(format!("settings-account-{n}").leak()).is_some(),
@@ -1239,6 +1340,43 @@ fn settings_accounts_lists_each_account_with_its_picture_buttons_and_says_why_a_
     cx.simulate_click(add.center(), gpui::Modifiers::none());
     cx.run_until_parked();
     assert_eq!(*p.d.asked.lock().unwrap(), [DesktopEvent::AddAccount]);
+}
+
+#[test]
+fn settings_accounts_says_which_picture_each_account_shows() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = Pictured::start(dir.path());
+    let mut cx = p.accounts_page();
+    assert!(cx.debug_bounds("account-picture-shows-1-profile").is_some());
+
+    p.choose(LAB_B);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("account-picture-shows-1-chosen").is_some());
+    assert!(cx.debug_bounds("account-picture-shows-0-profile").is_some());
+}
+
+#[test]
+fn settings_accounts_says_the_initials_show_for_an_account_without_a_picture() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = Pictured::start_with(dir.path(), None);
+    let mut cx = p.accounts_page();
+    for n in 0..2 {
+        assert!(p.pictures([LAB_A, LAB_B][n])[2].is_none(), "account {n} has no picture");
+        assert!(
+            cx.debug_bounds(format!("account-picture-shows-{n}-initials").leak())
+                .is_some(),
+            "account {n} says its initials show"
+        );
+        assert!(
+            cx.debug_bounds(format!("account-picture-shows-{n}-profile").leak())
+                .is_none()
+        );
+    }
+
+    p.choose(LAB_B);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("account-picture-shows-1-chosen").is_some());
+    assert!(cx.debug_bounds("account-picture-shows-0-initials").is_some());
 }
 
 #[test]

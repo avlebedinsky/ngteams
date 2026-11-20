@@ -36,6 +36,13 @@ fn decoded(png: &[u8]) -> RgbaImage {
         .to_rgba8()
 }
 
+/// [`AccountPictures::save`] in a turn of its own: the PNG kept.
+fn kept(pictures: &AccountPictures, account: &str, source: &Path) -> Result<Vec<u8>, PictureError> {
+    pictures
+        .save(account, source, pictures.turn(account))
+        .map(|png| png.expect("no later turn"))
+}
+
 fn near(pixel: Rgba<u8>, wanted: Rgba<u8>) -> bool {
     pixel.0.iter().zip(wanted.0).all(|(got, want)| got.abs_diff(want) < 40)
 }
@@ -47,7 +54,7 @@ fn a_saved_picture_is_the_centre_as_a_square_png_and_stays_when_its_file_goes() 
     let pictures = AccountPictures::new(data.path().join(DIR));
     let wide = written(source.path(), "wide.png", &stripes(900, 300), ImageFormat::Png);
 
-    let png = pictures.save(A, &wide).unwrap();
+    let png = kept(&pictures, A, &wide).unwrap();
     std::fs::remove_file(&wide).unwrap();
 
     let kept = decoded(&png);
@@ -66,7 +73,7 @@ fn a_small_picture_is_kept_at_its_own_size() {
     let pictures = AccountPictures::new(data.path().join(DIR));
     let tall = written(source.path(), "tall.png", &stripes(30, 90), ImageFormat::Png);
 
-    let kept = decoded(&pictures.save(A, &tall).unwrap());
+    let kept = decoded(&kept(&pictures, A, &tall).unwrap());
 
     assert_eq!(kept.dimensions(), (30, 30));
 }
@@ -89,12 +96,12 @@ fn a_second_picture_replaces_the_first() {
         ImageFormat::Png,
     );
 
-    pictures.save(A, &red).unwrap();
-    pictures.save(A, &blue).unwrap();
+    kept(&pictures, A, &red).unwrap();
+    kept(&pictures, A, &blue).unwrap();
 
     let kept = decoded(&pictures.load(A).unwrap());
     assert!(near(*kept.get_pixel(20, 20), BLUE));
-    let files: Vec<_> = std::fs::read_dir(pictures.dir()).unwrap().collect();
+    let files: Vec<_> = std::fs::read_dir(&pictures.dir).unwrap().collect();
     assert_eq!(files.len(), 1, "one file for the account, no part file left");
 }
 
@@ -109,8 +116,8 @@ fn reset_deletes_the_picture_and_is_quiet_without_one() {
         &RgbaImage::from_pixel(8, 8, RED),
         ImageFormat::Png,
     );
-    pictures.save(A, &red).unwrap();
-    pictures.save(B, &red).unwrap();
+    kept(&pictures, A, &red).unwrap();
+    kept(&pictures, B, &red).unwrap();
 
     pictures.reset(A).unwrap();
 
@@ -132,7 +139,7 @@ fn jpeg_gif_and_webp_are_read_whatever_the_file_is_named() {
         ("no-extension", ImageFormat::Png),
     ] {
         let path = written(source.path(), name, &green, format);
-        let kept = decoded(&pictures.save(A, &path).unwrap());
+        let kept = decoded(&kept(&pictures, A, &path).unwrap());
         assert!(near(*kept.get_pixel(8, 8), GREEN), "{name}");
     }
 }
@@ -148,18 +155,59 @@ fn a_file_that_is_no_picture_is_refused_and_the_picture_before_stays() {
         &RgbaImage::from_pixel(8, 8, RED),
         ImageFormat::Png,
     );
-    let before = pictures.save(A, &red).unwrap();
+    let before = kept(&pictures, A, &red).unwrap();
     let text = source.path().join("notes.png");
     std::fs::write(&text, "not a picture").unwrap();
 
-    let refused = pictures.save(A, &text);
+    let refused = kept(&pictures, A, &text);
 
     assert!(matches!(refused, Err(PictureError::Unreadable(_))), "{refused:?}");
-    assert!(matches!(
-        pictures.save(A, &source.path().join("gone.png")),
-        Err(PictureError::Unsaved(_))
-    ));
+    let gone = kept(&pictures, A, &source.path().join("gone.png"));
+    assert!(
+        matches!(gone, Err(PictureError::Unopened(_))),
+        "the chosen file, not the copy: {gone:?}"
+    );
     assert_eq!(pictures.load(A), Some(before));
+}
+
+#[test]
+fn a_save_of_an_earlier_turn_keeps_nothing_after_a_later_save_or_a_reset() {
+    let source = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let pictures = AccountPictures::new(data.path().join(DIR));
+    let red = written(
+        source.path(),
+        "red.png",
+        &RgbaImage::from_pixel(8, 8, RED),
+        ImageFormat::Png,
+    );
+    let blue = written(
+        source.path(),
+        "blue.png",
+        &RgbaImage::from_pixel(8, 8, BLUE),
+        ImageFormat::Png,
+    );
+
+    // red asked first, blue next; blue ends first
+    let (first, second) = (pictures.turn(A), pictures.turn(A));
+    assert!(pictures.save(A, &blue, second).unwrap().is_some());
+    assert_eq!(
+        pictures.save(A, &red, first).unwrap(),
+        None,
+        "the earlier turn keeps nothing"
+    );
+    assert!(!pictures.is_current(A, first) && pictures.is_current(A, second));
+    let kept = decoded(&pictures.load(A).unwrap());
+    assert!(near(*kept.get_pixel(4, 4), BLUE));
+
+    // a save asked before a reset ends after it
+    let before = pictures.turn(A);
+    pictures.reset(A).unwrap();
+    assert_eq!(pictures.save(A, &red, before).unwrap(), None);
+    assert_eq!(pictures.load(A), None);
+    assert!(!pictures.is_current(A, before));
+    let files: Vec<_> = std::fs::read_dir(&pictures.dir).unwrap().collect();
+    assert!(files.is_empty(), "no part file left: {files:?}");
 }
 
 #[test]

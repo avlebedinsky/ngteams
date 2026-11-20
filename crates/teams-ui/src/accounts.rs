@@ -29,7 +29,7 @@ use gpui::{
     WeakEntity,
 };
 
-use crate::account_picture::{AccountPictures, PictureError};
+use crate::account_picture::{AccountPictures, PictureError, Turn};
 
 use crate::app_admin::AppAdmin;
 use crate::bridge::Core;
@@ -256,11 +256,16 @@ impl Accounts {
             return;
         };
         let key = key.to_owned();
-        let account = key.clone();
-        let loading = cx.background_spawn(async move { pictures.load(&account) });
+        let turn = pictures.turn(&key);
+        let (account, reading) = (key.clone(), pictures.clone());
+        let loading = cx.background_spawn(async move { reading.load(&account) });
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let Some(png) = loading.await else { return };
             let _ = this.update(cx, |this, cx| {
+                // a picture chosen or reset since then is the last choice
+                if !pictures.is_current(&key, turn) {
+                    return;
+                }
                 if let Some(tile) = this.tiles.iter_mut().find(|tile| tile.key == key) {
                     tile.chosen_picture.get_or_insert_with(|| Picture::png(png));
                     cx.notify();
@@ -270,10 +275,11 @@ impl Accounts {
         .detach();
     }
 
-    /// "Change picture" of account `key`: the user picks a picture file, and the account shows it from then on.
-    pub fn change_picture(&mut self, key: &str, cx: &mut Context<Self>) {
+    /// "Change picture" of account `key`: the user picks a picture file, and the account shows it from then on. The
+    /// task gives why the picture can't be used, as [`Self::use_picture`] does.
+    pub fn change_picture(&mut self, key: &str, cx: &mut Context<Self>) -> Task<Option<SharedString>> {
         if self.pictures.is_none() || self.tile(key).is_none() {
-            return;
+            return Task::ready(None);
         }
         let picked = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -283,72 +289,90 @@ impl Accounts {
         });
         let key = key.to_owned();
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let Some(source) = picked
+            let source = picked
                 .await
                 .ok()
                 .and_then(Result::ok)
                 .flatten()
-                .and_then(|paths| paths.into_iter().next())
-            else {
-                return;
-            };
-            if let Ok(using) = this.update(cx, |this, cx| this.use_picture(&key, source, cx)) {
-                using.await;
-            }
+                .and_then(|paths| paths.into_iter().next())?;
+            let using = this.update(cx, |this, cx| this.use_picture(&key, source, cx)).ok()?;
+            using.await
         })
-        .detach();
     }
 
-    /// Keeps the picture file at `source` as the picture of account `key` and shows it, or says why it can't.
-    pub fn use_picture(&mut self, key: &str, source: PathBuf, cx: &mut Context<Self>) -> Task<()> {
+    /// Keeps the picture file at `source` as the picture of account `key` and shows it, or says why it can't. The task
+    /// gives why it can't (also kept for [`Self::picture_problem`]); `None` when it is used, or when a later choice of
+    /// the user came first.
+    pub fn use_picture(&mut self, key: &str, source: PathBuf, cx: &mut Context<Self>) -> Task<Option<SharedString>> {
         let Some(pictures) = self.pictures.clone().filter(|_| self.tile(key).is_some()) else {
-            return Task::ready(());
+            return Task::ready(None);
         };
         let key = key.to_owned();
+        let turn = pictures.turn(&key);
         let account = key.clone();
-        let saving = cx.background_spawn(async move { pictures.save(&account, &source) });
+        let saving = cx.background_spawn(async move { pictures.save(&account, &source, turn) });
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let saved = saving.await;
-            let _ = this.update(cx, |this, cx| this.picture_saved(&key, saved, cx));
+            this.update(cx, |this, cx| this.picture_saved(&key, turn, saved, cx))
+                .ok()
+                .flatten()
         })
     }
 
-    fn picture_saved(&mut self, key: &str, saved: Result<Vec<u8>, PictureError>, cx: &mut Context<Self>) {
+    /// The end of a save of turn `turn`; returns why the picture can't be used.
+    fn picture_saved(
+        &mut self,
+        key: &str,
+        turn: Turn,
+        saved: Result<Option<Vec<u8>>, PictureError>,
+        cx: &mut Context<Self>,
+    ) -> Option<SharedString> {
+        let pictures = self.pictures.as_ref()?;
+        if !pictures.is_current(key, turn) {
+            // a later choice of the user, or the removal of the account, came first: it decides
+            return None;
+        }
         let Some(tile) = self.tiles.iter_mut().find(|tile| tile.key == key) else {
-            // the account was removed while its picture was saved: its file goes too
-            if saved.is_ok() {
-                self.forget_picture(key, cx).detach();
+            // the account left the window while its picture was saved: its file goes too
+            if matches!(saved, Ok(Some(_))) {
+                self.forget_picture(key);
             }
-            return;
+            return None;
         };
         match saved {
-            Ok(png) => {
+            Ok(None) => None,
+            Ok(Some(png)) => {
                 tile.chosen_picture = Some(Picture::png(png));
                 self.picture_problem = None;
                 self.trace
                     .record(&TraceLine::new("account", "picture-chosen").people([key]));
+                cx.notify();
+                None
             }
             Err(error) => {
                 log::warn!("a picture for an account can't be used: {error}");
-                let why = match error {
+                let why: SharedString = match error {
                     PictureError::TooLarge(_) => "That picture is too large. Choose one smaller than 64 MB.".into(),
+                    PictureError::Unopened(error) => format!("That file can't be opened: {error}").into(),
                     PictureError::Unreadable(_) => {
                         "That file can't be used. Choose a PNG, JPEG, GIF or WebP picture.".into()
                     }
                     PictureError::Unsaved(error) => format!("The picture can't be saved: {error}").into(),
                 };
-                self.picture_problem = Some((key.to_owned(), why));
+                self.picture_problem = Some((key.to_owned(), why.clone()));
                 self.trace
                     .record(&TraceLine::new("account", "picture-refused").people([key]));
+                cx.notify();
+                Some(why)
             }
         }
-        cx.notify();
     }
 
     /// "Use profile picture" of account `key`: the picture the user chose goes, and its profile picture shows again.
-    pub fn use_profile_picture(&mut self, key: &str, cx: &mut Context<Self>) -> Task<()> {
+    /// A picture that is still being saved for it is not kept.
+    pub fn use_profile_picture(&mut self, key: &str, cx: &mut Context<Self>) {
         let Some(tile) = self.tiles.iter_mut().find(|tile| tile.key == key) else {
-            return Task::ready(());
+            return;
         };
         tile.chosen_picture = None;
         if self.picture_problem.as_ref().is_some_and(|(account, _)| account == key) {
@@ -357,20 +381,17 @@ impl Accounts {
         self.trace
             .record(&TraceLine::new("account", "picture-reset").people([key]));
         cx.notify();
-        self.forget_picture(key, cx)
+        self.forget_picture(key);
     }
 
-    /// Deletes the file of the picture the user chose for account `key`.
-    fn forget_picture(&self, key: &str, cx: &mut Context<Self>) -> Task<()> {
-        let Some(pictures) = self.pictures.clone() else {
-            return Task::ready(());
-        };
-        let account = key.to_owned();
-        cx.background_spawn(async move {
-            if let Err(error) = pictures.reset(&account) {
-                log::warn!("the picture of an account can't be deleted: {error}");
-            }
-        })
+    /// Deletes the file of the picture the user chose for account `key` (one small file: done at once, so it comes
+    /// before each later choice).
+    fn forget_picture(&self, key: &str) {
+        if let Some(pictures) = &self.pictures
+            && let Err(error) = pictures.reset(key)
+        {
+            log::warn!("the picture of an account can't be deleted: {error}");
+        }
     }
 
     /// Hands account `key` its server's account management (`None` takes it away): its settings then offer Manage
