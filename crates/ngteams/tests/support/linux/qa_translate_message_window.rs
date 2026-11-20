@@ -927,13 +927,14 @@ impl Walk<'_> {
         Err("Escape in the message list never lets the selected message go".into())
     }
 
-    /// The menu opened by Shift+F10 works with the keys: Down to "Translation", Right into its list, Enter on its
-    /// offer, Left and Escape back out. b's message shows translated when this starts.
+    /// The menu opened by Shift+F10 works with the keys: Down past "Mark as unread" to "Translation", Right into its
+    /// list, Enter on its offer, Left and Escape back out. b's message shows translated when this starts.
     fn menu_by_keys(&mut self) -> SandboxResult {
         let hello = self.ids().hello.clone();
         self.select_by_keys(&hello)?;
         self.menu_key_on("chat", &hello)?;
         self.key_shots("keys-menu")?;
+        self.run.input.key(keys::DOWN)?;
         self.run.input.key(keys::DOWN)?;
         self.run.input.key(keys::RIGHT)?;
         thread::sleep(SETTLE);
@@ -955,13 +956,14 @@ impl Walk<'_> {
         );
         // the keys are back on the message: Shift+F10 again, and Translate
         self.menu_key_on("chat", &hello)?;
-        for key in [keys::DOWN, keys::RIGHT, keys::ENTER] {
+        for key in [keys::DOWN, keys::DOWN, keys::RIGHT, keys::ENTER] {
             self.run.input.key(key)?;
             thread::sleep(Duration::from_millis(300));
         }
         self.until_shows("chat", &hello, HELLO.1, "translated")?;
         // Escape in the list closes the list, a second one the menu
         self.menu_key_on("chat", &hello)?;
+        self.run.input.key(keys::DOWN)?;
         self.run.input.key(keys::DOWN)?;
         self.run.input.key(keys::RIGHT)?;
         thread::sleep(SETTLE);
