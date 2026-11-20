@@ -213,7 +213,9 @@ impl Shell {
     pub(super) fn title_bar(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let left = div()
             .w(px(self.title_left_width(cx)))
-            .flex_none()
+            // a narrow window draws the list pane narrower than its width: the right part must keep its place
+            .flex_shrink(1.0)
+            .min_w_0()
             .h_full()
             .flex()
             .items_center()
