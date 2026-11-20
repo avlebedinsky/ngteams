@@ -17,6 +17,7 @@ use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
 
+use gpui::{PathPromptFilter, SharedString};
 use image::{DynamicImage, ImageReader};
 
 /// The directory of the account pictures, beside the settings file.
@@ -25,6 +26,25 @@ pub const DIR: &str = "account-pictures";
 pub const SIDE: u32 = 256;
 /// The largest file the app reads as a picture.
 const MAX_FILE: u64 = 64 * 1024 * 1024;
+
+/// The file chooser's kinds of file: the pictures that [`AccountPictures::save`] reads, shown when it opens, then all
+/// files.
+#[must_use]
+pub fn file_filters() -> Vec<PathPromptFilter> {
+    let shared = |items: &[&'static str]| items.iter().copied().map(SharedString::from).collect();
+    vec![
+        PathPromptFilter {
+            name: "Pictures (PNG, JPEG, GIF, WebP)".into(),
+            extensions: shared(&["png", "jpg", "jpeg", "gif", "webp"]),
+            mime_types: shared(&["image/png", "image/jpeg", "image/gif", "image/webp"]),
+        },
+        PathPromptFilter {
+            name: "All files".into(),
+            extensions: Vec::new(),
+            mime_types: Vec::new(),
+        },
+    ]
+}
 
 /// Why a picture was not kept.
 #[derive(Debug, thiserror::Error)]

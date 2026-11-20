@@ -1061,6 +1061,16 @@ impl Pictured {
         let picked = path.to_owned();
         self.d.rig.cx.simulate_path_prompt_response(move |options| {
             assert!(options.files && !options.multiple && !options.directories);
+            assert_eq!(options.title.as_deref(), Some("Choose a picture"));
+            let names: Vec<&str> = options.filters.iter().map(|filter| filter.name.as_str()).collect();
+            assert_eq!(names, ["Pictures (PNG, JPEG, GIF, WebP)", "All files"]);
+            let pictures: Vec<&str> = options.filters[0]
+                .extensions
+                .iter()
+                .map(gpui::SharedString::as_str)
+                .collect();
+            assert_eq!(pictures, ["png", "jpg", "jpeg", "gif", "webp"]);
+            assert!(options.filters[1].extensions.is_empty());
             Some(vec![picked])
         });
         self.d.rig.cx.run_until_parked();

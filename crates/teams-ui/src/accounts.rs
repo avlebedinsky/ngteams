@@ -286,6 +286,8 @@ impl Accounts {
             directories: false,
             multiple: false,
             prompt: Some("Use picture".into()),
+            title: Some("Choose a picture".into()),
+            filters: crate::account_picture::file_filters(),
         });
         let key = key.to_owned();
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
