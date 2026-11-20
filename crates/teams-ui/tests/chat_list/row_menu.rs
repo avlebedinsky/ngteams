@@ -121,3 +121,29 @@ fn a_read_only_app_draws_no_rows_menu() {
     cx.simulate_mouse_move(bounds.center(), None, Modifiers::none());
     assert!(!drawn(cx, selector(format!("{row}-more"))));
 }
+
+#[test]
+fn ctrl_2_puts_the_ring_on_the_open_chat_so_the_menu_key_opens_its_menu() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig);
+    let sidebar = cx.update(|_, cx| shell.read(cx).sidebar().clone());
+    let (ab, group) = (row_of(&shell, cx, AB), row_of(&shell, cx, GROUP));
+    let at = cx.debug_bounds(ab).unwrap().center();
+    cx.simulate_click(at, Modifiers::none());
+    cx.run_until_parked();
+    // the ring on the chat's row, then another chat opened by the pointer
+    cx.update(|window, cx| sidebar.update(cx, |sidebar, cx| sidebar.focus_list(window, cx)));
+    let at = cx.debug_bounds(group).unwrap().center();
+    cx.simulate_click(at, Modifiers::none());
+    cx.run_until_parked();
+    shell.update_in(cx, Shell::show_chats);
+    cx.run_until_parked();
+    cx.simulate_keystrokes("shift-f10");
+    cx.run_until_parked();
+    let list = list_of(&shell, cx);
+    assert_eq!(
+        cx.update(|_, cx| list.read(cx).row_menu_open().map(str::to_owned)),
+        Some(GROUP.to_owned()),
+        "the open chat's menu"
+    );
+}

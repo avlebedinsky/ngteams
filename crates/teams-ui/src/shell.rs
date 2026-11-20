@@ -4,7 +4,8 @@
 //! chat opened in a [`ChatView`] under its avatar and name, and a 1:1 chat's other member's presence, M2 Task 17; a
 //! channel opened in a [`ChannelView`] under its team's tile and its name; with nothing open, what to do).
 //! Settings take the place of both the list and the conversation pane, as in Teams (their pages are their own list);
-//! the rail's Chat leaves them for what they hid.
+//! the rail's Chat leaves them for what they hid. The rail's Chat counts the chats with anything unread
+//! ([`ChatList::unread_chats`]) on Teams' red badge, as the tray does.
 //!
 //! The account menu (M2 Task 20): the rail's status button, above Settings, shows what the account's own presence
 //! reports ([`OwnPresence`], handed in by the desktop) and opens a menu of the statuses the user may set (Automatic and
@@ -325,6 +326,8 @@ pub struct Shell {
     /// The Activity pane, with what it tells; shown in the list pane's place while [`ListPlace::Activity`].
     activity: (Entity<ActivityView>, Subscription),
     list_place: ListPlace,
+    /// The chats with anything unread, as the rail's Chat counts them ([`ChatList::unread_chats`]).
+    unread_chats: usize,
     /// The chat opened in the conversation pane.
     chat: Option<Entity<ChatView>>,
     /// A meeting chat's tabs: the one shown, its Recap and Shared views.
@@ -469,6 +472,7 @@ impl Shell {
         Self {
             activity,
             list_place: ListPlace::Chats,
+            unread_chats: 0,
             cards: Self::card_host(&models, (&search_box, previews), window, cx),
             core,
             models,
@@ -1636,7 +1640,18 @@ impl Shell {
     }
 
     /// The chat list changed: the header and the chat view's title follow it.
+    /// The chats with anything unread, as the rail's Chat shows them (0: no badge).
+    #[must_use]
+    pub fn unread_chats(&self) -> usize {
+        self.unread_chats
+    }
+
     fn list_changed(&mut self, cx: &mut Context<Self>) {
+        let unread_chats = self.list.read(cx).unread_chats();
+        if unread_chats != self.unread_chats {
+            self.unread_chats = unread_chats;
+            cx.notify();
+        }
         self.trace_header(cx);
         self.trace_call_button(cx);
         self.give_title(cx);
@@ -3118,14 +3133,20 @@ impl Shell {
                     ))
                     .children((unseen > 0).then(|| rail_count("rail-activity-count", unseen))),
             )
-            .child(Self::rail_button(
-                "rail-chats",
-                RailItem::CHAT,
-                chats,
-                palette,
-                cx,
-                Self::show_chats,
-            ))
+            .child(
+                div()
+                    .relative()
+                    .w_full()
+                    .child(Self::rail_button(
+                        "rail-chats",
+                        RailItem::CHAT,
+                        chats,
+                        palette,
+                        cx,
+                        Self::show_chats,
+                    ))
+                    .children((self.unread_chats > 0).then(|| rail_count("rail-chats-count", self.unread_chats))),
+            )
             .child(Self::rail_button(
                 "rail-calendar",
                 RailItem::CALENDAR,

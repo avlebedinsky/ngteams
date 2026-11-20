@@ -946,16 +946,24 @@ impl Sidebar {
 /// Enter and Space open a chat or a channel, fold a section or a team, or follow a link; Right unfolds and Left folds, or
 /// goes up to the row's team or section; Shift+F10 or the menu key opens a team's "..." menu.
 impl Sidebar {
-    /// Gives the list the keyboard, on the selected row (or the first).
+    /// Gives the list the keyboard, on the open chat's or channel's row; without one, on the row it was on (or the
+    /// first).
     pub fn focus_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.cursor_at().is_none() {
-            let selected = self.list.read(cx).selected().map(str::to_owned);
-            let at = selected
-                .and_then(|id| self.entries.iter().position(|entry| entry.chat() == Some(id.as_str())))
-                .or_else(|| self.rows().next());
-            if let Some(at) = at {
-                self.set_cursor(at);
-            }
+        let chat = self.list.read(cx).selected().map(str::to_owned);
+        let channel = self.teams.read(cx).selected().map(str::to_owned);
+        let at = chat
+            .and_then(|id| self.entries.iter().position(|entry| entry.chat() == Some(id.as_str())))
+            .or_else(|| {
+                channel.and_then(|id| {
+                    self.entries
+                        .iter()
+                        .position(|entry| matches!(entry, Entry::Channel { id: channel, .. } if *channel == id))
+                })
+            })
+            .or_else(|| self.cursor_at())
+            .or_else(|| self.rows().next());
+        if let Some(at) = at {
+            self.set_cursor(at);
         }
         self.focus.focus(window, cx);
         cx.notify();

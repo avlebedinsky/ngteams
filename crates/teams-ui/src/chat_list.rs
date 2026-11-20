@@ -955,6 +955,15 @@ impl ChatList {
         self.favorites.iter().chain(&self.rows)
     }
 
+    /// How many chats hold anything unread, as Teams' Chat in its rail counts them: each listed chat once, however
+    /// many of its messages are unread, a favourite channel not.
+    #[must_use]
+    pub fn unread_chats(&self) -> usize {
+        self.all_rows()
+            .filter(|row| row.unread > 0 && row.kind != RowKind::Channel)
+            .count()
+    }
+
     /// Every chat the account can find, listed or not: [`Self::all_rows`], then the empty chats the list leaves out,
     /// which Teams' search, its switcher and New message's To: find all the same.
     pub fn findable_rows(&self) -> impl Iterator<Item = &ChatRow> {
@@ -1217,7 +1226,16 @@ impl ChatList {
     ) -> AnyElement {
         let selected = self.selected.as_deref() == Some(row.id.as_str());
         let id = row.id.clone();
-        let background = if selected { palette.selected } else { palette.surface };
+        // the row stays hovered while its menu is open, as Teams keeps it
+        let menu_open = self
+            .row_menu
+            .as_ref()
+            .is_some_and(|(open, at, _)| *open == row.id && *at == selector);
+        let background = match (selected, menu_open) {
+            (true, _) => palette.selected,
+            (false, true) => palette.hover,
+            (false, false) => palette.surface,
+        };
         let element_id = format!("{selector}-{}", row.id);
         let group = SharedString::from(format!("{selector}-group"));
         let cover = if selected { palette.selected } else { palette.hover };

@@ -912,3 +912,44 @@ fn a_long_list_is_held_whole() {
     assert_eq!(cx.update(|_, cx| list.read(cx).rows().len()), total);
     assert_eq!(shown_numbers(&list, cx).len(), FIRST_PAGE);
 }
+
+#[test]
+fn the_rails_chat_counts_the_unread_chats_but_not_a_channel_and_follows_a_mark_and_a_read() {
+    let rig = seeded();
+    *rig.core.teams.lock().unwrap() = Some(vec![ops_crew()]);
+    rig.core.listing.lock().unwrap().favorites = Some(vec![NOTES.to_owned(), CHANNEL.to_owned(), AC.to_owned()]);
+    rig.core.messages.lock().unwrap().insert(
+        CHANNEL.to_owned(),
+        vec![message(CHANNEL, "7000", LAB_B, "<p>disk full</p>", 7_000)],
+    );
+    {
+        let mut unread = rig.core.unread.lock().unwrap();
+        unread.insert(CHANNEL.to_owned(), 3);
+        unread.insert(AC.to_owned(), 1);
+        unread.insert(GROUP.to_owned(), 4);
+    }
+    let (shell, cx) = shell_window(&rig);
+    let counted = |cx: &mut VisualTestContext| cx.update(|_, cx| shell.read(cx).unread_chats());
+    assert_eq!(
+        counted(cx),
+        2,
+        "a favourite chat and a chat, each once; the channel not"
+    );
+    assert!(drawn(cx, "rail-chats-count"));
+    // a chat marked unread counts one more, at once
+    rig.core.unread.lock().unwrap().insert(AB.to_owned(), 1);
+    rig.send(Event::ReadHorizon {
+        conversation: AB.to_owned(),
+    });
+    cx.run_until_parked();
+    assert_eq!(counted(cx), 3);
+    for chat in [AB, AC, GROUP] {
+        rig.core.unread.lock().unwrap().insert(chat.to_owned(), 0);
+        rig.send(Event::ReadHorizon {
+            conversation: chat.to_owned(),
+        });
+    }
+    cx.run_until_parked();
+    assert_eq!(counted(cx), 0);
+    assert!(!drawn(cx, "rail-chats-count"), "no badge without an unread chat");
+}
