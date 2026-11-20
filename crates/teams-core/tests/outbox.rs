@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use serde_json::{Map, Value, json};
+use teams_auth::authz::AuthzError;
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_core::{
@@ -88,6 +89,12 @@ enum Fault {
     DropRequest,
     /// The token request for the write gets no answer: nothing goes out.
     NoTokenAnswer,
+    /// Authz answers the token request with a 502: nothing goes out.
+    AuthzDown,
+    /// Entra answers the token request with a 500 that isn't its JSON: nothing goes out.
+    EntraDown,
+    /// The token service throttles the token request: nothing goes out.
+    TokenThrottled,
 }
 
 /// The HTTP transport with scripted faults on its writes.
@@ -117,6 +124,17 @@ impl Transport for Flaky {
             }
             Some(Fault::DropRequest) => Err(HttpError::Failed(Failure::Timeout)),
             Some(Fault::NoTokenAnswer) => Err(HttpError::Credentials(TokenError::Http(unanswered().await))),
+            Some(Fault::AuthzDown) => Err(HttpError::Credentials(TokenError::Authz(Box::new(
+                AuthzError::Unavailable {
+                    status: 502,
+                    retry_after: None,
+                },
+            )))),
+            Some(Fault::EntraDown) => Err(HttpError::Credentials(TokenError::UnexpectedResponse { status: 500 })),
+            Some(Fault::TokenThrottled) => Err(HttpError::Credentials(TokenError::Throttled {
+                retry_after: None,
+                error: None,
+            })),
         }
     }
 }
@@ -1978,6 +1996,84 @@ async fn an_unread_mark_answered_with_a_5xx_is_tried_again_later() {
 
     assert_eq!(sent.state, OutboxState::Sent, "{sent:?}");
     assert_eq!(bookmarks(&setup).await.len(), 2);
+}
+
+#[tokio::test]
+async fn an_unread_mark_throttled_or_refused_once_after_its_attempts_stays_pending() {
+    let setup = setup().await;
+    for (priority, answer) in [
+        (1, ResponseTemplate::new(503)),
+        (2, ResponseTemplate::new(429).insert_header("Retry-After", "60")),
+        (3, ResponseTemplate::new(401)),
+    ] {
+        Mock::given(method("PUT"))
+            .and(path(PROPERTIES))
+            .respond_with(answer)
+            .up_to_n_times(1)
+            .with_priority(priority)
+            .mount(&setup.server)
+            .await;
+    }
+    answered(&setup, "PUT", PROPERTIES).await;
+    let mut store = setup.open_store();
+    let row = enqueue(&mut store, &mark(Some("1760000000005"))).unwrap();
+    for _ in 0..MAX_ATTEMPTS {
+        setup.fault(Fault::DropRequest);
+        let waiting = send(&setup, &mut store, &row).await;
+        assert_eq!(waiting.state, OutboxState::Pending, "{waiting:?}");
+        setup.clock.store(waiting.not_before.unwrap(), Ordering::SeqCst);
+    }
+
+    let throttled = send(&setup, &mut store, &row).await;
+    assert_eq!(throttled.state, OutboxState::Pending, "503: {throttled:?}");
+    assert_eq!(
+        throttled.not_before,
+        Some(setup.now() + millis(DEFAULT_RETRY_WAIT.max(RESEND_MAX_WAIT))),
+        "at least the wait of a mark"
+    );
+    setup.clock.store(throttled.not_before.unwrap(), Ordering::SeqCst);
+    let throttled = send(&setup, &mut store, &row).await;
+    assert_eq!(throttled.state, OutboxState::Pending, "429: {throttled:?}");
+    assert_eq!(
+        throttled.not_before,
+        Some(setup.now() + 60_000),
+        "the longer wait the service asks for"
+    );
+    setup.clock.store(throttled.not_before.unwrap(), Ordering::SeqCst);
+    let sent = send(&setup, &mut store, &row).await;
+
+    assert_eq!(
+        sent.state,
+        OutboxState::Sent,
+        "a 401, then the refreshed token: {sent:?}"
+    );
+    assert_eq!(bookmarks(&setup).await.len(), 4);
+}
+
+#[tokio::test]
+async fn an_unread_mark_stays_pending_while_the_token_service_is_down_or_throttles() {
+    let setup = setup().await;
+    answered(&setup, "PUT", PROPERTIES).await;
+    let mut store = setup.open_store();
+    let row = enqueue(&mut store, &mark(None)).unwrap();
+    let faults = [Fault::AuthzDown, Fault::EntraDown, Fault::TokenThrottled];
+    for fault in faults
+        .into_iter()
+        .cycle()
+        .take(usize::try_from(MAX_ATTEMPTS).unwrap() + 2)
+    {
+        setup.fault(fault);
+        let waiting = send(&setup, &mut store, &row).await;
+        assert_eq!(waiting.state, OutboxState::Pending, "{waiting:?}");
+        assert!(!outcome_unknown(&waiting), "{waiting:?}");
+        setup.clock.store(waiting.not_before.unwrap(), Ordering::SeqCst);
+    }
+    assert!(bookmarks(&setup).await.is_empty(), "nothing reached the service");
+
+    let sent = send(&setup, &mut store, &row).await;
+
+    assert_eq!(sent.state, OutboxState::Sent, "{sent:?}");
+    assert_eq!(bookmarks(&setup).await.len(), 1);
 }
 
 #[tokio::test]

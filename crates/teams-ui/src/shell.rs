@@ -1639,13 +1639,13 @@ impl Shell {
         Some(selected_by(id, button).into_any_element())
     }
 
-    /// The chat list changed: the header and the chat view's title follow it.
     /// The chats with anything unread, as the rail's Chat shows them (0: no badge).
     #[must_use]
     pub fn unread_chats(&self) -> usize {
         self.unread_chats
     }
 
+    /// The chat list changed: the rail's count of unread chats, the header and the chat view's title follow it.
     fn list_changed(&mut self, cx: &mut Context<Self>) {
         let unread_chats = self.list.read(cx).unread_chats();
         if unread_chats != self.unread_chats {

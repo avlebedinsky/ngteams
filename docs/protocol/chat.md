@@ -227,7 +227,7 @@ in a lab team's General channel. Each write is the account's own property: nobod
 - The native client keeps the bookmark's arrival in the store and counts a marked chat's messages from others after it
   (at least 1) unless it marked all read later. It ends the mark when the chat is shown after it opened marked, or shown
   again after it was marked there, and sends no read receipt while the chat stays shown after a mark made there. A
-  mark (or its end) that gets no answer (the network down, or a 5xx) stays queued and goes out once the service answers:
+  mark (or its end) that gets no answer (the network down, a 5xx or a throttle, also of the token service) stays queued and goes out once the service answers:
   set again, the bookmark does no harm. A newer mark of the chat replaces an older one still queued, so only the newest
   goes out.
 - Not seen: the push delivery of a bookmark to the account's other endpoints (the own server sends a

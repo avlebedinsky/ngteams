@@ -16,7 +16,7 @@ use common::{LAB_A, LAB_B, Rig, Written};
 use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext};
 use teams_core::{Action, EngineError, Event, NameFrom, Person, READING_TEAMS};
 use teams_store::{ChannelKind, Message, Team, TeamChannel};
-use teams_ui::chat_view::{Body, ChatView, Item, LAST_READ, MessageAction, MessageItem, NEW_POST, Place};
+use teams_ui::chat_view::{Body, ChatView, Item, LAST_READ, MessageAction, MessageItem, NEW_MESSAGES, Place};
 use teams_ui::settings::{Settings, SettingsModel};
 use teams_ui::shell::{Main, Shell, ShellParts};
 use teams_ui::sidebar::Section;
@@ -848,13 +848,53 @@ fn a_post_marked_unread_gets_last_read_over_it_and_new_beside_it_and_the_later_p
     });
     assert_eq!(before.as_deref(), Some(POST), "the divider over the post");
     assert!(bounds(cx, "new-messages").is_some());
+    assert!(bounds(cx, &format!("new-messages-label {LAST_READ}")).is_some());
+    assert!(bounds(cx, &format!("new-messages-label {NEW_MESSAGES}")).is_none());
     assert!(bounds(cx, &format!("post-new-{POST}")).is_some());
     assert!(
         bounds(cx, "post-new-1760000400000").is_some(),
         "the later post is new too"
     );
     assert_eq!(cx.update(|_, cx| view.read(cx).new_posts()), [POST, "1760000400000"]);
-    assert_eq!((LAST_READ, NEW_POST), ("Last read", "New"));
+}
+
+#[test]
+fn a_post_after_last_read_that_continues_the_post_before_it_keeps_its_header_and_new() {
+    const GROUPED: &str = "1760000400050";
+    let rig = rig();
+    *rig.core.teams.lock().unwrap() = Some(teams());
+    let (mut messages, mut roots) = channel_store();
+    // the same sender as the second post, within GROUP_MS of it
+    messages.insert(0, message(GROUPED, LAB_C, "<p>third post</p>"));
+    roots.insert(0, (GROUPED.to_owned(), GROUPED.to_owned()));
+    rig.core.messages.lock().unwrap().insert(CHANNEL.to_owned(), messages);
+    rig.core.roots.lock().unwrap().insert(CHANNEL.to_owned(), roots);
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    click(cx, "channel-row-1");
+    let view = posts(&shell, cx);
+    let header = |id: &str, cx: &mut VisualTestContext| {
+        rows(&view, cx)
+            .into_iter()
+            .find(|item| item.id == id)
+            .map(|item| item.header)
+    };
+    assert_eq!(
+        header(GROUPED, cx),
+        Some(false),
+        "grouped with the second post before the mark"
+    );
+    assert!(bounds(cx, &format!("post-new-{GROUPED}")).is_none());
+
+    hover(cx, POST);
+    click(cx, "message-more");
+    click(cx, "action-mark-unread");
+
+    assert_eq!(header(GROUPED, cx), Some(true));
+    assert!(bounds(cx, &format!("post-new-{GROUPED}")).is_some());
+    assert_eq!(
+        cx.update(|_, cx| view.read(cx).new_posts()),
+        [POST, "1760000400000", GROUPED]
+    );
 }
 
 #[test]

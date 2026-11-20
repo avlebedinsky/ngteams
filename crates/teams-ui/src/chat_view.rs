@@ -1813,7 +1813,7 @@ impl ChatView {
     #[must_use]
     pub fn new_posts(&self) -> Vec<String> {
         self.message_items()
-            .filter(|item| item.header && self.new_post(item))
+            .filter(|item| self.new_post(item))
             .map(|item| item.id.clone())
             .collect()
     }
@@ -3509,6 +3509,14 @@ impl ChatView {
             (self.marked.horizon, self.marked.at),
             &Local,
         );
+        // each of a channel's posts after "Last read" has its header, which holds Teams' "New"
+        for item in &mut items {
+            if let Item::Message(message) = item
+                && self.new_post(message)
+            {
+                message.header = true;
+            }
+        }
         items.extend(self.pending(&known, now_ms).into_iter().map(Item::Pending));
         let anchor = Anchor::of(&self.list, &self.items);
         splice(&self.list, &self.items, &items);
@@ -4051,7 +4059,8 @@ impl ChatView {
         // an email post's header, reactions and rows are in its card, as Teams draws them
         let (head, header) = match &item.email {
             Some(post) => (
-                item.header.then(|| email_head(item, post, cycle, mark.take(), palette)),
+                item.header
+                    .then(|| email_head(item, post, (cycle, self.new_post(item)), mark.take(), palette)),
                 None,
             ),
             None => (
@@ -5270,6 +5279,8 @@ fn day_row(day: NaiveDate, palette: Palette) -> AnyElement {
         .into_any_element()
 }
 
+/// The divider over the first unread message: "Last read" in a channel, "New messages" elsewhere. Its test selector
+/// is `new-messages`, its label's `new-messages-label <label>`.
 fn new_messages_row(place: &Place, palette: Palette) -> AnyElement {
     let rule = || div().flex_1().h(px(1.0)).bg(rgb(palette.brand));
     let label = if *place == Place::Channel {
@@ -5288,7 +5299,11 @@ fn new_messages_row(place: &Place, palette: Palette) -> AnyElement {
         .text_xs()
         .text_color(rgb(palette.brand))
         .child(rule())
-        .child(label)
+        .child(
+            div()
+                .debug_selector(move || format!("new-messages-label {label}"))
+                .child(label),
+        )
         .child(rule())
         .into_any_element()
 }
@@ -5341,16 +5356,18 @@ fn header_line(
         .into_any_element()
 }
 
-/// The top of an email post's card ([`email::head`]): its sender with its time and marks, its "To:" line.
+/// The top of an email post's card ([`email::head`]): its sender with its time and marks (Teams' "New" on a
+/// channel's new post, [`ChatView::new_post`]), its "To:" line.
 fn email_head(
     item: &MessageItem,
     post: &EmailPost,
-    cycle: HourCycle,
+    (cycle, new): (HourCycle, bool),
     mark: Option<AnyElement>,
     palette: Palette,
 ) -> AnyElement {
     let time = clock::message_time(item.arrival_time, &Local::now(), cycle);
     let edited = item.edited.then(|| edited_mark().into_any_element());
+    let mark = mark.into_iter().chain(new.then(|| new_post_mark(&item.id, palette)));
     email::head(
         &item.id,
         email::Head {

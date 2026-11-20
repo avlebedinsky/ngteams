@@ -75,7 +75,7 @@ pub(super) struct Head {
     pub time: SharedString,
     /// The "To:" line.
     pub to: Option<SharedString>,
-    /// Marks after the time: "Edited", the translation's.
+    /// Marks after the time: "Edited", the translation's, Teams' "New" on a channel's new post.
     pub marks: Vec<AnyElement>,
 }
 

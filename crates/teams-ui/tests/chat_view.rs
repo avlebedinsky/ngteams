@@ -646,6 +646,8 @@ fn the_new_messages_divider_sits_at_the_read_horizon_as_the_chat_opened() {
     };
     assert_eq!(divider_before(cx).as_deref(), Some("3"));
     assert!(cx.debug_bounds("new-messages").is_some());
+    assert!(cx.debug_bounds("new-messages-label New messages").is_some());
+    assert!(cx.debug_bounds("new-messages-label Last read").is_none());
     // the horizon moves on (the account read the chat); the divider stays where it was while the chat is open
     rig.core.horizons.lock().unwrap().get_mut(AB).unwrap().last_read_arrival = NOON + 2 * MINUTE;
     arrive(&rig, cx, &message("4", LAB_B, "<p>newer</p>", NOON + 3 * MINUTE));

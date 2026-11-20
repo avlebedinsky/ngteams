@@ -50,9 +50,10 @@
 //! for. Only a message post can be looked for by its `clientmessageid`, so only its row is checked and tried again
 //! after an attempt whose outcome is unknown; any other such row is failed rather than risk doing it twice, except an
 //! unread mark ([`Command::UnreadMark`]): it sets the account's own bookmark as of its time, so a second send does no
-//! harm. After a network error, a token request that got no answer or a 5xx it stays pending and is tried again
-//! after [`RESEND_WAIT`], doubled for each attempt up to [`RESEND_MAX_WAIT`], however long the network is down; a 4xx
-//! other than throttling still fails it. Only the newest mark of a chat goes out: a newer one fails this run's older
+//! harm. After a network error, a token request that got no answer or a 5xx, or a throttle (of the service or the
+//! token service) it stays pending with no limit on its attempts and is tried again after [`RESEND_WAIT`], doubled
+//! for each attempt up to [`RESEND_MAX_WAIT`] (or after a longer wait the throttle asks for), however long the network
+//! is down; a 4xx other than throttling (a 401 again after a refreshed token too) still fails it. Only the newest mark of a chat goes out: a newer one fails this run's older
 //! pending ones unsent ([`replace_older_marks`]). The sync the check relies on is the [`ConversationSync`] seam, which
 //! M1 Task 17's catch-up sync fills.
 
@@ -72,6 +73,7 @@ use std::time::Duration;
 use crate::CallFloor;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use teams_auth::authz::AuthzError;
 use teams_auth::token::TokenError;
 use teams_call::Tracker;
 use teams_proto::Mri;
@@ -1272,7 +1274,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
             Tried::Denied(denied) => (AttemptOutcome::Denied { reason: denied.clone() }, false),
             Tried::Offline(error) if resendable(row) => (self.retry_later(row, error), false),
             Tried::NotSent(error) | Tried::Offline(error) => (AttemptOutcome::Failed { error }, false),
-            Tried::Throttled { wait, error } => (self.retry(row, wait, error), false),
+            Tried::Throttled { wait, error } => (self.retry_throttled(row, wait, error), false),
             Tried::Uncertain(error) => self.again_if_findable(row, &error),
         }
     }
@@ -1293,7 +1295,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
             }
             429 | 503 => {
                 let wait = answer.retry_after().unwrap_or(DEFAULT_RETRY_WAIT);
-                (self.retry(row, wait, format!("HTTP {status}")), false)
+                (self.retry_throttled(row, wait, format!("HTTP {status}")), false)
             }
             500..=599 => self.again_if_findable(row, &format!("HTTP {status}")),
             _ => (
@@ -1326,18 +1328,25 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
     /// Another attempt of a [`resendable`] row after [`RESEND_WAIT`], doubled for each of its attempts since it was made
     /// or last resent up to [`RESEND_MAX_WAIT`], with no limit on the attempts: the network may be down for long.
     fn retry_later(&self, row: &OutboxEntry, error: String) -> AttemptOutcome {
-        let doublings = row.attempts_since_resend().saturating_sub(1).min(16);
-        let wait = RESEND_WAIT.saturating_mul(1 << doublings).min(RESEND_MAX_WAIT);
-        AttemptOutcome::Retry {
-            not_before: (self.clock)().saturating_add(i64::try_from(wait.as_millis()).unwrap_or(i64::MAX)),
-            error,
-        }
+        self.retry(row, resend_wait(row), error)
     }
 
-    /// Another attempt after `wait`, unless the row has had all of its attempts since it was made or last resent.
+    /// Another attempt after a throttle (`wait` from the service, or its default); a [`resendable`] row waits at least
+    /// as long as [`Outbox::retry_later`] gives it.
+    fn retry_throttled(&self, row: &OutboxEntry, wait: Duration, error: String) -> AttemptOutcome {
+        let wait = if resendable(row) {
+            wait.max(resend_wait(row))
+        } else {
+            wait
+        };
+        self.retry(row, wait, error)
+    }
+
+    /// Another attempt after `wait`, unless the row has had all of its attempts since it was made or last resent; a
+    /// [`resendable`] row has no limit on its attempts.
     fn retry(&self, row: &OutboxEntry, wait: Duration, error: String) -> AttemptOutcome {
         let attempts = row.attempts_since_resend();
-        if attempts >= MAX_ATTEMPTS {
+        if attempts >= MAX_ATTEMPTS && !resendable(row) {
             return AttemptOutcome::Failed {
                 error: format!("{error}; given up after {attempts} attempts"),
             };
@@ -1358,6 +1367,13 @@ fn findable(row: &OutboxEntry) -> Option<&str> {
     } else {
         None
     }
+}
+
+/// The wait of a [`resendable`] row before its next attempt: [`RESEND_WAIT`], doubled for each of its attempts since
+/// it was made or last resent, up to [`RESEND_MAX_WAIT`].
+fn resend_wait(row: &OutboxEntry) -> Duration {
+    let doublings = row.attempts_since_resend().saturating_sub(1).min(16);
+    RESEND_WAIT.saturating_mul(1 << doublings).min(RESEND_MAX_WAIT)
 }
 
 /// Whether a second send of `row` does no harm: an unread mark sets the account's own bookmark as of its time.
@@ -1392,12 +1408,26 @@ fn entry(store: &Store, id: i64) -> Result<OutboxEntry, OutboxError> {
 fn from_transport(error: HttpError) -> Tried {
     match error {
         HttpError::Failed(_) | HttpError::BodyTooLarge => Tried::Uncertain(error.to_string()),
-        HttpError::Credentials(TokenError::Http(_)) => Tried::Offline(error.to_string()),
+        HttpError::Credentials(ref token) if token_service_down(token) => Tried::Offline(error.to_string()),
         HttpError::Credentials(TokenError::Throttled { retry_after, .. }) => Tried::Throttled {
             wait: retry_after.unwrap_or(DEFAULT_RETRY_WAIT),
             error: "the token service is throttling".to_owned(),
         },
         other => Tried::NotSent(other.to_string()),
+    }
+}
+
+/// Whether a token request for a write got no answer, or a 5xx other than throttling, from Entra or authz.
+fn token_service_down(error: &TokenError) -> bool {
+    match error {
+        TokenError::Http(_) => true,
+        TokenError::Entra { status, .. } | TokenError::UnexpectedResponse { status } => *status >= 500,
+        TokenError::Authz(authz) => match authz.as_ref() {
+            AuthzError::Http(_) => true,
+            AuthzError::Unavailable { status, .. } | AuthzError::UnexpectedResponse { status } => *status >= 500,
+            _ => false,
+        },
+        _ => false,
     }
 }
 
