@@ -1150,6 +1150,7 @@ impl Compose {
             directories: false,
             multiple: true,
             prompt: Some("Attach".into()),
+            ..PathPromptOptions::default()
         });
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(paths))) = picked.await {

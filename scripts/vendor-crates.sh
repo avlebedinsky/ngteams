@@ -4,7 +4,8 @@
 # (scripts/vendor-gpui.sh) with its external-surfaces patches only, unchanged:
 #   gpui-pre       `ExternalSurface` (a dmabuf or CPU pixels) as the Linux payload of `PaintSurface`, and
 #                  `Window::paint_external_surface` (0001); and, our own, no line break right after opening
-#                  punctuation (UAX #14 LB14), so `[[account]]` wraps whole (0002)
+#                  punctuation (UAX #14 LB14), so `[[account]]` wraps whole (0002); a path prompt's title and file
+#                  filters (0003), so the account picture's chooser shows the picture files
 #   gpui-pre-wgpu  the renderer's side: dmabufs imported through wgpu-hal Vulkan and copied on the GPU, CPU pixels
 #                  uploaded into a texture kept per surface, by damaged rectangle (0001); and, our own, a weight or
 #                  style the family has no face of drawn anyway: a variable face at that weight, else synthesized (0002)
@@ -12,9 +13,10 @@
 #                  item's metadata for the rich-text editor's paste (0001); immediate reads of local clipboard
 #                  writes, source generations, and validated private rich-copy recovery after a manager handoff (0002);
 #                  every form a clipboard offer holds read into one item: text, picture and uri-list files (0003);
-#                  cancel key repeat when its focused window closes or its key is released without focus (0004)
+#                  cancel key repeat when its focused window closes or its key is released without focus (0004);
+#                  the path prompt's title and filters on the file chooser portal (0005)
 #   gpui-pre-windows our own: test-support `contains` on the DirectX atlas so atlas-inspection tests query
-#                  the real atlas (0001)
+#                  the real atlas (0001); the path prompt's title and filters on the file open dialog (0002)
 #   libwebrtc      our own: `RtpTransceiver::set_direction`, which LiveKit's bindings leave out though `webrtc-sys`
 #                  binds it (0001): a group call's screen goes out on the mixer's sharing line, turned to send before
 #                  the answer (crates/teams-media/src/rtc.rs); preserve optional candidate-pair RTT (0002), so

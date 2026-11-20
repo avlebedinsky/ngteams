@@ -416,6 +416,7 @@ impl EffectsPicker {
             directories: false,
             multiple: false,
             prompt: Some("Add".into()),
+            ..PathPromptOptions::default()
         });
         self.adding = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
             let Some(source) = picked

@@ -109,6 +109,7 @@ impl TeamPictureDialog {
             directories: false,
             multiple: false,
             prompt: Some("Upload".into()),
+            ..PathPromptOptions::default()
         });
         self.working = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let path: Option<PathBuf> = picked

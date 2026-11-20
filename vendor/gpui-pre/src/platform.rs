@@ -2798,7 +2798,7 @@ pub enum TextRenderingMode {
 }
 
 /// The options that can be configured for a file dialog prompt
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct PathPromptOptions {
     /// Should the prompt allow files to be selected?
     pub files: bool,
@@ -2808,6 +2808,21 @@ pub struct PathPromptOptions {
     pub multiple: bool,
     /// The prompt to show to a user when selecting a path
     pub prompt: Option<SharedString>,
+    /// The title of the dialog; the platform's own title when `None`
+    pub title: Option<SharedString>,
+    /// The kinds of file the dialog offers, the first one chosen when it opens; every file when empty
+    pub filters: Vec<PathPromptFilter>,
+}
+
+/// A kind of file that a file dialog prompt offers
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PathPromptFilter {
+    /// The name that the dialog shows for this kind of file
+    pub name: SharedString,
+    /// The extensions of the file names, without the dot (`png`); every file when empty
+    pub extensions: Vec<SharedString>,
+    /// The MIME types of the files (`image/png`), where the platform matches files by their type
+    pub mime_types: Vec<SharedString>,
 }
 
 /// What kind of prompt styling to show
