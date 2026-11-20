@@ -91,10 +91,10 @@ fn account_row(row: AccountRow, can_choose: bool, accounts: &Entity<Accounts>, p
         row.face.as_ref(),
         gpui_component::Size::Size(px(AVATAR)),
     );
-    let shows = if row.chosen {
-        "Shows a picture you chose"
-    } else {
-        "Shows the profile picture"
+    let shows = match (row.chosen, row.face.is_some()) {
+        (true, _) => "Shows a picture you chose",
+        (false, true) => "Shows the profile picture",
+        (false, false) => "Shows the initials of the name",
     };
     let words = div()
         .flex_1()
