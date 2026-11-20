@@ -297,14 +297,46 @@ impl Walk<'_> {
     }
 
     /// The shots of `name` in Teams Light, then Teams Dark, then back to Light.
-    fn shots(&mut self, name: &str) -> SandboxResult<PathBuf> {
+    fn shots(&mut self, name: &str) -> SandboxResult<(PathBuf, PathBuf)> {
         let light = self.run.shot(self.sandbox, &format!("qa660-{name}-light.png"))?;
         self.run.theme(true)?;
         thread::sleep(SETTLE);
-        self.run.shot(self.sandbox, &format!("qa660-{name}-dark.png"))?;
+        let dark = self.run.shot(self.sandbox, &format!("qa660-{name}-dark.png"))?;
         self.run.theme(false)?;
         thread::sleep(SETTLE);
-        Ok(light)
+        Ok((light, dark))
+    }
+
+    /// The rail's Chat count, as the child reads it from the shell.
+    fn rail_count(&mut self) -> SandboxResult<u64> {
+        Ok(self.run.state("chat")?["rail_chats"].as_u64().unwrap_or(0))
+    }
+
+    /// Waits for the rail's Chat count to be `wanted`; a finding when it isn't.
+    fn expect_rail_count(&mut self, wanted: u64, what: &str) -> SandboxResult {
+        let reached = self
+            .run
+            .until("chat", what, |state| state["rail_chats"].as_u64() == Some(wanted));
+        if reached.is_err() {
+            let now = self.rail_count()?;
+            note(format!("{what}: the rail's Chat counts {now}, not {wanted}"));
+        }
+        Ok(())
+    }
+
+    /// The row whose middle is at `y`, its menu open and the pointer away: its left part keeps the colour of the
+    /// "..."'s cover (the hovered row's), as Teams keeps the whole row hovered.
+    fn expect_row_kept_hovered(&self, png: &Path, y: u32, theme: &str) -> SandboxResult {
+        let shot = load(png)?;
+        let top = y - ROW / 2 + 4;
+        let (left, cover) = (at(&shot, ROW_X, top), at(&shot, self.dots.0, top));
+        expect(near(left, cover, 8), || {
+            format!(
+                "{theme}: while a row's menu is open its left part is {left:?}, its \"...\"'s cover {cover:?}: \
+                 only the cover keeps the hover colour"
+            )
+        });
+        Ok(())
     }
 
     /// Opens `chat` as a click on its row does, once its message `id` shows.
@@ -712,7 +744,10 @@ impl Walk<'_> {
         thread::sleep(SETTLE);
         self.run.shot(self.sandbox, "qa660-1to1-read-light.png")?;
         let (marks, receipts) = (self.bookmark_count(AB_CHAT)?, self.receipt_count(AB_CHAT)?);
+        let rail = self.rail_count()?;
+        step(&format!("the rail's Chat count before the mark: {rail}"));
         self.mark_by_menu("chat", &ids.m2, false, Some("message-menu"))?;
+        self.expect_rail_count(rail + 1, "the rail's Chat after Mark as unread")?;
         self.expect_divider("chat", &ids.m2, "Mark as unread on b's message");
         // m2, m3 and m4 are b's; a's own message between them does not count
         let count = self.expect_count(AB_CHAT, "the 1:1 chat counted unread from the mark", |count| count == 3)?;
@@ -813,6 +848,8 @@ impl Walk<'_> {
             Self::expect_end_value(value, "the chat shown again");
         }
         self.expect_count(AB_CHAT, "the chat read once shown again", |count| count == 0)?;
+        let rail = self.rail_count()?;
+        step(&format!("the rail's Chat count once the chat is read: {rail}"));
         expect(self.wait_receipt(AB_CHAT, receipts), || {
             "no read receipt after the marked chat was shown again".to_owned()
         });
@@ -920,9 +957,23 @@ impl Walk<'_> {
             );
         }
         let state = self.run.state("posts")?;
-        expect(state["divider_before"].is_null(), || {
-            format!("a channel's posts show a divider: {}", state["divider_before"])
+        expect(state["divider_before"] == CHANNEL_POST, || {
+            format!(
+                "Mark as unread on a channel post: \"Last read\" stands before {}, not over the post",
+                state["divider_before"]
+            )
         });
+        expect(
+            state["new_posts"]
+                .as_array()
+                .is_some_and(|new| new.first().is_some_and(|id| id == CHANNEL_POST)),
+            || {
+                format!(
+                    "Mark as unread on a channel post: \"New\" beside {}, not the post",
+                    state["new_posts"]
+                )
+            },
+        );
         // the channel shows unread already (a channel's posts send no read receipt): its row is only logged
         let after = self.run.state("chat")?["channel_unread"].clone();
         step(&format!("the channel's unread after the mark: {after}"));
@@ -944,7 +995,10 @@ impl Walk<'_> {
         expect(state["row_menu_entry"] == "Mark as unread", || {
             format!("the row menu of a read chat offers {}", state["row_menu_entry"])
         });
-        self.shots("row-menu-unread")?;
+        let y = self.row_y(AB_CHAT)?;
+        let (light, dark) = self.shots("row-menu-unread")?;
+        self.expect_row_kept_hovered(&light, y, "Teams Light")?;
+        self.expect_row_kept_hovered(&dark, y, "Teams Dark")?;
         self.choose_row_entry(AB_CHAT, "Mark as unread")?;
         self.expect_count(AB_CHAT, "the row's Mark as unread", |count| count >= 1)?;
         let new = self.expect_bookmark(AB_CHAT, marks, "the row's Mark as unread");
@@ -1018,11 +1072,11 @@ impl Walk<'_> {
         thread::sleep(SETTLE);
         self.run.input.key_with(&[Modifier::Shift], KEY_F10)?;
         thread::sleep(SETTLE);
-        // the list keeps the row its ring was on before, not always the open chat's
+        // the ring is on the open chat's row
         let state = self.run.state("chat")?;
         let first = state["row_menu"].clone();
-        expect(!first.is_null(), || {
-            "Shift+F10 on the list opened no row menu".to_owned()
+        expect(first == ABC_CHAT, || {
+            format!("Ctrl+2, then Shift+F10 opened the menu of {first}, not of the open chat {ABC_CHAT}")
         });
         step(&format!("Shift+F10 on the list opened the menu of {first}"));
         self.run.shot(self.sandbox, "qa660-row-menu-shift-f10-light.png")?;
@@ -2149,6 +2203,7 @@ fn list_json(shell: &Entity<Shell>, cx: &App) -> Value {
             if row.unread > 0 { teams_ui::chat_list::MARK_READ } else { teams_ui::chat_list::MARK_UNREAD }
         }),
         "channel_unread": channel_unread,
+        "rail_chats": shell.read(cx).unread_chats(),
     })
 }
 
@@ -2212,6 +2267,7 @@ fn state_of(root: &Entity<Root>, shell: &Entity<Shell>, view: &str, cx: &App) ->
     state["hovered"] = json!(chat.hovered());
     state["options"] = json!(chat.options());
     state["divider_before"] = divider_before;
+    state["new_posts"] = json!(chat.new_posts());
     state["viewport"] = json!([
         pixels(viewport.origin.x),
         pixels(viewport.origin.y),
