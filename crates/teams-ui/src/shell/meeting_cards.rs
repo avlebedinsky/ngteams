@@ -171,7 +171,8 @@ fn follow_area(
         move |_, window, _| {
             let now = area_drawn.as_ref().and_then(|drawn| drawn.get());
             if now != placed_in.get() {
-                window.refresh();
+                // a refresh in prepaint does nothing: the next frame asks for it
+                window.on_next_frame(|window, _| window.refresh());
             }
         },
         |_, (), _, _| {},

@@ -399,13 +399,15 @@ impl MeetingAlert {
                 return;
             };
             // a banner closed while the server answered takes its notification away again
-            let kept = this.update(cx, |this, _| {
+            let kept = this.update(cx, |this, cx| {
                 let local = this
                     .shown
                     .iter()
                     .find_map(|(id, shown)| (shown.seq == seq).then_some(*id))?;
                 let shown = this.shown.remove(&local)?;
                 this.shown.insert(given, shown);
+                // the drawn card's actions hold the old id: draw it again with the new one
+                cx.notify();
                 Some(())
             });
             if kept.ok().flatten().is_none() {

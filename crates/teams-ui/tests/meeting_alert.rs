@@ -16,7 +16,7 @@ mod common;
 #[path = "common/notices.rs"]
 mod notices;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, Waker};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -711,22 +711,66 @@ fn a_banner_shown_before_the_server_came_goes_to_the_desktop_once_it_comes() {
     a.rig
         .cx
         .update(|cx| a.alert.update(cx, |alert, cx| alert.dismiss(trio, cx)));
+    let told = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&told);
+    let _observing = a.rig.cx.update(|cx| {
+        cx.observe(&a.alert, move |_, _| {
+            counted.fetch_add(1, Ordering::SeqCst);
+        })
+    });
     a.hand_server();
+    assert!(
+        told.load(Ordering::SeqCst) > 0,
+        "the window draws the card again: its actions take the new id"
+    );
     let shown = a.server.shown();
     assert_eq!(shown.len(), 1, "{shown:?}");
     assert_eq!(shown[0].summary, "Weekly sync");
-    // the card keeps its place and takes the server's id: the desktop's Join acts on it
+    // the card takes the server's id
     let cards = a.cards();
     assert_eq!((cards.len(), cards[0].id), (1, 1));
-    assert!(a.activate(1, JOIN_ACTION));
-    assert!(a.cards().is_empty());
-    assert_eq!(a.server.closed(), [1]);
-    // the card goes after Teams' banner time as one sent in time does
-    a.push(pushed(teams_core::MeetingStartKind::Meeting, MEETING, "call-2", LAB_B));
-    assert_eq!(a.cards().len(), 1);
+    // the card goes after Teams' banner time as one sent in time does; the desktop's Join still acts on it
     a.rig.cx.executor().advance_clock(teams_ui::meeting_alert::CARD_TIME);
     a.rig.cx.run_until_parked();
     assert!(a.cards().is_empty());
+    assert!(a.activate(1, JOIN_ACTION));
+    assert_eq!(a.server.closed(), [1]);
+}
+
+/// The fake server, its ids set by the banner's chat and not by the order it shows them.
+struct IdByChat(Arc<FakeServer>);
+
+impl NotificationServer for IdByChat {
+    fn show(&self, notice: &Notice, replaces: u32) -> BoxFuture<'static, Result<u32, String>> {
+        let id = if notice.conversation == MEETING { 9 } else { 3 };
+        let shown = self.0.show(notice, replaces);
+        Box::pin(async move { shown.await.map(|_| id) })
+    }
+
+    fn close(&self, id: u32) -> BoxFuture<'static, ()> {
+        self.0.close(id)
+    }
+}
+
+#[test]
+fn late_banners_keep_their_order_and_their_card_time_whatever_ids_the_server_gives() {
+    let mut a = Alerting::start_without_server(Settings::default());
+    a.calendar(running_meeting(Some(MEETING), None));
+    a.push(pushed(teams_core::MeetingStartKind::Meeting, MEETING, "call-1", LAB_B));
+    a.arrive(call_event(TRIO, "1", LAB_B, huddle(LAB_B)), Source::Delivery);
+    // the server gives the older banner the higher id
+    a.late = Some(Arc::new(IdByChat(Arc::clone(&a.server))));
+    a.hand_server();
+    assert_eq!(a.server.shown().len(), 2);
+    let cards: Vec<(u32, String)> = a.cards().into_iter().map(|card| (card.id, card.title)).collect();
+    assert_eq!(
+        cards,
+        [(9, "Weekly sync".to_owned()), (3, "Lab trio".to_owned())],
+        "the oldest first"
+    );
+    a.rig.cx.executor().advance_clock(teams_ui::meeting_alert::CARD_TIME);
+    a.rig.cx.run_until_parked();
+    assert!(a.cards().is_empty(), "the cards go after Teams' banner time");
 }
 
 #[test]
