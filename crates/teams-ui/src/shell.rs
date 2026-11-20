@@ -104,6 +104,7 @@ use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::view::status_text;
 
+mod account_menu;
 mod apps;
 mod bot_chat;
 mod channel_management;
@@ -894,11 +895,18 @@ impl Shell {
             let (accounts, _) = shell.accounts.as_ref()?;
             accounts.read(cx).tile(shell.core.me())?.app_admin.clone()
         });
+        let shell = cx.weak_entity();
+        let accounts: crate::settings_view::AppAccounts = Rc::new(move |cx: &App| {
+            let shell = shell.upgrade()?;
+            let (accounts, _) = shell.read(cx).accounts.as_ref()?;
+            Some(accounts.clone())
+        });
         let view = cx.new(|cx| {
             SettingsView::new(settings.clone(), cx)
                 .for_account(account)
                 .with_test_call(offer)
                 .with_server(server)
+                .with_accounts(accounts)
                 .with_admin(admin, Arc::clone(trace))
                 .with_app_admin(app_admin, Arc::clone(trace))
         });
@@ -3253,60 +3261,6 @@ impl Shell {
         }
     }
 
-    /// The account menu's account: its name and what tells it apart above the statuses, and its "Sign out and remove"
-    /// below them in an app that permits removal; neither before the accounts were handed in.
-    fn account_menu_parts(&self, palette: Palette, cx: &mut Context<Self>) -> (Option<gpui::Div>, Option<gpui::Div>) {
-        let account = self.accounts.as_ref().and_then(|(accounts, _)| {
-            let accounts = accounts.read(cx);
-            let tile = accounts.tile(self.core.me())?;
-            let told_apart = (tile.name.clone(), tile.detail.clone(), tile.server.clone());
-            Some((told_apart, accounts.can_remove()))
-        });
-        let header = account.as_ref().map(|((name, detail, server), _)| {
-            div()
-                .debug_selector(|| "status-menu-account".to_owned())
-                .px_2()
-                .pt_1()
-                .pb_2()
-                .mb_1()
-                .border_b_1()
-                .border_color(rgb(palette.border))
-                .child(div().font_weight(gpui::FontWeight::BOLD).child(name.clone()))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(palette.muted_foreground))
-                        .child(detail.clone())
-                        .children(server.clone().map(|server| {
-                            div()
-                                .debug_selector(|| "status-menu-account-server".to_owned())
-                                .child(server)
-                        })),
-                )
-        });
-        let remove = account.filter(|(_, can_remove)| *can_remove).map(|_| {
-            div()
-                .w_full()
-                .mt_1()
-                .pt_1()
-                .border_t_1()
-                .border_color(rgb(palette.border))
-                .child(keyboard::stop(
-                    "status-menu-remove-account",
-                    menu_row("status-menu-remove-account", palette)
-                        .text_color(rgb(theme::DANGER))
-                        .child(Glyph::LOG_OUT.icon().size(px(16.0)))
-                        .child("Sign out and remove")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.status_focus.closed(window, cx);
-                            this.ask_remove_account(cx);
-                        })),
-                    palette,
-                ))
-        });
-        (header, remove)
-    }
-
     /// The account menu: the statuses the user may set (the one set marked), what is reported, and the last failed
     /// report.
     fn status_menu_view(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
@@ -3357,7 +3311,7 @@ impl Shell {
                         failure.why
                     )))
             });
-        let (header, remove) = self.account_menu_parts(palette, cx);
+        let parts = self.account_menu_parts(palette, cx);
         let menu = div().debug_selector(|| "status-menu".to_owned()).absolute();
         let menu = match self.status_anchor {
             MenuAnchor::Rail => menu.left(px(RAIL_WIDTH + 4.0)).bottom(px(48.0)),
@@ -3380,11 +3334,12 @@ impl Shell {
                 self.status_opener
                     .outside(cx.listener(|this, _, _, cx| this.close_status_menu(cx))),
             )
-            .children(header)
+            .children(parts.header)
             .children(entries)
             .children(reported)
             .children(failure)
-            .children(remove)
+            .children(parts.pictures)
+            .children(parts.remove)
             .into_any_element()
     }
 
@@ -3845,7 +3800,7 @@ impl AccountFace {
             index,
             key: tile.key.clone(),
             name: tile.name.clone(),
-            picture: tile.picture.clone(),
+            picture: tile.face().cloned(),
             reporting: tile.own_presence.as_ref().map(|own| own.read(cx).reporting(cx)),
             unread: tile.unread(cx),
             signed_out: tile.signed_out(cx),

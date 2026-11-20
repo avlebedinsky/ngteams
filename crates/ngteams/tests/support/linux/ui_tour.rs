@@ -195,7 +195,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 327 + 8 + 5 + 15 + 6 + 12 + 10 + 5] = [
+const STEPS: [Step; 5 + 328 + 8 + 5 + 15 + 6 + 12 + 10 + 5] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -1038,6 +1038,7 @@ const STEPS: [Step; 5 + 327 + 8 + 5 + 15 + 6 + 12 + 10 + 5] = [
         shell.update(cx, Shell::toggle_status_menu);
         show_page(shell, Page::General, cx);
     }),
+    ("settings-accounts", |shell, _, cx| show_page(shell, Page::Accounts, cx)),
     ("settings-appearance", |shell, _, cx| {
         show_page(shell, Page::Appearance, cx);
     }),

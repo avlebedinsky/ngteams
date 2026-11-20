@@ -89,6 +89,12 @@ impl Picture {
     pub fn image(&self) -> &Arc<Image> {
         &self.0
     }
+
+    /// The picture of PNG `bytes`.
+    #[must_use]
+    pub fn png(bytes: Vec<u8>) -> Self {
+        Self(Arc::new(Image::from_bytes(ImageFormat::Png, bytes)))
+    }
 }
 
 impl Deref for Picture {

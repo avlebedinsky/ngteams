@@ -14,12 +14,22 @@
 //! Calls are one at a time across the accounts (`teams_core::CallFloor` decides it for the writes): an account's
 //! shell offers no call while another account has one up or ringing ([`Accounts::busy_elsewhere`]).
 //!
+//! The user can choose a picture for each account ([`crate::account_picture`]): [`Accounts::change_picture`] and
+//! [`Accounts::use_profile_picture`]. The rail, the title bar, the account menu and Settings > Accounts show it
+//! ([`AccountTile::face`]) in place of the profile picture.
+//!
 //! Traced: `account added`, `account removed` and `account switched`, each with the account's MRI, and `account
-//! add-asked`.
+//! add-asked`; `account picture-chosen`, `account picture-refused` and `account picture-reset`, each with the MRI.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui::{App, AsyncApp, Context, Entity, EventEmitter, SharedString, Subscription, WeakEntity};
+use gpui::{
+    App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, PathPromptOptions, SharedString, Subscription, Task,
+    WeakEntity,
+};
+
+use crate::account_picture::{AccountPictures, PictureError};
 
 use crate::app_admin::AppAdmin;
 use crate::bridge::Core;
@@ -65,12 +75,20 @@ pub struct AccountTile {
     pub own_presence: Option<Entity<OwnPresence>>,
     /// Its own picture, once the engine had it.
     pub picture: Option<Picture>,
+    /// The picture the user chose for it ([`crate::account_picture`]); `None` shows its profile picture.
+    pub chosen_picture: Option<Picture>,
     /// The profile revision its picture was asked at.
     named_at: Option<u64>,
     _observing: Vec<Subscription>,
 }
 
 impl AccountTile {
+    /// The picture that shows which account it is: the one the user chose, else its profile picture.
+    #[must_use]
+    pub fn face(&self) -> Option<&Picture> {
+        self.chosen_picture.as_ref().or(self.picture.as_ref())
+    }
+
     /// Whether the account is signed out.
     #[must_use]
     pub fn signed_out(&self, cx: &App) -> bool {
@@ -110,6 +128,10 @@ pub struct Accounts {
     trace: Arc<ViewTrace>,
     /// Each account's own presence observed, by the account's MRI.
     own_observed: Vec<(String, Subscription)>,
+    /// Where the pictures the user chose are kept; `None`: no picture can be chosen.
+    pictures: Option<AccountPictures>,
+    /// The account whose last chosen picture can't be used, and why.
+    picture_problem: Option<(String, SharedString)>,
 }
 
 impl EventEmitter<AccountsEvent> for Accounts {}
@@ -125,7 +147,31 @@ impl Accounts {
             can_remove: can_add,
             trace,
             own_observed: Vec::new(),
+            pictures: None,
+            picture_problem: None,
         }
+    }
+
+    /// The accounts with the pictures the user chose kept by `pictures`; `None`: none can be chosen.
+    #[must_use]
+    pub fn with_pictures(mut self, pictures: Option<AccountPictures>) -> Self {
+        self.pictures = pictures;
+        self
+    }
+
+    /// Whether the user can choose a picture for an account.
+    #[must_use]
+    pub fn can_choose_pictures(&self) -> bool {
+        self.pictures.is_some()
+    }
+
+    /// Why the last picture chosen for account `key` can't be used.
+    #[must_use]
+    pub fn picture_problem(&self, key: &str) -> Option<&SharedString> {
+        self.picture_problem
+            .as_ref()
+            .filter(|(account, _)| account == key)
+            .map(|(_, why)| why)
     }
 
     /// Whether the app adds accounts (the rail shows its "+").
@@ -184,7 +230,7 @@ impl Accounts {
         self.trace
             .record(&TraceLine::new("account", "added").people([key.as_str()]));
         self.tiles.push(AccountTile {
-            key,
+            key: key.clone(),
             name: parts.name,
             detail: parts.detail,
             server: parts.server,
@@ -195,11 +241,136 @@ impl Accounts {
             tray,
             own_presence: None,
             picture: None,
+            chosen_picture: None,
             named_at: None,
             _observing: observing,
         });
         self.ask_pictures(cx);
+        self.load_chosen_picture(&key, cx);
         cx.notify();
+    }
+
+    /// Reads the picture the user chose for account `key` before, if any.
+    fn load_chosen_picture(&mut self, key: &str, cx: &mut Context<Self>) {
+        let Some(pictures) = self.pictures.clone() else {
+            return;
+        };
+        let key = key.to_owned();
+        let account = key.clone();
+        let loading = cx.background_spawn(async move { pictures.load(&account) });
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let Some(png) = loading.await else { return };
+            let _ = this.update(cx, |this, cx| {
+                if let Some(tile) = this.tiles.iter_mut().find(|tile| tile.key == key) {
+                    tile.chosen_picture.get_or_insert_with(|| Picture::png(png));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// "Change picture" of account `key`: the user picks a picture file, and the account shows it from then on.
+    pub fn change_picture(&mut self, key: &str, cx: &mut Context<Self>) {
+        if self.pictures.is_none() || self.tile(key).is_none() {
+            return;
+        }
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Use picture".into()),
+        });
+        let key = key.to_owned();
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let Some(source) = picked
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .flatten()
+                .and_then(|paths| paths.into_iter().next())
+            else {
+                return;
+            };
+            if let Ok(using) = this.update(cx, |this, cx| this.use_picture(&key, source, cx)) {
+                using.await;
+            }
+        })
+        .detach();
+    }
+
+    /// Keeps the picture file at `source` as the picture of account `key` and shows it, or says why it can't.
+    pub fn use_picture(&mut self, key: &str, source: PathBuf, cx: &mut Context<Self>) -> Task<()> {
+        let Some(pictures) = self.pictures.clone().filter(|_| self.tile(key).is_some()) else {
+            return Task::ready(());
+        };
+        let key = key.to_owned();
+        let account = key.clone();
+        let saving = cx.background_spawn(async move { pictures.save(&account, &source) });
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let saved = saving.await;
+            let _ = this.update(cx, |this, cx| this.picture_saved(&key, saved, cx));
+        })
+    }
+
+    fn picture_saved(&mut self, key: &str, saved: Result<Vec<u8>, PictureError>, cx: &mut Context<Self>) {
+        let Some(tile) = self.tiles.iter_mut().find(|tile| tile.key == key) else {
+            // the account was removed while its picture was saved: its file goes too
+            if saved.is_ok() {
+                self.forget_picture(key, cx).detach();
+            }
+            return;
+        };
+        match saved {
+            Ok(png) => {
+                tile.chosen_picture = Some(Picture::png(png));
+                self.picture_problem = None;
+                self.trace
+                    .record(&TraceLine::new("account", "picture-chosen").people([key]));
+            }
+            Err(error) => {
+                log::warn!("a picture for an account can't be used: {error}");
+                let why = match error {
+                    PictureError::TooLarge(_) => "That picture is too large. Choose one smaller than 64 MB.".into(),
+                    PictureError::Unreadable(_) => {
+                        "That file can't be used. Choose a PNG, JPEG, GIF or WebP picture.".into()
+                    }
+                    PictureError::Unsaved(error) => format!("The picture can't be saved: {error}").into(),
+                };
+                self.picture_problem = Some((key.to_owned(), why));
+                self.trace
+                    .record(&TraceLine::new("account", "picture-refused").people([key]));
+            }
+        }
+        cx.notify();
+    }
+
+    /// "Use profile picture" of account `key`: the picture the user chose goes, and its profile picture shows again.
+    pub fn use_profile_picture(&mut self, key: &str, cx: &mut Context<Self>) -> Task<()> {
+        let Some(tile) = self.tiles.iter_mut().find(|tile| tile.key == key) else {
+            return Task::ready(());
+        };
+        tile.chosen_picture = None;
+        if self.picture_problem.as_ref().is_some_and(|(account, _)| account == key) {
+            self.picture_problem = None;
+        }
+        self.trace
+            .record(&TraceLine::new("account", "picture-reset").people([key]));
+        cx.notify();
+        self.forget_picture(key, cx)
+    }
+
+    /// Deletes the file of the picture the user chose for account `key`.
+    fn forget_picture(&self, key: &str, cx: &mut Context<Self>) -> Task<()> {
+        let Some(pictures) = self.pictures.clone() else {
+            return Task::ready(());
+        };
+        let account = key.to_owned();
+        cx.background_spawn(async move {
+            if let Err(error) = pictures.reset(&account) {
+                log::warn!("the picture of an account can't be deleted: {error}");
+            }
+        })
     }
 
     /// Hands account `key` its server's account management (`None` takes it away): its settings then offer Manage

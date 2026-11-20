@@ -192,6 +192,13 @@ name = "workflow_message_window"
 harness = false
 
 [[test]]
+# two accounts with the same profile picture, one with a picture the user chose, over the fake engine in the UI
+# sandbox: the rail, the account menu and Settings > Accounts, screenshotted in each theme under
+# `target/ui-shots/account-pictures-*.png`
+name = "account_pictures_window"
+harness = false
+
+[[test]]
 # a YouTube link's app card in a chat over the fake engine, in the UI sandbox, screenshotted in each theme under
 # `target/ui-shots/app-card-*.png`
 name = "app_card_window"

@@ -50,6 +50,11 @@ one, and the account menu offers "Sign out and remove". Every account notifies, 
 one opens its chat in its account), and the tray badge counts all accounts' unread chats. Each account has its own
 engine, store, tokens and region; one engine opens each store.
 
+Each account can show a picture that the user chose in place of its profile picture: in the rail, the title bar, the
+account menu and Settings > Accounts ("Change picture", "Use profile picture"). The app keeps a square PNG copy in
+`account-pictures/` beside `settings.toml`, never sends it, and deletes it with the account. Messages, people cards
+and calls keep the profile picture.
+
 A newly typed account is pending until sign-in succeeds. If sign-in stores nothing, a bare entry containing only its
 UPN is removed; entries with manual identity-provider hosts or a refused provider remain pending for correction.
 An existing provisioned lab identity is different: canceling or failing its first sign-in retains it so the alias

@@ -426,7 +426,7 @@ impl Shell {
         let tile = self.accounts.as_ref().and_then(|(accounts, _)| {
             let accounts = accounts.read(cx);
             let tile = accounts.tile(self.core.me())?;
-            Some((tile.name.clone(), tile.detail.clone(), tile.picture.clone()))
+            Some((tile.name.clone(), tile.detail.clone(), tile.face().cloned()))
         });
         let reporting = self.own_reporting(cx);
         let failed = self.own_presence().is_some_and(|own| own.read(cx).failure().is_some());

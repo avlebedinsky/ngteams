@@ -231,6 +231,10 @@ source with Xcode's command line tools, the repository's Rust and GStreamer's of
 
 To add another account, press **+** under your avatar on the left.
 
+If two accounts have the same profile picture, give one of them a picture of its own: click its avatar, then
+**Change picture** (or go to **Settings > Accounts**). The picture shows only in ngteams, so you can tell the accounts
+apart. Teams doesn't get it, and others still see your profile picture. **Use profile picture** goes back.
+
 ## Your own server
 
 ngteams can also sign in to a server you run yourself instead of Microsoft's. `ngteams-server` speaks the same

@@ -246,7 +246,12 @@ impl Desktop {
     /// ([`Desktop::open_window`]) and no bus ([`Desktop::connect`]).
     pub fn new(parts: DesktopParts, cx: &mut Context<Self>) -> Self {
         let shell = parts.shell.clone();
-        let accounts = cx.new(|_| Accounts::new(parts.can_add, Arc::clone(&shell.trace)));
+        let pictures = shell
+            .settings
+            .read(cx)
+            .account_pictures_dir()
+            .map(crate::account_picture::AccountPictures::new);
+        let accounts = cx.new(|_| Accounts::new(parts.can_add, Arc::clone(&shell.trace)).with_pictures(pictures));
         let asking = cx.subscribe(&accounts, |_: &mut Self, _, event, cx| match event {
             AccountsEvent::AddAsked => cx.emit(DesktopEvent::AddAccount),
             AccountsEvent::RemoveAsked(key) => cx.emit(DesktopEvent::RemoveAccount(key.clone())),

@@ -6,6 +6,9 @@
 //! - **General**: the account's manual status, whether its availability is reported, the idle time after which
 //!   it no longer is, the time format (following the system's locale, 12-hour or 24-hour), "Use AI features", and
 //!   while it is on the AI providers ([`ai_providers::AiProviders`]), then the AI choices of the chats and the drafts.
+//! - **Accounts** (where the app shows its accounts, [`SettingsView::with_accounts`]): each account with its picture,
+//!   "Change picture" and "Use profile picture" ([`crate::account_picture`]), and "Add account" where the app adds
+//!   accounts.
 //! - **Appearance**: the theme (following the system's light or dark mode with a theme for each, or one theme
 //!   whatever the system says), each a tile drawn in its own colours; the font size with its steps; the font family,
 //!   searchable among the system's.
@@ -64,6 +67,7 @@ use crate::theme::{self, Appearance, FONT_SIZE, FONT_SIZES, Palette, THEMES, The
 use crate::trace::ViewTrace;
 use crate::user_admin::{ManageUsers, UserAdmin};
 
+mod accounts;
 pub mod ai_picker;
 pub mod ai_providers;
 mod message_box;
@@ -138,6 +142,9 @@ pub type TestCallState = Rc<dyn Fn(&App) -> TestCallOffer>;
 /// The own server of the view's account, as the shell tells it ([`SettingsView::with_server`]); `None` for a
 /// Microsoft 365 account.
 pub type AccountServer = Rc<dyn Fn(&App) -> Option<SharedString>>;
+
+/// The app's accounts, once the desktop handed them in ([`SettingsView::with_accounts`]).
+pub type AppAccounts = Rc<dyn Fn(&App) -> Option<Entity<crate::accounts::Accounts>>>;
 
 /// The account's own server's account management, when the account is an administrator there
 /// ([`SettingsView::with_admin`]).
@@ -245,6 +252,8 @@ pub fn status_mark(status: ManualStatus, palette: Palette) -> AnyElement {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
     General,
+    /// The app's accounts and their pictures ([`SettingsView::with_accounts`]).
+    Accounts,
     Appearance,
     Notifications,
     Privacy,
@@ -258,8 +267,9 @@ pub enum Page {
 
 impl Page {
     /// The pages every account has ([`Page::Users`] is an own server's administrator's alone).
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::General,
+        Self::Accounts,
         Self::Appearance,
         Self::Notifications,
         Self::Privacy,
@@ -272,6 +282,7 @@ impl Page {
     pub fn key(self) -> &'static str {
         match self {
             Self::General => "general",
+            Self::Accounts => "accounts",
             Self::Appearance => "appearance",
             Self::Notifications => "notifications",
             Self::Privacy => "privacy",
@@ -286,6 +297,7 @@ impl Page {
     pub fn title(self) -> &'static str {
         match self {
             Self::General => "General",
+            Self::Accounts => "Accounts",
             Self::Appearance => "Appearance",
             Self::Notifications => "Notifications",
             Self::Privacy => "Privacy",
@@ -299,6 +311,7 @@ impl Page {
     fn glyph(self) -> Glyph {
         match self {
             Self::General => Glyph::USER,
+            Self::Accounts => Glyph::USER_COG,
             Self::Appearance => Glyph::PALETTE,
             Self::Notifications => Glyph::BELL,
             Self::Privacy => Glyph::SHIELD,
@@ -372,6 +385,8 @@ pub struct SettingsView {
     test_call: Option<TestCallState>,
     /// The account's own server, as the shell tells it ([`SettingsView::with_server`]).
     server: Option<AccountServer>,
+    /// The app's accounts, as the shell tells them ([`SettingsView::with_accounts`]).
+    accounts: Option<AppAccounts>,
     /// The account's server's account management as the shell tells it, and the trace its page records to
     /// ([`SettingsView::with_admin`]).
     admin: Option<(AccountAdmin, Arc<ViewTrace>)>,
@@ -420,6 +435,7 @@ impl SettingsView {
             fonts: None,
             test_call: None,
             server: None,
+            accounts: None,
             admin: None,
             users: None,
             admin_gone: false,
@@ -472,6 +488,18 @@ impl SettingsView {
     pub fn with_server(mut self, server: AccountServer) -> Self {
         self.server = Some(server);
         self
+    }
+
+    /// The view offering the Accounts page while `accounts` gives the app's accounts.
+    #[must_use]
+    pub fn with_accounts(mut self, accounts: AppAccounts) -> Self {
+        self.accounts = Some(accounts);
+        self
+    }
+
+    /// The app's accounts now, once the desktop handed them in.
+    fn app_accounts(&self, cx: &App) -> Option<Entity<crate::accounts::Accounts>> {
+        self.accounts.as_ref().and_then(|accounts| accounts(cx))
     }
 
     /// The view offering Manage users while `admin` gives the account's server's account management (an own
@@ -690,15 +718,17 @@ impl SettingsView {
         self.focus.focus(window, cx);
     }
 
-    /// The pages the column lists: Calls only where it has something, Manage users only for an own server's
-    /// administrator.
+    /// The pages the column lists: Accounts only where the app shows its accounts, Calls only where it has something,
+    /// Manage users only for an own server's administrator.
     fn pages(&self, cx: &App) -> Vec<Page> {
         let calls = self.has_calls(cx);
+        let accounts = self.app_accounts(cx).is_some();
         let users = self.user_admin(cx).map(|_| Page::Users);
         let apps = self.app_admin(cx).map(|_| Page::Apps);
         Page::ALL
             .into_iter()
             .filter(|page| *page != Page::Calls || calls)
+            .filter(|page| *page != Page::Accounts || accounts)
             .chain(users)
             .chain(apps)
             .collect()
@@ -1552,6 +1582,7 @@ impl SettingsView {
                 boxes.push(self.message_box(settings, palette, cx));
                 boxes
             }
+            Page::Accounts => self.accounts_page(palette, cx),
             Page::Notifications => self.notifications(settings, palette, cx),
             Page::Privacy => self.privacy(settings, palette),
             Page::Calls => self.calls(settings, palette, cx),

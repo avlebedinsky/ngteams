@@ -1624,6 +1624,14 @@ impl SettingsModel {
         Some(file.path().parent()?.join(BACKGROUNDS_DIR))
     }
 
+    /// Where the pictures the user chose for the accounts are kept: [`crate::account_picture::DIR`] beside the settings
+    /// file; `None` for settings kept in memory (no picture can be chosen).
+    #[must_use]
+    pub fn account_pictures_dir(&self) -> Option<PathBuf> {
+        let file = self.file.as_ref()?;
+        Some(file.path().parent()?.join(crate::account_picture::DIR))
+    }
+
     /// Where the recaps' AI summaries are kept: [`crate::recap_summary::SUMMARY_DIR`] beside the settings file; `None`
     /// for settings kept in memory (summaries kept for the run only).
     #[must_use]
@@ -1722,8 +1730,14 @@ impl SettingsModel {
         self.change(move |settings| settings.make_first(&account), cx);
     }
 
-    /// Forgets `account`'s own settings, `next` the first account when it was ([`Settings::forget_account`]).
+    /// Forgets `account`'s own settings, `next` the first account when it was ([`Settings::forget_account`]), and
+    /// deletes the picture the user chose for it.
     pub fn forget_account(&mut self, account: &str, next: Option<&str>, cx: &mut Context<Self>) {
+        if let Some(dir) = self.account_pictures_dir()
+            && let Err(error) = crate::account_picture::AccountPictures::new(dir).reset(account)
+        {
+            log::warn!("the picture of an account removed can't be deleted: {error}");
+        }
         let (account, next) = (account.to_owned(), next.map(str::to_owned));
         self.change(move |settings| settings.forget_account(&account, next.as_deref()), cx);
     }

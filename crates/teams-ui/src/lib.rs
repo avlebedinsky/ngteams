@@ -86,6 +86,7 @@ macro_rules! ctrl {
     };
 }
 
+pub mod account_picture;
 pub mod account_prompt;
 pub mod accounts;
 pub mod activity_view;
