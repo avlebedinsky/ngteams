@@ -3,9 +3,10 @@
 //!
 //! **Which meetings.** An online meeting of the account's calendar, neither cancelled nor declined nor all day, whose
 //! reminder is set: its `isReminderSet` and `reminderMinutesBeforeStart`. The calendar view's answer may lack them; the
-//! event is then read whole ([`Core::calendar_event`]), and again each [`REFRESH`] so that a reminder changed during the
-//! run is seen. Until the first read answers the reminder waits; one that fails leaves Outlook's default,
-//! [`DEFAULT_MINUTES`].
+//! event is then read whole ([`Core::calendar_event`]), and again each [`REFRESH`] while it starts within
+//! [`REREAD_AHEAD_MS`] (or its reminder, when longer) so that a reminder changed during the run is seen; a meeting that
+//! ended is not read. Until the first read answers the reminder waits; one that fails leaves Outlook's default,
+//! [`DEFAULT_MINUTES`], and a failed read again keeps the last reminder.
 //!
 //! **When.** From its reminder time until the meeting starts the notice says how long until it starts ("Starts in 15
 //! minutes"); at the start it is shown again ("Starting now"), until the meeting ends. A run that starts after the
@@ -52,6 +53,9 @@ pub const REFRESH: Duration = Duration::from_mins(5);
 pub const AHEAD_MS: i64 = 24 * HOUR_MS;
 /// How long after its start a meeting not reminded yet still shows its start's notice, in ms.
 pub const START_LATE_MS: i64 = 10 * MINUTE_MS;
+/// How near its start a meeting whose reminder was read whole has that read asked again each [`REFRESH`], in ms
+/// (further when its reminder is longer).
+pub const REREAD_AHEAD_MS: i64 = 2 * HOUR_MS;
 /// How long the desktop notice's Snooze holds a reminder back, in minutes.
 pub const DESKTOP_SNOOZE_MINUTES: u32 = 5;
 /// The card's Snooze choices, in minutes; `0` is "until it starts".
@@ -440,15 +444,23 @@ impl MeetingReminders {
 
     /// The reminder of `event`: its own, else the one its read whole gave; `None` until that read (asked for an event
     /// within [`AHEAD_MS`]) first answers. A read older than [`REFRESH`] is asked again, its reminder kept meanwhile, so
-    /// a reminder changed during the run is seen.
+    /// a reminder changed during the run is seen: only for a meeting that starts within [`REREAD_AHEAD_MS`] (or within
+    /// its reminder, when that is longer). No read is asked for a meeting that ended.
     fn reminder_of(&mut self, event: &CalendarEvent, now: i64, cx: &mut Context<Self>) -> Option<EventReminder> {
         if event.reminder != EventReminder::Unknown {
             return Some(event.reminder);
         }
         let read = self.reminders.get(&event.id).copied();
-        let stale = read.is_none_or(|(_, at)| now - at >= refresh_ms());
-        let soon = teams_core::calendar::instant(event.start) - now <= AHEAD_MS;
-        if stale && soon && self.reading.insert(event.id.clone()) {
+        let start = teams_core::calendar::instant(event.start);
+        let over = now >= teams_core::calendar::instant(event.end).max(start + MINUTE_MS);
+        let ask = match read {
+            None => start - now <= AHEAD_MS,
+            Some((reminder, at)) => {
+                let reminder_ms = minutes_of(reminder).map_or(0, |minutes| i64::from(minutes) * MINUTE_MS);
+                now - at >= refresh_ms() && start - now <= REREAD_AHEAD_MS.max(reminder_ms)
+            }
+        };
+        if !over && ask && self.reading.insert(event.id.clone()) {
             let (core, id) = (Arc::clone(&self.core), event.id.clone());
             cx.spawn(async move |this, cx: &mut AsyncApp| {
                 let read = core.calendar_event(id.clone()).await;

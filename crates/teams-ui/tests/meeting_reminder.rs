@@ -4,7 +4,8 @@
 //! declined, cancelled or offline one, the switch off and Do not disturb remind of nothing; a meeting that moves closes
 //! its notice; Snooze, Dismiss and Join do what they say, from the desktop notice and from the window's card, also
 //! when Snooze ends after the start or the server answers after a Dismiss; a reminder changed during the run is read
-//! again; the calendar is read from the service without the calendar view. Every id and name is made up.
+//! again, only for a meeting soon and never for one that ended; the calendar is read from the service without the
+//! calendar view. Every id and name is made up.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -31,6 +32,7 @@ use teams_ui::settings::{ManualStatus, Settings, SettingsModel};
 
 const MEETING: &str = "19:meeting_MadeUpReview01@thread.v2";
 const MINUTE: i64 = 60_000;
+const HOUR: i64 = 60 * MINUTE;
 
 struct Reminding {
     rig: Rig,
@@ -471,6 +473,30 @@ fn a_reminder_changed_during_the_run_is_read_again() {
     assert_eq!(
         r.bodies().iter().map(|body| first_line(body)).collect::<Vec<_>>(),
         ["Starts in 29 minutes"]
+    );
+}
+
+#[test]
+fn only_a_meeting_soon_is_read_again_and_one_that_ended_is_not_read() {
+    let r = Reminding::start(Settings::default(), |now| {
+        let mut ended = meeting("ended", now - HOUR, EventReminder::Unknown);
+        ended.end = EventTime::Instant(now - 30 * MINUTE);
+        vec![
+            ended,
+            meeting("planning", now + 34 * MINUTE, EventReminder::Unknown),
+            meeting("later", now + 5 * HOUR, EventReminder::Unknown),
+        ]
+    });
+    let reads = |id: &str| {
+        let calendar = r.rig.core.calendar.lock().unwrap();
+        calendar.full_reads.iter().filter(|read| *read == id).count()
+    };
+    assert_eq!((reads("ended"), reads("planning"), reads("later")), (0, 1, 1));
+    r.wait(6);
+    assert_eq!(
+        (reads("ended"), reads("planning"), reads("later")),
+        (0, 2, 1),
+        "only the meeting within two hours is read again"
     );
 }
 

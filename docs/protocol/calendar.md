@@ -95,7 +95,9 @@ no snooze. The desktop Outlook-style reminder the user knows from Teams on Windo
 
 The native client reminds as Outlook does, by the event's own reminder (`teams_ui::meeting_reminder`): an online
 meeting, neither cancelled nor declined nor all day, whose reminder is set. The view's event lacking the fields is
-read whole once; until it answers nothing is shown, and a failed read leaves the default 15 minutes. From the
+read whole, and again every 5 minutes while it starts within 2 hours (or within its reminder, when longer) so that a
+reminder changed during the run is seen; a meeting that ended is not read. Until the first read answers nothing is
+shown, a failed first read leaves the default 15 minutes, and a failed read again keeps the last one. From the
 reminder time until the start the notice says "Starts in N minutes", and at the start "Starting now" (in the same
 notice's place), until the meeting ends; a run that starts after the reminder time reminds at once, one that starts
 more than 10 minutes after the start doesn't. Join (the calendar's Join), Snooze (the desktop notice's for 5 minutes;
