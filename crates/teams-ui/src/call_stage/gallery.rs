@@ -381,6 +381,13 @@ impl CallStage {
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
+        self.speakers.first_page(
+            tiles
+                .iter()
+                .take(page.per)
+                .filter_map(|tile| tile.mri.clone())
+                .collect(),
+        );
         let shown: Vec<StageTile> = tiles.into_iter().skip(page.first).take(page.per).collect();
         self.speakers
             .drawn(Some(shown.iter().filter_map(|tile| tile.mri.clone()).collect()));

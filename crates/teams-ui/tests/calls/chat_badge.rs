@@ -6,7 +6,8 @@
 use std::sync::Arc;
 
 use gpui::VisualTestContext;
-use teams_core::{CallStatus, Event};
+use teams_core::{CallStatus, Event, MessageChange, Source};
+use teams_store::Applied;
 use teams_ui::call_stage::BUBBLE_FOR;
 
 use super::{AB, LAB_A, LAB_B, Rig, TRIO, call_windows, click, draw, drawn, in_group_call, registered, shell_window};
@@ -21,18 +22,45 @@ fn unread(rig: &Rig, chat: &str, count: u64) {
     rig.cx.run_until_parked();
 }
 
-/// `from` wrote `text` in `chat` (its `n`th message), the store counting `count` unread.
+/// `from` wrote `text` in `chat` (its `n`th message), delivered, the store counting `count` unread.
 fn wrote(rig: &Rig, chat: &str, (from, n, text): (&str, i64, &str), count: u64) {
-    let id = (1_760_000_000_000 + n).to_string();
-    let message = super::message(chat, &id, from, &format!("<p>{text}</p>"), 1_760_000_000_000 + n);
+    brought(
+        rig,
+        chat,
+        (from, 1_760_000_000_000 + n, text),
+        (count, Source::Delivery),
+    );
+}
+
+/// `source` stored `from`'s `text`, which arrived in `chat` at `arrival` (Unix ms), the store counting `count` unread.
+fn brought(rig: &Rig, chat: &str, (from, arrival, text): (&str, i64, &str), (count, source): (u64, Source)) {
+    let id = arrival.to_string();
+    let message = super::message(chat, &id, from, &format!("<p>{text}</p>"), arrival);
     rig.core
         .messages
         .lock()
         .unwrap()
         .entry(chat.to_owned())
         .or_default()
-        .push(message);
+        .push(message.clone());
+    rig.core.unread.lock().unwrap().insert(chat.to_owned(), count);
+    rig.send(Event::Message {
+        conversation: chat.to_owned(),
+        id,
+        change: MessageChange::New,
+        applied: Applied::Inserted,
+        message: Some(Box::new(message)),
+        source,
+    });
     unread(rig, chat, count);
+}
+
+/// Now, in Unix ms.
+fn now_ms() -> i64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    i64::try_from(now.as_millis()).unwrap()
 }
 
 fn dot(stage: &mut VisualTestContext) -> Option<gpui::Bounds<gpui::Pixels>> {
@@ -184,13 +212,55 @@ fn older_history_stored_during_the_call_shows_no_bubble() {
     let (_windows, stage) = in_group_call(&rig, &trace);
     assert!(!drawn(stage, "call-chat-bubble"));
     // a load of older history stores earlier unread messages: the count rises, but nothing new came
-    wrote(&rig, TRIO, (LAB_B, 10, "from yesterday"), 2);
+    let older = |n: i64, text: &str, count: u64| {
+        brought(
+            &rig,
+            TRIO,
+            (LAB_B, 1_760_000_000_000 + n, text),
+            (count, Source::History),
+        );
+    };
+    older(10, "from yesterday", 2);
     assert!(!drawn(stage, "call-chat-bubble"), "no bubble for older history");
-    wrote(&rig, TRIO, (LAB_B, 9, "from the day before"), 3);
+    older(9, "from the day before", 3);
     assert!(!drawn(stage, "call-chat-bubble"), "nor for its next page");
     assert!(dot(stage).is_some(), "the dot counts them");
     // a new message still bubbles
     wrote(&rig, TRIO, (LAB_B, 60, "new"), 4);
+    assert!(drawn(stage, "call-chat-bubble"));
+}
+
+#[test]
+fn a_chat_with_no_message_stored_at_the_call_s_start_bubbles_only_what_comes_during_the_call() {
+    let rig = super::calling();
+    let (trace, _) = trace();
+    let (_windows, stage) = in_group_call(&rig, &trace);
+    let start = now_ms();
+    // the chat's first sync during the call stores its messages from before the call: no bubble
+    brought(
+        &rig,
+        TRIO,
+        (LAB_B, start - 60_000, "from before the call"),
+        (1, Source::CatchUp),
+    );
+    assert!(dot(stage).is_some(), "the dot counts it");
+    assert!(
+        !drawn(stage, "call-chat-bubble"),
+        "no bubble for a message from before the call"
+    );
+    brought(&rig, TRIO, (LAB_B, start - 120_000, "older"), (2, Source::History));
+    assert!(!drawn(stage, "call-chat-bubble"), "nor for older history");
+    // a message that came during the call, which a catch-up brought (after a drop of the push channel): a bubble
+    brought(
+        &rig,
+        TRIO,
+        (LAB_B, now_ms() + 1_000, "during the call"),
+        (3, Source::CatchUp),
+    );
+    assert!(drawn(stage, "call-chat-bubble"), "a bubble for a message from the call");
+    click(stage, "call-chat-bubble-close");
+    // a delivery: a bubble
+    wrote(&rig, TRIO, (LAB_B, 70, "delivered"), 4);
     assert!(drawn(stage, "call-chat-bubble"));
 }
 

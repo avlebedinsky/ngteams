@@ -3,12 +3,14 @@
 //! While the pane is closed and the chat has unread messages, the toolbar's Chat carries Teams' red dot (no count, as
 //! Teams has it): the store's count (the account's own messages are never unread), counted again each time the chat
 //! changes; gone while the pane shows the chat, which reads it. Each new message of someone else's that comes while
-//! the pane is closed shows for [`BUBBLE_FOR`] in Teams' chat bubble at the stage's top middle: the sender's avatar
+//! the pane is closed (see [`fresh`]: never one from before the call, nor older history) shows for [`BUBBLE_FOR`] in
+//! Teams' chat bubble at the stage's top middle: the sender's avatar
 //! with their presence, their name over the message's first line, "Mute these notifications" (no more bubbles in this
 //! call, as More → Settings' "Don't show chat bubbles") and Close; a click on it opens the pane. One bubble at a time:
 //! a newer message takes its place.
 use super::*;
 use crate::chat_view::ChatView;
+use teams_core::Source;
 
 /// How long a chat bubble shows.
 pub const BUBBLE_FOR: Duration = Duration::from_secs(4);
@@ -17,7 +19,7 @@ const BUBBLE: (f32, f32) = (320.0, 70.0);
 /// The sender's avatar's side in the bubble, px.
 const BUBBLE_AVATAR: f32 = 32.0;
 
-/// The call's chat's unread count, as last read from the store, and the bubble of its newest message.
+/// The call's chat's unread count, as last read from the store, and the bubble of a new message.
 #[derive(Default)]
 pub(super) struct Unread {
     /// The chat counted, and the revision of its last change when it was counted.
@@ -25,14 +27,25 @@ pub(super) struct Unread {
     /// The count, once read for the chat.
     count: Option<u64>,
     counting: Option<Task<()>>,
-    /// The arrival time of the newest message known in the chat, once read: only a message newer than it gets a
-    /// bubble, so older history stored during the call (it raises the count too) shows none.
-    newest: Option<i64>,
-    /// The newest message's bubble while it shows.
+    /// When the stage began to follow the chat, Unix ms: a message that a catch-up or a replay brings gets a bubble
+    /// only when it arrived after this time ([`fresh`]).
+    since: i64,
+    /// The bubble of the last new message while it shows.
     bubble: Option<Bubble>,
     bubbling: Option<Task<()>>,
     /// "Mute these notifications": no bubble for the rest of the call.
     muted: bool,
+}
+
+/// Whether a message that `source` brought, which arrived at `arrival` (Unix ms), is new in a call that began to
+/// follow its chat at `since` (Unix ms): a delivery is new; a catch-up or a replay is new only when it arrived after
+/// `since` (a chat synced for the first time during the call brings its old messages too); older history never is.
+fn fresh(source: Source, arrival: i64, since: i64) -> bool {
+    match source {
+        Source::Delivery => true,
+        Source::CatchUp | Source::Replay => arrival > since,
+        Source::History => false,
+    }
 }
 
 /// What a chat bubble shows: who sent the message, by MRI and name, and its first line.
@@ -75,9 +88,10 @@ impl CallStage {
         {
             return;
         }
-        if self.chat_unread.of.as_ref().is_some_and(|(of, _)| *of != chat) {
+        if self.chat_unread.of.as_ref().is_none_or(|(of, _)| *of != chat) {
             self.chat_unread = Unread {
                 muted: self.chat_unread.muted,
+                since: meeting::now_ms(),
                 ..Unread::default()
             };
         }
@@ -87,23 +101,16 @@ impl CallStage {
             // a count that failed leaves the dot as it was
             let Ok(count) = reply.await else { return };
             // a stage that is gone shows no dot
-            let _ = this.update(cx, |this, cx| this.counted(chat, count, cx));
+            let _ = this.update(cx, |this, cx| this.counted(&chat, count, cx));
         }));
     }
 
-    /// `chat` counts `count` unread: the dot follows, and a count that rose shows the newest message's bubble.
-    fn counted(&mut self, chat: String, count: u64, cx: &mut Context<Self>) {
+    /// `chat` counts `count` unread: the dot follows.
+    fn counted(&mut self, chat: &str, count: u64, cx: &mut Context<Self>) {
         if self.chat_unread.of.as_ref().is_none_or(|(of, _)| *of != chat) {
             return;
         }
-        // the first count of a call's chat is what came before the call: no bubble for it, but its newest message is
-        // where the new ones start
-        let first = self.chat_unread.count.is_none();
-        let more = self.chat_unread.count.is_some_and(|before| count > before);
         self.chat_unread.count = Some(count);
-        if first || more {
-            self.read_newest(chat, more, cx);
-        }
         cx.notify();
     }
 
@@ -112,34 +119,25 @@ impl CallStage {
         self.pane != Pane::Chat && self.chat_unread.count.unwrap_or(0) > 0
     }
 
-    /// Reads `chat`'s newest message. While `show`, it goes in the bubble when it is newer than all known before,
-    /// someone else sent it, the pane is closed and bubbles aren't muted.
-    fn read_newest(&mut self, chat: String, show: bool, cx: &mut Context<Self>) {
-        let reply = self.core.messages(chat.clone(), None, 1);
-        let me = self.core.me().to_owned();
-        cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let Ok(page) = reply.await else { return };
-            let Some(message) = page.messages.into_iter().next() else {
-                return;
-            };
-            // a stage that is gone shows no bubble
-            let _ = this.update(cx, |this, cx| {
-                let unread = &mut this.chat_unread;
-                if unread.of.as_ref().is_none_or(|(of, _)| *of != chat) {
-                    return;
-                }
-                let newer = unread.newest.is_none_or(|known| message.arrival_time > known);
-                unread.newest = unread.newest.max(Some(message.arrival_time));
-                let Some(from) = message.sender.clone().filter(|from| *from != me) else {
-                    return;
-                };
-                if show && newer && crate::chat_list::is_text(&message) {
-                    let line = SharedString::from(crate::chat_list::message_line(&message));
-                    this.bubble(message, (from, line), cx);
-                }
-            });
-        })
-        .detach();
+    /// `message` was newly stored in `conversation`, brought by `source`: it shows in the bubble when it is new in the
+    /// call's chat ([`fresh`]), someone else sent it, it has text, the pane is closed and bubbles aren't muted.
+    pub(super) fn arrived(
+        &mut self,
+        (conversation, message, source): (&str, &teams_store::Message, Source),
+        cx: &mut Context<Self>,
+    ) {
+        let unread = &self.chat_unread;
+        if unread.of.as_ref().is_none_or(|(of, _)| of != conversation)
+            || !fresh(source, message.arrival_time, unread.since)
+            || !crate::chat_list::is_text(message)
+        {
+            return;
+        }
+        let Some(from) = message.sender.clone().filter(|from| from != self.core.me()) else {
+            return;
+        };
+        let line = SharedString::from(crate::chat_list::message_line(message));
+        self.bubble(message.clone(), (from, line), cx);
     }
 
     /// Shows `message` (sent by `from`, its first line `line`) in the bubble for [`BUBBLE_FOR`], unless the pane

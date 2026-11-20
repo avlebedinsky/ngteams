@@ -327,9 +327,9 @@ pub struct CallStage {
     ticking: Option<Task<()>>,
     _waking: Option<Task<()>>,
     _observing: [Subscription; 4],
-    /// Profiles read in the background (the account's chats' model, when the window has its shell's parts): the
-    /// faces read again.
-    _profiles: Option<Subscription>,
+    /// The account's chats' model and its feed, when the window has its shell's parts: profiles read in the
+    /// background (the faces read again), the call's chat's unread count, and its new messages (the chat bubble).
+    _shell: Option<[Subscription; 2]>,
 }
 
 impl EventEmitter<CallStageEvent> for CallStage {}
@@ -357,12 +357,24 @@ impl CallStage {
 }
 
 impl CallStage {
-    fn observe_profiles(shell: Option<&ShellParts>, cx: &mut Context<Self>) -> Option<Subscription> {
+    fn observe_shell(shell: Option<&ShellParts>, cx: &mut Context<Self>) -> Option<[Subscription; 2]> {
         shell.map(|shell| {
-            cx.observe(&shell.models.chats, |this: &mut Self, chats, cx| {
-                this.profiles_changed(&chats, cx);
-                this.follow_chat_unread(cx);
-            })
+            [
+                cx.observe(&shell.models.chats, |this: &mut Self, chats, cx| {
+                    this.profiles_changed(&chats, cx);
+                    this.follow_chat_unread(cx);
+                }),
+                cx.subscribe(&shell.models.feed, |this: &mut Self, _, event, cx| {
+                    if let crate::models::FeedEvent::Arrived {
+                        conversation,
+                        message,
+                        source,
+                    } = event
+                    {
+                        this.arrived((conversation, message, *source), cx);
+                    }
+                }),
+            ]
         })
     }
 
@@ -384,7 +396,7 @@ impl CallStage {
         let tiles = feed.map(|feed| Tiles::new(feed, Arc::clone(&trace)));
         // profile changes before the stage asked about anyone change nothing it read
         let seen = shell.as_ref().map_or(0, |shell| shell.models.chats.read(cx).revision());
-        let profiles = Self::observe_profiles(shell.as_ref(), cx);
+        let observing_shell = Self::observe_shell(shell.as_ref(), cx);
         let mut stage = Self {
             core,
             calls,
@@ -444,7 +456,7 @@ impl CallStage {
             ticking: None,
             _waking: waking,
             _observing: observing,
-            _profiles: profiles,
+            _shell: observing_shell,
         };
         stage.read_own_name(cx);
         stage.changed(cx);
