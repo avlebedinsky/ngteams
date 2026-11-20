@@ -1,12 +1,12 @@
 //! Meetings on the group call controller: the client's engines (`teams-core`, `teams-media` on the file device
-//! backend) join a meeting scheduled on the server's calendar, wait in its lobby until someone lets them in, raise
-//! hands, react, are muted by the organizer and see the meeting ended for all; a channel's meeting is posted to its
-//! channel, titled and joined the same way. Every account and meeting is synthetic.
+//! backend) join a meeting scheduled on the server's calendar, are pushed its start, wait in its lobby until someone
+//! lets them in, raise hands, react, are muted by the organizer and see the meeting ended for all; a channel's meeting
+//! is posted to its channel, titled and joined the same way. Every account and meeting is synthetic.
 
 use reqwest::Method;
 use serde_json::json;
 use teams_core::engine::Event;
-use teams_core::{CallAction, CallId, CallStatus, End, EventWrite};
+use teams_core::{CallAction, CallId, CallStatus, End, EventWrite, MeetingStartKind};
 use teams_media::tone::Tone;
 use teams_proto::chat::ChatReads;
 use teams_proto::{CalendarEvent, MIDDLE_TIER_AUDIENCE, MeetingInfo, Mri};
@@ -140,6 +140,8 @@ async fn three_join_a_scheduled_meeting_nobody_rings_and_its_chat_tells_its_star
         );
         // a guest may start the meeting's call before its organizer comes
         let b_call = joined(&mut bert, &join).await;
+        let chat = event.meeting_chat.clone().unwrap();
+        told_started(&mut [&mut ada, &mut cora], &chat, &bert.engine.mri.clone()).await;
         let a_call = joined(&mut ada, &join).await;
         let c_call = joined(&mut cora, &join).await;
         mixed.connected(&mixed.open_call().await, 3).await;
@@ -159,7 +161,6 @@ async fn three_join_a_scheduled_meeting_nobody_rings_and_its_chat_tells_its_star
                 shown(&last).is_some() && shown(&guest).is_some_and(|party| !party.organizer)
             })
             .await;
-        let chat = event.meeting_chat.clone().unwrap();
         leave_all(&mut [&mut bert, &mut ada, &mut cora], &[b_call, a_call, c_call]).await;
         let events = ended_events(&mixed, &cora, &chat).await;
         assert_eq!(events.len(), 2, "{events:?}");
@@ -169,6 +170,25 @@ async fn three_join_a_scheduled_meeting_nobody_rings_and_its_chat_tells_its_star
             "{events:?}"
         );
         shut_down(vec![ada, bert, cora], mixed).await;
+    }
+}
+
+/// Until each of `people` is pushed the start of the meeting in `chat` by `starter` (`evt` 128), as Teams pushes it to
+/// its members.
+async fn told_started(people: &mut [&mut Person], chat: &str, starter: &str) {
+    for person in people.iter_mut() {
+        let start = person
+            .engine
+            .next(|event| match event {
+                Event::MeetingStarted(start) => Some(start.clone()),
+                _ => None,
+            })
+            .await;
+        assert_eq!(
+            (start.kind, start.thread.as_str(), start.starter.as_deref()),
+            (MeetingStartKind::Meeting, chat, Some(starter))
+        );
+        assert_eq!(start.subject.as_deref(), Some("Planning"));
     }
 }
 

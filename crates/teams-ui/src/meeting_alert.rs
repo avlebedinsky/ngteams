@@ -12,7 +12,8 @@
 //! **The calling push** ([`FeedEvent::MeetingPushed`], `teams_call::meeting_push`): a meeting's start the calling
 //! service pushes to its members, whether or not they opened its chat, shows the same banner for a meeting chat's or a
 //! channel's meeting, titled with the push's subject; "<name> is waiting in the lobby. Join the meeting to let them
-//! in." for someone waiting in its lobby. The calendar must hold the meeting about now, as above, unless it can't be
+//! in." for someone waiting in its lobby. A group chat's Meet now shows from the chat's start only, since its Join
+//! needs the conversation that start names. The calendar must hold the meeting about now, as above, unless it can't be
 //! read: then it shows, as Teams does. One call (its id) shows one banner, from the push or the chat's start, whichever
 //! came first.
 //!
@@ -315,7 +316,8 @@ fn now_ms() -> i64 {
 }
 
 impl MeetingAlert {
-    /// The alert over the models; it shows nothing until it is given a server ([`MeetingAlert::set_server`]).
+    /// The alert over the models; without a server ([`MeetingAlert::set_server`]) its banners show only as the
+    /// window's cards.
     pub fn new(
         core: Arc<dyn Core>,
         models: &Models,
@@ -434,14 +436,20 @@ impl MeetingAlert {
         self.read_running(conversation, ended, cx);
     }
 
-    /// The calling service pushed a meeting's start: a meeting's (its chat's or a channel's), someone waiting in its
-    /// lobby, or a group chat's Meet now. Each call shows once, whichever of this and the chat's start came first.
+    /// The calling service pushed a meeting's start: a meeting's (its chat's or a channel's), or someone waiting in its
+    /// lobby. Each call shows once, whichever of this and the chat's start came first. A group chat's Meet now is left
+    /// to the chat's start: its Join goes where that start says the call runs, which the push doesn't say.
     fn pushed(&mut self, start: &MeetingStartPush, cx: &mut Context<Self>) {
         let conversation = start.thread.as_str();
+        if start.kind == MeetingStartKind::Huddle && is_group_chat_id(conversation) {
+            log::debug!(
+                "meeting banner: a pushed Meet now in {conversation} (call {}): left to the chat's start",
+                start.call_id
+            );
+            return;
+        }
         let place = if is_team_thread_id(conversation) {
             StartedIn::Channel
-        } else if start.kind == MeetingStartKind::Huddle && is_group_chat_id(conversation) {
-            StartedIn::GroupChat { huddle: true }
         } else {
             StartedIn::MeetingChat
         };

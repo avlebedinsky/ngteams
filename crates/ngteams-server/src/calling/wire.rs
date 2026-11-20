@@ -712,6 +712,28 @@ pub(crate) fn add_failure(invitee: &str) -> Value {
     })
 }
 
+/// `evt` of a delivery at a calling endpoint's root telling a meeting's member that its call started.
+pub(crate) const MEETING_STARTED: u64 = 128;
+
+/// A meeting's start told to a member of it (`docs/protocol/calling.md`, "When a meeting starts"): `{"evt": 128, "gp":
+/// <base64 JSON>}`, `kind` its `notificationType` (`MeetingStart`, `MeetingStartFromLobby`), its starter the call's
+/// first party, `subject` the meeting's and `organizer` and `tenant` its `meetingInfo`.
+pub(crate) fn meeting_started(kind: &str, call: &Call, subject: Option<&str>, organizer: &str, tenant: &str) -> Value {
+    let starter = call.party(Seat::CALLER);
+    let gp = json!({
+        "notificationType": kind,
+        "callId": call.id,
+        "threadId": call.chat,
+        "messageId": "0",
+        "subject": subject,
+        "groupCallInitiator": starter.mri(),
+        "groupCallInitiatorDisplayName": starter.name,
+        "firstUserToJoinModality": starter.mri(),
+        "meetingInfo": {"tenantId": tenant, "organizerId": organizer},
+    });
+    json!({"evt": MEETING_STARTED, "gp": base64::engine::general_purpose::STANDARD.encode(gp.to_string())})
+}
+
 /// `evt` of a group call's delivery at a calling endpoint's root telling that someone came into the call.
 pub(crate) const JOINED: u64 = 115;
 /// … that someone left it.

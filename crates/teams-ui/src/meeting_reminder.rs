@@ -3,15 +3,17 @@
 //!
 //! **Which meetings.** An online meeting of the account's calendar, neither cancelled nor declined nor all day, whose
 //! reminder is set: its `isReminderSet` and `reminderMinutesBeforeStart`. The calendar view's answer may lack them; the
-//! event is then read whole once ([`Core::calendar_event`]), and until that read answers (or when it fails) the
-//! reminder waits for that read; one that fails leaves Outlook's default, [`DEFAULT_MINUTES`].
+//! event is then read whole ([`Core::calendar_event`]), and again each [`REFRESH`] so that a reminder changed during the
+//! run is seen. Until the first read answers the reminder waits; one that fails leaves Outlook's default,
+//! [`DEFAULT_MINUTES`].
 //!
 //! **When.** From its reminder time until the meeting starts the notice says how long until it starts ("Starts in 15
 //! minutes"); at the start it is shown again ("Starting now"), until the meeting ends. A run that starts after the
 //! reminder time but before the start shows it at once; one that starts after the start shows the start's notice only
 //! within [`START_LATE_MS`]. Each meeting (its event and its start) is reminded once per stage: a meeting that moves is
 //! a new one, its old notice closed; a cancelled, declined or deleted one closes its notice. Snooze holds it back for
-//! the time chosen (the desktop notice's Snooze for [`DESKTOP_SNOOZE_MINUTES`]); Dismiss ends its reminders.
+//! the time chosen (the desktop notice's Snooze for [`DESKTOP_SNOOZE_MINUTES`]), also past [`START_LATE_MS`]; Dismiss
+//! ends its reminders.
 //!
 //! **The calendar.** Every [`TICK`] the stored calendar is looked at, and every [`REFRESH`] (and at the start) the
 //! service's calendar is read, which keeps what it read in the store: so the reminders work when the calendar view was
@@ -186,6 +188,13 @@ struct Kept {
     dismissed: bool,
 }
 
+impl Kept {
+    /// Whether it was reminded: shown, or snoozed since (a snooze past [`START_LATE_MS`] must still remind again).
+    fn reminded(&self) -> bool {
+        self.shown.is_some() || self.snoozed_until.is_some()
+    }
+}
+
 /// The meeting reminders of one account (see the module docs). A GPUI entity the desktop holds.
 pub struct MeetingReminders {
     core: Arc<dyn Core>,
@@ -194,8 +203,8 @@ pub struct MeetingReminders {
     trace: Arc<ViewTrace>,
     server: Option<Arc<dyn NotificationServer>>,
     kept: HashMap<Occasion, Kept>,
-    /// The reminders read from the events read whole, by event id.
-    reminders: HashMap<String, EventReminder>,
+    /// The reminders read from the events read whole, by event id, with when each was read (wall clock, ms).
+    reminders: HashMap<String, (EventReminder, i64)>,
     /// The events being read whole.
     reading: HashSet<String>,
     /// When the service's calendar was last read, on the wall clock (ms).
@@ -351,9 +360,7 @@ impl MeetingReminders {
     fn look(&mut self, cx: &mut Context<Self>) {
         let now = wall_ms(cx);
         let window = (now - 2 * HOUR_MS, now + AHEAD_MS);
-        let refresh = self
-            .refreshed
-            .is_none_or(|at| now - at >= i64::try_from(REFRESH.as_millis()).unwrap_or(i64::MAX));
+        let refresh = self.refreshed.is_none_or(|at| now - at >= refresh_ms());
         let core = Arc::clone(&self.core);
         if refresh {
             self.refreshed = Some(now);
@@ -391,7 +398,7 @@ impl MeetingReminders {
             let Some(minutes) = self.reminder_of(event, now, cx).and_then(minutes_of) else {
                 continue;
             };
-            let shown = self.kept.get(&occasion).is_some_and(|kept| kept.shown.is_some());
+            let shown = self.kept.get(&occasion).is_some_and(Kept::reminded);
             let Some(stage) = stage_at(occasion.start, end, minutes, now, shown) else {
                 continue;
             };
@@ -431,32 +438,33 @@ impl MeetingReminders {
         cx.notify();
     }
 
-    /// The reminder of `event`: its own, else the one its read whole gave; `None` while that read is asked (once, for
-    /// an event within [`AHEAD_MS`]) or runs.
+    /// The reminder of `event`: its own, else the one its read whole gave; `None` until that read (asked for an event
+    /// within [`AHEAD_MS`]) first answers. A read older than [`REFRESH`] is asked again, its reminder kept meanwhile, so
+    /// a reminder changed during the run is seen.
     fn reminder_of(&mut self, event: &CalendarEvent, now: i64, cx: &mut Context<Self>) -> Option<EventReminder> {
         if event.reminder != EventReminder::Unknown {
             return Some(event.reminder);
         }
-        if let Some(read) = self.reminders.get(&event.id) {
-            return Some(*read);
-        }
+        let read = self.reminders.get(&event.id).copied();
+        let stale = read.is_none_or(|(_, at)| now - at >= refresh_ms());
         let soon = teams_core::calendar::instant(event.start) - now <= AHEAD_MS;
-        if soon && self.reading.insert(event.id.clone()) {
+        if stale && soon && self.reading.insert(event.id.clone()) {
             let (core, id) = (Arc::clone(&self.core), event.id.clone());
             cx.spawn(async move |this, cx: &mut AsyncApp| {
                 let read = core.calendar_event(id.clone()).await;
                 let _ = this.update(cx, |this, cx| {
                     this.reading.remove(&id);
-                    let reminder = read.map_or(EventReminder::Unknown, |full| full.event.reminder);
+                    let before = this.reminders.get(&id).map(|(reminder, _)| *reminder);
+                    let reminder = read.map_or(before.unwrap_or(EventReminder::Unknown), |full| full.event.reminder);
                     log::debug!("meeting reminder: {id} read whole, its reminder {reminder:?}");
-                    this.reminders.insert(id, reminder);
+                    this.reminders.insert(id, (reminder, wall_ms(cx)));
                     let last = std::mem::take(&mut this.last);
                     this.apply(&last, cx);
                 });
             })
             .detach();
         }
-        None
+        read.map(|(reminder, _)| reminder)
     }
 
     /// Shows `occasion` at `stage` unless it is dismissed, snoozed, or shown at that stage already.
@@ -498,8 +506,12 @@ impl MeetingReminders {
                 log::debug!("meeting reminder: the notification server refused one");
                 return;
             };
+            // a Dismiss, Join, Snooze or the next stage while the server answered: this notice is no longer the one
             let kept = this.update(cx, |this, _| {
-                let kept = this.kept.get_mut(&occasion).filter(|kept| kept.shown.is_some());
+                let kept = this
+                    .kept
+                    .get_mut(&occasion)
+                    .filter(|kept| kept.shown == Some(stage) && !kept.dismissed && kept.snoozed_until.is_none());
                 kept.map(|kept| kept.notice = Some(id)).is_some()
             });
             if !kept.unwrap_or(false) {
@@ -527,6 +539,11 @@ impl MeetingReminders {
         self.trace
             .record(&TraceLine::new("meeting-reminder", what).conversation(&chat));
     }
+}
+
+/// [`REFRESH`] in ms.
+fn refresh_ms() -> i64 {
+    i64::try_from(REFRESH.as_millis()).unwrap_or(i64::MAX)
 }
 
 /// The meeting's title: its subject, else [`NO_TITLE`].

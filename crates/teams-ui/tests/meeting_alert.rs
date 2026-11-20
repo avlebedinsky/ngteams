@@ -738,3 +738,14 @@ fn a_meeting_that_ended_more_than_five_minutes_ago_shows_none() {
     a.push(pushed(teams_core::MeetingStartKind::Meeting, MEETING, "call-1", LAB_B));
     assert!(a.server.shown().is_empty());
 }
+
+#[test]
+fn a_pushed_meet_now_of_a_group_chat_waits_for_the_chat_s_start_whose_join_can_go() {
+    let a = Alerting::start(Settings::default());
+    a.push(pushed(teams_core::MeetingStartKind::Huddle, TRIO, "huddle-1", LAB_B));
+    assert!(a.server.shown().is_empty(), "no Join could go there yet");
+    assert!(a.cards().is_empty());
+    a.arrive(call_event(TRIO, "1", LAB_B, huddle(LAB_B)), Source::Delivery);
+    assert_eq!(a.server.shown().len(), 1);
+    assert!(a.joinable(TRIO));
+}

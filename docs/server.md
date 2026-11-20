@@ -1327,6 +1327,10 @@ the calendar's ([above](#the-calendar-and-meetings)); its organizer is the meeti
   (`403`). Two
   first starts at once make one call (the group calls' unique index), the second joining it. The chat gets
   `callStarted` naming the call's conversation and, at the end, `callEnded`.
+- **The start's push**: when a scheduled meeting's call starts, each calling endpoint of the meeting chat's other
+  members gets `{"evt": 128, "gp": <base64 JSON>}` (`MeetingStart`, its call, chat, subject, starter and
+  `meetingInfo`); a first joiner that waits in the lobby is pushed to the organizer only (`MeetingStartFromLobby`).
+  A channel's meeting pushes none.
 - **The lobby** is the meeting's `AutoAdmittedUsers`, read at each join: the organizer always comes in; under
   `InvitedUsers` the meeting chat's people do, under `OrganizerOnly` nobody else; any other value lets every account
   in (they are all of the company). Whom it holds waits: its roster entry has a `lobby` endpoint (`modalityJoined`

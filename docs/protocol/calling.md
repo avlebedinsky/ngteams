@@ -608,9 +608,9 @@ ring:
 The web client learns of a meeting's start two ways (read 2026-11-19 from the bundle a lab profile keeps):
 
 - **The calling push**, at the calling endpoint's root (not a call's callback), as the incoming call's invitation
-  comes: `{"evt": 128, "gp": <base64 JSON>}`, or `"cp"`: the JSON zlib-deflated, then base64. 128 is the bundle's
-  `MEETING_STARTED_NOTIFICATION`; it handles 115 (an active call started), 116 (no active calls) and 129 (a call's
-  update) the same way and shows nothing for them. The JSON: `notificationType` (`MeetingStart`,
+  comes: `{"evt": 128, "gp": <base64 JSON>}`, or `"cp"`: the JSON deflated (zlib or gzip), then base64. 128 is the
+  bundle's `MEETING_STARTED_NOTIFICATION`; it handles 115 (an active call started), 116 (no active calls) and 129 (a
+  call's update) the same way and shows nothing for them. The JSON: `notificationType` (`MeetingStart`,
   `MeetingStartFromLobby`: someone waits in the lobby and nobody who admits is in, `HuddleMeetingStart`: a group
   chat's Meet now), `callId`, `threadId` (the meeting's chat, or the channel), `messageId` (a channel meeting's post;
   `"0"` for a meeting with its own chat), `subject`, `groupCallInitiator` and `groupCallInitiatorDisplayName` (who
@@ -635,7 +635,8 @@ Join and Message (a channel's: Join only), shown 20 s, with a ring of its own.
 
 The native client reads both (`teams_call::meeting_push`, `teams_ui::meeting_alert`): the push of a meeting in a
 meeting chat or a channel shows its banner as above (the push's starter, else the name it gives; the lobby's words for
-`MeetingStartFromLobby`); the chat service's start does so for a group chat's `huddleGroupCall`, and for a meeting
+`MeetingStartFromLobby`); the chat service's start does so for a group chat's `huddleGroupCall` (its push,
+`HuddleMeetingStart`, is left to that start, since only the start names where its Join goes), and for a meeting
 chat's or a channel's start while the account's calendar holds the meeting from 15 minutes before its start to 5
 minutes after its end. One call (its `callId`) shows one banner, whichever came first. The window shows the banner as
 a card as well, for Teams' 20 s; the desktop's notice stays as its server keeps it. A group chat's plain group call

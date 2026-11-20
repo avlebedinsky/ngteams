@@ -2,8 +2,9 @@
 //! notification server: a meeting is reminded at its reminder time and again as it starts, once each; a run started
 //! after the reminder time reminds at once; an event the calendar view gives no reminder for is read whole first; a
 //! declined, cancelled or offline one, the switch off and Do not disturb remind of nothing; a meeting that moves closes
-//! its notice; Snooze, Dismiss and Join do what they say, from the desktop notice and from the window's card; the
-//! calendar is read from the service without the calendar view. Every id and name is made up.
+//! its notice; Snooze, Dismiss and Join do what they say, from the desktop notice and from the window's card, also
+//! when Snooze ends after the start or the server answers after a Dismiss; a reminder changed during the run is read
+//! again; the calendar is read from the service without the calendar view. Every id and name is made up.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -17,6 +18,7 @@ mod notices;
 use std::sync::{Arc, Mutex};
 
 use common::{Rig, Written};
+use futures_util::future::BoxFuture;
 use gpui::{AppContext as _, Entity};
 use notices::FakeServer;
 use teams_core::{CalendarEvent, EventKind, EventReminder, EventResponse, EventTime, MeetingInfo, ShowAs};
@@ -24,7 +26,7 @@ use teams_ui::ViewTrace;
 use teams_ui::meeting_alert::MeetingJoin;
 use teams_ui::meeting_reminder::{self, MeetingReminders, ReminderEvent, Stage, TICK};
 use teams_ui::models::Models;
-use teams_ui::notify::{DISMISS_ACTION, JOIN_ACTION, NoticeKind, NotificationServer, SNOOZE_ACTION};
+use teams_ui::notify::{DISMISS_ACTION, JOIN_ACTION, Notice, NoticeKind, NotificationServer, SNOOZE_ACTION};
 use teams_ui::settings::{ManualStatus, Settings, SettingsModel};
 
 const MEETING: &str = "19:meeting_MadeUpReview01@thread.v2";
@@ -36,6 +38,29 @@ struct Reminding {
     server: Arc<FakeServer>,
     asked: Arc<Mutex<Vec<ReminderEvent>>>,
     written: Written,
+    /// Lets one held answer of the server go (`start_held`).
+    release: Option<async_channel::Sender<()>>,
+}
+
+/// A notification server slow to answer: each show is recorded at once, its id answered once released.
+struct HeldServer {
+    inner: Arc<FakeServer>,
+    gate: async_channel::Receiver<()>,
+}
+
+impl NotificationServer for HeldServer {
+    fn show(&self, notice: &Notice, replaces: u32) -> BoxFuture<'static, Result<u32, String>> {
+        let shown = self.inner.show(notice, replaces);
+        let gate = self.gate.clone();
+        Box::pin(async move {
+            let _ = gate.recv().await;
+            shown.await
+        })
+    }
+
+    fn close(&self, id: u32) -> BoxFuture<'static, ()> {
+        self.inner.close(id)
+    }
 }
 
 /// The account's online meeting `id` from `start` (ms) for half an hour, its reminder `reminder`.
@@ -75,6 +100,15 @@ fn meeting(id: &str, start: i64, reminder: EventReminder) -> CalendarEvent {
 impl Reminding {
     /// The reminders over a calendar of the events `events` makes from now (ms) on the test clock.
     fn start(settings: Settings, events: impl FnOnce(i64) -> Vec<CalendarEvent>) -> Self {
+        Self::start_on(settings, events, false)
+    }
+
+    /// As [`Self::start`], the server answering each show only when [`Self::release`] lets it.
+    fn start_held(settings: Settings, events: impl FnOnce(i64) -> Vec<CalendarEvent>) -> Self {
+        Self::start_on(settings, events, true)
+    }
+
+    fn start_on(settings: Settings, events: impl FnOnce(i64) -> Vec<CalendarEvent>, held: bool) -> Self {
         let rig = Rig::start_with(|cx| Models::with_calls(None, cx));
         let now = rig.cx.read(meeting_reminder::wall_ms);
         let events = events(now);
@@ -91,7 +125,15 @@ impl Reminding {
         let calls = rig.models.calls.clone();
         let asked = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&asked);
-        let given: Arc<dyn NotificationServer> = server.clone();
+        let (release, gate) = async_channel::unbounded();
+        let given: Arc<dyn NotificationServer> = if held {
+            Arc::new(HeldServer {
+                inner: Arc::clone(&server),
+                gate,
+            })
+        } else {
+            server.clone()
+        };
         let reminders = rig.cx.update(|cx| {
             let reminders = cx.new(|cx| {
                 let mut reminders = MeetingReminders::new(core, settings, calls, trace, cx);
@@ -99,7 +141,7 @@ impl Reminding {
                 reminders
             });
             cx.subscribe(&reminders, move |_, event, _| {
-                recorded.lock().unwrap().push(event.clone())
+                recorded.lock().unwrap().push(event.clone());
             })
             .detach();
             reminders
@@ -111,7 +153,41 @@ impl Reminding {
             server,
             asked,
             written,
+            release: held.then_some(release),
         }
+    }
+
+    /// The held server answers its oldest show.
+    fn release(&self) {
+        if let Some(release) = &self.release {
+            release.try_send(()).unwrap();
+        }
+        self.rig.cx.run_until_parked();
+    }
+
+    /// The account's event `id` reads whole as `event`, its reminder `minutes` before.
+    fn whole(&self, event: CalendarEvent, minutes: u32) {
+        self.rig.core.calendar.lock().unwrap().full.insert(
+            event.id.clone(),
+            teams_core::FullEvent {
+                event,
+                raw: serde_json::Map::new(),
+                body_html: None,
+                reminder_minutes: Some(minutes),
+                categories: Vec::new(),
+                optional: Vec::new(),
+                recurrence: None,
+            },
+        );
+    }
+
+    fn snooze(&self, minutes: u32) {
+        let occasion = self.cards()[0].occasion.clone();
+        self.rig.cx.update(|cx| {
+            self.reminders
+                .update(cx, |reminders, cx| reminders.snooze(&occasion, minutes, cx));
+        });
+        self.rig.cx.run_until_parked();
     }
 
     fn now(&self) -> i64 {
@@ -231,20 +307,7 @@ fn an_event_read_whole_gives_its_reminder() {
         vec![meeting("later", now + 30 * MINUTE, EventReminder::Unknown)]
     });
     let now = r.now();
-    let mut whole = meeting("planning", now + 10 * MINUTE, EventReminder::Before(5));
-    whole.id = "planning".to_owned();
-    r.rig.core.calendar.lock().unwrap().full.insert(
-        "planning".to_owned(),
-        teams_core::FullEvent {
-            event: whole,
-            raw: serde_json::Map::new(),
-            body_html: None,
-            reminder_minutes: Some(5),
-            categories: Vec::new(),
-            optional: Vec::new(),
-            recurrence: None,
-        },
-    );
+    r.whole(meeting("planning", now + 10 * MINUTE, EventReminder::Before(5)), 5);
     r.calendar(vec![meeting("planning", now + 10 * MINUTE, EventReminder::Unknown)]);
     r.wait(4);
     assert!(r.server.shown().is_empty(), "6 minutes before a 5-minute reminder");
@@ -334,11 +397,7 @@ fn snooze_reminds_again_after_its_time_and_dismiss_ends_the_reminders() {
     r.wait(2);
     assert_eq!(r.server.shown().len(), 2, "reminded again");
     // the card's Snooze "until it starts", then Dismiss at the start
-    let occasion = r.cards()[0].occasion.clone();
-    r.rig.cx.update(|cx| {
-        r.reminders
-            .update(cx, |reminders, cx| reminders.snooze(&occasion, 0, cx));
-    });
+    r.snooze(0);
     r.wait(7);
     assert_eq!(r.server.shown().len(), 2, "snoozed until it starts");
     r.wait(1);
@@ -372,4 +431,62 @@ fn join_goes_into_the_meeting_as_the_calendar_s_join_does() {
     assert_eq!(r.server.closed(), [1]);
     r.wait(10);
     assert_eq!(r.server.shown().len(), 1, "joined: no start notice");
+}
+
+#[test]
+fn a_snooze_that_ends_well_after_the_start_reminds_again() {
+    let r = Reminding::start(Settings::default(), |now| {
+        vec![meeting("planning", now + MINUTE, EventReminder::Before(15))]
+    });
+    r.wait(1);
+    assert_eq!(first_line(&r.bodies()[1]), "Starting now");
+    r.wait(6);
+    assert!(r.activate(1, SNOOZE_ACTION));
+    r.wait(4);
+    assert_eq!(r.server.shown().len(), 2, "snoozed for five minutes");
+    r.wait(2);
+    assert_eq!(r.server.shown().len(), 3, "reminded again 11 minutes after the start");
+    assert_eq!(first_line(&r.bodies()[2]), "Starting now");
+    // the card's longest Snooze, from 12 to 27 minutes after the start
+    r.snooze(15);
+    r.wait(14);
+    assert_eq!(r.server.shown().len(), 3);
+    r.wait(2);
+    assert_eq!(r.server.shown().len(), 4, "reminded again until the meeting ends");
+}
+
+#[test]
+fn a_reminder_changed_during_the_run_is_read_again() {
+    let r = Reminding::start(Settings::default(), |now| {
+        vec![meeting("planning", now + 34 * MINUTE, EventReminder::Unknown)]
+    });
+    assert_eq!(r.rig.core.calendar.lock().unwrap().full_reads, ["planning"]);
+    // the first read failed (Outlook's 15 minutes); the organizer then set 30 minutes
+    let now = r.now();
+    r.whole(meeting("planning", now + 34 * MINUTE, EventReminder::Before(30)), 30);
+    r.wait(4);
+    assert!(r.server.shown().is_empty(), "the read is not stale yet");
+    r.wait(2);
+    assert_eq!(r.rig.core.calendar.lock().unwrap().full_reads.len(), 2);
+    assert_eq!(
+        r.bodies().iter().map(|body| first_line(body)).collect::<Vec<_>>(),
+        ["Starts in 29 minutes"]
+    );
+}
+
+#[test]
+fn a_notice_the_server_answers_after_a_dismiss_is_closed() {
+    let r = Reminding::start_held(Settings::default(), |now| {
+        vec![meeting("planning", now + 5 * MINUTE, EventReminder::Before(15))]
+    });
+    assert_eq!(r.server.shown().len(), 1);
+    let occasion = r.cards()[0].occasion.clone();
+    r.rig.cx.update(|cx| {
+        r.reminders.update(cx, |reminders, cx| reminders.dismiss(&occasion, cx));
+    });
+    r.rig.cx.run_until_parked();
+    assert!(r.server.closed().is_empty(), "the server didn't name it yet");
+    r.release();
+    assert_eq!(r.server.closed(), [1]);
+    assert!(!r.activate(1, DISMISS_ACTION), "not kept as the reminder's notice");
 }

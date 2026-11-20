@@ -1,7 +1,7 @@
 //! A meeting's start as the calling service pushes it (`docs/protocol/calling.md`, "When a meeting starts"): a delivery
 //! at the calling endpoint's root, `{"evt": 128, "gp": <base64 JSON>}` or `{"evt": 128, "cp": <base64 of the JSON,
-//! zlib-deflated>}`, read as the web client's bundle reads it. Only the fields the banner uses are kept; a value in a
-//! form the bundle doesn't read is left out.
+//! deflated as zlib or gzip>}`, read as the web client's bundle reads it. Only the fields the banner uses are kept; a
+//! value in a form the bundle doesn't read is left out.
 
 use std::io::Read as _;
 
@@ -13,6 +13,9 @@ pub const MEETING_STARTED_EVENT: u64 = 128;
 
 /// The largest payload a deflated one is inflated to.
 const MAX_PAYLOAD: u64 = 256 * 1024;
+
+/// The first bytes of a gzip stream.
+const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
 
 /// What started, as its `notificationType` names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,7 +90,8 @@ pub fn read(body: &[u8]) -> Option<MeetingStartPush> {
     })
 }
 
-/// The payload: `gp` as base64 JSON (or as the JSON object itself), else `cp` inflated.
+/// The payload: `gp` as base64 JSON (or as the JSON object itself), else `cp` inflated (gzip by its magic, else zlib,
+/// as the bundle's inflate tells them apart).
 fn payload(body: &Value) -> Option<Value> {
     let base64 = base64::engine::general_purpose::STANDARD;
     let bytes = match (body.get("gp"), body.get("cp")) {
@@ -95,11 +99,13 @@ fn payload(body: &Value) -> Option<Value> {
         (Some(Value::String(gp)), _) => base64.decode(gp).ok()?,
         (None, Some(Value::String(cp))) => {
             let deflated = base64.decode(cp).ok()?;
+            let reader: Box<dyn std::io::Read + '_> = if deflated.starts_with(&GZIP_MAGIC) {
+                Box::new(flate2::read::GzDecoder::new(deflated.as_slice()))
+            } else {
+                Box::new(flate2::read::ZlibDecoder::new(deflated.as_slice()))
+            };
             let mut inflated = Vec::new();
-            flate2::read::ZlibDecoder::new(deflated.as_slice())
-                .take(MAX_PAYLOAD)
-                .read_to_end(&mut inflated)
-                .ok()?;
+            reader.take(MAX_PAYLOAD).read_to_end(&mut inflated).ok()?;
             inflated
         }
         _ => return None,
@@ -177,8 +183,23 @@ mod tests {
         let cp = base64::engine::general_purpose::STANDARD.encode(deflater.finish().unwrap());
         let body = json!({"evt": 128, "cp": cp}).to_string();
         assert_eq!(read(body.as_bytes()).unwrap().call_id, "made-up-call");
+        let mut gzipped = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzipped.write_all(started().to_string().as_bytes()).unwrap();
+        let cp = base64::engine::general_purpose::STANDARD.encode(gzipped.finish().unwrap());
+        let body = json!({"evt": 128, "cp": cp}).to_string();
+        assert_eq!(read(body.as_bytes()).unwrap().call_id, "made-up-call");
         let inline = json!({"evt": 128, "gp": started()}).to_string();
         assert_eq!(read(inline.as_bytes()).unwrap().kind, StartKind::Meeting);
+    }
+
+    /// A `cp` whose JSON inflates past [`MAX_PAYLOAD`]: it is cut there, so it doesn't read.
+    fn bomb() -> Vec<u8> {
+        let mut payload = started();
+        payload["subject"] = json!(" ".repeat(usize::try_from(MAX_PAYLOAD).unwrap()));
+        let mut gzipped = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzipped.write_all(payload.to_string().as_bytes()).unwrap();
+        let cp = base64::engine::general_purpose::STANDARD.encode(gzipped.finish().unwrap());
+        json!({"evt": 128, "cp": cp}).to_string().into_bytes()
     }
 
     #[test]
@@ -197,6 +218,7 @@ mod tests {
             json!({"evt": 128, "gp": "not base64!"}).to_string().into_bytes(),
             json!({"evt": 128, "cp": "bm90IGRlZmxhdGVk"}).to_string().into_bytes(),
             json!({"evt": 128}).to_string().into_bytes(),
+            bomb(),
             b"not json".to_vec(),
         ] {
             assert!(read(&body).is_none(), "{}", String::from_utf8_lossy(&body));

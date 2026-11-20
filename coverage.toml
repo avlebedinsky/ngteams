@@ -653,12 +653,12 @@ reason = "macOS-only menu bar, Dock reopen and AppKit terminate routing; no Linu
 [unmapped_sources."crates/teams-ui/src/meeting_alert/tests.rs"]
 sha256 = "1957d1d18badb89aaccd1076d057c4f6894cf22ddf8701396753dc3cb1f2ed7f"
 reason = "unit-test module included only by meeting_alert.rs cfg(test); omitted by cargo-llvm-cov's test-file filter"
-context = { "crates/teams-ui/src/meeting_alert.rs" = "96d88b52cb3d6f257db610228d48a63fd76d7ccf05dfe1f116df42e8c9116ce2" }
+context = { "crates/teams-ui/src/meeting_alert.rs" = "b180eddb2acceb8c1c01be023092c4e65b231cd85097e5fce5d42f2eac223f04" }
 
 [unmapped_sources."crates/teams-ui/src/meeting_reminder/tests.rs"]
 sha256 = "7a7955ca3a4b8cce2c254bac771408a408d195007d02e6f4fa8ff5ebd76fe04d"
 reason = "unit-test module included only by meeting_reminder.rs cfg(test); omitted by cargo-llvm-cov's test-file filter"
-context = { "crates/teams-ui/src/meeting_reminder.rs" = "9a90b19544687a608b59517efa79df700701c82d977573aec532f1ada2cbbf4f" }
+context = { "crates/teams-ui/src/meeting_reminder.rs" = "d39f21098498be90b9ba60de24f83f6f5dacd79dd010b2dc40413aa1701b58b7" }
 
 [unmapped_sources."crates/teams-proto/src/http/cloud_tests.rs"]
 sha256 = "d782175be3712d32b82427f86fa2f39fdf6f66074dc1935be0aa963a0b8e7044"
