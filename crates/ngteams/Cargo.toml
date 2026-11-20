@@ -72,7 +72,7 @@ windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Globali
 
 [dev-dependencies]
 # The retained sandbox window tests read screenshots and serve mock tray items.
-image = { workspace = true, features = ["png", "gif"] }
+image = { workspace = true, features = ["png", "gif", "jpeg", "webp"] }
 zbus.workspace = true
 # a call's id for the call events the personal app's models are shown (`CallId::for_tests`)
 teams-call = { workspace = true, features = ["test-support"] }
@@ -316,6 +316,11 @@ harness = false
 [[test]]
 # QA of task 577: a still screen shared before a late join, again and by another, on the own server, in the UI sandbox
 name = "qa_share_still_own_window"
+harness = false
+
+[[test]]
+# QA of task 670: a picture of the user's own for each account, in the app's window over the mock
+name = "qa_account_picture_window"
 harness = false
 
 [build-dependencies]
