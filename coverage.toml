@@ -114,7 +114,7 @@ sha256 = "4f27776ff2e3d9d662467a5ecb6542670137e2e47658e9d5b3dc26196987a972"
 reason = "module declarations, documentation and an integer constant only; no executable bodies"
 
 [unmapped_sources."crates/teams-ui/src/lib.rs"]
-sha256 = "ee2575c3aabd34a52d516dd0c983368753963eea8805a38650bffec893c214d1"
+sha256 = "12c582c45a75fab13995bdc703ae5572698d6acbcb25167ddb9161a985649a27"
 reason = "module declarations, re-exports, documentation and the `ctrl!` hint macro (a string literal per platform) only; no executable bodies"
 
 [unmapped_sources."crates/teams-wpe-client/src/event.rs"]
@@ -599,12 +599,12 @@ context = { "crates/teams-signin/src/lib.rs" = "a7b946e05829938c67d8c83c2f95877b
 [unmapped_sources_windows."crates/teams-ui/src/notify/linux.rs"]
 sha256 = "e11d043bb9278f1d7deeebbf5691845cb357b43531d5295f78bca0fab9c498f4"
 reason = "Linux-only freedesktop notification D-Bus transport; notify.rs selects this module only under cfg(target_os = \"linux\"), so it is absent from native Windows compilation and remains required on Linux"
-context = { "crates/teams-ui/src/lib.rs" = "ee2575c3aabd34a52d516dd0c983368753963eea8805a38650bffec893c214d1", "crates/teams-ui/src/notify.rs" = "465fe3d89ab6ec59f754a766aa59815a0d9617892bf82e4774300ecb10101f67" }
+context = { "crates/teams-ui/src/lib.rs" = "12c582c45a75fab13995bdc703ae5572698d6acbcb25167ddb9161a985649a27", "crates/teams-ui/src/notify.rs" = "465fe3d89ab6ec59f754a766aa59815a0d9617892bf82e4774300ecb10101f67" }
 
 [unmapped_sources_windows."crates/teams-ui/src/tray/linux.rs"]
 sha256 = "ceed6565f30d059be5e8b6c0901fcba714248fe4ba0998e40c912d90db539ade"
 reason = "Linux-only StatusNotifierItem, D-Bus menu and launcher unread transport; tray.rs selects this module only under cfg(target_os = \"linux\"), so it is absent from native Windows compilation and remains required on Linux"
-context = { "crates/teams-ui/src/lib.rs" = "ee2575c3aabd34a52d516dd0c983368753963eea8805a38650bffec893c214d1", "crates/teams-ui/src/tray.rs" = "761e00a9301f59539a3edca854dfd467ac83a8f68dcd509ef18e4eaa07d7a1ab" }
+context = { "crates/teams-ui/src/lib.rs" = "12c582c45a75fab13995bdc703ae5572698d6acbcb25167ddb9161a985649a27", "crates/teams-ui/src/tray.rs" = "761e00a9301f59539a3edca854dfd467ac83a8f68dcd509ef18e4eaa07d7a1ab" }
 
 [unmapped_sources_windows."crates/ngteams/src/ctl/socket/unix.rs"]
 sha256 = "ea79c3378f2968223f72f282f2514e5cd6cb8ff57c9d0dc46b9130aa2b7bc50e"
@@ -643,7 +643,7 @@ sha256 = "f8695424981879c878659211b5b8b47c7cec742923f8ef5a61bc44e04f6a7fef"
 reason = "macOS-only AppKit/WebKit sign-in window; no Linux LLVM mapping; compiled and linted by the macOS portability workflow, run on the Mac console"
 
 [unmapped_sources."crates/teams-ui/src/desktop/macos.rs"]
-sha256 = "2e3740688dd9b64979ef89579b1a5f8d5ac6b56d64c3e650b7888fa21742a76e"
+sha256 = "b58d99803b48f62d8020c273341365b20bf6091e34a9e14966082f65ae191445"
 reason = "macOS-only notifications (posted to the notification center with a picture attachment, GPUI's binding for responses and dismissal) and Dock badge; no Linux LLVM mapping; its tags, actions and picture files are tested natively by the macOS portability workflow, the notification center and the Dock on the Mac console"
 
 [unmapped_sources."crates/ngteams/src/mac_app.rs"]
@@ -653,7 +653,7 @@ reason = "macOS-only menu bar, Dock reopen and AppKit terminate routing; no Linu
 [unmapped_sources."crates/teams-ui/src/meeting_alert/tests.rs"]
 sha256 = "1957d1d18badb89aaccd1076d057c4f6894cf22ddf8701396753dc3cb1f2ed7f"
 reason = "unit-test module included only by meeting_alert.rs cfg(test); omitted by cargo-llvm-cov's test-file filter"
-context = { "crates/teams-ui/src/meeting_alert.rs" = "3a7e67c961cabc73e815e063c7c44277a5b94fd2f3b725351bda8bb0981b8df1" }
+context = { "crates/teams-ui/src/meeting_alert.rs" = "313cbe8b80a236f1c5c1db5545608dfaf457ed0325214b497e6fd63b03815d6d" }
 
 [unmapped_sources."crates/teams-ui/src/meeting_reminder/tests.rs"]
 sha256 = "7a7955ca3a4b8cce2c254bac771408a408d195007d02e6f4fa8ff5ebd76fe04d"
