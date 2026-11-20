@@ -249,6 +249,11 @@ name = "qa_share_file_window"
 harness = false
 
 [[test]]
+# QA of task 660: Mark as unread from a message's menu and a chat row's menu in the app's window over the mock
+name = "qa_mark_unread_window"
+harness = false
+
+[[test]]
 # QA of task 420: a channel meeting's title, its post's Join and its end in the app's window over the mock
 name = "qa_channel_meeting_window"
 harness = false
