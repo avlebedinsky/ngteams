@@ -81,8 +81,14 @@ use support::{Alias, display_name};
 mod meet_now;
 #[path = "call_pixels.rs"]
 mod pixels;
+#[path = "large_call_qa_chat.rs"]
+mod qa_chat;
 #[path = "large_call_qa_hands.rs"]
 mod qa_hands;
+#[path = "large_call_qa_order.rs"]
+mod qa_order;
+#[path = "large_call_qa_reactions.rs"]
+mod qa_reactions;
 use pixels::{Rect, Stage};
 
 const CHILD_ENV: &str = "NGTEAMS_LARGE_CALL_TEST";
@@ -103,6 +109,10 @@ const QUIT_TRIGGER: &str = "quit";
 /// The file in the sandbox dir the parent writes a theme's key into to have the settings take it, as the
 /// appearance page's tiles do.
 const THEME_TRIGGER: &str = "theme";
+/// [`THEME_TRIGGER`]'s words for "Play animations" on and off, and the start of a font size's (`font-16`).
+const ANIMATIONS_ON: &str = "animations-on";
+const ANIMATIONS_OFF: &str = "animations-off";
+const FONT_PREFIX: &str = "font-";
 /// From the child's start to its `ready`.
 const STARTUP: Duration = Duration::from_secs(120);
 /// Anything else the parent waits for.
@@ -218,7 +228,7 @@ fn b_picture() -> SandboxResult<Vec<u8>> {
 /// Everything the user does, in order.
 fn scenarios(rig: &mut Rig<'_>) -> SandboxResult {
     type Step = fn(&mut Rig<'_>) -> SandboxResult;
-    let steps: [(&str, Step); 13] = [
+    let steps: [(&str, Step); 17] = [
         ("small", small_calls),
         ("mic-10", |rig| every_size(rig, 10)),
         ("mic-25", |rig| every_size(rig, 25)),
@@ -232,6 +242,10 @@ fn scenarios(rig: &mut Rig<'_>) -> SandboxResult {
         ("leave", share_and_leave),
         ("one-to-one", one_to_one),
         ("qa-hands", qa_hands::qa_hands),
+        ("qa-order", qa_order::qa_order),
+        ("qa-reactions", qa_reactions::qa_reactions),
+        ("qa-chat", qa_chat::qa_chat),
+        ("qa-chat-calls", qa_chat::other_calls),
     ];
     // a run of some steps alone (`LARGE_CALL_STEPS=sizes,strips`), each setting up the call it needs
     let only = std::env::var(STEPS_ENV).ok();
@@ -1735,6 +1749,23 @@ impl Rig<'_> {
     }
 }
 
+/// Saves the call window as `shot` shows it, as [`Rig::save`] does.
+fn save_shot(rig: &mut Rig<'_>, shot: &RgbImage, name: &str) -> SandboxResult {
+    let window = rig.window()?;
+    let cut = pixels::crop(shot, window);
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .parent()
+        .map_or_else(|| std::path::PathBuf::from("target"), std::path::Path::to_owned)
+        .join("ui-shots");
+    let mut dirs = vec![dir];
+    dirs.extend(std::env::var_os(EVIDENCE_ENV).map(std::path::PathBuf::from));
+    for dir in dirs {
+        std::fs::create_dir_all(&dir)?;
+        cut.save(dir.join(format!("{name}.png")))?;
+    }
+    Ok(())
+}
+
 fn made_up_mri(index: usize) -> String {
     format!("8:orgid:00000000-0000-4000-8000-00000000b{index:03}")
 }
@@ -2087,6 +2118,10 @@ fn theme_when_asked(desktop: gpui::Entity<teams_ui::Desktop>, cx: &mut App) {
                 continue;
             };
             let _ = fs::remove_file(&trigger);
+            if let Some(change) = appearance_change(&key) {
+                cx.update(|cx| appearance(&desktop, change, cx));
+                continue;
+            }
             let theme = if key == teams_ui::theme::DARK_KEY {
                 teams_ui::theme::DARK_KEY
             } else {
@@ -2106,6 +2141,41 @@ fn fixed_theme(desktop: &gpui::Entity<teams_ui::Desktop>, theme: &'static str, c
             |settings| {
                 settings.appearance.follow_system = false;
                 settings.appearance.theme = theme;
+            },
+            cx,
+        );
+    });
+}
+
+/// A change of the appearance's other settings that [`THEME_TRIGGER`] can carry instead of a theme's key.
+#[derive(Clone, Copy)]
+enum AppearanceChange {
+    /// "Play animations" on or off.
+    Animations(bool),
+    /// The base font size, px.
+    FontSize(u16),
+}
+
+/// The change `key` names: `animations-on`, `animations-off` or `font-<px>`.
+fn appearance_change(key: &str) -> Option<AppearanceChange> {
+    match key {
+        ANIMATIONS_ON => Some(AppearanceChange::Animations(true)),
+        ANIMATIONS_OFF => Some(AppearanceChange::Animations(false)),
+        _ => key
+            .strip_prefix(FONT_PREFIX)
+            .and_then(|size| size.parse().ok())
+            .map(AppearanceChange::FontSize),
+    }
+}
+
+/// The settings take `change`, as the appearance page's controls set it.
+fn appearance(desktop: &gpui::Entity<teams_ui::Desktop>, change: AppearanceChange, cx: &mut App) {
+    let settings = desktop.read(cx).settings().clone();
+    settings.update(cx, |model, cx| {
+        model.change(
+            |settings| match change {
+                AppearanceChange::Animations(on) => settings.appearance.animations = on,
+                AppearanceChange::FontSize(size) => settings.appearance.font_size = size,
             },
             cx,
         );

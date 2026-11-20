@@ -10,6 +10,8 @@
 //! - **A titled meeting** (an odd title of 200 characters: emoji, quotes, «», `&`, `<b>`): the post's card shows the
 //!   title, "Started <time>" and Join (shots at 1280 and 480 px, Light and Dark). The post's Join opens the pre-join
 //!   with the title, for the post; Escape. The header's Join opens the same pre-join. Join now: the call has the title.
+//!   In the call, b posts in the channel: the call window shows the chat bubble at its stage's top, gone after about 4 s
+//!   (QA of task 666).
 //! - **The end**: the post becomes "<title> ended" with no Join, the header has no Join.
 //! - **An untitled meeting**: the card, the pre-join and the call say `Meeting in "A made-up channel"`.
 //! - **The read-only mode**: a second app, read-only, shows the running meeting's card with no Join.
@@ -886,11 +888,55 @@ fn titled_meeting(user: &mut User<'_>) -> SandboxResult {
         .any(|(op, by)| op == "join" && by == LAB_A);
     user.wait_other_window()?;
     user.shots("titled-call", &[])?;
+    channel_bubble(user)?;
     ensure(joined, || {
         "a's join did not reach the post's meeting on the mock".to_owned()
     })?;
     ensure(call["title"] == title.as_str(), || format!("the call's title: {call}"))?;
     user.hang_up()
+}
+
+/// QA of task 666: b posts in the channel while a is in its meeting: the call window shows the chat bubble at the
+/// stage's top (about 320×70) and puts it away after about 4 s.
+fn channel_bubble(user: &mut User<'_>) -> SandboxResult {
+    let calm = user.screen()?;
+    user.mock
+        .post_as(LAB_B, TEAM_CHANNEL, "<p>The agenda is in the channel</p>")
+        .ok_or("b's post to the channel was refused")?;
+    thread::sleep(Duration::from_millis(500));
+    let shot = user.screen()?;
+    let bubble = changed_band(&calm, &shot);
+    user.shot("qa666-channel-meeting-bubble", false)?;
+    say(&format!(
+        "  QA 666: b's channel post in the meeting: the call window's top changed at {bubble:?}"
+    ));
+    let (x, y, w, h) = bubble.ok_or("b's post in the channel showed no chat bubble in the meeting's call window")?;
+    ensure((290..=350).contains(&w) && (55..=95).contains(&h), || {
+        format!("the change at the call window's top is {w}×{h} at ({x}, {y}): not a chat bubble")
+    })?;
+    thread::sleep(Duration::from_secs(5));
+    let later = user.screen()?;
+    ensure(changed_band(&calm, &later).is_none(), || {
+        "the chat bubble stayed after 5 s".to_owned()
+    })
+}
+
+/// Where `after` differs from `before` under the call window's toolbar (rows 56 to 200, where the chat bubble
+/// shows): the bounds `(x, y, w, h)` of the changed px, if any.
+fn changed_band(before: &RgbImage, after: &RgbImage) -> Option<(u32, u32, u32, u32)> {
+    let mut bounds: Option<(u32, u32, u32, u32)> = None;
+    for y in 56..200.min(before.height()) {
+        for x in 0..before.width() {
+            let (a, b) = (before.get_pixel(x, y).0, after.get_pixel(x, y).0);
+            let distance: u32 = a.iter().zip(b).map(|(one, two)| u32::from(one.abs_diff(two))).sum();
+            if distance > 48 {
+                bounds = Some(bounds.map_or((x, y, x, y), |(x0, y0, x1, y1)| {
+                    (x0.min(x), y0.min(y), x1.max(x), y1.max(y))
+                }));
+            }
+        }
+    }
+    bounds.map(|(x0, y0, x1, y1)| (x0, y0, x1 - x0 + 1, y1 - y0 + 1))
 }
 
 /// The titled meeting ends: its post is a line "<title> ended" with no Join; the header has no Join.

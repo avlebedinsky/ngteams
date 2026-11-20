@@ -52,6 +52,9 @@ pub(crate) struct Party {
     pub(crate) name: Option<String>,
     /// Its screen goes out on its `applicationsharing-video` stream, of this (made-up) source id.
     pub(crate) sharing: Option<i64>,
+    /// The made-up audio source id of someone the mock made up (no mixer of its own), so the mixer can name them as a
+    /// dominant speaker.
+    pub(crate) audio: Option<i64>,
 }
 
 /// The `rosterUpdate` callback a start's, a join's or an `attach`'s body hands out (wherever in it).
@@ -239,6 +242,7 @@ pub(crate) fn enter(state: &mut State, index: usize, mri: &str, link: Option<Str
         server_mute: 0,
         name: None,
         sharing: None,
+        audio: None,
     });
     if call.group_chat.is_some() || call.test_call {
         send(state, index, Some(mri));
@@ -277,6 +281,12 @@ pub(crate) fn made_up(state: &mut State, index: usize, people: &[(String, String
     };
     for (mri, name) in people {
         call.roster.retain(|party| &party.mri != mri);
+        let audio = call
+            .roster
+            .iter()
+            .filter_map(|party| party.audio)
+            .max()
+            .map_or(MADE_UP_AUDIO, |last| last + 1);
         call.roster.push(Party {
             mri: mri.clone(),
             link: None,
@@ -289,10 +299,23 @@ pub(crate) fn made_up(state: &mut State, index: usize, people: &[(String, String
             server_mute: 0,
             name: Some(name.clone()),
             sharing: None,
+            audio: Some(audio),
         });
     }
     send(state, index, None);
     true
+}
+
+/// The first made-up audio source id of the people the mock makes up; the next ones count up from it.
+const MADE_UP_AUDIO: i64 = 7_000;
+
+/// The made-up audio source id of `mri`, someone the mock made up in call `id`.
+pub(crate) fn made_up_audio(state: &State, id: &str, mri: &str) -> Option<i64> {
+    let call = state.calling.calls.iter().find(|call| call.id == id)?;
+    call.roster
+        .iter()
+        .find(|party| party.mri == mri && party.active)
+        .and_then(|party| party.audio)
 }
 
 /// `mri`'s screen in group call `index` goes out (`on`) on its sharing stream, or no longer: everyone is told. `false`
@@ -434,7 +457,8 @@ fn entry(
         _ if !party.active => json!({}),
         true => {
             let direction = if party.video_on { "sendrecv" } else { "recvonly" };
-            let mut audio = stream("audio", "main-audio", sources.map(|(audio, _)| audio), "sendrecv");
+            let source = sources.map(|(audio, _)| audio).or(party.audio);
+            let mut audio = stream("audio", "main-audio", source, "sendrecv");
             audio["serverMuted"] = json!(party.server_mute > 0);
             let mut streams = vec![
                 audio,
