@@ -7,9 +7,9 @@
 //! - `menu`: three accounts. Cancel the chooser; PNG, JPEG, GIF (its first frame), WebP, a PNG named `.gif`, a wide
 //!   and a very large picture (the centre, not stretched); an empty, a broken, a text and a 65 MB file (a reason,
 //!   nothing changes); "Use profile picture". Only that account changes on the rail, the title bar and the menu. A
-//!   message and a notification from b, and b's face in the chat, keep b's profile picture. Light and Dark.
-//! - `restart`: the next run on the same files, the source files deleted: the pictures stay. "Sign out and remove"
-//!   deletes b's file. The run after it adds b again: its profile picture shows.
+//!   message and a notification from b, and b's face in the chat, keep b's profile picture. Light and Dark. Then
+//!   the next runs: the next run on the same files, the source files deleted: the pictures stay. "Sign out and
+//!   remove" deletes b's file. The run after it adds b again: its profile picture shows.
 //! - `initials`: c has no profile picture: after "Use profile picture" it shows its initials.
 //! - `settings`: Settings > Accounts, its Tab order and its buttons, in Light, Dark and a font of 20 px.
 //! - `narrow`: a window 480 px wide: the rail, the menu and Settings > Accounts in Light and Dark. The title bar's
@@ -120,10 +120,25 @@ const SCENES: [Scene; 4] = [
 
 fn parent() -> SandboxResult {
     let only = std::env::var("QA_AP_SCENES").unwrap_or_default();
+    let wanted: Vec<&str> = only.split(',').map(str::trim).filter(|name| !name.is_empty()).collect();
+    // a name that matches no scene must not give a passing empty run
+    let unknown: Vec<&str> = wanted
+        .iter()
+        .copied()
+        .filter(|name| !SCENES.iter().any(|(scene, _)| scene == name))
+        .collect();
+    if !unknown.is_empty() || (!only.trim().is_empty() && wanted.is_empty()) {
+        let names: Vec<&str> = SCENES.iter().map(|(name, _)| *name).collect();
+        return Err(format!(
+            "QA_AP_SCENES={only:?} names an unknown scene or no scene; the scenes are {}",
+            names.join(",")
+        )
+        .into());
+    }
     let mut failed = Vec::new();
     let mut passed = 0_usize;
     for (name, scene) in SCENES {
-        if !only.is_empty() && !only.split(',').any(|wanted| wanted.trim() == name) {
+        if !wanted.is_empty() && !wanted.contains(&name) {
             continue;
         }
         match scene() {
