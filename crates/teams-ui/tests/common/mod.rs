@@ -129,6 +129,9 @@ pub struct FakeCore {
     /// While set, a read of the kept translations is held in `held_translations` for the test to send.
     pub hold_translations: Mutex<bool>,
     pub held_translations: Mutex<Vec<Answer<Vec<StoredTranslation>>>>,
+    /// While set, a mark's write is recorded but neither kept nor answered, as a catch-up holds it.
+    pub hold_marks: Mutex<bool>,
+    pub held_marks: Mutex<Vec<Answer<OutboxEntry>>>,
     pub previews: Mutex<HashMap<String, Message>>,
     /// Conversations never synced: `history_complete` answers `None` for them; for any other, whether `older` has
     /// no page left.
@@ -473,6 +476,32 @@ impl FakeCore {
             return Reply::ready(Err(EngineError::Stopped));
         }
         Reply::ready(Ok(answer()))
+    }
+
+    /// What the engine's store keeps of a mark's write: the mark 1 ms before the message it names (the newest without
+    /// one), or none once it ends.
+    fn keep_mark(&self, action: &Action) {
+        match action {
+            Action::MarkUnread {
+                conversation,
+                message_id,
+            } => {
+                let arrival = locked(&self.messages).get(conversation).and_then(|messages| {
+                    messages
+                        .iter()
+                        .filter(|message| message_id.as_ref().is_none_or(|id| &message.id == id))
+                        .map(|message| message.arrival_time)
+                        .max()
+                });
+                if let Some(arrival) = arrival {
+                    locked(&self.unread_marks).insert(conversation.clone(), arrival - 1);
+                }
+            }
+            Action::MarkRead { conversation } | Action::EndUnreadMark { conversation } => {
+                locked(&self.unread_marks).remove(conversation);
+            }
+            _ => {}
+        }
     }
 
     pub fn asked(&self) -> Vec<&'static str> {
@@ -867,6 +896,17 @@ impl Core for FakeCore {
         if let Some(error) = locked(&self.write_errors).pop_front() {
             return Reply::ready(Err(error));
         }
+        if *locked(&self.hold_marks)
+            && matches!(
+                action,
+                Action::MarkUnread { .. } | Action::MarkRead { .. } | Action::EndUnreadMark { .. }
+            )
+        {
+            let (answer, reply) = Reply::later();
+            locked(&self.held_marks).push(answer);
+            return reply;
+        }
+        self.keep_mark(&action);
         self.answer("write", || {
             if let Some(row) = locked(&self.write_answers).pop_front() {
                 return row;

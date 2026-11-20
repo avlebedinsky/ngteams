@@ -1613,8 +1613,14 @@ impl ChatView {
         self.shown = if shown { Visibility::Shown } else { Visibility::Hidden };
         if shown {
             // shown again: the chat is opened again, so a mark made here or on the chat list ends
-            self.marked.standing = Standing::Nothing;
-            self.reread_mark(cx);
+            if self.marked.standing == Standing::MadeHere && self.marked.writing > 0 {
+                // the store has no mark to read yet (a catch-up holds its write): the end goes after it
+                self.marked.standing = Standing::ToEnd;
+                self.end_mark(cx);
+            } else {
+                self.marked.standing = Standing::Nothing;
+                self.reread_mark(cx);
+            }
             self.want_receipt(cx);
         } else {
             self.receipt = None;
@@ -2629,6 +2635,9 @@ impl ChatView {
         }
         self.kick(cx);
         self.end_mark(cx);
+        if load == Load::Window {
+            self.reread_made_mark(cx);
+        }
         self.want_receipt(cx);
     }
 
@@ -3644,14 +3653,48 @@ impl ChatView {
             message.to_owned()
         };
         self.receipt = None;
-        self.marked.at = Some(arrival - 1);
+        // a channel's post shows "New", not the divider, as a channel opened again shows it
+        self.marked.at = (!self.place.in_channel()).then_some(arrival - 1);
         self.marked.standing = Standing::MadeHere;
-        // the row comes back as the engine's events
-        drop(self.core.write(Action::MarkUnread {
+        self.marked.made += 1;
+        self.marked.writing += 1;
+        // the row comes back as the engine's events; once the write is answered, the store holds the mark
+        let written = self.core.write(Action::MarkUnread {
             conversation: self.conversation.clone(),
             message_id: Some(named),
-        }));
+        });
+        cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let _ = written.await;
+            let _ = this.update(cx, |view, cx| {
+                view.marked.writing = view.marked.writing.saturating_sub(1);
+                view.reread_made_mark(cx);
+            });
+        })
+        .detach();
         self.rebuild(cx);
+    }
+
+    /// Reads the mark made here again, once the store holds it: a mark that ended elsewhere (the chat list's "Mark as
+    /// read", another client) lets the chat be read here again.
+    fn reread_made_mark(&mut self, cx: &mut Context<Self>) {
+        if self.marked.standing != Standing::MadeHere || self.marked.writing > 0 {
+            return;
+        }
+        let made = self.marked.made;
+        let reply = self.core.unread_mark(self.conversation.clone());
+        cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let Ok(None) = reply.await else { return };
+            let _ = this.update(cx, |view, cx| {
+                if view.marked.standing != Standing::MadeHere || view.marked.writing > 0 || view.marked.made != made {
+                    return;
+                }
+                view.marked.standing = Standing::Nothing;
+                view.marked.at = None;
+                view.rebuild(cx);
+                view.want_receipt(cx);
+            });
+        })
+        .detach();
     }
 
     /// Reads the chat's mark again (the view is shown again): one there is ends, its divider shown where it was.
@@ -4784,6 +4827,10 @@ struct Marked {
     horizon: Option<i64>,
     at: Option<i64>,
     standing: Standing,
+    /// How many marks the view made; an answer read before the newest one is stale.
+    made: u64,
+    /// The view's mark writes that the engine did not answer yet: until then the store may not hold the mark.
+    writing: u32,
 }
 
 /// What the view does about the chat's mark.

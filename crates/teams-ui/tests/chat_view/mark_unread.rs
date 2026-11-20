@@ -1,8 +1,8 @@
 //! A message's "Mark as unread", as Teams has it in its more-options menu (`docs/protocol/chat.md`, "Mark as unread"),
 //! on GPUI's test context over the fake engine: the entry after a hairline under copy and delete, on the account's own
 //! messages too, and on key U; the write names the message; the "New messages" divider moves before it; no read
-//! receipt goes while the chat stays shown; a mark the chat had when it opened ends once it is shown, and so does one
-//! made here once the chat is shown again. The messages and ids are made up.
+//! receipt goes while the chat stays shown, unless the mark ends elsewhere; a mark the chat had when it opened ends
+//! once it is shown, and so does one made here once the chat is shown again. The messages and ids are made up.
 
 use std::sync::Arc;
 
@@ -129,6 +129,50 @@ fn mark_as_unread_names_the_message_moves_the_divider_and_holds_the_receipts() {
     cx.executor().advance_clock(READ_DEBOUNCE);
     draw(cx);
     assert!(receipts(&rig) > before, "receipts go again");
+}
+
+#[test]
+fn a_mark_made_here_that_ends_elsewhere_lets_the_chat_be_read_again() {
+    let rig = rig_with(vec![sent("1", LAB_B, NOON), sent("2", LAB_B, NOON + MINUTE)]);
+    let (view, cx) = chat_window(&rig, Arc::new(ViewTrace::off()));
+    cx.update(|window, _| window.activate_window());
+    draw(cx);
+    from_menu(cx, "message-2", "action-mark-unread");
+    assert_eq!(divider_before(&view, cx).as_deref(), Some("2"));
+    let before = receipts(&rig);
+
+    // the chat list's "Mark as read" (or another client) ends the mark while the chat stays shown
+    rig.core.unread_marks.lock().unwrap().remove(AB);
+    arrive(&rig, cx, &sent("3", LAB_B, NOON + 2 * MINUTE));
+    cx.executor().advance_clock(READ_DEBOUNCE);
+    draw(cx);
+    assert!(receipts(&rig) > before, "receipts go again");
+    assert_eq!(divider_before(&view, cx), None, "no divider at the ended mark");
+}
+
+#[test]
+fn a_mark_shown_again_before_the_engine_keeps_it_ends_after_it() {
+    let rig = rig_with(vec![sent("1", LAB_B, NOON), sent("2", LAB_B, NOON + MINUTE)]);
+    let (view, cx) = chat_window(&rig, Arc::new(ViewTrace::off()));
+    // marked, hidden and shown again before the write is kept and answered (a catch-up holds it)
+    *rig.core.hold_marks.lock().unwrap() = true;
+    from_menu(cx, "message-2", "action-mark-unread");
+    cx.update(|_, cx| view.update(cx, |view, cx| view.set_shown(false, cx)));
+    cx.update(|_, cx| view.update(cx, |view, cx| view.set_shown(true, cx)));
+    draw(cx);
+    assert_eq!(
+        marks(&rig),
+        [
+            Action::MarkUnread {
+                conversation: AB.to_owned(),
+                message_id: Some("2".to_owned()),
+            },
+            Action::EndUnreadMark {
+                conversation: AB.to_owned(),
+            },
+        ],
+        "the end goes after the mark"
+    );
 }
 
 #[test]

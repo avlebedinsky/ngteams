@@ -2000,8 +2000,8 @@ impl EngineRequests {
         self.query(|reply| Query::ReadHorizon(conversation, reply))
     }
 
-    /// Where the account marked a conversation unread ([`Store::unread_mark`]): the arrival of the message before the
-    /// first unread one; `None` when it isn't marked.
+    /// Where the account marked a conversation unread ([`Store::unread_mark`]): 1 ms before the arrival of the first
+    /// unread message; `None` when it isn't marked.
     pub fn unread_mark(&self, conversation: impl Into<String>) -> Reply<Option<i64>> {
         let conversation = conversation.into();
         self.query(|reply| Query::UnreadMark(conversation, reply))
@@ -2211,8 +2211,6 @@ where
     })
 }
 
-/// The future `make` makes, on the heap. In a debug build a poll frame holds every future made in it by value and
-/// shares no slot between them; made here instead, they cost the caller's frame a pointer each.
 /// Whether `action` moves the account's own read state in a conversation: a read receipt or an unread mark's write.
 fn is_read_state(action: &Action) -> bool {
     matches!(
@@ -2236,6 +2234,8 @@ fn not_generic(action: &Action) -> EngineError {
     }
 }
 
+/// The future `make` makes, on the heap. In a debug build a poll frame holds every future made in it by value and
+/// shares no slot between them; made here instead, they cost the caller's frame a pointer each.
 fn on_heap<F: Future>(make: impl FnOnce() -> F) -> Pin<Box<F>> {
     Box::pin(make())
 }

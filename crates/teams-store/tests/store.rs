@@ -2384,13 +2384,21 @@ fn a_later_mark_all_read_or_a_bookmark_of_zeros_ends_a_mark() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut store = read_chat(&dir).expect("the chat, read");
     store.set_unread_bookmark(CHAT, 2999, 6000).expect("marked");
-    // a mark-all-read after the mark reads it as the rest
     store
+        .set_app_read_horizon(AppReadHorizon { chat: 4000, channel: 0 })
+        .expect("all read before the mark");
+    assert_eq!(store.unread_mark(CHAT).expect("still marked"), Some(2999));
+    // a mark-all-read after the mark reads it as the rest, and tells the chat, though its newest message is older
+    let changed = store
         .set_app_read_horizon(AppReadHorizon { chat: 7000, channel: 0 })
         .expect("all read");
+    assert_eq!(changed, [CHAT], "the mark it ends");
     assert_eq!(store.unread_count(CHAT, ME).expect("all read after the mark"), 0);
-    store.set_app_read_horizon(AppReadHorizon::default()).expect("reset");
+    assert_eq!(store.unread_mark(CHAT).expect("ended by all read"), None);
+    let changed = store.set_app_read_horizon(AppReadHorizon::default()).expect("reset");
+    assert_eq!(changed, [CHAT], "the mark it brings back");
     assert_eq!(store.unread_count(CHAT, ME).expect("marked again"), 1);
+    assert_eq!(store.unread_mark(CHAT).expect("back"), Some(2999));
     // the chat opened again: `0;<ms>;0`
     assert_eq!(store.set_horizon_bookmark(CHAT, 8000).expect("ended"), Applied::Updated);
     assert_eq!(store.unread_mark(CHAT).expect("ended"), None);

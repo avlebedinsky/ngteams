@@ -96,7 +96,8 @@ impl Store {
     }
 
     /// Keeps the account's mark-all-read horizon. When it changed, the conversations whose unread count that can
-    /// change: their newest message arrived after the earlier of the two horizons.
+    /// change: their newest message arrived after the earlier of the two horizons, or they were marked unread after
+    /// it (the newer horizon ends such a mark, the older one brings it back).
     ///
     /// # Errors
     ///
@@ -115,7 +116,10 @@ impl Store {
         let changed = {
             let mut statement = tx.prepare(
                 "SELECT id FROM conversations
-                 WHERE last_activity > CASE kind WHEN 'channel' THEN ?2 ELSE ?1 END",
+                 WHERE last_activity > CASE kind WHEN 'channel' THEN ?2 ELSE ?1 END
+                    OR EXISTS (SELECT 1 FROM horizon_bookmarks AS mark
+                        WHERE mark.conversation_id = conversations.id AND mark.arrival > 0
+                          AND mark.time_ms > CASE kind WHEN 'channel' THEN ?2 ELSE ?1 END)",
             )?;
             let rows = statement.query_map(
                 params![before.chat.min(horizon.chat), before.channel.min(horizon.channel)],
@@ -193,8 +197,9 @@ impl Store {
         Ok(applied)
     }
 
-    /// Where the account marked a conversation unread: the arrival (ms) of the message before the first unread one;
-    /// `None` when it isn't marked.
+    /// Where the account marked a conversation unread: 1 ms before the arrival of the first unread message; `None`
+    /// when it isn't marked, or a later mark-all-read ([`Store::app_read_horizon`]) ended the mark, as
+    /// [`Store::unread_count`] counts it.
     ///
     /// # Errors
     ///
@@ -203,15 +208,19 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT arrival FROM horizon_bookmarks WHERE conversation_id = ?1 AND arrival > 0",
+                "SELECT mark.arrival FROM horizon_bookmarks AS mark
+                 JOIN conversations ON conversations.id = mark.conversation_id
+                 WHERE mark.conversation_id = ?1 AND mark.arrival > 0
+                   AND mark.time_ms > COALESCE((SELECT CASE conversations.kind WHEN 'channel' THEN channel ELSE chat END
+                                                FROM app_read_horizon), 0)",
                 params![conversation_id],
                 |row| row.get(0),
             )
             .optional()?)
     }
 
-    /// When the account last marked a whole conversation read (ms); `None` when it never did, as far as the store
-    /// knows.
+    /// When the account last set a conversation's bookmark (ms): it marked the whole conversation read, marked it
+    /// unread, or ended a mark; `None` when it never did, as far as the store knows.
     ///
     /// # Errors
     ///

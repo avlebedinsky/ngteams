@@ -210,8 +210,8 @@ pub trait Core: Send + Sync + 'static {
     }
     /// The account's own read horizon in a conversation.
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>>;
-    /// Where the account marked a conversation unread ("Mark as unread"): the arrival of the message before the first
-    /// unread one; `None` when it isn't marked. A fake marks none.
+    /// Where the account marked a conversation unread ("Mark as unread"): 1 ms before the arrival of the first unread
+    /// message; `None` when it isn't marked. A fake marks none.
     fn unread_mark(&self, conversation: String) -> Reply<Option<i64>> {
         let _ = conversation;
         Reply::ready(Ok(None))
