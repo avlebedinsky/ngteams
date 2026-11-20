@@ -1145,8 +1145,10 @@ recording bot's entry into `teams_call::MeetingState` (the bot is left out of th
 shows the timer's bar and editor, the lock's question and notices, Meeting info and the recording's notice and red
 dot, and starts and stops a recording (Record, above). People's Download attendance list is made locally from the
 roster's `endpointJoinTime`s. Not built: Notes (a Loop page), Report a concern (a meeting's only; its target wasn't
-captured), Accessibility settings and Don't show chat bubbles (the app has neither), Apps, and the Dial pad (the user
-doesn't want one).
+captured), Accessibility settings (the app has none), Apps, and the Dial pad (the user doesn't want one). Don't show
+chat bubbles is built: it turns off the in-call bubbles of new chat messages (seen 2026-11-20 in the a–b–c group call:
+a bubble at the stage's top middle with the sender's avatar, name and text, its bell "Mute these notifications" and
+Close, about 4 s; the toolbar's Chat a red dot without a count while the pane is closed).
 
 **Help** (More's last entry in a group call or a meeting, after a separator; a 1:1 call's More has none) opens
 `https://go.microsoft.com/fwlink/?linkid=2163160` in a new browser tab (it lands on Microsoft's Teams support

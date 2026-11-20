@@ -2,7 +2,10 @@
 //! process's main thread), for their screenshots: the call window over the fake engine (`common`), a group call of
 //! 10, 16, 25 and 50 made-up participants, some with their camera on (a test pattern), the rest showing their
 //! initials, two with a hand up; in the gallery (also in Teams Dark), in the speaker view (alone and beside the People pane) and with someone's screen shared;
-//! on a small, a laptop's and a full HD screen. The test runs itself again inside the sandbox per scene; the parent screenshots each window into
+//! on a small, a laptop's and a full HD screen. On a laptop's screen also: a share of 14 whose presenter and speaker
+//! come from the strip's second page to its top (also in Teams Dark), live reactions on their senders' tiles, live
+//! reactions floating over Focus on content, and the Chat's unread dot with a chat bubble (also in Teams Dark). The
+//! test runs itself again inside the sandbox per scene; the parent screenshots each window into
 //! `target/ui-shots/call-large-<scene>.png`.
 //!
 //! Without weston 15, niri or `dbus-daemon` it says so and passes, unless `GPUI_SMOKE_REQUIRE=1`.
@@ -29,7 +32,7 @@ use common::{FakeCore, FakeEvents, LAB_A};
 use gpui::{App, AppContext as _, Window};
 use teams_core::{CallId, CallParticipant, CallStatus, CallView, Event, RegistrationReport, VideoOutput};
 use teams_media::devices::pattern::TestPattern;
-use teams_store::{Conversation, ConversationKind, Member};
+use teams_store::{Conversation, ConversationKind, Member, Message};
 use teams_ui::call_stage::{CallStage, Layout};
 use teams_ui::call_window::CallWindows;
 use teams_ui::calls::{self, Ask};
@@ -74,6 +77,16 @@ const SCENES: [&str; 10] = [
     "share-50",
 ];
 
+/// The scenes shot on a laptop's screen alone.
+const LAPTOP_SCENES: [&str; 6] = [
+    "share+order-14",
+    "share+order+dark-14",
+    "gallery+react-10",
+    "focus+float-25",
+    "gallery+bubble-10",
+    "gallery+bubble+dark-10",
+];
+
 pub(super) fn main() -> ExitCode {
     let outcome = match std::env::var(CHILD_ENV) {
         Ok(scene) => child(&scene),
@@ -110,7 +123,8 @@ fn parent() -> SandboxResult {
         let Some(sandbox) = sized_sandbox_or_skip("teams-ui call large window", Some(size))? else {
             return Ok(());
         };
-        for scene in SCENES {
+        let laptop = if screen == "laptop" { &LAPTOP_SCENES[..] } else { &[] };
+        for scene in SCENES.iter().chain(laptop) {
             shot(&sandbox, scene, screen).map_err(|error| format!("{error}{}", sandbox.logs()))?;
         }
     }
@@ -180,9 +194,9 @@ fn seed(core: &FakeCore, count: usize) {
     );
 }
 
-/// The roster of `count` others: the first nine with their camera on, each on a line of its own, one speaking, a few
-/// muted, two with a hand up (one with its camera on, one without), the one sharing while `sharing`.
-fn roster(count: usize, sharing: bool) -> CallView {
+/// The roster of `count` others: the first nine with their camera on, each on a line of its own, one speaking (the
+/// third, or `speaker`), a few muted, two with a hand up (one with its camera on, one without), `sharer` sharing.
+fn roster(count: usize, (sharer, speaker): (Option<usize>, Option<usize>)) -> CallView {
     CallView {
         participants: (1..=count)
             .map(|n| CallParticipant {
@@ -194,12 +208,12 @@ fn roster(count: usize, sharing: bool) -> CallView {
                 )),
                 video_on: n % 2 == 1 && n < 19,
                 line: (n % 2 == 1 && n < 19).then_some(n / 2 + 1),
-                speaking: n == 3,
+                speaking: speaker.map_or(n == 3, |speaker| n == speaker),
                 muted: n % 3 == 0,
                 hand_raised: n == 5 || n == 8,
                 organizer: n == 1,
                 joined: None,
-                sharing: sharing && n == 2,
+                sharing: sharer == Some(n),
             })
             .collect(),
         speaking: false,
@@ -261,9 +275,11 @@ fn film(feed: VideoFeed, cx: &mut App) {
 /// The call window of `scene`'s call, once it is up as the scene has it.
 fn open(scene: &str, cx: &mut App) {
     let (layout, count) = parse(scene);
-    let (layout, sharing) = (layout.to_owned(), layout == "share");
+    let sharing = layout.starts_with("share") || layout.starts_with("focus");
+    let layout = layout.to_owned();
     let core = Arc::new(FakeCore::default());
     seed(&core, count);
+    let fake = Arc::clone(&core);
     let (events, received) = mpsc::unbounded_channel();
     let source = FakeEvents {
         events: received,
@@ -310,19 +326,112 @@ fn open(scene: &str, cx: &mut App) {
             call,
             status: CallStatus::Connected,
         });
-        let _ = send.send(Event::CallParticipants {
-            call,
-            view: roster(count, sharing),
-        });
-        if sharing {
-            let _ = send.send(Event::CallRemoteShare { call, on: true });
-        }
-        cx.background_executor().timer(Duration::from_millis(500)).await;
+        tell(&layout, (count, sharing), (&fake, &send), cx).await;
         cx.update(|cx| ready(&windows, &layout, cx));
         // the bridge, the windows and the event channel live as long as the app
         mem::forget((bridge, send));
     })
     .detach();
+}
+
+/// Tells the scene's call as `layout` has it (`count` others, someone `sharing`): its roster and share, and the
+/// scene's speaker, reactions or chat messages.
+async fn tell(
+    layout: &str,
+    (count, sharing): (usize, bool),
+    (fake, send): (&FakeCore, &mpsc::UnboundedSender<Event>),
+    cx: &mut gpui::AsyncApp,
+) {
+    let call = CallId::for_tests(1);
+    let order = layout.contains("+order");
+    let presenter = if order { Some(12) } else { sharing.then_some(2) };
+    let speaker = order.then_some(0);
+    let _ = send.send(Event::CallParticipants {
+        call,
+        view: roster(count, (presenter, speaker)),
+    });
+    if sharing {
+        let _ = send.send(Event::CallRemoteShare { call, on: true });
+    }
+    cx.background_executor().timer(Duration::from_millis(500)).await;
+    if order {
+        // the 13th, on the strip's second page, speaks long enough to come up
+        let _ = send.send(Event::CallParticipants {
+            call,
+            view: roster(count, (presenter, Some(13))),
+        });
+        cx.background_executor().timer(Duration::from_millis(1_800)).await;
+    }
+    if layout.contains("+react") {
+        for (n, reaction) in [(1, "heart"), (4, "like"), (6, "laugh"), (0, "applause")] {
+            let from = if n == 0 { LAB_A.to_owned() } else { mri(n) };
+            let _ = send.send(react(call, &from, reaction));
+            cx.background_executor().timer(Duration::from_millis(150)).await;
+        }
+        cx.background_executor().timer(Duration::from_millis(1_400)).await;
+    }
+    if layout.contains("+float") {
+        // a reaction now and then from people whose tiles the share hides, so several float at once
+        let floating = send.clone();
+        cx.spawn(async move |cx| {
+            for (index, reaction) in ["heart", "like", "applause", "laugh", "surprised"]
+                .iter()
+                .cycle()
+                .enumerate()
+            {
+                let _ = floating.send(react(call, &mri(index % 20 + 1), reaction));
+                cx.background_executor().timer(Duration::from_millis(450)).await;
+            }
+        })
+        .detach();
+        cx.background_executor().timer(Duration::from_millis(1_500)).await;
+    }
+    if layout.contains("+bubble") {
+        chat_message(fake, send, (2, "Can everyone see the deck? I can share it again.", 1));
+        chat_message(fake, send, (3, "Yes, it looks fine here", 2));
+        cx.background_executor().timer(Duration::from_millis(400)).await;
+    }
+}
+
+/// A live reaction `reaction` from `from` in `call`.
+fn react(call: CallId, from: &str, reaction: &str) -> Event {
+    Event::CallReaction {
+        call,
+        from: teams_proto::Mri::new(from),
+        name: None,
+        reaction: reaction.to_owned(),
+    }
+}
+
+/// The `n`th participant wrote `text` in the call's chat (its `seq`th message), the store counting it unread.
+fn chat_message(core: &FakeCore, send: &mpsc::UnboundedSender<Event>, (n, text, seq): (usize, &str, u64)) {
+    let arrival = 1_760_000_000_000 + i64::try_from(seq).unwrap_or(0);
+    locked(&core.messages)
+        .entry(GROUP.to_owned())
+        .or_default()
+        .push(Message {
+            conversation_id: GROUP.to_owned(),
+            id: arrival.to_string(),
+            version: 1,
+            client_message_id: None,
+            sender: Some(mri(n)),
+            sender_name: Some(format!(
+                "{} {}",
+                FIRST[n % FIRST.len()],
+                LAST[n / FIRST.len() % LAST.len()]
+            )),
+            message_type: "RichText/Html".to_owned(),
+            content: format!("<p>{text}</p>"),
+            properties: None,
+            arrival_time: arrival,
+            compose_time: Some(arrival),
+            edit_time: None,
+            delete_time: None,
+        });
+    locked(&core.unread).insert(GROUP.to_owned(), seq);
+    let _ = send.send(Event::ConversationChanged {
+        conversation: GROUP.to_owned(),
+    });
 }
 
 /// The call window laid out as `layout` has it, then `ready` once it settled.
@@ -333,12 +442,16 @@ fn ready(windows: &gpui::Entity<CallWindows>, layout: &str, cx: &mut App) {
         return;
     };
     let speaker = layout.starts_with("speaker");
+    let focus = layout.starts_with("focus");
     let people = layout.ends_with("+people");
     let _ = window.update(cx, move |kit: &mut KitRoot, window, cx| {
         if let Ok(stage) = kit.view().clone().downcast::<CallStage>() {
             stage.update(cx, |stage, cx| {
                 if speaker {
                     stage.set_layout(Layout::Speaker, cx);
+                }
+                if focus {
+                    stage.set_layout(Layout::Focus, cx);
                 }
                 stage.show_roster(people, cx);
             });

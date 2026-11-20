@@ -464,3 +464,151 @@ fn view_s_max_gallery_size_is_picked_by_the_keyboard() {
         pick_gallery_size(stage, 49);
     }
 }
+
+/// The roster of [`large_call`] again, `sharer` sharing its screen and `speaking` speaking.
+fn tell(rig: &super::Rig, count: usize, sharer: Option<usize>, speaking: &[usize]) {
+    let ids = mris(count);
+    let who: Vec<(&str, &str, bool, Option<usize>, bool)> = ids
+        .iter()
+        .enumerate()
+        .map(|(index, mri)| {
+            let speaks = speaking.contains(&index);
+            (mri.as_str(), "Someone With A Long Name", index % 2 == 0, None, speaks)
+        })
+        .collect();
+    let mut told = view(&who, false);
+    if let Some(sharer) = sharer {
+        told.participants[sharer].sharing = true;
+    }
+    rig.send(Event::CallParticipants {
+        call: call(1),
+        view: told,
+    });
+    rig.cx.run_until_parked();
+}
+
+/// The roster indices of the tiles drawn, in the order they show: top to bottom, left to right.
+fn in_order(stage: &mut VisualTestContext, count: usize) -> Vec<usize> {
+    let mut drawn: Vec<(usize, Bounds<Pixels>)> = shown(stage, count)
+        .into_iter()
+        .map(|index| (index, bounds(stage, &format!("call-participant-{index}")).unwrap()))
+        .collect();
+    drawn.sort_by(|(_, a), (_, b)| {
+        (f32::from(a.origin.y), f32::from(a.origin.x))
+            .partial_cmp(&(f32::from(b.origin.y), f32::from(b.origin.x)))
+            .unwrap()
+    });
+    drawn.into_iter().map(|(index, _)| index).collect()
+}
+
+/// Moves the stage's clock on by `ms` and lets what was due run.
+fn later(rig: &super::Rig, stage: &mut VisualTestContext, ms: u64) {
+    stage.executor().advance_clock(std::time::Duration::from_millis(ms));
+    rig.cx.run_until_parked();
+    draw(stage);
+}
+
+/// A share of 25 others at a laptop's size, `sharer` sharing.
+fn shared_by(rig: &super::Rig, sharer: usize) -> &'static mut VisualTestContext {
+    let stage = large_call(rig, 25);
+    resize(stage, (1280.0, 800.0));
+    tell(rig, 25, Some(sharer), &[]);
+    rig.send(Event::CallRemoteShare {
+        call: call(1),
+        on: true,
+    });
+    rig.cx.run_until_parked();
+    draw(stage);
+    stage
+}
+
+#[test]
+fn the_presenter_leads_the_share_strip_and_the_account_s_own_tile_ends_each_page() {
+    let rig = super::calling();
+    let stage = shared_by(&rig, 20);
+    let first = in_order(stage, 25);
+    assert_eq!(first.first(), Some(&20), "the presenter first: {first:?}");
+    assert_eq!(
+        &first[1..],
+        &(0..first.len() - 1).collect::<Vec<_>>()[..],
+        "then the roster's order"
+    );
+    let last_tile = bounds(stage, &format!("call-participant-{}", first[first.len() - 1])).unwrap();
+    let own = bounds(stage, "call-participant-self").expect("the account's own tile");
+    assert!(own.origin.y > last_tile.origin.y, "the account's own tile last");
+    click(stage, "call-strip-next");
+    assert!(
+        !in_order(stage, 25).contains(&20),
+        "the presenter only on the first page"
+    );
+    assert!(
+        drawn(stage, "call-participant-self"),
+        "the account's own tile on the next page too"
+    );
+}
+
+#[test]
+fn a_speaker_on_page_2_comes_to_page_1_but_a_short_sound_moves_nothing() {
+    let rig = super::calling();
+    let stage = shared_by(&rig, 20);
+    let first = in_order(stage, 25);
+    assert!(!first.contains(&18), "18 starts on a later page: {first:?}");
+    // a cough: speaking for half a second moves nobody
+    tell(&rig, 25, Some(20), &[18]);
+    later(&rig, stage, 500);
+    tell(&rig, 25, Some(20), &[]);
+    later(&rig, stage, 5_000);
+    assert_eq!(in_order(stage, 25), first, "no jump on a short sound");
+    // 18 talks: once it spoke a second it moves up, right after the presenter
+    tell(&rig, 25, Some(20), &[18]);
+    assert_eq!(in_order(stage, 25), first, "not at once");
+    later(&rig, stage, 1_000);
+    let moved = in_order(stage, 25);
+    assert_eq!(&moved[..2], &[20, 18], "the speaker next to the presenter: {moved:?}");
+    assert_eq!(moved.len(), first.len(), "the page holds as many");
+    // 22 answers at once: the order holds still for a few seconds, then 22 leads the speakers
+    tell(&rig, 25, Some(20), &[22]);
+    later(&rig, stage, 1_000);
+    assert_eq!(in_order(stage, 25), moved, "no second jump right after the first");
+    later(&rig, stage, 2_000);
+    let then = in_order(stage, 25);
+    assert_eq!(&then[..3], &[20, 22, 18], "{then:?}");
+    // 18 talks again, in sight: it stays where it is
+    tell(&rig, 25, Some(20), &[18]);
+    later(&rig, stage, 10_000);
+    assert_eq!(in_order(stage, 25), then);
+}
+
+#[test]
+fn the_page_the_user_turned_to_stays_while_someone_on_it_speaks() {
+    let rig = super::calling();
+    let stage = shared_by(&rig, 0);
+    click(stage, "call-strip-next");
+    let second = in_order(stage, 25);
+    assert!(drawn(stage, "call-strip-pager"));
+    let speaker = second[1];
+    tell(&rig, 25, Some(0), &[speaker]);
+    later(&rig, stage, 5_000);
+    assert_eq!(
+        in_order(stage, 25),
+        second,
+        "a tile in sight keeps its place, the page stays"
+    );
+    click(stage, "call-strip-previous");
+    assert!(!in_order(stage, 25).contains(&speaker));
+}
+
+#[test]
+fn a_gallery_speaker_on_a_later_page_comes_to_the_first() {
+    let rig = super::calling();
+    let stage = large_call(&rig, 25);
+    resize(stage, (1280.0, 800.0));
+    pick_gallery_size(stage, 9);
+    let first = in_order(stage, 25);
+    assert_eq!(first, (0..8).collect::<Vec<_>>());
+    tell(&rig, 25, None, &[17]);
+    later(&rig, stage, 1_000);
+    let moved = in_order(stage, 25);
+    assert_eq!(moved.first(), Some(&17), "{moved:?}");
+    assert_eq!(moved.len(), 8);
+}

@@ -22,14 +22,19 @@
 //!   options pins it for the account alone. The account's own tile (its own picture while its camera is off) is the
 //!   last tile on each gallery page in a group call; in a 1:1 call and the speaker view it floats at the stage's
 //!   bottom right, as Teams' self view does (the last tile of the speaker view's strip in a stage too narrow for it
-//!   beside the strip); View can hide it. Live reactions float up from the stage's bottom. The
+//!   beside the strip); View can hide it. Every page keeps Teams' order ([`order`]): the presenter first, then who
+//!   spoke (one out of sight comes up after a second of speech, the order held still a few seconds between changes),
+//!   the one pinned, the cameras on (View's Show videos first), the rest. A live reaction shows on its sender's tile,
+//!   or floats up from the stage's bottom while that tile is not on it ([`live_reactions`]). The
 //!   far end's shared screen takes the stage, the people's tiles (the account's own last) in a strip on its right
 //!   (View's Focus on content: the share alone). Nothing on the stage covers the controls above it.
 //! - **The People pane** ([`people_pane`]): a meeting's Share invite (its link copied), who waits in its lobby (Admit
 //!   all, Admit and Deny each), and who is in the call, the account first, with whether they speak, are muted or have
 //!   their hand up (numbered in the order the hands went up, the avatar ringed in gold), and "Organizer" under the
 //!   meeting's organizer. People's red badge counts the hands up and the people waiting in the lobby.
-//! - **The Chat pane** ([`chat_pane`]): the call's chat beside the stage, as the main window shows it.
+//! - **The Chat pane** ([`chat_pane`]): the call's chat beside the stage, as the main window shows it. While it is
+//!   closed, Chat carries Teams' red dot when the chat has unread messages, and a new message shows in a chat bubble
+//!   at the stage's top for a few seconds.
 //! - **The video effects' pane** (More's or the camera menu's Video effects; one pane at a time, as Teams has it):
 //!   the self-preview over the background effects ([`crate::effects::EffectsPicker`]): what the call sends while the
 //!   camera is on, else a preview only the user's Preview turns on. A background chosen applies to the call's camera
@@ -54,13 +59,16 @@
 
 mod captions;
 mod chat_pane;
+pub use chat_pane::BUBBLE_FOR;
 mod controls;
 mod faces;
 mod gallery;
 mod health;
 pub use health::HEALTH_REFRESH;
 mod invite;
+mod live_reactions;
 mod meeting;
+mod order;
 mod pages;
 mod people_pane;
 mod recording;
@@ -239,6 +247,8 @@ pub struct CallStage {
     effects: Option<Entity<EffectsPicker>>,
     /// The call's chat, once the Chat pane showed it.
     chat: Option<Entity<crate::chat_view::ChatView>>,
+    /// The call's chat's unread messages, as last counted: the Chat button's badge.
+    chat_unread: chat_pane::Unread,
     /// The Call health pane's reading, while it is open.
     health: Option<health::HealthPane>,
     /// What the call's chat is drawn with ([`StageParts::shell`]).
@@ -249,6 +259,8 @@ pub struct CallStage {
     pinned: Option<String>,
     /// Who spoke last (the speaker view shows them while nobody speaks), by MRI.
     last_speaker: Option<String>,
+    /// Who spoke and who the stage showed: the tiles' order ([`order`]).
+    speakers: order::Speakers,
     /// View's Hide me: the self view hidden.
     self_hidden: bool,
     /// View's Show videos first: the tiles whose camera is on lead.
@@ -285,8 +297,8 @@ pub struct CallStage {
     controls: controls::ControlsUi,
     /// Meeting info's Copy join info put the join info on the clipboard.
     join_info_copied: bool,
-    /// The live reactions' floating while some show.
-    reacting: Option<Task<()>>,
+    /// The live reactions of the frame drawn, and the stage drawn again while some show ([`live_reactions`]).
+    reactions: live_reactions::Reactions,
     /// The devices a test call used, named as it ended.
     results: Option<[String; 3]>,
     /// The grid as last traced.
@@ -347,6 +359,7 @@ impl CallStage {
         shell.map(|shell| {
             cx.observe(&shell.models.chats, |this: &mut Self, chats, cx| {
                 this.profiles_changed(&chats, cx);
+                this.follow_chat_unread(cx);
             })
         })
     }
@@ -385,11 +398,13 @@ impl CallStage {
             share_dismiss: None,
             effects: None,
             chat: None,
+            chat_unread: chat_pane::Unread::default(),
             health: None,
             shell,
             layout: Layout::default(),
             pinned: None,
             last_speaker: None,
+            speakers: order::Speakers::default(),
             self_hidden: false,
             videos_first: false,
             paging: pages::Paging::default(),
@@ -409,7 +424,7 @@ impl CallStage {
             record: recording::RecordUi::default(),
             controls: controls::ControlsUi::default(),
             join_info_copied: false,
-            reacting: None,
+            reactions: live_reactions::Reactions::default(),
             results: None,
             grid_traced: None,
             titled: None,
@@ -638,6 +653,8 @@ impl CallStage {
             );
             self.ask_faces(cx);
             self.float_reactions(active, cx);
+            self.follow_speakers(active, cx);
+            self.follow_chat_unread(cx);
             self.order_hands(active);
             self.meeting_seen(active);
             self.controls_follow(active, cx);
@@ -993,6 +1010,24 @@ impl CallStage {
         )
     }
 
+    /// [`Self::body`], the window drawn again on the next frame while a live reaction shows on it.
+    fn framed_body(
+        &mut self,
+        call: (Option<&ActiveCall>, Option<&Ended>),
+        title: &SharedString,
+        palette: Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.reactions.frame = live_reactions::Frame::default();
+        let body = self.body(call, title, palette, cx);
+        if self.reactions.frame.shown && crate::motion::on(cx) {
+            // the reactions move on the next frame; none once the last is gone
+            window.request_animation_frame();
+        }
+        body
+    }
+
     /// What the window shows under its header: the stage (and the participants' pane), a test call's results, or that
     /// the call ended.
     fn body(
@@ -1157,7 +1192,7 @@ impl Render for CallStage {
         self.follow_invite_box(window, cx);
         let viewport = window.viewport_size();
         self.paging.window = (f32::from(viewport.width), f32::from(viewport.height));
-        let body = self.body((live.as_ref(), ended.as_ref()), &title, palette, cx);
+        let body = self.framed_body((live.as_ref(), ended.as_ref()), &title, palette, window, cx);
         let header = self.header(live.as_ref(), title, palette, cx);
         let mut captions = live.as_ref().and_then(|_| self.caption_pane(palette, cx));
         // a refusal while the call is up, or of a call back from its end

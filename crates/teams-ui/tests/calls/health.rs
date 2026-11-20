@@ -51,7 +51,7 @@ fn reads(rig: &crate::Rig) -> usize {
 }
 
 /// Opens More → Settings (a submenu, reached by the keyboard as a user's arrows reach it).
-fn open_settings(window: &mut VisualTestContext) {
+pub(super) fn open_settings(window: &mut VisualTestContext) {
     for downs in 1..=12 {
         click(window, "call-more");
         let keys = format!("{} right", vec!["down"; downs].join(" "));

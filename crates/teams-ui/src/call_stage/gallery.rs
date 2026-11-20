@@ -9,6 +9,8 @@
 use gpui::{Bounds, Pixels};
 use gpui_component::Disableable as _;
 
+use super::live_reactions;
+use super::order;
 use super::pages::{self, PAGER_HEIGHT, PAGER_WIDTH, Page, Strip, TILE_GAP};
 use super::*;
 
@@ -54,6 +56,7 @@ impl CallStage {
     ) -> AnyElement {
         // waiting in the lobby, the account sees nobody: only that someone should let it in
         // waiting in the lobby, holding the call or held by the far end, the account sees nobody's tile
+        self.take_reactions(active, cx);
         let tiles = if active.status == CallStatus::Lobby || active.held.is_some() || active.held_by_far_end {
             Vec::new()
         } else {
@@ -68,21 +71,25 @@ impl CallStage {
         let in_gallery = !tiles.is_empty() && self.self_in_gallery(active);
         let focus = self.focus_of(&tiles).filter(|_| tiles.len() > 1);
         let in_strip = !shared && focus.is_some() && !self.self_hidden && !floats_beside_strip(area.0);
+        // a page of tiles drawn below tells whose are in sight
+        self.speakers.drawn(None);
         let body = if shared {
             self.share_stage(active, tiles, (title, area), palette, cx)
         } else if tiles.is_empty() {
             self.nobody_shown(active, title, palette, cx)
         } else if let Some(index) = focus {
-            self.speaker_stage(active, (tiles, index), (area.0, in_strip), palette, cx)
+            self.speaker_stage(active, (tiles, index), (area, in_strip), palette, cx)
         } else {
             self.gallery_stage(active, tiles, (area, in_gallery), palette, cx)
         };
         let own = if self.self_hidden || shared || in_gallery || in_strip {
             None
         } else {
-            let face = self.own_face(call, palette, cx);
+            let face = self.own_face((call, live_reactions::tile_emoji(SELF_VIEW.1)), palette, cx);
             Some(self_view(active, (face, self.own_hand(active)), true, palette, cx))
         };
+        let reactions = self.reactions_floating(area, cx);
+        let bubble = self.chat_bubble(palette, cx);
         div()
             .debug_selector(|| "call-stage".to_owned())
             .relative()
@@ -95,7 +102,8 @@ impl CallStage {
             .bg(rgb(palette.background))
             .child(div().relative().size_full().child(self.paging.measure(cx)).child(body))
             .children(own)
-            .children(self.reactions_shown(active, palette, cx))
+            .children(reactions)
+            .children(bubble)
             .children(lobby)
             .into_any_element()
     }
@@ -211,9 +219,10 @@ impl CallStage {
         let own = usize::from(!self.self_hidden);
         let (page, tile_height) =
             self.strip_page(Strip::Share, (tiles.len(), own), (area.1, SHARE_STRIP.1), PAGER_HEIGHT);
-        let mut strip: Vec<AnyElement> = self.page_tiles(tiles, page, (call, false), palette, cx);
+        let emoji = live_reactions::tile_emoji(tile_height);
+        let mut strip: Vec<AnyElement> = self.page_tiles(tiles, page, (call, false, emoji), palette, cx);
         if own == 1 {
-            let face = self.own_face(call, palette, cx);
+            let face = self.own_face((call, emoji), palette, cx);
             strip.push(self_view(active, (face, self.own_hand(active)), false, palette, cx));
         }
         div()
@@ -275,13 +284,15 @@ impl CallStage {
         let page = pages::page_of(tiles.len(), per, self.paging.gallery);
         self.paging.gallery = page.index;
         let menus = tiles.len() > 1;
-        let mut drawn = self.page_tiles(tiles, page, (call, menus), palette, cx);
+        let count = tiles.len().saturating_sub(page.first).min(page.per) + own;
+        let grid_height = if page.pages > 1 { height - PAGER_HEIGHT } else { height };
+        let (columns, tile) = pages::arrange(count, (width, grid_height));
+        let emoji = live_reactions::tile_emoji(tile.1);
+        let mut drawn = self.page_tiles(tiles, page, (call, menus, emoji), palette, cx);
         if in_gallery {
-            let face = self.own_face(call, palette, cx);
+            let face = self.own_face((call, emoji), palette, cx);
             drawn.push(self_view(active, (face, self.own_hand(active)), false, palette, cx));
         }
-        let grid_height = if page.pages > 1 { height - PAGER_HEIGHT } else { height };
-        let (columns, tile) = pages::arrange(drawn.len(), (width, grid_height));
         div()
             .debug_selector(move || selector.to_owned())
             .size_full()
@@ -297,7 +308,7 @@ impl CallStage {
         &mut self,
         active: &ActiveCall,
         (mut tiles, main): (Vec<StageTile>, usize),
-        (width, in_strip): (f32, bool),
+        ((width, height), in_strip): ((f32, f32), bool),
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -309,15 +320,19 @@ impl CallStage {
         };
         let floating = !self.self_hidden && !in_strip;
         let large = tiles.remove(main);
+        let large_mri = large.mri.clone();
         let pinned = large.mri.is_some() && large.mri == self.pinned;
-        let face = self.face_of(&large, call, palette, cx);
+        let large_emoji = live_reactions::tile_emoji(height - STRIP_HEIGHT);
+        let face = self.face_of(&large, (call, large_emoji), palette, cx);
         let large = tile_view(large, face, (pinned, true), palette, cx);
         let room = if floating { width - SELF_VIEW.0 - 16.0 } else { width };
         let own = usize::from(in_strip);
         let (page, tile_width) = self.strip_page(Strip::Speaker, (tiles.len(), own), (room, STRIP_TILE), PAGER_WIDTH);
-        let mut others = self.page_tiles(tiles, page, (call, true), palette, cx);
+        let emoji = live_reactions::tile_emoji(STRIP_HEIGHT);
+        let mut others = self.page_tiles(tiles, page, (call, true, emoji), palette, cx);
+        self.speakers.also_drawn(large_mri);
         if in_strip {
-            let face = self.own_face(call, palette, cx);
+            let face = self.own_face((call, emoji), palette, cx);
             others.push(self_view(active, (face, self.own_hand(active)), false, palette, cx));
         }
         speaker(
@@ -359,16 +374,17 @@ impl CallStage {
         &mut self,
         tiles: Vec<StageTile>,
         page: Page,
-        (call, menus): (u64, bool),
+        (call, menus, emoji): (u64, bool, f32),
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        tiles
+        let shown: Vec<StageTile> = tiles.into_iter().skip(page.first).take(page.per).collect();
+        self.speakers
+            .drawn(Some(shown.iter().filter_map(|tile| tile.mri.clone()).collect()));
+        shown
             .into_iter()
-            .skip(page.first)
-            .take(page.per)
             .map(|tile| {
-                let face = self.face_of(&tile, call, palette, cx);
+                let face = self.face_of(&tile, (call, emoji), palette, cx);
                 let pinned = tile.mri.is_some() && tile.mri == self.pinned;
                 tile_view(tile, face, (pinned, menus), palette, cx)
             })
@@ -391,22 +407,32 @@ impl CallStage {
     }
 
     /// What `tile` shows: its video when a line shows it (and View didn't turn the others' video off), else its
-    /// person's face.
-    fn face_of(&mut self, tile: &StageTile, call: u64, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    /// person's face; their live reaction on it ([`live_reactions`]), its emoji `emoji` px.
+    fn face_of(
+        &mut self,
+        tile: &StageTile,
+        (call, emoji): (u64, f32),
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let video = tile
             .video
             .filter(|_| !self.others_off)
             .and_then(|line| self.tiles.as_mut()?.fill(line, call));
-        video.unwrap_or_else(|| self.tile_face(&tile.selector, (tile.mri.as_deref(), Some(&tile.name)), palette, cx))
+        let dim = video.is_none();
+        let face = video
+            .unwrap_or_else(|| self.tile_face(&tile.selector, (tile.mri.as_deref(), Some(&tile.name)), palette, cx));
+        self.reacted(tile.mri.as_deref(), face, (&tile.selector, emoji, dim), cx)
     }
 
-    /// What the account's own tile shows: its self view while the camera sends, else its face.
-    fn own_face(&mut self, call: u64, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    /// What the account's own tile shows: its self view while the camera sends, else its face; its own live reaction
+    /// on it, its emoji `emoji` px.
+    fn own_face(&mut self, (call, emoji): (u64, f32), palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let video = self.tiles.as_mut().and_then(|tiles| tiles.fill(Tile::Own, call));
-        video.unwrap_or_else(|| {
-            let me = self.core.me().to_owned();
-            self.tile_face(SELF_TILE, (Some(&me), self.own_name.as_ref()), palette, cx)
-        })
+        let dim = video.is_none();
+        let me = self.core.me().to_owned();
+        let face = video.unwrap_or_else(|| self.tile_face(SELF_TILE, (Some(&me), self.own_name.as_ref()), palette, cx));
+        self.reacted(Some(&me), face, (SELF_TILE, emoji, dim), cx)
     }
 
     /// Which tile the stage shows large, if any: the one pinned; in the speaker view the one who speaks, else who
@@ -456,10 +482,21 @@ impl CallStage {
             if let Some(speaking) = tiles.iter().find(|tile| tile.speaking) {
                 self.last_speaker.clone_from(&speaking.mri);
             }
-            if self.videos_first {
-                // stable: the cameras on lead, each side in the roster's order
-                tiles.sort_by_key(|tile| !tile.video_on);
-            }
+            let presenter = active
+                .remote_share
+                .then(|| view.participants.iter().find(|p| p.sharing))
+                .flatten()
+                .map(|p| p.mri.as_str());
+            // stable: each group keeps the roster's order
+            tiles.sort_by_key(|tile| {
+                let mri = tile.mri.as_deref();
+                let place = order::Place {
+                    presenter: presenter.is_some() && mri == presenter,
+                    pinned: mri.is_some() && mri == self.pinned.as_deref(),
+                    video_first: self.videos_first && tile.video_on,
+                };
+                self.speakers.rank(mri, place)
+            });
             self.trace_grid(active.id, view);
             return tiles;
         }
@@ -996,107 +1033,30 @@ fn self_view(
 }
 
 impl CallStage {
-    /// The live reactions sent lately, floating up from the stage's bottom left as Teams floats them: each its picture
-    /// and who sent it ("You" for the account's own), gone after [`calls::REACTION_SHOWN`].
-    pub(super) fn reactions_shown(&self, active: &ActiveCall, palette: Palette, cx: &App) -> Option<AnyElement> {
-        let now = std::time::Instant::now();
-        let shown: Vec<&calls::LiveReaction> = active
-            .reactions
+    /// Takes who speaks now into the tiles' order ([`order`]), and looks again when a move waits for its time.
+    pub(super) fn follow_speakers(&mut self, active: &ActiveCall, cx: &mut Context<Self>) {
+        let now = cx.background_executor().now();
+        let speaking = active
+            .view
+            .participants
             .iter()
-            .filter(|reaction| now.duration_since(reaction.at) < calls::REACTION_SHOWN)
-            .collect();
-        if shown.is_empty() {
-            return None;
-        }
-        let me = self.core.me().to_owned();
-        let people = self.people.of(active.id);
-        let floats: Vec<AnyElement> = shown
-            .into_iter()
-            .enumerate()
-            .map(|(index, reaction)| {
-                let key = toolbar::REACTIONS
-                    .iter()
-                    .find(|(name, _, _)| *name == reaction.reaction)
-                    .map_or(reaction.reaction.as_str(), |(_, key, _)| key);
-                let who = reaction_sender(reaction, &me, people);
-                let float = div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap_0p5()
-                    .child(crate::reactions::emoji(key, px(40.0)))
-                    .child(
-                        div()
-                            .max_w(px(120.0))
-                            .px_1p5()
-                            .rounded_md()
-                            .bg(rgb(palette.surface))
-                            .text_xs()
-                            .truncate()
-                            .child(who),
-                    );
-                // each one rises into place as it comes, as Teams' float up
-                let id = SharedString::from(format!("call-reaction-{index}-{}", reaction.reaction));
-                crate::motion::rise(float, id, 24.0, cx)
-            })
-            .collect();
-        Some(
-            div()
-                .debug_selector(|| "call-reactions".to_owned())
-                .absolute()
-                .bottom(px(56.0))
-                .left_5()
-                .flex()
-                .items_end()
-                .gap_2()
-                .children(floats)
-                .into_any_element(),
-        )
-    }
-
-    /// While a live reaction shows, the stage is drawn again as the next one is due to go.
-    pub(super) fn float_reactions(&mut self, active: &ActiveCall, cx: &mut Context<Self>) {
-        let now = std::time::Instant::now();
-        let Some(due) = active
-            .reactions
-            .iter()
-            .map(|reaction| (reaction.at + calls::REACTION_SHOWN).saturating_duration_since(now))
-            .filter(|due| !due.is_zero())
-            .min()
-        else {
-            self.reacting = None;
+            .filter(|participant| participant.speaking)
+            .map(|participant| participant.mri.as_str());
+        let Some(due) = self.speakers.follow(speaking, now) else {
+            self.speakers.look = None;
             return;
         };
-        self.reacting = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-            cx.background_executor().timer(due).await;
-            // a stage that is gone has nothing left to draw
+        self.speakers.look = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
+            cx.background_executor().timer(due.saturating_duration_since(now)).await;
+            // a stage that is gone orders nothing
             let _ = this.update(cx, |this, cx| {
                 if let Some(active) = this.live(cx) {
-                    this.float_reactions(&active, cx);
+                    this.follow_speakers(&active, cx);
                 }
                 cx.notify();
             });
         }));
     }
-}
-
-/// Who sent `reaction`: "You" for the account's own (`me`), else the name it came with, the call's people's name for
-/// them, or "Someone".
-fn reaction_sender(reaction: &calls::LiveReaction, me: &str, people: &[(String, SharedString)]) -> SharedString {
-    if reaction.from.as_str() == me {
-        return SharedString::from("You");
-    }
-    reaction
-        .name
-        .clone()
-        .map(SharedString::from)
-        .or_else(|| {
-            people
-                .iter()
-                .find(|(mri, _)| mri == reaction.from.as_str())
-                .map(|(_, name)| name.clone())
-        })
-        .unwrap_or_else(|| SharedString::from(SOMEONE))
 }
 
 /// While the call reconnects, a bar over the stage saying so, as Teams says it; nothing while its connection is fine.

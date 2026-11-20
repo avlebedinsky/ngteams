@@ -231,7 +231,7 @@ impl CallStage {
         let reactions = self.takes_reactions(active);
         let chat = self.call_chat(active).map(|_| {
             let shown = self.pane == Pane::Chat;
-            tool(
+            let chat = tool(
                 ("call-chat", Glyph::MESSAGE, self.caption("Chat")),
                 (if shown { "Hide chat" } else { "Show chat" }, None),
                 shown,
@@ -241,7 +241,8 @@ impl CallStage {
                     let open = this.pane != Pane::Chat;
                     this.show_chat(open, window, cx);
                 },
-            )
+            );
+            with_dot(chat, self.chat_unread_shown(), palette)
         });
         let shown = self.pane == Pane::People;
         let roster = with_count(
@@ -653,6 +654,33 @@ fn with_count(tool: AnyElement, count: Option<usize>, attention: usize, palette:
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(rgb(palette.on_frame))
                 .child(SharedString::from(count.to_string())),
+        )
+        .into_any_element()
+}
+
+/// Teams' unread dot's side, px.
+const DOT: f32 = 10.0;
+
+/// `tool` with Teams' red unread dot at its icon's top right while `unread`, ringed in the toolbar's colour.
+fn with_dot(tool: AnyElement, unread: bool, palette: Palette) -> AnyElement {
+    if !unread {
+        return tool;
+    }
+    div()
+        .relative()
+        .child(tool)
+        .child(
+            div()
+                .debug_selector(|| "call-chat-unread".to_owned())
+                .absolute()
+                .top(px(5.0))
+                .left(relative(0.5))
+                .ml(px(4.0))
+                .size(px(DOT))
+                .rounded_full()
+                .bg(rgb(theme::DANGER))
+                .border_2()
+                .border_color(rgb(theme::mix(palette.frame_start, palette.frame_end, 0.5))),
         )
         .into_any_element()
 }

@@ -693,6 +693,8 @@ pub(super) struct MoreTools {
     mute_notifications: bool,
     /// The notifications are held back now (the entry reads Unmute notifications).
     notifications_muted: bool,
+    /// The call's chat bubbles are off now (the entry reads Show chat bubbles).
+    bubbles_muted: bool,
 }
 
 impl CallStage {
@@ -708,6 +710,7 @@ impl CallStage {
             call_health: active.status == CallStatus::Connected,
             mute_notifications: group,
             notifications_muted: crate::notify::muted_in_call(cx),
+            bubbles_muted: self.chat_bubbles_muted(),
         }
     }
 
@@ -830,8 +833,8 @@ pub(super) fn help_item(menu: PopupMenu, tools: MoreTools) -> PopupMenu {
     )
 }
 
-/// More's Settings, where it has an entry: Call health once the call is up, Mute notifications (or Unmute) in a group
-/// call or a meeting.
+/// More's Settings, where it has an entry: Call health once the call is up; Don't show chat bubbles (or Show) and Mute
+/// notifications (or Unmute) in a group call or a meeting.
 pub(super) fn settings_submenu(
     menu: PopupMenu,
     stage: &WeakEntity<CallStage>,
@@ -854,6 +857,18 @@ pub(super) fn settings_submenu(
         if !tools.mute_notifications {
             return menu.min_w(px(220.0));
         }
+        let bubbles = stage.clone();
+        let hidden = tools.bubbles_muted;
+        let (glyph, label) = if hidden {
+            (Glyph::MESSAGE, "Show chat bubbles")
+        } else {
+            (Glyph::MESSAGE, "Don't show chat bubbles")
+        };
+        let menu = menu.item(
+            toolbar::menu_item("call-more-chat-bubbles", Some(glyph), label).on_click(move |_, _, cx| {
+                let _ = bubbles.update(cx, |stage, cx| stage.mute_chat_bubbles(!hidden, cx));
+            }),
+        );
         let stage = stage.clone();
         let muted = tools.notifications_muted;
         let (glyph, label) = if muted {

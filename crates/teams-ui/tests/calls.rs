@@ -17,6 +17,9 @@ mod fake_tool;
 /// A channel's running meeting: its post's Join, and the meeting's own title on the header's Join.
 #[path = "calls/channel_meeting.rs"]
 mod channel_meeting;
+/// The toolbar's Chat badged with the call's chat's unread messages.
+#[path = "calls/chat_badge.rs"]
+mod chat_badge;
 pub mod common;
 /// The faces a call shows: pictures, else initials.
 #[path = "calls/faces.rs"]
@@ -30,6 +33,9 @@ mod health;
 /// Calls of ten people and more: the stage keeps clear of the call's controls.
 #[path = "calls/large_call.rs"]
 mod large_call;
+/// Live reactions float up the stage in every layout.
+#[path = "calls/live_reactions.rs"]
+mod live_reactions;
 #[path = "common/notices.rs"]
 mod notices;
 /// What a call sounds like as it goes along.
@@ -3614,7 +3620,7 @@ fn a_group_call_offers_teams_controls_raise_and_react_and_shows_who_is_muted_or_
         (0..=9).all(|rank| !drawn(stage, &format!("call-roster-self-hand-{rank}"))),
         "the account's hand is down again"
     );
-    // a live reaction floats up from the stage
+    // a live reaction shows on its sender's tile
     rig.send(Event::CallReaction {
         call: call(1),
         from: Mri::new(LAB_C),
@@ -3622,7 +3628,7 @@ fn a_group_call_offers_teams_controls_raise_and_react_and_shows_who_is_muted_or_
         reaction: "applause".to_owned(),
     });
     rig.cx.run_until_parked();
-    assert!(drawn(stage, "call-reactions"));
+    assert!(drawn(stage, "call-participant-1-reaction"));
     no_name_in(&written);
 }
 
