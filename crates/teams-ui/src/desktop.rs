@@ -64,7 +64,7 @@ use crate::bus::BusError;
 use crate::call_alert::{CallAlert, CallAlertEvent};
 use crate::call_sounds::CallSounds;
 use crate::call_window::{AccountNamer, CallWindows, CallWindowsEvent};
-use crate::meeting_alert::{MeetingAlert, MeetingAlertEvent};
+use crate::meeting_alert::{MeetingAlert, MeetingAlertEvent, MeetingJoin};
 use crate::meeting_reminder::{MeetingReminders, ReminderEvent};
 #[cfg(target_os = "linux")]
 use crate::notify::BusNotifications;
@@ -428,11 +428,7 @@ impl Desktop {
                 channel: true,
             } => this.open_channel_of(&key, conversation.clone(), cx),
             MeetingAlertEvent::Open { conversation, .. } => this.open_chat_of(&key, conversation.clone(), cx),
-            MeetingAlertEvent::Join(join) => {
-                let join = join.clone();
-                this.switch(&key, cx);
-                this.in_shell(cx, move |shell, window, cx| shell.join_from_banner(join, window, cx));
-            }
+            MeetingAlertEvent::Join(join) => this.join_from_notice(&key, join.clone(), cx),
         });
         (alert, asked)
     }
@@ -459,11 +455,7 @@ impl Desktop {
                 this.switch(&key, cx);
                 this.in_shell(cx, Shell::show_calendar);
             }
-            ReminderEvent::Join(join) => {
-                let join = join.clone();
-                this.switch(&key, cx);
-                this.in_shell(cx, move |shell, window, cx| shell.join_from_banner(join, window, cx));
-            }
+            ReminderEvent::Join(join) => this.join_from_notice(&key, join.clone(), cx),
         });
         (reminders, asked)
     }
@@ -839,6 +831,19 @@ impl Desktop {
         self.in_shell(cx, |shell, window, cx| shell.search_for(query, window, cx));
     }
 
+    /// A meeting notice's Join (its banner's, its reminder's) for account `key`: in its shell, the pre-join it opens over
+    /// the main window. Windows brings the main window forward only in a task of its own, after the pre-join opened:
+    /// the pre-join is raised in a task after that one.
+    fn join_from_notice(&mut self, key: &str, join: MeetingJoin, cx: &mut Context<Self>) {
+        self.switch(key, cx);
+        self.in_shell(cx, move |shell, window, cx| shell.join_from_banner(join, window, cx));
+        let windows = self.call_windows.clone();
+        cx.spawn(async move |_, cx: &mut AsyncApp| {
+            windows.update(cx, CallWindows::raise_prejoin);
+        })
+        .detach();
+    }
+
     /// Shows the window and does `then` in the shell it shows.
     fn in_shell(&mut self, cx: &mut Context<Self>, then: impl FnOnce(&mut Shell, &mut Window, &mut Context<Shell>)) {
         self.show(cx);
@@ -1062,9 +1067,9 @@ fn hand_server(slot: &Slot, server: &Arc<dyn NotificationServer>, cx: &mut App) 
     slot.notifier
         .update(cx, |notifier, _| notifier.set_server(Arc::clone(server)));
     slot.meeting_alert
-        .update(cx, |alert, _| alert.set_server(Arc::clone(server)));
+        .update(cx, |alert, cx| alert.set_server(Arc::clone(server), cx));
     slot.meeting_reminders
-        .update(cx, |reminders, _| reminders.set_server(Arc::clone(server)));
+        .update(cx, |reminders, cx| reminders.set_server(Arc::clone(server), cx));
     slot.call_alert
         .update(cx, |alert, cx| alert.set_server(Arc::clone(server), cx));
 }

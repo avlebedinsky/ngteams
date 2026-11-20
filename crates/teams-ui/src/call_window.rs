@@ -415,6 +415,13 @@ impl CallWindows {
         account.parts.trace.record(&line);
     }
 
+    /// The pre-join's window to the front, while it is open.
+    pub fn raise_prejoin(&mut self, cx: &mut Context<Self>) {
+        if let Some(open) = &self.prejoin {
+            let _ = open.window.update(cx, |_, window, _| window.activate_window());
+        }
+    }
+
     /// "Return to call": the window to the front; opened again when its call is still up and the user closed it.
     fn raise(&mut self, cx: &mut Context<Self>) {
         if let Some(open) = &self.prejoin {

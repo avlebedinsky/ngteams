@@ -182,11 +182,14 @@ pub enum ReminderEvent {
     Open { chat: Option<String> },
 }
 
-/// One meeting being reminded: the event as last read, the stage shown and its desktop notice, a snooze, a dismissal.
+/// One meeting being reminded: the event as last read, the stage shown, the stage sent to the desktop and its notice, a
+/// snooze, a dismissal.
 struct Kept {
     event: CalendarEvent,
     end: i64,
     shown: Option<Stage>,
+    /// The stage whose desktop notice went to the server: one shown before the server came is sent once it comes.
+    sent: Option<Stage>,
     notice: Option<u32>,
     snoozed_until: Option<i64>,
     dismissed: bool,
@@ -251,9 +254,24 @@ impl MeetingReminders {
         }
     }
 
-    /// From now on, desktop notices go to `server`.
-    pub fn set_server(&mut self, server: Arc<dyn NotificationServer>) {
+    /// From now on, desktop notices go to `server`; a reminder the window shows already (one due as the app started,
+    /// before the server came) goes there now.
+    pub fn set_server(&mut self, server: Arc<dyn NotificationServer>, cx: &mut Context<Self>) {
         self.server = Some(server);
+        let now = wall_ms(cx);
+        let unsent: Vec<(Occasion, Stage)> = self
+            .kept
+            .iter()
+            .filter(|(_, kept)| !kept.dismissed && kept.snoozed_until.is_none() && kept.sent != kept.shown)
+            .filter_map(|(occasion, kept)| Some((occasion.clone(), kept.shown?)))
+            .collect();
+        for (occasion, stage) in unsent {
+            log::debug!(
+                "meeting reminder: {} sent to the desktop late ({stage:?})",
+                occasion.event
+            );
+            self.send(&occasion, stage, now, cx);
+        }
     }
 
     /// Reads the service's calendar now (the calendar changed, or a test can't wait for [`REFRESH`]).
@@ -342,6 +360,7 @@ impl MeetingReminders {
         };
         kept.snoozed_until = Some(until);
         kept.shown = None;
+        kept.sent = None;
         log::debug!("meeting reminder: {} snoozed for {minutes} min", occasion.event);
         self.record("snoozed", occasion);
         self.close_notice(occasion, cx);
@@ -411,6 +430,7 @@ impl MeetingReminders {
                 event: event.clone(),
                 end,
                 shown: None,
+                sent: None,
                 notice: None,
                 snoozed_until: None,
                 dismissed: false,
@@ -495,14 +515,6 @@ impl MeetingReminders {
         }
         kept.shown = Some(stage);
         log::debug!("meeting reminder: {} shown ({stage:?})", occasion.event);
-        let notice = Notice {
-            conversation: kept.event.meeting_chat.clone().unwrap_or_default(),
-            kind: NoticeKind::Reminder,
-            summary: title_of(&kept.event),
-            body: notice_body(&kept.event, occasion.start, now, crate::clock::cycle(cx).time_of_day()),
-            picture: None,
-        };
-        let replaces = kept.notice.unwrap_or(0);
         self.record("shown", occasion);
         if let Some(player) = self.settings.read(cx).sound_player() {
             player.play(
@@ -511,7 +523,25 @@ impl MeetingReminders {
                 self.calls.read(cx).call().is_some(),
             );
         }
+        self.send(occasion, stage, now, cx);
+    }
+
+    /// Sends the desktop notice of `occasion` at `stage`, in place of its last one; without a server yet it waits for
+    /// [`MeetingReminders::set_server`].
+    fn send(&mut self, occasion: &Occasion, stage: Stage, now: i64, cx: &mut Context<Self>) {
         let Some(server) = self.server.clone() else { return };
+        let Some(kept) = self.kept.get_mut(occasion) else {
+            return;
+        };
+        kept.sent = Some(stage);
+        let notice = Notice {
+            conversation: kept.event.meeting_chat.clone().unwrap_or_default(),
+            kind: NoticeKind::Reminder,
+            summary: title_of(&kept.event),
+            body: notice_body(&kept.event, occasion.start, now, crate::clock::cycle(cx).time_of_day()),
+            picture: None,
+        };
+        let replaces = kept.notice.unwrap_or(0);
         let occasion = occasion.clone();
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             let Ok(id) = server.show(&notice, replaces).await else {

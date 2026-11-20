@@ -1,14 +1,21 @@
-//! The window's cards of the account's meeting notices, at its bottom right over everything, the newest at the bottom:
+//! The window's cards of the account's meeting notices, the newest at the bottom: at the bottom right of the open chat's
+//! messages, clear of its header and its compose box, else of the window, over everything else:
 //! a started meeting's ([`crate::meeting_alert`]: Join, Message but for a channel's, and Dismiss; it goes after
 //! Teams' banner time) and a calendar meeting's reminder ([`crate::meeting_reminder`]: Join, Snooze with its choices,
 //! and Dismiss; it stays until it is acted on, or the meeting moves, ends or is joined). The desktop's notice of each
 //! shows as well; acting on either closes both.
+//!
+//! At most [`MAX_CARDS`] show at once, as Teams' own notifications stack: the started meetings' and the soonest
+//! reminders; "+N more" shows the rest, and the stack scrolls when the room is too short for it. A card is as narrow
+//! as the room asks.
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::{
-    Anchor, AnyElement, App, Context, Entity, FontWeight, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, SharedString, Styled as _, Subscription, div, px, rgb,
+    Anchor, AnyElement, App, Bounds, Context, Entity, FontWeight, InteractiveElement as _, IntoElement as _,
+    ParentElement as _, Pixels, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
+    anchored, canvas, div, point, px, rgb,
 };
 use gpui_component::Sizable as _;
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -21,14 +28,38 @@ use crate::meeting_reminder::{self, MeetingReminders, ReminderCard, SNOOZE_CHOIC
 use crate::notify::{DEFAULT_ACTION, JOIN_ACTION};
 use crate::theme::Palette;
 
-/// How wide a card is.
+/// How wide a card is, room allowing.
 const CARD_WIDTH: f32 = 360.0;
+/// How narrow a card gets, past the messages' width when they are narrower.
+const MIN_CARD_WIDTH: f32 = 260.0;
+/// The room kept between the cards and the edges of the place they show in.
+const MARGIN: f32 = 16.0;
+/// How many cards show at once before "+N more".
+pub const MAX_CARDS: usize = 3;
 
 /// The account's meeting notices the shell shows as cards.
 pub struct MeetingNotices {
     pub alert: Entity<MeetingAlert>,
     pub reminders: Entity<MeetingReminders>,
+    /// Whether "+N more" was clicked: every card shows.
+    all_shown: bool,
+    /// The chat's messages area the cards were placed in, of the frame before: a frame that drew it elsewhere (or
+    /// none) draws them again.
+    placed_in: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// Where the stack and how many cards were drawn in the last frame, for a test to read.
+    drawn: Rc<Cell<Option<CardsDrawn>>>,
     _observing: [Subscription; 2],
+}
+
+/// Where the cards were drawn: the stack's bounds, the room it had, how many cards it showed and how many "+N more"
+/// held back.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CardsDrawn {
+    pub stack: Bounds<Pixels>,
+    /// The chat's messages area it was placed in; `None`: the window's corner.
+    pub area: Option<Bounds<Pixels>>,
+    pub shown: usize,
+    pub more: usize,
 }
 
 impl Shell {
@@ -46,6 +77,9 @@ impl Shell {
         self.meeting_notices = Some(MeetingNotices {
             alert,
             reminders,
+            all_shown: false,
+            placed_in: Rc::default(),
+            drawn: Rc::default(),
             _observing: observing,
         });
         cx.notify();
@@ -57,38 +91,170 @@ impl Shell {
         self.meeting_notices.as_ref().map(|notices| &notices.reminders)
     }
 
-    /// The cards, when any shows.
-    pub(super) fn meeting_cards_view(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let notices = self.meeting_notices.as_ref()?;
-        let started = notices.alert.read(cx).cards();
-        let reminders = notices.reminders.read(cx).cards(cx);
-        if started.is_empty() && reminders.is_empty() {
-            return None;
+    /// Where the cards were drawn in the last frame, while any shows.
+    #[must_use]
+    pub fn meeting_cards_drawn(&self) -> Option<CardsDrawn> {
+        self.meeting_notices.as_ref()?.drawn.get()
+    }
+
+    /// The cards, when any shows, and what draws them again once the chat's messages area they go in moved.
+    pub(super) fn meeting_cards_view(
+        &mut self,
+        palette: Palette,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let area_drawn = self.chat.as_ref().map(|chat| chat.read(cx).messages_area());
+        let Some(notices) = self.meeting_notices.as_mut() else {
+            return Vec::new();
+        };
+        // what the chat drew last frame; a frame that doesn't draw it leaves none
+        let area = area_drawn.as_ref().and_then(|drawn| drawn.take());
+        notices.placed_in.set(area);
+        let mut started = notices.alert.read(cx).cards();
+        let mut reminders = notices.reminders.read(cx).cards(cx);
+        let total = started.len() + reminders.len();
+        if total <= MAX_CARDS {
+            notices.all_shown = false;
         }
+        if total == 0 {
+            notices.drawn.set(None);
+            return Vec::new();
+        }
+        if !notices.all_shown {
+            started.drain(..started.len().saturating_sub(MAX_CARDS));
+            reminders.truncate(MAX_CARDS - started.len());
+        }
+        let shown = started.len() + reminders.len();
         let now = meeting_reminder::wall_ms(cx);
         let (alert, reminder_model) = (notices.alert.clone(), notices.reminders.clone());
+        let more = more_button(total - shown, notices.all_shown, cx);
         let cards = reminders
             .into_iter()
             .zip(0_u64..)
             .map(|(card, key)| reminder_card((key, card), &reminder_model, now, palette))
             .chain(started.into_iter().map(|card| started_card(card, &alert, palette)));
-        Some(
-            gpui::deferred(
-                div()
-                    .debug_selector(|| "meeting-cards".to_owned())
+        let drawn = Rc::clone(&notices.drawn);
+        let record = move |stack| {
+            drawn.set(Some(CardsDrawn {
+                stack,
+                area,
+                shown,
+                more: total - shown,
+            }));
+        };
+        let stack = div()
+            .id("meeting-cards")
+            .debug_selector(|| "meeting-cards".to_owned())
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                canvas(move |bounds, _, _| record(bounds), |_, (), _, _| {})
                     .absolute()
-                    .right(px(16.0))
-                    .bottom(px(16.0))
-                    .w(px(CARD_WIDTH))
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .children(cards),
+                    .size_full(),
             )
-            .with_priority(1)
-            .into_any_element(),
-        )
+            .children(more)
+            .children(cards);
+        let follow = follow_area(Rc::clone(&notices.placed_in), area_drawn);
+        vec![Room::of(area, window).place(stack), follow]
     }
+}
+
+/// Drawn after the chat: once its messages area moved (or went) since the cards were placed in it, they are placed
+/// again.
+fn follow_area(
+    placed_in: Rc<Cell<Option<Bounds<Pixels>>>>,
+    area_drawn: Option<Rc<Cell<Option<Bounds<Pixels>>>>>,
+) -> AnyElement {
+    canvas(
+        move |_, window, _| {
+            let now = area_drawn.as_ref().and_then(|drawn| drawn.get());
+            if now != placed_in.get() {
+                window.refresh();
+            }
+        },
+        |_, (), _, _| {},
+    )
+    .absolute()
+    .size_0()
+    .into_any_element()
+}
+
+/// The room the cards have: the corner they stand on (their bottom right), how wide and how tall they may be.
+struct Room {
+    corner: gpui::Point<Pixels>,
+    width: Pixels,
+    height: Pixels,
+}
+
+impl Room {
+    /// The bottom right of the chat's messages `area`, else of the window below its title bar.
+    fn of(area: Option<Bounds<Pixels>>, window: &Window) -> Self {
+        let viewport = window.viewport_size();
+        let (window_w, window_h) = (f32::from(viewport.width), f32::from(viewport.height));
+        let (right, bottom, top, wide) = match area {
+            Some(area) => (
+                f32::from(area.right()) - MARGIN,
+                f32::from(area.bottom()) - MARGIN,
+                f32::from(area.top()) + MARGIN,
+                f32::from(area.size.width) - 2.0 * MARGIN,
+            ),
+            None => (
+                window_w - MARGIN,
+                window_h - MARGIN,
+                super::title_bar::TITLE_HEIGHT + MARGIN,
+                window_w - 2.0 * MARGIN,
+            ),
+        };
+        let width = CARD_WIDTH.min(wide.max(MIN_CARD_WIDTH)).min(window_w - MARGIN);
+        Self {
+            corner: point(px(right), px(bottom)),
+            width: px(width.max(0.0)),
+            height: px((bottom - top).max(0.0)),
+        }
+    }
+
+    /// `stack` over everything, its bottom right on the corner, as wide as the room and scrolling past its height.
+    fn place(&self, stack: gpui::Stateful<gpui::Div>) -> AnyElement {
+        gpui::deferred(
+            anchored()
+                .anchor(Anchor::BottomRight)
+                .position(self.corner)
+                .snap_to_window_with_margin(px(MARGIN / 2.0))
+                .child(stack.relative().w(self.width).max_h(self.height).overflow_y_scroll()),
+        )
+        .with_priority(1)
+        .into_any_element()
+    }
+}
+
+/// "+N more" while cards are held back; "Show fewer" once they all show.
+fn more_button(held: usize, all_shown: bool, cx: &mut Context<Shell>) -> Option<AnyElement> {
+    let (label, show_all) = match (held, all_shown) {
+        (0, false) => return None,
+        (_, true) => ("Show fewer".to_owned(), false),
+        (held, false) => (format!("+{held} more"), true),
+    };
+    Some(
+        div()
+            .flex()
+            .justify_end()
+            .child(selected_by(
+                "meeting-cards-more",
+                Button::new("meeting-cards-more")
+                    .outline()
+                    .small()
+                    .label(label)
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        if let Some(notices) = shell.meeting_notices.as_mut() {
+                            notices.all_shown = show_all;
+                            cx.notify();
+                        }
+                    })),
+            ))
+            .into_any_element(),
+    )
 }
 
 /// What a card shows: its test selector, its mark, its title and lines, its actions and its close button.

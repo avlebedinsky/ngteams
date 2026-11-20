@@ -520,6 +520,35 @@ mod tests {
     }
 
     #[test]
+    fn a_meeting_reminder_offers_join_snooze_and_dismiss() {
+        let (server, queue) = server();
+        let _ = server
+            .show(&notice(NoticeKind::Reminder), 0)
+            .now_or_never()
+            .expect("ready");
+        let Ok(Command::Show(Banner {
+            notification: shown, ..
+        })) = queue.try_recv()
+        else {
+            panic!("nothing shown")
+        };
+        let actions: Vec<(&str, &str)> = shown
+            .actions
+            .iter()
+            .map(|action| (action.id.as_ref(), action.label.as_ref()))
+            .collect();
+        assert_eq!(
+            actions,
+            [
+                (JOIN_ACTION, "Join"),
+                (SNOOZE_ACTION, "Snooze"),
+                (DISMISS_ACTION, "Dismiss")
+            ]
+        );
+        assert_eq!(category_of(&shown.actions), "ngteams-reminder");
+    }
+
+    #[test]
     fn an_app_activity_item_shows_as_a_plain_banner() {
         let (server, queue) = server();
         let id = server
@@ -603,6 +632,8 @@ mod tests {
         assert_eq!(action_of(&response(Some(ANSWER_ACTION))), Some(ANSWER_ACTION));
         assert_eq!(action_of(&response(Some(DECLINE_ACTION))), Some(DECLINE_ACTION));
         assert_eq!(action_of(&response(Some(JOIN_ACTION))), Some(JOIN_ACTION));
+        assert_eq!(action_of(&response(Some(SNOOZE_ACTION))), Some(SNOOZE_ACTION));
+        assert_eq!(action_of(&response(Some(DISMISS_ACTION))), Some(DISMISS_ACTION));
         assert_eq!(action_of(&response(Some("other"))), None);
     }
 

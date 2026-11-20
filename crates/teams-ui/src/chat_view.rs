@@ -218,6 +218,18 @@ const AVATAR: f32 = 32.0;
 type FacesPlaced = Rc<std::cell::RefCell<HashMap<String, Bounds<Pixels>>>>;
 #[cfg(not(feature = "test-support"))]
 type FacesPlaced = ();
+
+/// Where the last frame drew what others place things by.
+#[derive(Default)]
+struct Placed {
+    /// Each sender's face, by message, in a test build only: the UI tour opens a profile card beside one
+    /// ([`ChatView::face_bounds`]). The card itself is placed by its anchor's own bounds.
+    #[cfg_attr(not(feature = "test-support"), expect(dead_code, reason = "a test build's hook"))]
+    faces: FacesPlaced,
+    /// The messages, between the header and the compose box: the window's meeting cards go there
+    /// ([`ChatView::messages_area`]).
+    messages: Rc<Cell<Option<Bounds<Pixels>>>>,
+}
 /// Between the avatar's column and the bubble, px.
 const AVATAR_GAP: f32 = 12.0;
 /// A bubble's text inset, px: the reactions start there too.
@@ -1129,10 +1141,7 @@ pub struct ChatView {
     /// The message whose hover bar is under the pointer: the bar floats over the message above its own, outside its
     /// row, so it keeps itself shown.
     bar_hovered: Option<String>,
-    /// Where each sender's face was drawn in the last frame, by message, in a test build only: the UI tour opens a
-    /// profile card beside one ([`ChatView::face_bounds`]). The card itself is placed by its anchor's own bounds.
-    #[cfg_attr(not(feature = "test-support"), expect(dead_code, reason = "a test build's hook"))]
-    faces_placed: FacesPlaced,
+    placed: Placed,
     selected: Option<String>,
     focus: FocusHandle,
     traced: Option<Vec<Traced>>,
@@ -1324,7 +1333,7 @@ impl ChatView {
             drawn: Vec::new(),
             hovered: None,
             bar_hovered: None,
-            faces_placed: FacesPlaced::default(),
+            placed: Placed::default(),
             selected: None,
             focus: cx.focus_handle(),
             traced: None,
@@ -3792,10 +3801,17 @@ impl ChatView {
         column.pt(rems(HEADER_REMS)).child(avatar)
     }
 
+    /// Where the messages are drawn, set each frame the view is drawn: the shell takes it to place its cards over the
+    /// messages, clear of the header and the compose box.
+    #[must_use]
+    pub fn messages_area(&self) -> Rc<Cell<Option<Bounds<Pixels>>>> {
+        Rc::clone(&self.placed.messages)
+    }
+
     /// `avatar`, its bounds recorded for [`Self::face_bounds`].
     #[cfg(feature = "test-support")]
     fn face_placed(&self, item: &MessageItem, avatar: AnyElement) -> AnyElement {
-        let (placed, at) = (Rc::clone(&self.faces_placed), item.id.clone());
+        let (placed, at) = (Rc::clone(&self.placed.faces), item.id.clone());
         div()
             .on_children_prepainted(move |children, _, _| {
                 if let Some(bounds) = children.first() {
@@ -3810,7 +3826,7 @@ impl ChatView {
     #[cfg(feature = "test-support")]
     #[must_use]
     pub fn face_bounds(&self, id: &str) -> Option<Bounds<Pixels>> {
-        self.faces_placed.borrow().get(id).copied()
+        self.placed.faces.borrow().get(id).copied()
     }
 
     /// A message's column: its header, its bubble (with the "mentions you" mark beside it and its hover bar over its
@@ -5768,7 +5784,7 @@ impl Render for ChatView {
         let palette = theme::current(cx);
         self.drawn.clear();
         #[cfg(feature = "test-support")]
-        self.faces_placed.borrow_mut().clear();
+        self.placed.faces.borrow_mut().clear();
         let more = self.more_overlay();
         let options = self.options_overlay(palette, window, cx);
         let selection_menu = self.selection_menu(palette, window, cx);
@@ -5781,6 +5797,10 @@ impl Render for ChatView {
         .pb_3();
         self.centre(cx);
         let pill = self.jump_pill(cx);
+        let area = Rc::clone(&self.placed.messages);
+        let area_probe = canvas(move |bounds, _, _| area.set(Some(bounds)), |_, (), _, _| {})
+            .absolute()
+            .size_full();
         let typing = self.typing_line(palette, cx);
         let messages = reactors::reaction_keys(hover_bar_keys(div(), cx), cx)
             .key_context(CONTEXT)
@@ -5793,6 +5813,7 @@ impl Render for ChatView {
             .relative()
             .flex_1()
             .min_h_0()
+            .child(area_probe)
             .child(rows)
             .children(self.bot_intro(palette))
             .children(pill);

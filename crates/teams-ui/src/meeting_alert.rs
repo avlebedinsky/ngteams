@@ -19,7 +19,8 @@
 //!
 //! **The window's card**: each banner shows in the window as well ([`MeetingAlert::cards`], drawn by the shell), for
 //! [`CARD_TIME`], or until it is acted on or closed; without a notification server (or one that refused it) only the
-//! card shows.
+//! card shows. A banner shown before the server was handed in (as the app starts) gets its desktop notification once
+//! it is.
 //!
 //! It shows its starter's picture as the engine has it stored, as a message's banner shows its sender's
 //! ([`crate::notify::picture`]); none is waited for from the network.
@@ -241,6 +242,11 @@ struct ShownBanner {
     body: String,
     /// Whether the window still shows its card.
     card: bool,
+    /// Its place in the order the banners came, which a desktop notification's id that came later doesn't change.
+    seq: u64,
+    /// Its desktop notification, while none was shown because no server was handed in yet (a banner as the app
+    /// starts): it is shown once one is.
+    unsent: Option<Notice>,
 }
 
 /// A banner decided on, to show: its notice, without its starter's `picture` until that is decoded.
@@ -302,6 +308,8 @@ pub struct MeetingAlert {
     running: HashMap<String, RunningRead>,
     /// The last id given to a banner only the window's card shows.
     next_local: u32,
+    /// The last banner's place in their order.
+    next_seq: u64,
     _feed: Subscription,
     _calls: Subscription,
 }
@@ -348,6 +356,7 @@ impl MeetingAlert {
             ended: HashSet::new(),
             running: HashMap::new(),
             next_local: LOCAL_IDS,
+            next_seq: 0,
             _feed: feed,
             _calls: calls,
         };
@@ -355,9 +364,55 @@ impl MeetingAlert {
         this
     }
 
-    /// From now on, banners go to `server`.
-    pub fn set_server(&mut self, server: Arc<dyn NotificationServer>) {
+    /// From now on, banners go to `server`; a banner the window shows already without one (one due as the app
+    /// started, before the server came) goes there now.
+    pub fn set_server(&mut self, server: Arc<dyn NotificationServer>, cx: &mut Context<Self>) {
         self.server = Some(server);
+        let unsent: Vec<u32> = self
+            .shown
+            .iter()
+            .filter(|(_, shown)| shown.unsent.is_some())
+            .map(|(id, _)| *id)
+            .collect();
+        for id in unsent {
+            self.send_late(id, cx);
+        }
+    }
+
+    /// Shows banner `id`'s desktop notification, which no server showed when it came; the banner takes the server's id.
+    fn send_late(&mut self, id: u32, cx: &mut Context<Self>) {
+        let Some(server) = self.server.clone() else { return };
+        let Some((notice, seq)) = self
+            .shown
+            .get_mut(&id)
+            .and_then(|shown| Some((shown.unsent.take()?, shown.seq)))
+        else {
+            return;
+        };
+        log::debug!(
+            "meeting banner: a desktop notification late for {}",
+            notice.conversation
+        );
+        cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let Ok(given) = server.show(&notice, 0).await else {
+                log::debug!("meeting banner: no desktop notification for {}", notice.conversation);
+                return;
+            };
+            // a banner closed while the server answered takes its notification away again
+            let kept = this.update(cx, |this, _| {
+                let local = this
+                    .shown
+                    .iter()
+                    .find_map(|(id, shown)| (shown.seq == seq).then_some(*id))?;
+                let shown = this.shown.remove(&local)?;
+                this.shown.insert(given, shown);
+                Some(())
+            });
+            if kept.ok().flatten().is_none() {
+                server.close(given).await;
+            }
+        })
+        .detach();
     }
 
     /// Notification `id` had `action` invoked: whether it is one of this alert's (its Join joins, its body opens the
@@ -619,12 +674,13 @@ impl MeetingAlert {
             if shown.is_none() {
                 log::debug!("meeting banner: no desktop notification for {}", pending.conversation);
             }
+            let no_server = server.is_none();
             let kept = this.update(cx, |this, cx| {
                 let due = !this.ended_since(&pending) && !this.in_call(&pending.conversation, cx);
                 if due {
                     let id = shown.unwrap_or_else(|| this.local_id());
                     log::debug!("meeting banner: shown for {}", pending.conversation);
-                    this.shown_banner(id, banner, pending.call.clone(), cx);
+                    this.shown_banner(id, banner, pending.call.clone(), no_server, cx);
                 }
                 due
             });
@@ -635,7 +691,8 @@ impl MeetingAlert {
         .detach();
     }
 
-    fn shown_banner(&mut self, id: u32, banner: Banner, call: Option<String>, cx: &mut Context<Self>) {
+    /// Banner `id` shows; `unsent` when no server was handed in to show its desktop notification.
+    fn shown_banner(&mut self, id: u32, banner: Banner, call: Option<String>, unsent: bool, cx: &mut Context<Self>) {
         let conversation = banner.notice.conversation.clone();
         let kind = match banner.join {
             MeetingJoin::GroupChat { .. } => "group-chat",
@@ -655,6 +712,9 @@ impl MeetingAlert {
                 self.calls.read(cx).call().is_some(),
             );
         }
+        self.next_seq += 1;
+        let seq = self.next_seq;
+        let unsent = unsent.then(|| banner.notice.clone());
         self.shown.insert(
             id,
             ShownBanner {
@@ -664,13 +724,19 @@ impl MeetingAlert {
                 title: banner.notice.summary,
                 body: banner.notice.body,
                 card: true,
+                seq,
+                unsent,
             },
         );
+        // the server came while this banner was being decided
+        if self.server.is_some() {
+            self.send_late(id, cx);
+        }
         // the window's card goes after Teams' banner time; the desktop's stays as its server keeps it
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             cx.background_executor().timer(CARD_TIME).await;
             let _ = this.update(cx, |this, cx| {
-                if let Some(shown) = this.shown.get_mut(&id) {
+                if let Some(shown) = this.shown.values_mut().find(|shown| shown.seq == seq) {
                     shown.card = false;
                     cx.notify();
                 }
@@ -690,19 +756,22 @@ impl MeetingAlert {
     /// The banners the window shows as cards now, the newest last.
     #[must_use]
     pub fn cards(&self) -> Vec<StartedCard> {
-        let mut cards: Vec<StartedCard> = self
+        let mut cards: Vec<(u64, StartedCard)> = self
             .shown
             .iter()
             .filter(|(_, shown)| shown.card)
-            .map(|(id, shown)| StartedCard {
-                id: *id,
-                title: shown.title.clone(),
-                body: shown.body.clone(),
-                opens_chat: !is_team_thread_id(&shown.conversation),
+            .map(|(id, shown)| {
+                let card = StartedCard {
+                    id: *id,
+                    title: shown.title.clone(),
+                    body: shown.body.clone(),
+                    opens_chat: !is_team_thread_id(&shown.conversation),
+                };
+                (shown.seq, card)
             })
             .collect();
-        cards.sort_by_key(|card| card.id);
-        cards
+        cards.sort_by_key(|(seq, _)| *seq);
+        cards.into_iter().map(|(_, card)| card).collect()
     }
 
     /// The card of banner `id` was dismissed: the banner closes, the desktop's too.

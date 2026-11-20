@@ -110,6 +110,7 @@ mod bot_chat;
 mod channel_management;
 mod chat_people;
 mod meeting_cards;
+pub use meeting_cards::{CardsDrawn, MAX_CARDS as MAX_MEETING_CARDS};
 mod meeting_tabs;
 mod new_chat;
 mod profile_card;
@@ -3667,7 +3668,7 @@ impl Render for Shell {
         let share_dialog = self.share_dialog_view();
         let team_dialog = self.team_dialog_view();
         let toast = self.toast_view(palette, cx);
-        let meeting_cards = self.meeting_cards_view(palette, cx);
+        let meeting_cards = self.meeting_cards_view(palette, window, cx);
         let more_apps = self.more_apps_view(palette, cx);
         let card = self.card_layer(window, cx);
         let first_run = self.first_run_layer(window, cx);
