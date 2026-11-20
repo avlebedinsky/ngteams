@@ -1028,8 +1028,9 @@ fn shift_f10_opens_the_menu_and_its_keys_reach_translate() {
     use teams_ui::chat_translate::Mark;
     let rig = Rig::start();
     let (view, cx) = keyed_chat(&rig);
-    // Copy first, Down to Translation, Right opens its list, Left closes it, Right again, Enter translates
-    keys(cx, &["shift-f10", "down", "right"]);
+    // Copy first, Down past Mark as unread to Translation, Right opens its list, Left closes it, Right again, Enter
+    // translates
+    keys(cx, &["shift-f10", "down", "down", "right"]);
     assert_eq!(options_of(&view, cx).as_deref(), Some("1001"));
     assert!(
         cx.debug_bounds("message-translation-menu").is_some(),
@@ -1052,7 +1053,7 @@ fn shift_f10_opens_the_menu_and_its_keys_reach_translate() {
 fn escape_in_the_translation_list_closes_it_alone_and_its_settings_row_takes_enter() {
     let rig = Rig::start();
     let (view, cx) = keyed_chat(&rig);
-    keys(cx, &["shift-f10", "down"]);
+    keys(cx, &["shift-f10", "down", "down"]);
     press(cx, "enter");
     assert!(
         cx.debug_bounds("message-translation-menu").is_some(),
@@ -1074,7 +1075,7 @@ fn escape_in_the_translation_list_closes_it_alone_and_its_settings_row_takes_ent
         })
         .detach();
     });
-    keys(cx, &["shift-f10", "down", "right", "down"]);
+    keys(cx, &["shift-f10", "down", "down", "right", "down"]);
     press(cx, "enter");
     assert!(settings.get(), "Settings opens the settings' page");
     assert_eq!(options_of(&view, cx), None);
@@ -1117,7 +1118,7 @@ fn tab_and_shift_tab_in_the_menu_close_it_and_give_the_keys_back() {
         assert!(list_focused(&view, cx), "{tab}: the keys are back on the message list");
     }
     // with Translation's list open, Tab closes the menu and the list
-    keys(cx, &["shift-f10", "down", "right"]);
+    keys(cx, &["shift-f10", "down", "down", "right"]);
     assert!(cx.debug_bounds("message-translation-menu").is_some());
     keys(cx, &["tab"]);
     assert_eq!(options_of(&view, cx), None);

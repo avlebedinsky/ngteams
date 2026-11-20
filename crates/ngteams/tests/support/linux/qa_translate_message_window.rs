@@ -503,7 +503,7 @@ impl Walk<'_> {
     }
 
     /// Opens the menu of `id` and its "Translation" list; where the list's rows are. `own`: the menu also offers
-    /// Delete, before Translation.
+    /// Delete, before Mark as unread and Translation.
     fn open_list(&mut self, view: &str, id: &str, own: bool) -> SandboxResult<ListAt> {
         let (x, y) = self.open_menu(view, id)?;
         let menu = load(&self.run.shot(self.sandbox, "qa575-menu.png")?)?;
@@ -511,9 +511,10 @@ impl Walk<'_> {
         let top = border_top(&menu, column, y + 12..menu.height())
             .or_else(|| border_top(&menu, column, y.saturating_sub(320).max(60)..y))
             .ok_or("no menu's top edge under its button")?;
-        // the rows of Copy, Delete (the account's own), then Translation: 32 px with 2 px between, under 1 + 4 px
-        let index = if own { 2 } else { 1 };
-        let row_y = top + 1 + 4 + 34 * index + 16;
+        // the rows of Copy, Delete (the account's own), a hairline (1 px with 4 px over and under it), Mark as unread,
+        // then Translation: 32 px with 2 px between, under 1 + 4 px
+        let index = if own { 3 } else { 2 };
+        let row_y = top + 1 + 4 + 34 * index + 11 + 16;
         self.run.click(column, row_y)?;
         thread::sleep(SETTLE);
         let listed = load(&self.run.shot(self.sandbox, "qa575-list.png")?)?;
