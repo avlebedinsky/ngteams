@@ -13,6 +13,8 @@
 //!   background read. Requests remain FIFO within that lane, except one for a conversation being read waits until
 //!   its cursor is stored. Duplicate message syncs share the successful result; canceled queued reads are skipped.
 //!   Teams reads use the same lane, so requesting many chats and lists cannot create a burst of parallel reads.
+//! - **Messages translated one at a time** ([`Request::KeepTranslatedMessage`]): kept in the store at once (only the
+//!   store changes), so a later query of them reads the write.
 //! - **Read receipts**: queued locally at once, advancing the shared read horizon for the messages seen; the
 //!   transport waits its turn with the other writes. Queries and read receipts also run while an outbox attempt waits.
 //! - **Call actions**: handed to the calling at once ([`Inbox::hand_calls_to`]), as the loop hands them: the calling
@@ -282,21 +284,32 @@ impl<C: Credentials + 'static> Inbox<C> {
     /// Answers a request from the store alone when it can be (see the module docs); the request to keep, if any.
     fn meanwhile(&self, store: &mut Store, request: Request) -> Option<Request> {
         match request {
-            Request::Write(
+            Request::Write(action, reply) => match *action {
                 Action::Read {
                     conversation,
                     message_id,
+                } => match self.queue_read(store, conversation, message_id) {
+                    Ok(row) => Some(Request::SendQueued(row.id, reply)),
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        None
+                    }
                 },
-                reply,
-            ) => match self.queue_read(store, conversation, message_id) {
-                Ok(row) => Some(Request::SendQueued(row.id, reply)),
-                Err(error) => {
-                    let _ = reply.send(Err(error));
-                    None
-                }
+                other => Some(Request::Write(Box::new(other), reply)),
             },
             Request::Query(query) => {
                 self.answer(store, query);
+                None
+            }
+            // a later query of the translated messages reads what this write keeps
+            Request::KeepTranslatedMessage {
+                conversation,
+                message,
+                translated,
+                reply,
+            } => {
+                let kept = store.set_translated_message(&conversation, &message, translated);
+                let _ = reply.send(kept.map_err(EngineError::from));
                 None
             }
             Request::Call(_, _, reply) if self.stopping.load(Ordering::Relaxed) => {
@@ -397,9 +410,6 @@ impl<C: Credentials + 'static> Inbox<C> {
 
     /// Answers a query from the store.
     pub(super) fn answer(&self, store: &Store, query: Query) {
-        fn give<T>(reply: Responder<T>, answer: Result<T, StoreError>) {
-            let _ = reply.send(answer.map_err(EngineError::from));
-        }
         let me = self.me.as_str();
         match query {
             Query::Conversations(limit, reply) => give(reply, store.conversations_by_activity(limit)),
@@ -428,6 +438,7 @@ impl<C: Credentials + 'static> Inbox<C> {
             Query::RecentReactions(limit, reply) => give(reply, store.recent_reactions(me, limit)),
             Query::FrequentReactions(limit, reply) => give(reply, store.frequent_reactions(me, limit)),
             Query::UnreadCount(conversation, reply) => give(reply, store.unread_count(&conversation, me)),
+            Query::UnreadMark(conversation, reply) => give(reply, store.unread_mark(&conversation)),
             Query::DisplayName(mri, reply) => give(reply, store.display_name(&mri)),
             Query::ReadHorizon(conversation, reply) => give(reply, store.read_horizon(&conversation, me)),
             Query::Activity(reply) => give(reply, crate::activity::ActivityFeed::from_store(store, me)),
@@ -441,22 +452,10 @@ impl<C: Credentials + 'static> Inbox<C> {
             Query::OutboxUnsettled(conversation, reply) => give(reply, store.outbox_unsettled(&conversation)),
             Query::LeftByEarlierRuns(reply) => give(reply, store.outbox_left_by_earlier_runs()),
             Query::ReplyRoots(conversation, reply) => give(reply, store.reply_roots(&conversation)),
-            Query::Translations {
-                conversation,
-                language,
-                ids,
-                reply,
-            } => give(reply, store.translations(&conversation, &language, &ids)),
-            Query::Glossary {
-                conversation,
-                language,
-                reply,
-            } => give(reply, store.glossary(&conversation, &language)),
-            Query::SentOriginals {
-                conversation,
-                keys,
-                reply,
-            } => give(reply, store.sent_originals(&conversation, &keys)),
+            query @ (Query::Translations { .. }
+            | Query::Glossary { .. }
+            | Query::SentOriginals { .. }
+            | Query::TranslatedMessages { .. }) => answer_translation(store, query),
             Query::CallTranscripts(conversation, reply) => give(reply, store.call_transcripts(&conversation)),
             Query::TranscriptLines(id, reply) => give(reply, store.transcript_lines(id)),
             Query::CalendarEvents {
@@ -477,6 +476,39 @@ impl<C: Credentials + 'static> Inbox<C> {
                 },
             ),
         }
+    }
+}
+
+fn give<T>(reply: Responder<T>, answer: Result<T, StoreError>) {
+    let _ = reply.send(answer.map_err(EngineError::from));
+}
+
+/// Answers a query about the chats translated on this computer from the store.
+fn answer_translation(store: &Store, query: Query) {
+    match query {
+        Query::Translations {
+            conversation,
+            language,
+            ids,
+            reply,
+        } => give(reply, store.translations(&conversation, &language, &ids)),
+        Query::Glossary {
+            conversation,
+            language,
+            reply,
+        } => give(reply, store.glossary(&conversation, &language)),
+        Query::SentOriginals {
+            conversation,
+            keys,
+            reply,
+        } => give(reply, store.sent_originals(&conversation, &keys)),
+        Query::TranslatedMessages {
+            conversation,
+            ids,
+            reply,
+        } => give(reply, store.translated_messages(&conversation, &ids)),
+        // the caller hands only those over
+        _ => {}
     }
 }
 

@@ -50,6 +50,7 @@ mod relay;
 mod request;
 mod schedule;
 mod search;
+mod sticker;
 mod team_apps;
 pub use activity_settings::{
     AppNotificationPreference, UserGraphSettings, UserGraphSettingsError, UserGraphSettingsRead,
@@ -58,7 +59,11 @@ mod team_read;
 mod thumbnail;
 pub mod transcript;
 pub use attachment::{DriveSite, DriveWrite, MAX_ATTACHMENT_SIZE, OwnDrive, UploadedFile, direct_file_grants};
-pub use bot::{BotInvoke, CardInvoke, CommandContext, InvokeAnswer, InvokeKind};
+pub use bot::{
+    BotInvoke, CardInvoke, CommandContext, ComposeCommand, DialogSize, InvokeAnswer, InvokeKind, TaskDialog,
+};
+mod extensions;
+pub use extensions::{CommandParameter, ExtensionApp, ExtensionCommand, TaskInfo, extension_apps};
 mod urlp;
 pub mod workflow;
 mod write;
@@ -74,8 +79,8 @@ pub use ams::{MessagePicture, PastedFormat, PastedPicture, sent_picture, sent_pi
 pub use calendar::{
     Attendee, CALENDAR_VIEW_PATH, CalendarAnswer, CalendarAnswerError, CalendarEvent, CalendarView, ChannelEventRead,
     ChannelEventRef, EventKind, EventRead, EventTime, FloatingTime, FullEvent, MAX_CALENDAR_WINDOW_MS,
-    Response as EventResponse, ShowAs, TimeZoneSettings, join_url_chat, join_url_chat_in, join_url_meeting,
-    join_url_meeting_in,
+    Reminder as EventReminder, Response as EventResponse, ShowAs, TimeZoneSettings, join_url_chat, join_url_chat_in,
+    join_url_meeting, join_url_meeting_in,
 };
 pub use channel_meeting::{CANCELLED_MEETING_TYPE, SCHEDULED_MEETING_TYPE, ScheduledMeeting};
 pub use channel_read::{ChannelCreationStatus, TeamPeopleSearch, TeamPerson};
@@ -136,6 +141,7 @@ pub use search::{
     ALL_PAGE, Found, FoundChannel, FoundChat, FoundFile, FoundMessage, FoundPerson, PAGE, SUBSTRATE_AUDIENCE,
     SUBSTRATE_HOST, SearchAnswerError, SearchKind, SubstrateSearch, highlighted,
 };
+pub use sticker::{STICKERS_HOST, StickerPicture};
 pub use team_apps::{
     AppDefinitions, AppStore, DEFINITIONS_PAGE, DefaultTeamPicture, InstalledApp, OwnedGroups, StoreApp,
     TEMPLATE_LOCALE, TeamApps, TeamTemplateCard, TeamTemplateDetails, TeamTemplateRead, TeamTemplates, TemplateChannel,
@@ -159,7 +165,7 @@ pub use write::{
     RemoveReaction, RemoveState, RenegotiateMedia, ReportRinging, ResumeCall, SendCallReaction, SendMessage,
     SetActivityRead, SetEndpointAvailability, SetMeetingTitle, SetReaction, SetUserGraphSettings, SharedHistory,
     StartCall, StartParts, TEAMS_ECHO_BOT_MRI, TEST_CALL_SCENARIO, TeamCopy, TeamRole, TeamWrite, TemplateTeam,
-    TransferCall, Transferor, Typing, UpdateEndpointMetadata, UpdateEndpointState, UpdateMediaDescriptions,
+    TransferCall, Transferor, Typing, UnreadMark, UpdateEndpointMetadata, UpdateEndpointState, UpdateMediaDescriptions,
     UpdateParticipantProperties, VoiceConsent, Wire, team_created, team_error_code,
 };
 pub use write::{

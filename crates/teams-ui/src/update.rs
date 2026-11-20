@@ -9,6 +9,8 @@
 //! - **Restart to update** (downloaded and verified): the press installs and restarts, unless something holds the
 //!   restart up (a call, or a message not sent yet, [`Waiting`]): then it says what does.
 //! - **Update failed**: why in its tooltip; the press tries again, as the next check does.
+//! - **Update available** (a copy that only Nix updates): the tooltip gives the command that updates it, and the press
+//!   copies that command.
 //!
 //! Nothing is shown otherwise: no update, or a build that doesn't update itself.
 
@@ -41,6 +43,13 @@ pub enum UpdateStatus {
     Failed {
         version: SharedString,
         reason: SharedString,
+    },
+    /// A newer release that the app does not install itself (a Nix install): what to do, and the command to run, which
+    /// the press copies.
+    Manual {
+        version: SharedString,
+        says: SharedString,
+        command: Option<SharedString>,
     },
 }
 
@@ -115,13 +124,18 @@ pub fn waiting(cx: &App) -> Option<Waiting> {
     holds(cx)
 }
 
-/// The press, as the button takes it: the app's press when the status takes one, else nothing. A press of Restart to
-/// update while something holds the restart up gives back what does, for the window to say.
-pub fn press(cx: &mut App) -> Option<Waiting> {
+/// The press, as the button takes it: the app's press when the status takes one, else nothing. It gives back what the
+/// window says: what holds up a press of Restart to update, or the command that a press of Update available copies.
+pub fn press(cx: &mut App) -> Option<SharedString> {
     let status = status(cx);
     match status {
-        UpdateStatus::Ready(_) if let Some(waiting) = waiting(cx) => return Some(waiting),
+        UpdateStatus::Ready(_) if let Some(waiting) = waiting(cx) => return Some(waiting.says().into()),
         UpdateStatus::Ready(_) | UpdateStatus::Failed { .. } => {}
+        UpdateStatus::Manual { command, .. } => {
+            let command = command?;
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(command.to_string()));
+            return Some(format!("Copied: {command}").into());
+        }
         UpdateStatus::None | UpdateStatus::Downloading { .. } | UpdateStatus::Installing(_) => return None,
     }
     if let Some(press) = cx.try_global::<Updates>().and_then(|updates| updates.press.clone()) {
@@ -156,6 +170,19 @@ fn face(status: &UpdateStatus, waiting: Option<Waiting>) -> Option<(Option<Glyph
             Some(Glyph::CIRCLE_ALERT),
             "Update failed".into(),
             format!("ngteams {version} wasn't installed. {reason}\nSelect to try again").into(),
+        ),
+        UpdateStatus::Manual { version, says, command } => (
+            Some(if command.is_some() {
+                Glyph::COPY
+            } else {
+                Glyph::ARROW_UP
+            }),
+            "Update available".into(),
+            match command {
+                Some(command) => format!("ngteams {version} is out. {says}\n{command}\nSelect to copy the command"),
+                None => format!("ngteams {version} is out. {says}"),
+            }
+            .into(),
         ),
     })
 }
@@ -272,12 +299,12 @@ mod tests {
             holds_with(Rc::new(|_| Some(Waiting::Call)), cx);
             set_status(UpdateStatus::Ready(version.clone()), cx);
             let before = pressed.get();
-            assert_eq!(press(cx), Some(Waiting::Call));
+            assert_eq!(press(cx), Some(Waiting::Call.says().into()));
             assert_eq!(pressed.get(), before);
             // ... but not a new try of a failed download, which may go on meanwhile
             set_status(
                 UpdateStatus::Failed {
-                    version,
+                    version: version.clone(),
                     reason: "Offline.".into(),
                 },
                 cx,
@@ -285,6 +312,41 @@ mod tests {
             assert_eq!(press(cx), None);
             assert_eq!(pressed.get(), before + 1);
         });
+    }
+
+    #[gpui::test]
+    fn a_press_of_update_available_copies_the_command_and_asks_nothing_of_the_app(cx: &mut gpui::TestAppContext) {
+        let pressed = Rc::new(Cell::new(0));
+        let counted = Rc::clone(&pressed);
+        cx.update(|cx| {
+            on_press(Rc::new(move |_| counted.set(counted.get() + 1)), cx);
+            set_status(
+                UpdateStatus::Manual {
+                    version: "0.1.0.7".into(),
+                    says: "To update, run this command:".into(),
+                    command: Some("nix profile upgrade ngteams".into()),
+                },
+                cx,
+            );
+            assert_eq!(press(cx), Some("Copied: nix profile upgrade ngteams".into()));
+        });
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("nix profile upgrade ngteams".to_owned())
+        );
+        cx.update(|cx| {
+            // a copy that does not say how it was installed: no command, nothing to copy
+            set_status(
+                UpdateStatus::Manual {
+                    version: "0.1.0.7".into(),
+                    says: "Update it with Nix, as you installed it.".into(),
+                    command: None,
+                },
+                cx,
+            );
+            assert_eq!(press(cx), None);
+        });
+        assert_eq!(pressed.get(), 0);
     }
 
     #[test]
@@ -332,5 +394,38 @@ mod tests {
         assert_eq!(failed.1, "Update failed");
         assert!(failed.2.contains("Not enough space.") && failed.2.ends_with("Select to try again"));
         assert!(Waiting::Call.says().contains("after your call"));
+        assert_eq!(
+            words(
+                UpdateStatus::Manual {
+                    version: "0.1.0.7".into(),
+                    says: "To update, run this command. If your system flake is not in /etc/nixos, use its folder:".into(),
+                    command: Some("sudo nix flake update ngteams --flake /etc/nixos && sudo nixos-rebuild switch --flake /etc/nixos".into()),
+                },
+                None
+            ),
+            (
+                true,
+                "Update available".into(),
+                "ngteams 0.1.0.7 is out. To update, run this command. If your system flake is not in /etc/nixos, use its folder:\n\
+                 sudo nix flake update ngteams --flake /etc/nixos && sudo nixos-rebuild switch --flake /etc/nixos\nSelect to copy the command"
+                    .into()
+            )
+        );
+        let other = words(
+            UpdateStatus::Manual {
+                version: "0.1.0.7".into(),
+                says: "Update it with Nix, as you installed it.".into(),
+                command: None,
+            },
+            None,
+        );
+        assert_eq!(
+            other,
+            (
+                true,
+                "Update available".into(),
+                "ngteams 0.1.0.7 is out. Update it with Nix, as you installed it.".into()
+            )
+        );
     }
 }

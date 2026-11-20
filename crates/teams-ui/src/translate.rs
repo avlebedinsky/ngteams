@@ -233,7 +233,7 @@ impl CaptionTranslation {
         let settings = self.settings.read(cx).settings();
         let want = settings
             .caption_translate_to
-            .filter(|_| self.showing)
+            .filter(|_| self.showing && crate::local_ai::enabled(cx))
             .map(|target| (target, settings.caption_translator.clone()));
         if want != self.config {
             self.config.clone_from(&want);
@@ -262,17 +262,18 @@ impl CaptionTranslation {
             return;
         };
         self.schedule = Some(Schedule::new(code));
-        let (backend, program) = match crate::local_ai::Tools::of(cx).pick(choice.tool) {
+        let picked = match crate::local_ai::pick(&choice.tool, cx) {
             Ok(picked) => picked,
             Err(failure) => {
                 self.status = Status::Failed { failure, language };
                 return;
             }
         };
-        let by = backend.label_of(Work::Captions, &choice.model);
+        let by = picked.label(Work::Captions, &choice.model);
+        let crate::local_ai::Picked { backend, target, .. } = picked;
         let session = Session::start(Spec {
             backend,
-            program,
+            target,
             model: choice.model,
             language,
             limits: self.limits,

@@ -308,7 +308,8 @@ async fn a_node_whose_database_is_gone_is_not_ready() {
     server.stop().await;
 }
 
-/// The binary itself: `migrate`, then `serve` until SIGTERM.
+/// The binary itself: `migrate`, then `serve` until SIGTERM. Linux only, as the binary's harness (`crate::binary`).
+#[cfg(target_os = "linux")]
 #[test]
 fn the_binary_migrates_and_serves_until_terminated() {
     let dir = tempfile::tempdir().unwrap();
@@ -355,6 +356,7 @@ fn the_binary_migrates_and_serves_until_terminated() {
     drop(taken);
 }
 
+#[cfg(target_os = "linux")]
 fn binary_is_live(port: u16) -> bool {
     use std::io::{Read as _, Write as _};
     let wait = std::time::Duration::from_millis(500);

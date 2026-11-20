@@ -67,6 +67,15 @@ pub enum ChannelViewEvent {
     },
     /// "More actions" → "Create workflows" on a post or a reply: the Workflows dialog for it.
     CreateWorkflows(crate::workflow_run::MessageRef),
+    /// An app's dialog opens over the window ([`crate::app_dialog`]): a post's or a reply's "More actions", or a
+    /// card's `task/fetch` button.
+    AppDialog(Box<crate::app_dialog::DialogSeed>),
+    /// An app the account hasn't added was chosen in "More actions": its details open, to add it.
+    AppDetails(Box<teams_proto::StoreApp>),
+    /// A post's "Translation" → "Settings".
+    TranslationSettings,
+    /// A file card's Share: "Share this file" for that file, as a chat's ([`ChatViewEvent::ShareFile`]).
+    ShareFile(Box<teams_proto::chat::SharedFile>),
 }
 
 /// A post's thread, open beside the posts.
@@ -154,7 +163,14 @@ impl ChannelView {
                 message: message.clone(),
             }),
             ChatViewEvent::CreateWorkflows(message) => cx.emit(ChannelViewEvent::CreateWorkflows(message.clone())),
-            ChatViewEvent::Action { .. } | ChatViewEvent::OpenRecap { .. } | ChatViewEvent::OpenSavedTranscript(_) => {}
+            ChatViewEvent::ShareFile(file) => cx.emit(ChannelViewEvent::ShareFile(file.clone())),
+            ChatViewEvent::AppDialog(seed) => cx.emit(ChannelViewEvent::AppDialog(seed.clone())),
+            ChatViewEvent::AppDetails(store) => cx.emit(ChannelViewEvent::AppDetails(store.clone())),
+            ChatViewEvent::TranslationSettings => cx.emit(ChannelViewEvent::TranslationSettings),
+            ChatViewEvent::Action { .. }
+            | ChatViewEvent::OpenRecap { .. }
+            | ChatViewEvent::OpenSavedTranscript(_)
+            | ChatViewEvent::ShowStore => {}
         })
     }
 
@@ -265,6 +281,34 @@ impl ChannelView {
             _events: events,
         });
         cx.notify();
+    }
+
+    /// An app dialog's result card goes into the box that writes to `conversation`: the posts' box for the channel, a
+    /// post's thread's box for its chain (the thread opens, as a reply's box takes it). `false` when `conversation` is
+    /// not this channel's.
+    pub fn add_app_card(
+        &mut self,
+        conversation: &str,
+        card: teams_proto::chat::AppCard,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let view = if conversation == self.channel {
+            self.posts.clone()
+        } else {
+            match teams_proto::reply_chain(conversation) {
+                Some((channel, post)) if channel == self.channel => {
+                    self.open_thread(post.to_owned(), window, cx);
+                    match &self.thread {
+                        Some(thread) => thread.view.clone(),
+                        None => return false,
+                    }
+                }
+                _ => return false,
+            }
+        };
+        view.update(cx, |view, cx| view.add_app_card(card, window, cx));
+        true
     }
 
     /// Closes the thread beside the posts; its box's draft is kept for the thread's next opening.

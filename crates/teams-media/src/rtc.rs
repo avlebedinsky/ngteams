@@ -304,10 +304,11 @@ fn report(events: &Events, event: PeerEvent) {
 }
 
 /// The candidates gathered so far, and whether gathering ended.
-#[derive(Default)]
 struct Gathering {
     state: Mutex<Gathered>,
     changed: Condvar,
+    /// How long after the first candidate the SDP waits for gathering to end.
+    settle: Duration,
 }
 
 #[derive(Default)]
@@ -318,6 +319,14 @@ struct Gathered {
 }
 
 impl Gathering {
+    fn new(settle: Duration) -> Self {
+        Self {
+            state: Mutex::default(),
+            changed: Condvar::new(),
+            settle,
+        }
+    }
+
     fn lock(&self) -> MutexGuard<'_, Gathered> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -336,14 +345,14 @@ impl Gathering {
         self.changed.notify_all();
     }
 
-    /// The candidates once gathering ended, or [`GATHER_SETTLE`] after the first one; none within [`GATHER_TIMEOUT`]
-    /// is an error.
+    /// The candidates once gathering ended, or the settle time ([`GATHER_SETTLE`]) after the first one; none within
+    /// [`GATHER_TIMEOUT`] is an error.
     fn wait(&self) -> Result<Vec<String>, Error> {
         let deadline = Instant::now() + GATHER_TIMEOUT;
         let mut state = self.lock();
         loop {
             let now = Instant::now();
-            let settled = state.first.is_some_and(|first| now >= first + GATHER_SETTLE);
+            let settled = state.first.is_some_and(|first| now >= first + self.settle);
             if (state.complete || settled) && !state.candidates.is_empty() {
                 return Ok(state.candidates.clone());
             }
@@ -354,7 +363,7 @@ impl Gathering {
             }
             let until = state
                 .first
-                .map_or(deadline, |first| (first + GATHER_SETTLE).min(deadline));
+                .map_or(deadline, |first| (first + self.settle).min(deadline));
             let wait = until.saturating_duration_since(now).max(Duration::from_millis(10));
             state = self
                 .changed
@@ -430,6 +439,14 @@ impl Peer {
     /// # Errors
     /// [`Error::Rtc`] when libwebrtc refuses the configuration.
     pub(crate) fn new(relay: &RelayConfig, events: Events) -> Result<Self, Error> {
+        Self::settling(relay, events, GATHER_SETTLE)
+    }
+
+    /// As [`Peer::new`], with `settle` in place of [`GATHER_SETTLE`].
+    ///
+    /// # Errors
+    /// As [`Peer::new`].
+    pub(crate) fn settling(relay: &RelayConfig, events: Events, settle: Duration) -> Result<Self, Error> {
         let mut config = RtcConfiguration::default();
         config.ice_transport_type = IceTransportsType::Relay;
         config.continual_gathering_policy = ContinualGatheringPolicy::GatherOnce;
@@ -448,7 +465,7 @@ impl Peer {
             audio_attached: Mutex::new(false),
             video: Mutex::new(None),
             channel: Arc::new(Mutex::new(None)),
-            gathering: Arc::new(Gathering::default()),
+            gathering: Arc::new(Gathering::new(settle)),
             lines: Arc::new(Mutex::new(LineMap::default())),
             sharing: Mutex::new(None),
             group_sharing: Mutex::new(None),
@@ -618,6 +635,19 @@ impl Peer {
         screen.sending = on;
         group_screen_encoding(screen);
         true
+    }
+
+    /// The sender our screen goes out on: a group call's sharing line while the screen goes out on it, else our
+    /// screen's own line.
+    pub(crate) fn screen_sender(&self) -> Option<RtpSender> {
+        if let Some(screen) = self.group_screen().as_ref().filter(|screen| screen.sending) {
+            return Some(screen.sender.clone());
+        }
+        self.screen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|screen| screen.transceiver.sender())
     }
 
     /// Whether our screen goes out on a group call's sharing line.
@@ -1274,6 +1304,19 @@ mod tests {
         assert!(!line_sends(text, "1"));
         assert!(line_sends(text, "2"));
         assert!(!line_sends(text, "3"));
+    }
+
+    // On macOS, libwebrtc's H.264 codec list needs its Objective-C categories, which only `-ObjC` links.
+    #[test]
+    fn the_factory_starts_and_sends_h264() {
+        let codecs = factory().get_rtp_sender_capabilities(MediaType::Video).codecs;
+        assert!(
+            codecs
+                .iter()
+                .any(|codec| codec.mime_type.eq_ignore_ascii_case("video/H264")),
+            "{:?}",
+            codecs.iter().map(|codec| &codec.mime_type).collect::<Vec<_>>()
+        );
     }
 }
 

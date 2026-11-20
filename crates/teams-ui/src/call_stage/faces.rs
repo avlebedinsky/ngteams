@@ -203,12 +203,9 @@ impl CallStage {
         let (shown, face) = match (picture, name) {
             (Some(_), _) | (None, Some(_)) => {
                 let face = people::avatar(name, picture, Size::Size(px(side)))
-                    // the kit sizes custom initials to a box of half the side: they are centred in it at Teams' size
+                    // a call tile's initials are larger and bolder than a list's, as Teams draws them
                     .text_size(px(side * 0.4))
-                    .line_height(px(side * 0.5))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_center()
-                    .whitespace_nowrap();
+                    .font_weight(gpui::FontWeight::SEMIBOLD);
                 (
                     if picture.is_some() { "picture" } else { "initials" },
                     face.into_any_element(),

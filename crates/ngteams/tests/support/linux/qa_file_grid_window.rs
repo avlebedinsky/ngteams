@@ -13,9 +13,9 @@
 //! - **A narrow window**: one card in a row, none cut at the right; then wide again.
 //! - **A channel post with files and its thread** beside the posts.
 //! - **The actions**: a click on a name opens the file's link; a click on a video's picture plays it in the card, a
-//!   second click pauses it; Share's "Copy link"; the zip has no Share; "More options" of a document: "Open in
-//!   browser", "Download", "Share" (its menu's "Copy link") and "Copy link"; of a video: "Download", "Share" and "Copy
-//!   link", no "Open in browser", as Teams on the web has them; Escape closes a menu.
+//!   second click pauses it; Share opens "Share this file" (task 543) and Escape closes it; the zip has no Share;
+//!   "More options" of a document: "Open in browser", "Download", "Share" (the dialog) and "Copy link"; of a video:
+//!   "Download", "Share" and "Copy link", no "Open in browser", as Teams on the web has them; Escape closes a menu.
 //! - **Odd shapes**, each beside good entries: a lone surrogate escape, an entry with no `@type`, an entry with no
 //!   SharePoint link, a list encoded twice.
 //!
@@ -91,8 +91,6 @@ const NIRI_CONFIG: &str = "layout {\n    gaps 0\n    default-column-width { prop
 const CARD_WIDTH: u32 = 316;
 const HEADER: u32 = 64;
 const GAP: u32 = 10;
-/// The room a menu beside a menu needs at the screen's right, else it opens on the left.
-const SHARE_MENU_ROOM: u32 = 160;
 /// The thread pane's width beside a channel's posts.
 const THREAD_WIDTH: u32 = 440;
 
@@ -457,23 +455,31 @@ impl Walk<'_> {
         Ok(())
     }
 
-    /// Share on a video's card: its menu's "Copy link" puts the file's link on the clipboard.
+    /// Share on a video's card opens "Share this file" (task 543); Escape closes it.
     fn share(&mut self, video: Rect) -> SandboxResult {
-        let menu = self
-            .run
-            .open_menu(self.sandbox, share_at(video), "qa525-share-menu-light.png")?;
-        let Some(menu) = menu else {
-            note("Share on a video's card opens no menu".to_owned());
+        let (x, y) = share_at(video);
+        self.run.click(x, y)?;
+        self.share_dialog("Share on a video's card", "qa525-share-dialog-light.png")?;
+        step("Share opens \"Share this file\"");
+        Ok(())
+    }
+
+    /// "Share this file" is on the screen after `what` (the shot kept as `name`); Escape closes it.
+    fn share_dialog(&mut self, what: &str, name: &str) -> SandboxResult {
+        thread::sleep(SETTLE);
+        self.run.shot(self.sandbox, name)?;
+        if !dialog_shown(&self.run.last) {
+            note(format!("{what} opens no \"Share this file\" ({name})"));
             return Ok(());
-        };
-        let copied = self.run.click_copies(self.sandbox, row_at(menu, 0, 1))?;
-        if copied != share_url(&CLIP_A) {
-            note(format!(
-                "Share's Copy link copies {copied:?}, expected {}",
-                share_url(&CLIP_A)
-            ));
         }
-        step("Share's Copy link copies the file's link");
+        self.run.input.key(keys::ESC)?;
+        thread::sleep(SETTLE);
+        self.run.shot(self.sandbox, &name.replace(".png", "-closed.png"))?;
+        if dialog_shown(&self.run.last) {
+            note(format!("Escape leaves \"Share this file\" open after {what}"));
+            self.run.input.key(keys::ESC)?;
+            thread::sleep(SETTLE);
+        }
         Ok(())
     }
 
@@ -511,7 +517,7 @@ impl Walk<'_> {
         if copied != link {
             note(format!("More options' Copy link copies {copied:?}, expected {link}"));
         }
-        self.more_share(doc, rows, 2, &link, "the document")?;
+        self.more_share(doc, rows, 2, "the document")?;
         step("More options: Open in browser, Download, Share and Copy link");
         Ok(())
     }
@@ -537,14 +543,13 @@ impl Walk<'_> {
         if opened != format!("{link}?download=1") {
             note(format!("a video's More options' first row (Download) opens {opened}"));
         }
-        self.more_share(video, rows, 1, &link, "a video")?;
+        self.more_share(video, rows, 1, "a video")?;
         step("a video's More options: Download, Share and Copy link");
         Ok(())
     }
 
-    /// "More options" → "Share" (row `row` of `rows`) on `card`: its menu beside it (on the right, or on the left
-    /// when the screen has no room), whose one row "Copy link" copies `link`.
-    fn more_share(&mut self, card: Rect, rows: u32, row: u32, link: &str, what: &str) -> SandboxResult {
+    /// "More options" → "Share" (row `row` of `rows`) on `card` opens "Share this file" (task 543).
+    fn more_share(&mut self, card: Rect, rows: u32, row: u32, what: &str) -> SandboxResult {
         let Some(menu) = self
             .run
             .open_menu(self.sandbox, more_at(card), "qa525-more-share-light.png")?
@@ -554,21 +559,10 @@ impl Walk<'_> {
         };
         let (x, y) = row_at(menu, row, rows);
         self.run.click(x, y)?;
-        thread::sleep(SETTLE);
-        self.run.shot(self.sandbox, "qa525-more-share-open-light.png")?;
-        // the Share menu's row is level with Share, its middle about 50 px from the menu's edge
-        let beside = if menu.x1 + SHARE_MENU_ROOM < SCREEN.0 {
-            menu.x1 + 50
-        } else {
-            menu.x0 - 50
-        };
-        let copied = self.run.click_copies(self.sandbox, (beside, y))?;
-        if copied != link {
-            note(format!(
-                "More options' Share → Copy link on {what} copies {copied:?}, expected {link}"
-            ));
-        }
-        Ok(())
+        self.share_dialog(
+            &format!("More options' Share on {what}"),
+            "qa525-more-share-dialog-light.png",
+        )
     }
 
     /// Escape closes "More options".
@@ -594,6 +588,14 @@ impl Walk<'_> {
         step("Escape closes More options");
         Ok(())
     }
+}
+
+/// Whether "Share this file" is on the screen: its 600 px box's surface in the middle of the screen, over the dimmed
+/// window (Teams Light).
+fn dialog_shown(shot: &image::RgbImage) -> bool {
+    let (x, y) = (SCREEN.0 / 2 - 295, SCREEN.1 / 2);
+    let dimmed = at(shot, x - 10, y).iter().all(|&channel| channel < 200);
+    near(at(shot, x, y), LIGHT.surface, 3) && dimmed
 }
 
 /// Where a card's name is: right of its icon, on the name's line.

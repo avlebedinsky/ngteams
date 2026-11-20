@@ -1254,7 +1254,7 @@ fn only_the_made_up_tool() -> SandboxResult {
     let made_up = PathBuf::from(std::env::var_os(TOOLS_ENV).ok_or("no made-up tool's directory")?);
     let found = teams_ui::local_ai::Tools::detect();
     for backend in [teams_ui::local_ai::Backend::Claude, teams_ui::local_ai::Backend::Codex] {
-        if let Ok((_, program)) = found.pick(teams_ui::local_ai::ToolChoice::Only(backend))
+        if let Some(program) = found.program(backend)
             && !program.starts_with(&made_up)
         {
             return Err(format!("a real tool is on the PATH: {}", program.display()).into());
@@ -1464,7 +1464,7 @@ fn box_state(compose: &Entity<Compose>, window: &Window, cx: &App) -> Value {
         "mode": mode,
         "focused": compose.focused(window, cx),
         "narrow": compose.is_narrow(),
-        "stacked": compose.is_stacked(),
+        "stacked": compose.is_stacked(cx),
         "expanded": compose.is_expanded(),
         "more_open": compose.more_open(),
     })

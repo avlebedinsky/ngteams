@@ -12,7 +12,7 @@
 //!   checks again before it writes.
 //! - **Per box**: a chat's box stays alive with its draft across navigation, so a correction running while another chat is
 //!   open is waiting there when the user comes back, and it can't land in any other box.
-//! - Stopping it (the button again, Escape, or sending the draft) ends the tool's process.
+//! - Stopping it (its row again, Escape, or sending the draft) ends the tool's process.
 
 use std::mem;
 
@@ -22,12 +22,12 @@ use gpui::{
     StyledText, Window, actions, div, px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::{Disableable as _, Selectable as _, Sizable as _, Size};
+use gpui_component::{Sizable as _, Size};
 
-use super::{Compose, Mode, TOOL};
+use super::{Compose, Mode};
 use crate::chat_translate::prompt::Said;
 use crate::editor::doc::Doc;
-use crate::icons::{Glyph, icon_button, icon_button_with_key, selected_by};
+use crate::icons::{Glyph, icon_button, selected_by};
 use crate::local_ai::{Failure, Tools, Work};
 use crate::message_correct::diff::Change;
 use crate::message_correct::draft::{self, Encoded};
@@ -53,7 +53,7 @@ actions!(
 const PROPOSAL_CONTEXT: &str = "ComposeCorrection";
 /// The tallest the proposal's text gets before it scrolls, px.
 const PROPOSAL_MAX: f32 = 200.0;
-/// What the button says while it can start a correction.
+/// What the Correct row says while it can start a correction.
 const CORRECT_TIP: &str = "Correct spelling and style";
 
 /// Binds the keys of correcting a draft.
@@ -191,8 +191,11 @@ impl Compose {
         }
     }
 
-    /// The button or its key: a correction asked for, the one running stopped, or the one shown given the keyboard.
+    /// Its row or its key: a correction asked for, the one running stopped, or the one shown given the keyboard.
     pub fn correct_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !crate::local_ai::enabled(cx) {
+            return;
+        }
         match self.correction.state {
             State::Running { .. } => self.end_correction(window, cx),
             State::Proposed(_) => window.focus(&self.correction.focus, cx),
@@ -228,13 +231,15 @@ impl Compose {
 
     fn run_correction(&mut self, doc: Doc, encoded: Encoded, window: &mut Window, cx: &mut Context<Self>) {
         let choice = self.settings.read(cx).settings().ai(Work::Correction).clone();
-        let (backend, program) = match Tools::of(cx).pick(choice.tool) {
+        let picked = match crate::local_ai::pick(&choice.tool, cx) {
             Ok(picked) => picked,
             Err(failure) => return self.correction_failed(doc, &failure, cx),
         };
+        let label = picked.label(Work::Correction, &choice.model);
+        let crate::local_ai::Picked { backend, target, .. } = picked;
         let correcting = Correcting::start(Request {
             backend,
-            program,
+            target,
             model: choice.model.clone(),
             context: self.correction_context(cx),
             draft: encoded,
@@ -248,7 +253,7 @@ impl Compose {
         });
         self.correction.state = State::Running {
             draft: doc,
-            tool: backend.label_of(Work::Correction, &choice.model).into(),
+            tool: label.into(),
             _waiting: waiting,
             _correcting: correcting,
         };
@@ -340,6 +345,15 @@ impl Compose {
         self.correction.state = State::Idle;
     }
 
+    /// The AI switch turned off: a correction and a draft's translation stop, their process with them.
+    pub(super) fn follow_ai_switch(&mut self, cx: &mut Context<Self>) {
+        if !crate::local_ai::enabled(cx) {
+            self.forget_correction();
+            self.forget_draft_translation();
+            cx.notify();
+        }
+    }
+
     /// Whether Escape has a correction to end.
     pub(super) fn correction_on_show(&self) -> bool {
         !matches!(self.correction.state, State::Idle)
@@ -400,17 +414,6 @@ impl Compose {
     }
 
     // --- drawing ---
-
-    /// Correct, in the box's toolbar: lit while a correction runs or is shown, when it stops or takes the keyboard.
-    pub(super) fn correct_button(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (tip, lit, can) = self.correct_state(cx);
-        let button = icon_button_with_key("compose-correct", Glyph::SPELL_CHECK, tip, &CorrectDraft)
-            .with_size(Size::Size(px(TOOL)))
-            .selected(lit)
-            .disabled(!lit && !can)
-            .on_click(cx.listener(|this, _, window, cx| this.correct_draft(window, cx)));
-        selected_by("compose-correct", button).into_any_element()
-    }
 
     /// Correct's name now, whether it is lit (a correction runs or is proposed) and whether it can start one.
     pub(super) fn correct_state(&self, cx: &App) -> (&'static str, bool, bool) {

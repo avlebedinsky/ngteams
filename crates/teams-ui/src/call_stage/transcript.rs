@@ -30,7 +30,7 @@ const PRIVACY_POLICY: &str = "https://go.microsoft.com/fwlink/?LinkId=521839";
 impl CallStage {
     /// What the roster told since last seen of the recording and the transcription: a start or a stop shows its notice,
     /// the transcript gets its row, and the account's own transcription alone opens the transcript.
-    pub(super) fn recorder_seen(&mut self, active: &ActiveCall) {
+    pub(super) fn recorder_seen(&mut self, active: &ActiveCall, cx: &mut App) {
         let state = &active.meeting;
         let was_recording = self.recording_seen;
         let recording = state.recording.is_some();
@@ -65,7 +65,7 @@ impl CallStage {
                     self.record.transcription_notice = Some(true);
                     self.record.stopped = None;
                     if by.as_ref().is_some_and(|by| by.as_str() == self.core.me()) {
-                        self.pane = Pane::Transcript;
+                        self.open_pane(Pane::Transcript, cx);
                         self.effects = None;
                     }
                 }
@@ -85,7 +85,7 @@ impl CallStage {
     /// Opens or closes the Transcript pane, as Show transcript and Hide transcript do.
     pub fn show_transcript(&mut self, open: bool, cx: &mut Context<Self>) {
         if open {
-            self.pane = Pane::Transcript;
+            self.open_pane(Pane::Transcript, cx);
             self.effects = None;
         } else if self.pane == Pane::Transcript {
             self.pane = Pane::None;
@@ -199,7 +199,7 @@ impl CallStage {
             .flex()
             .items_center()
             .gap_1()
-            .child(self.transcript_translate(cx))
+            .children(crate::local_ai::enabled(cx).then(|| self.transcript_translate(cx)))
             .child(selected_by(
                 "call-transcript-close",
                 icon_button("call-transcript-close", Glyph::X, "Close transcript")

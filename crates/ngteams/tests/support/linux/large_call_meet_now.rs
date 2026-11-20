@@ -65,7 +65,7 @@ fn joined_from_the_banner(rig: &mut Rig<'_>) -> SandboxResult {
     };
     let before = opened(rig.app.trace.catch_up());
     let joins = joins_of_a(rig, &conversation);
-    rig.window_id = None;
+    rig.expect_call_window()?;
     rig.sandbox.bus().invoke_action(banner.id, "join")?;
     wait_until(WAIT, || (joins_of_a(rig, &conversation) > joins).then_some(()))
         .ok_or("the banner's Join reached no join of the Meet now on the mock")?;
@@ -171,7 +171,7 @@ fn no_call(rig: &mut Rig<'_>) -> SandboxResult {
     .ok_or_else(|| "a call stayed up".into())
 }
 
-fn conversation_of(rig: &Rig<'_>, call: &str) -> SandboxResult<String> {
+pub(super) fn conversation_of(rig: &Rig<'_>, call: &str) -> SandboxResult<String> {
     rig.mock
         .calls()
         .into_iter()
@@ -202,7 +202,7 @@ fn meeting_banners(rig: &Rig<'_>, seen: usize) -> Vec<Notification> {
         .collect()
 }
 
-fn post(rig: &Rig<'_>, chat: &str, content: &str) -> SandboxResult {
+pub(super) fn post(rig: &Rig<'_>, chat: &str, content: &str) -> SandboxResult {
     rig.mock
         .add_message(chat, (LAB_B, "Lab B"), "Event/Call", content)
         .map(|_| ())
@@ -225,7 +225,7 @@ fn kind(huddle: bool) -> &'static str {
 }
 
 /// b's start of the call at `conversation`: a group chat's meeting (Meet now) when `huddle`.
-fn start(conversation: &str, call: &str, huddle: bool) -> String {
+pub(super) fn start(conversation: &str, call: &str, huddle: bool) -> String {
     format!(
         "<partlist type=\"started\" alt=\"\"><part identity=\"{LAB_B}\"><name>{LAB_B}</name></part></partlist>{}\
          <callEventType>callStarted</callEventType><conversationUrl>{}</conversationUrl><callId>{call}</callId>",
@@ -234,7 +234,7 @@ fn start(conversation: &str, call: &str, huddle: bool) -> String {
     )
 }
 
-fn end(conversation: &str, call: &str, huddle: bool) -> String {
+pub(super) fn end(conversation: &str, call: &str, huddle: bool) -> String {
     format!(
         "<ended/><partlist alt=\"\" count=\"0\"></partlist>{}<callEventType>callEnded</callEventType>\
          <conversationUrl>{}</conversationUrl><callId>{call}</callId>",

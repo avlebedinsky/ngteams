@@ -4,7 +4,11 @@
 //! and its control trailing.
 //!
 //! - **General**: the account's manual status, whether its availability is reported, the idle time after which
-//!   it no longer is, and the time format (following the system's locale, 12-hour or 24-hour).
+//!   it no longer is, the time format (following the system's locale, 12-hour or 24-hour), "Use AI features", and
+//!   while it is on the AI providers ([`ai_providers::AiProviders`]), then the AI choices of the chats and the drafts.
+//! - **Accounts** (where the app shows its accounts, [`SettingsView::with_accounts`]): each account with its picture,
+//!   "Change picture" and "Use profile picture" ([`crate::account_picture`]), and "Add account" where the app adds
+//!   accounts.
 //! - **Appearance**: the theme (following the system's light or dark mode with a theme for each, or one theme
 //!   whatever the system says), each a tile drawn in its own colours; the font size with its steps; the font family,
 //!   searchable among the system's.
@@ -18,11 +22,13 @@
 //!   endpoint is registered and the app isn't read-only, else said why), the calls' video switch ("Video in
 //!   calls"), and the camera's video effects (blur, a picture behind the person) with their self-preview
 //!   ([`crate::effects::EffectsPicker`], made while the page shows and dropped as it goes, its preview with it),
-//!   "Save live captions of every call" ([`crate::call_transcript`]), then the local AI tools: which tool and model translates live captions and which summarizes meeting recaps, each with
+//!   "Save live captions of every call" ([`crate::call_transcript`]), then, while "Use AI features" is on, the local AI tools: which tool and model translates live captions and which summarizes meeting recaps, each with
 //!   the same control ([`ai_picker::AiPicker`]).
 //! - **Diagnostics**: the diagnostic log's level and "Copy diagnostics".
 //! - **Manage users** (an own server's administrator alone, [`SettingsView::with_admin`]): the server's accounts
 //!   ([`crate::user_admin`]).
+//! - **Manage apps** (the same administrator, while the server serves apps and `NGTEAMS_BOTS=1`,
+//!   [`SettingsView::with_app_admin`]): the server's apps and bots ([`crate::app_admin`]).
 //!
 //! What was wrong with the settings file (or the log) is shown above every page. Each change goes to the
 //! [`SettingsModel`] (and so to the file, and a device's to the calls) at once. In a narrow window ([`narrow`]) the
@@ -47,6 +53,7 @@ use teams_core::{Choice, Reporting};
 use teams_log::diagnostics::WARNING;
 use teams_media::devices::catalog::{DeviceKind, DeviceList, DeviceStatus};
 
+use crate::app_admin::{AppAdmin, ManageApps};
 use crate::clock::{self, HourCycle};
 use crate::effects::{EffectsPicker, PickerPlace};
 use crate::icons::{Glyph, icon_button, selected_by};
@@ -54,12 +61,16 @@ use crate::local_ai::Work;
 use crate::presence;
 use crate::settings::{LogLevel, ManualStatus, Notifications, Settings, SettingsModel, TimeFormat};
 use crate::settings_view::ai_picker::AiPicker;
+use crate::settings_view::ai_providers::AiProviders;
 use crate::shell::shown_as;
 use crate::theme::{self, Appearance, FONT_SIZE, FONT_SIZES, Palette, THEMES, ThemeSpec};
 use crate::trace::ViewTrace;
 use crate::user_admin::{ManageUsers, UserAdmin};
 
+mod accounts;
 pub mod ai_picker;
+pub mod ai_providers;
+mod message_box;
 pub mod sounds;
 
 /// The font picker's first row: the system's UI font (no family named).
@@ -81,6 +92,8 @@ const NARROW_WINDOW: f32 = 720.0;
 const PAGE_WIDTH: f32 = 880.0;
 /// What Settings say once the account's Manage users went because it is no administrator any more.
 pub const ADMIN_GONE: &str = "You're no longer an administrator of this server, so Manage users was closed.";
+/// What Settings say once the account's Manage apps went because it is no administrator any more.
+pub const APPS_GONE: &str = "You're no longer an administrator of this server, so Manage apps was closed.";
 /// A theme tile's width, px.
 const TILE_WIDTH: f32 = 96.0;
 /// A theme tile's preview height, px.
@@ -130,9 +143,16 @@ pub type TestCallState = Rc<dyn Fn(&App) -> TestCallOffer>;
 /// Microsoft 365 account.
 pub type AccountServer = Rc<dyn Fn(&App) -> Option<SharedString>>;
 
+/// The app's accounts, once the desktop handed them in ([`SettingsView::with_accounts`]).
+pub type AppAccounts = Rc<dyn Fn(&App) -> Option<Entity<crate::accounts::Accounts>>>;
+
 /// The account's own server's account management, when the account is an administrator there
 /// ([`SettingsView::with_admin`]).
 pub type AccountAdmin = Rc<dyn Fn(&App) -> Option<Arc<dyn UserAdmin>>>;
+
+/// The account's own server's apps and bots, when the account is an administrator of a server that serves apps
+/// ([`SettingsView::with_app_admin`]).
+pub type AccountAppAdmin = Rc<dyn Fn(&App) -> Option<Arc<dyn AppAdmin>>>;
 
 /// What the settings view asks of the shell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -232,6 +252,8 @@ pub fn status_mark(status: ManualStatus, palette: Palette) -> AnyElement {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
     General,
+    /// The app's accounts and their pictures ([`SettingsView::with_accounts`]).
+    Accounts,
     Appearance,
     Notifications,
     Privacy,
@@ -239,12 +261,15 @@ pub enum Page {
     Diagnostics,
     /// An own server's accounts, for its administrator ([`crate::user_admin`]).
     Users,
+    /// An own server's apps and bots, for its administrator ([`crate::app_admin`]).
+    Apps,
 }
 
 impl Page {
     /// The pages every account has ([`Page::Users`] is an own server's administrator's alone).
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::General,
+        Self::Accounts,
         Self::Appearance,
         Self::Notifications,
         Self::Privacy,
@@ -257,12 +282,14 @@ impl Page {
     pub fn key(self) -> &'static str {
         match self {
             Self::General => "general",
+            Self::Accounts => "accounts",
             Self::Appearance => "appearance",
             Self::Notifications => "notifications",
             Self::Privacy => "privacy",
             Self::Calls => "calls",
             Self::Diagnostics => "diagnostics",
             Self::Users => "users",
+            Self::Apps => "apps",
         }
     }
 
@@ -270,24 +297,28 @@ impl Page {
     pub fn title(self) -> &'static str {
         match self {
             Self::General => "General",
+            Self::Accounts => "Accounts",
             Self::Appearance => "Appearance",
             Self::Notifications => "Notifications",
             Self::Privacy => "Privacy",
             Self::Calls => "Calls and devices",
             Self::Diagnostics => "Diagnostics",
             Self::Users => "Manage users",
+            Self::Apps => "Manage apps",
         }
     }
 
     fn glyph(self) -> Glyph {
         match self {
             Self::General => Glyph::USER,
+            Self::Accounts => Glyph::USER_COG,
             Self::Appearance => Glyph::PALETTE,
             Self::Notifications => Glyph::BELL,
             Self::Privacy => Glyph::SHIELD,
             Self::Calls => Glyph::HEADPHONES,
             Self::Diagnostics => Glyph::BUG,
             Self::Users => Glyph::USERS,
+            Self::Apps => Glyph::BOT,
         }
     }
 }
@@ -354,6 +385,8 @@ pub struct SettingsView {
     test_call: Option<TestCallState>,
     /// The account's own server, as the shell tells it ([`SettingsView::with_server`]).
     server: Option<AccountServer>,
+    /// The app's accounts, as the shell tells them ([`SettingsView::with_accounts`]).
+    accounts: Option<AppAccounts>,
     /// The account's server's account management as the shell tells it, and the trace its page records to
     /// ([`SettingsView::with_admin`]).
     admin: Option<(AccountAdmin, Arc<ViewTrace>)>,
@@ -361,10 +394,19 @@ pub struct SettingsView {
     users: Option<Entity<ManageUsers>>,
     /// Manage users went while it showed: the General page says why until another page is chosen.
     admin_gone: bool,
+    /// The account's server's apps and bots as the shell tells them, and the trace their page records to
+    /// ([`SettingsView::with_app_admin`]).
+    app_admin: Option<(AccountAppAdmin, Arc<ViewTrace>)>,
+    /// The Manage apps page, made the first time it shows.
+    apps: Option<Entity<ManageApps>>,
+    /// Manage apps went while it showed: the General page says why until another page is chosen.
+    apps_gone: bool,
     /// The video effects' picker while the Calls page shows.
     effects: Option<Entity<EffectsPicker>>,
     /// The local AI choices' pickers (captions, then recaps), made the first time the Calls page shows.
     ai: Option<[Entity<AiPicker>; 2]>,
+    /// The AI providers' box, once the General page showed it.
+    ai_providers: Option<Entity<AiProviders>>,
     /// The chats' translator's picker, once the General page showed it.
     chat_ai: Option<Entity<AiPicker>>,
     correction_ai: Option<Entity<AiPicker>>,
@@ -393,11 +435,16 @@ impl SettingsView {
             fonts: None,
             test_call: None,
             server: None,
+            accounts: None,
             admin: None,
             users: None,
             admin_gone: false,
+            app_admin: None,
+            apps: None,
+            apps_gone: false,
             effects: None,
             ai: None,
+            ai_providers: None,
             chat_ai: None,
             correction_ai: None,
             message_translation_ai: None,
@@ -443,12 +490,90 @@ impl SettingsView {
         self
     }
 
+    /// The view offering the Accounts page while `accounts` gives the app's accounts.
+    #[must_use]
+    pub fn with_accounts(mut self, accounts: AppAccounts) -> Self {
+        self.accounts = Some(accounts);
+        self
+    }
+
+    /// The app's accounts now, once the desktop handed them in.
+    fn app_accounts(&self, cx: &App) -> Option<Entity<crate::accounts::Accounts>> {
+        self.accounts.as_ref().and_then(|accounts| accounts(cx))
+    }
+
     /// The view offering Manage users while `admin` gives the account's server's account management (an own
     /// server's administrator; nothing for any other account), its page recording to `trace`.
     #[must_use]
     pub fn with_admin(mut self, admin: AccountAdmin, trace: Arc<ViewTrace>) -> Self {
         self.admin = Some((admin, trace));
         self
+    }
+
+    /// The view offering Manage apps while `admin` gives the account's server's apps and bots (an own server's
+    /// administrator, with `NGTEAMS_BOTS=1`; nothing for any other account), its page recording to `trace`.
+    #[must_use]
+    pub fn with_app_admin(mut self, admin: AccountAppAdmin, trace: Arc<ViewTrace>) -> Self {
+        self.app_admin = Some((admin, trace));
+        self
+    }
+
+    /// The account's server's apps and bots now, while the bots are shown and it has them.
+    fn app_admin(&self, cx: &App) -> Option<Arc<dyn AppAdmin>> {
+        if !crate::bots_flag::bots_on(cx) {
+            return None;
+        }
+        self.app_admin.as_ref().and_then(|(admin, _)| admin(cx))
+    }
+
+    /// The Manage apps page, once it showed.
+    #[must_use]
+    pub fn apps(&self) -> Option<&Entity<ManageApps>> {
+        self.apps.as_ref()
+    }
+
+    /// The Manage apps page, made when it first shows; none without the account's server's apps.
+    fn apps_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<Entity<ManageApps>> {
+        let admin = self.app_admin(cx)?;
+        let trace = self.app_admin.as_ref().map(|(_, trace)| Arc::clone(trace))?;
+        let apps = self
+            .apps
+            .get_or_insert_with(|| cx.new(|cx| ManageApps::new(admin, trace, window, cx)));
+        Some(apps.clone())
+    }
+
+    /// The Manage apps page in the pane, its problems above it, drawn from its last frame until it changes itself.
+    fn apps_pane(&mut self, problems: Option<AnyElement>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let apps = self.apps_page(window, cx);
+        div()
+            .flex_1()
+            .h_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .children(problems.map(|problems| div().px_8().pt_6().child(problems)))
+            .children(apps.map(|apps| apps.cached(gpui::StyleRefinement::default().flex_1().w_full().min_h_0())))
+            .into_any_element()
+    }
+
+    /// The Manage apps page's dialog over the settings, while one is open.
+    fn app_dialog(&self, cx: &App) -> Option<gpui::Stateful<gpui::Div>> {
+        let apps = self.apps.as_ref().filter(|_| self.page == Page::Apps)?;
+        let dialog = apps.read(cx).dialog()?.clone();
+        Some(
+            div()
+                .id("app-dialog-backdrop")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .occlude()
+                .bg(gpui::rgba(0x0000_0080))
+                .child(dialog),
+        )
     }
 
     /// The account's server's account management now, if it has one.
@@ -549,13 +674,26 @@ impl SettingsView {
         if self.page != page {
             self.page = page;
             self.admin_gone = false;
+            self.apps_gone = false;
+            self.hide_admin_pages(cx);
             cx.notify();
         }
     }
 
-    /// The settings went out of sight: the video effects' picker goes, and its preview with it.
-    pub fn put_away(&mut self) {
+    /// The settings went out of sight: the video effects' picker goes, and its preview with it. Manage users and
+    /// Manage apps read their lists again when they show again.
+    pub fn put_away(&mut self, cx: &mut App) {
         self.effects = None;
+        self.hide_admin_pages(cx);
+    }
+
+    fn hide_admin_pages(&self, cx: &mut App) {
+        if let Some(users) = &self.users {
+            users.update(cx, ManageUsers::hide);
+        }
+        if let Some(apps) = &self.apps {
+            apps.update(cx, ManageApps::hide);
+        }
     }
 
     /// The video effects' picker, while the Calls page shows it.
@@ -580,15 +718,19 @@ impl SettingsView {
         self.focus.focus(window, cx);
     }
 
-    /// The pages the column lists: Calls only where it has something, Manage users only for an own server's
-    /// administrator.
+    /// The pages the column lists: Accounts only where the app shows its accounts, Calls only where it has something,
+    /// Manage users only for an own server's administrator.
     fn pages(&self, cx: &App) -> Vec<Page> {
         let calls = self.has_calls(cx);
+        let accounts = self.app_accounts(cx).is_some();
         let users = self.user_admin(cx).map(|_| Page::Users);
+        let apps = self.app_admin(cx).map(|_| Page::Apps);
         Page::ALL
             .into_iter()
             .filter(|page| *page != Page::Calls || calls)
+            .filter(|page| *page != Page::Accounts || accounts)
             .chain(users)
+            .chain(apps)
             .collect()
     }
 
@@ -991,14 +1133,28 @@ impl SettingsView {
             ),
             group(
                 Some("Meetings"),
-                vec![row(
-                    "Meeting started notification",
-                    Some("A notification with Join when a meeting you're invited to, or one in a group chat, starts."),
-                    self.switch("meeting-started", settings.meeting_started, |settings, on| {
-                        settings.meeting_started = on;
-                    }),
-                    palette,
-                )],
+                vec![
+                    row(
+                        "Meeting started notification",
+                        Some(
+                            "A notification with Join when a meeting you're invited to, or one in a group chat, starts.",
+                        ),
+                        self.switch("meeting-started", settings.meeting_started, |settings, on| {
+                            settings.meeting_started = on;
+                        }),
+                        palette,
+                    ),
+                    row(
+                        "Meeting reminders",
+                        Some(
+                            "A reminder with Join before a meeting on your calendar starts, at the meeting's reminder time.",
+                        ),
+                        self.switch("meeting-reminders", settings.meeting_reminders, |settings, on| {
+                            settings.meeting_reminders = on;
+                        }),
+                        palette,
+                    ),
+                ],
                 palette,
             ),
         ];
@@ -1070,7 +1226,9 @@ impl SettingsView {
             )],
             palette,
         ));
-        groups.extend(self.ai_pickers(cx).into_iter().map(IntoElement::into_any_element));
+        if self.model.read(cx).uses_ai() {
+            groups.extend(self.ai_pickers(cx).into_iter().map(IntoElement::into_any_element));
+        }
         groups
     }
 
@@ -1104,6 +1262,28 @@ impl SettingsView {
             rows.push(Self::test_call_row(offer, palette, cx));
         }
         rows
+    }
+
+    /// "Use AI features", on the General page before the AI providers: off, every AI box and control is hidden.
+    fn ai_switch(&self, on: bool, palette: Palette) -> AnyElement {
+        group(
+            Some("AI features"),
+            vec![row(
+                "Use AI features",
+                Some(USE_AI_NOTE),
+                self.switch("use-ai-features", on, |settings, on| settings.ai_features = Some(on)),
+                palette,
+            )],
+            palette,
+        )
+    }
+
+    /// The AI providers' box, on the General page before the AI choices.
+    pub fn ai_providers(&mut self, cx: &mut Context<Self>) -> Entity<AiProviders> {
+        let model = self.model.clone();
+        self.ai_providers
+            .get_or_insert_with(|| cx.new(|cx| AiProviders::new(model, cx)))
+            .clone()
     }
 
     /// The chats' translator's picker ([`crate::chat_translate`]), on the General page beside the chats' other
@@ -1398,12 +1578,25 @@ impl SettingsView {
                 if self.admin_gone {
                     boxes.insert(0, note_box("settings-admin-gone", ADMIN_GONE, palette));
                 }
-                boxes.push(self.chat_ai_picker(cx).into_any_element());
-                boxes.push(self.correction_ai_picker(cx).into_any_element());
-                boxes.push(self.message_translation_ai_picker(cx).into_any_element());
+                if self.apps_gone {
+                    boxes.insert(0, note_box("settings-apps-gone", APPS_GONE, palette));
+                }
+                let uses_ai = self.model.read(cx).uses_ai();
+                boxes.push(self.ai_switch(uses_ai, palette));
+                if uses_ai {
+                    boxes.push(self.ai_providers(cx).into_any_element());
+                    boxes.push(self.chat_ai_picker(cx).into_any_element());
+                    boxes.push(self.correction_ai_picker(cx).into_any_element());
+                    boxes.push(self.message_translation_ai_picker(cx).into_any_element());
+                }
                 boxes
             }
-            Page::Appearance => self.appearance(&settings.appearance, palette, window, cx),
+            Page::Appearance => {
+                let mut boxes = self.appearance(&settings.appearance, palette, window, cx);
+                boxes.push(self.message_box(settings, palette, cx));
+                boxes
+            }
+            Page::Accounts => self.accounts_page(palette, cx),
             Page::Notifications => self.notifications(settings, palette, cx),
             Page::Privacy => self.privacy(settings, palette),
             Page::Calls => self.calls(settings, palette, cx),
@@ -1411,8 +1604,8 @@ impl SettingsView {
                 let model = self.model.clone();
                 self.diagnostics(settings, model.read(cx), palette)
             }
-            // drawn by its own view ([`SettingsView::users_pane`])
-            Page::Users => Vec::new(),
+            // drawn by their own views ([`SettingsView::users_pane`], [`SettingsView::apps_pane`])
+            Page::Users | Page::Apps => Vec::new(),
         }
     }
 }
@@ -1436,11 +1629,14 @@ fn level_label(level: LogLevel) -> &'static str {
     }
 }
 
-/// A line under a row, in `color`, its test selector `selector`.
 /// What "Save live captions of every call" does, under it.
 pub const SAVE_CAPTIONS_NOTE: &str = "Turns captions on in every call and saves them on this computer as the call's \
                                       transcript, with its AI summary. Teams and the others in the call see nothing.";
+/// What "Use AI features" does.
+pub const USE_AI_NOTE: &str = "Correct and translate messages, translate chats and captions, and summarize recaps \
+                               with your own Claude Code, Codex or API key. When off, no text goes to an AI provider.";
 
+/// A line under a row, in `color`, its test selector `selector`.
 fn caption(selector: &'static str, color: u32) -> gpui::Div {
     div()
         .debug_selector(move || selector.to_owned())
@@ -1529,6 +1725,16 @@ fn row_with(
     control: impl IntoElement,
     palette: Palette,
 ) -> AnyElement {
+    row_colored(title, description, palette.muted_foreground, control)
+}
+
+/// [`row_with`], its description in `color`.
+fn row_colored(
+    title: SharedString,
+    description: Option<SharedString>,
+    color: u32,
+    control: impl IntoElement,
+) -> AnyElement {
     div()
         .min_h(px(56.0))
         .px_4()
@@ -1544,12 +1750,7 @@ fn row_with(
                 .flex_col()
                 .gap_0p5()
                 .child(title)
-                .children(description.map(|description| {
-                    div()
-                        .text_sm()
-                        .text_color(rgb(palette.muted_foreground))
-                        .child(description)
-                })),
+                .children(description.map(|description| div().text_sm().text_color(rgb(color)).child(description))),
         )
         .child(div().flex_none().child(control))
         .into_any_element()
@@ -1880,7 +2081,7 @@ impl Render for SettingsView {
             self.page = Page::General;
         }
         if self.page != Page::Calls {
-            self.put_away();
+            self.effects = None;
         }
         if self.user_admin(cx).is_none() {
             // the account is no administrator (any more): its page and what it listed go, and why is said
@@ -1890,9 +2091,19 @@ impl Render for SettingsView {
                 self.admin_gone = true;
             }
         }
+        if self.app_admin(cx).is_none() {
+            // the account is no administrator (any more), or the bots are hidden: its page goes, and why is said
+            self.apps = None;
+            if self.page == Page::Apps {
+                self.page = Page::General;
+                self.apps_gone = true;
+            }
+        }
         let problems = problems(self.model.read(cx));
         let pane = if self.page == Page::Users {
             self.users_pane(problems, window, cx)
+        } else if self.page == Page::Apps {
+            self.apps_pane(problems, window, cx)
         } else {
             let settings = self.model.read(cx).settings().clone();
             let content = self.page_content(&settings, palette, window, cx);
@@ -1916,6 +2127,7 @@ impl Render for SettingsView {
         };
         let nav = self.nav(palette, window, cx);
         let user_dialog = self.user_dialog(cx);
+        let app_dialog = self.app_dialog(cx);
         div()
             .debug_selector(|| "settings-view".to_owned())
             .relative()
@@ -1925,5 +2137,6 @@ impl Render for SettingsView {
             .child(nav)
             .child(pane)
             .children(user_dialog)
+            .children(app_dialog)
     }
 }

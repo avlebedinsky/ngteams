@@ -7,6 +7,10 @@ on:
       - '**'
       - '!**/*.md'
       - '!docs/**'
+      # the Nix flake uses a release's binaries and builds nothing of the workspace
+      - '!flake.nix'
+      - '!flake.lock'
+      - '!packaging/nix/**'
       # These Markdown files are build/test inputs; docs/ is checked by fixtures.yml.
       - '**/tests/fixtures/**'
       - vendor/gpui-pre/README.md
@@ -15,6 +19,10 @@ on:
       - '**'
       - '!**/*.md'
       - '!docs/**'
+      # the Nix flake uses a release's binaries and builds nothing of the workspace
+      - '!flake.nix'
+      - '!flake.lock'
+      - '!packaging/nix/**'
       - '**/tests/fixtures/**'
       - vendor/gpui-pre/README.md
   merge_group:
@@ -59,6 +67,10 @@ jobs:
         id: environment
         with:
           save-cache: 'true'
+      - name: Release the local image build cache
+        run: |
+          docker buildx prune --all --force
+          docker system df
       - name: Restore registry and Git sources
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -100,7 +112,13 @@ jobs:
           retention-days: 14
           if-no-files-found: error
       - name: Bundle the shared executables and coverage maps
-        run: .github/ci/bundle.sh pack
+        run: |
+          df -h .
+          du -h -d 2 target .ci-cache
+          .github/ci/bundle.sh pack
+      - name: Disk space after the bundle step
+        if: always()
+        run: df -h .
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: coverage-common
@@ -245,6 +263,22 @@ jobs:
         run: |
           .github/ci/unpack.sh target
           rm target/coverage-*.tar.zst
+      # 4 test threads x 4 nodes x pool 16 is 256, over the default 100; a service takes no server options
+      - name: Let Postgres take every test node's connections
+        env:
+          POSTGRES: ${{ job.services.postgres.id }}
+        run: |
+          docker exec "$POSTGRES" psql -U postgres -c 'ALTER SYSTEM SET max_connections = 300'
+          docker restart "$POSTGRES"
+          for _ in $(seq 60); do
+            if docker exec "$POSTGRES" pg_isready -U postgres -h 127.0.0.1 &&
+              [ "$(docker exec "$POSTGRES" psql -U postgres -Atc 'SHOW max_connections')" = 300 ]; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Postgres didn't come back with 300 connections" >&2
+          exit 1
       - name: Wait for the S3 store
         run: |
           for _ in $(seq 60); do

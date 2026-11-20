@@ -111,7 +111,8 @@ pub struct ActiveCall {
     pub hand_raised: bool,
     /// The account organizes the meeting: it may end it for everyone.
     pub organizer: bool,
-    /// The live reactions sent in the call lately, the newest last, each shown for [`REACTION_SHOWN`].
+    /// The live reactions sent in the call lately, the newest last, each kept for [`REACTION_SHOWN`] (on its sender's
+    /// tile; one that floats goes sooner).
     pub reactions: Vec<LiveReaction>,
     /// Since when the account holds the call (Teams' Hold), while it does ([`teams_core::Event::CallHeld`]).
     pub held: Option<Instant>,
@@ -147,7 +148,10 @@ pub struct LiveReaction {
     pub name: Option<String>,
     /// `like`, `heart`, `applause`, `laugh` or `surprised`.
     pub reaction: String,
+    /// When it came, on the app's clock (the executor's).
     pub at: Instant,
+    /// Its number among the call's reactions, from 0: the stage's float of it keeps its place by it.
+    pub seq: u64,
 }
 
 /// Whether `event` is one of the engine's call events (what [`Calls::apply`] takes).
@@ -179,8 +183,9 @@ fn is_call_event(event: &Event) -> bool {
     )
 }
 
-/// How long a live reaction shows on the stage, as Teams floats one up and away.
-pub const REACTION_SHOWN: Duration = Duration::from_secs(4);
+/// How long a live reaction shows on its sender's tile, as Teams plays it there. A reaction that floats (its sender's
+/// tile is not on the stage) goes sooner, after the call stage's float time.
+pub const REACTION_SHOWN: Duration = Duration::from_millis(4_250);
 
 /// The most live reactions the stage shows at once.
 const REACTIONS_SHOWN: usize = 12;
@@ -1263,7 +1268,7 @@ impl Calls {
             | Event::CallRemoteShare { .. }
             | Event::CallGroupChat { .. }
             | Event::CallAddFailed { .. }
-            | Event::CallReaction { .. } => self.in_call(event),
+            | Event::CallReaction { .. } => self.in_call(event, cx.background_executor().now()),
             Event::CallTransferFailed { .. } | Event::CallTransferred { .. } => self.transfer_told(event),
             _ => return false,
         }
@@ -1271,8 +1276,8 @@ impl Calls {
         true
     }
 
-    /// The account's own state in its call, or a live reaction sent in it.
-    fn in_call(&mut self, event: &Event) {
+    /// The account's own state in its call, or a live reaction sent in it (at `now`, on the app's clock).
+    fn in_call(&mut self, event: &Event, now: Instant) {
         match event {
             Event::CallOwn {
                 call,
@@ -1336,15 +1341,16 @@ impl Calls {
                 reaction,
             } => {
                 if let Some(active) = self.call.as_mut().filter(|active| active.id == *call) {
-                    let now = Instant::now();
+                    let seq = active.reactions.last().map_or(0, |last| last.seq + 1);
                     active
                         .reactions
-                        .retain(|shown| now.duration_since(shown.at) < REACTION_SHOWN);
+                        .retain(|shown| now.saturating_duration_since(shown.at) < REACTION_SHOWN);
                     active.reactions.push(LiveReaction {
                         from: from.clone(),
                         name: name.clone(),
                         reaction: reaction.clone(),
                         at: now,
+                        seq,
                     });
                     let over = active.reactions.len().saturating_sub(REACTIONS_SHOWN);
                     active.reactions.drain(..over);

@@ -45,7 +45,7 @@ sha256 = "694db7114b006c69772cd024e8d6a87347ce1b3591d84c6ef89734e334cd5f12"
 reason = "module declarations and documentation only; no executable items"
 
 [unmapped_sources."crates/ngteams-server/src/lib.rs"]
-sha256 = "a8b40e005a4a8104c7e630d432eb772478a0cf87e1a045898a6fc9f5c7ca8ea0"
+sha256 = "5ec05d7b6c95fe303542bbd661d20b1af94f47a21eb64e2c6c0087cf1a8a021e"
 reason = "module declarations and documentation only; no executable items"
 
 [unmapped_sources."crates/ngteams-server/src/auth/mod.rs"]
@@ -61,18 +61,18 @@ sha256 = "713e3237771cf1e69e5a92513c2efbd42d03fd36393d664e55061c69aa2c872e"
 reason = "module declarations, re-exports and documentation only; no executable items"
 
 [unmapped_sources."crates/teams-call/src/lib.rs"]
-sha256 = "edae72eac4e6ae91a4c2ea2450ada9e42ae6b6dda30bc63772fe256618809b45"
+sha256 = "1953c54b6b47602a6c4d8a941a7ba70655c15579f95db023979670e9fdec6cd5"
 reason = "module declarations, re-exports and documentation only; no executable items"
 
 [unmapped_sources."crates/teams-call/src/machine/tests.rs"]
-sha256 = "aa8541f24641f97535f428934f210ea62d6bb560c8a214721c8b6a61744f69e1"
+sha256 = "f29dddd1d971c7551bd074c4aa236142ec33b5256f6aa554cc29ecd395011c63"
 reason = "unit-test module included only by machine.rs cfg(test); omitted by cargo-llvm-cov's test-file filter"
-context = { "crates/teams-call/src/machine.rs" = "0dc76d076560afe9c476cfcc45ba539728e803a970cdc1061ae98da9e13effc4" }
+context = { "crates/teams-call/src/machine.rs" = "a48732627b640512c0813cfa59137f7dd9e3b136f5247c737223252d497803f2" }
 
 [unmapped_sources."crates/teams-call/src/track/tests.rs"]
-sha256 = "9e9520a231135b903047158d4c71da1e2dce56320482da7f4dbafdbe257a4397"
+sha256 = "8813e2f1798339f71226b396269e9233a704ab8e86de109e38e58b2a747f10a6"
 reason = "unit-test module included only by track.rs cfg(test); omitted by cargo-llvm-cov's test-file filter"
-context = { "crates/teams-call/src/track.rs" = "ca2c73ea0986844e6a2591ff039056041f8c5296490a525a812796ee1a93afc9" }
+context = { "crates/teams-call/src/track.rs" = "6d4e8692460da51c26997e85f500f4838d67f3cd02b004cba42203a53727eeb9" }
 
 [unmapped_sources."crates/teams-media/src/video/effects/tests.rs"]
 sha256 = "cb1ce19ec37268fed2b9c4e2472156b7a71691003811ca451d8a6144722e5370"
@@ -81,7 +81,7 @@ context = { "crates/teams-media/src/video/effects.rs" = "787856448e591791db31587
 
 
 [unmapped_sources."crates/teams-proto/src/chat/mod.rs"]
-sha256 = "71333cfb7c7fa47e68b17ab095effe753c89c96cba5057a344c555bce16d7d41"
+sha256 = "f9354fe5d43781e1ec1a9b88d88053717dbcceb72bc3538c7439349d564a13ba"
 reason = "module declarations, re-exports and documentation only; no executable items"
 
 
@@ -90,7 +90,7 @@ sha256 = "7bdd5ebbbf07a8daf3659fc52c93eb5866aa515311ff1a0b1b3e31fe7d38b9ee"
 reason = "module declarations, re-exports and documentation only; no executable items"
 
 [unmapped_sources."crates/ngteams/src/lib.rs"]
-sha256 = "dd66d90141528a4a3f53f7035e2c6b23994c93bc27b83a771896aaa02d7282ea"
+sha256 = "da0ff12bf110b47930dc09398654322881b95a17807ea5376b3ebca8551c2d60"
 reason = "module declarations, re-exports, documentation and a string constant only; no executable bodies"
 
 [unmapped_sources."crates/proto-lab/src/bundles.rs"]
@@ -102,7 +102,7 @@ sha256 = "eac1126557b554aae9c187daa89a44640a3a08fae132c60468def9156fd01f70"
 reason = "module declarations and documentation only; no executable bodies"
 
 [unmapped_sources."crates/teams-core/src/lib.rs"]
-sha256 = "437d198cd79511af7fc408c3511c4b4f38a4a594fa44cbdb8efc96ccc2e99d98"
+sha256 = "87ad90c0d3d5af11fc16d0d6ec4e959306ba043f77d555913ae43fb6cce55b16"
 reason = "module declarations, re-exports and documentation only; no executable bodies"
 
 [unmapped_sources."crates/teams-media/src/lib.rs"]
@@ -114,7 +114,7 @@ sha256 = "4f27776ff2e3d9d662467a5ecb6542670137e2e47658e9d5b3dc26196987a972"
 reason = "module declarations, documentation and an integer constant only; no executable bodies"
 
 [unmapped_sources."crates/teams-ui/src/lib.rs"]
-sha256 = "3c5faf32cfaf41a378f5cd80710fd3eb344b4770ce6e907e4ad759a62c1c6794"
+sha256 = "12c582c45a75fab13995bdc703ae5572698d6acbcb25167ddb9161a985649a27"
 reason = "module declarations, re-exports, documentation and the `ctrl!` hint macro (a string literal per platform) only; no executable bodies"
 
 [unmapped_sources."crates/teams-wpe-client/src/event.rs"]
@@ -142,7 +142,7 @@ context = { "crates/proto-lab/src/action_targets.rs" = "624e25a8a896080702107574
 [unmapped_sources."crates/teams-proto/src/http/attachment_tests.rs"]
 sha256 = "fc4f64d121310a964744b565cd4d0efbd7874f3b5438692d6759a076cfd66c94"
 reason = "unit-test module included only under cfg(test); omitted by cargo-llvm-cov default tests.rs/_tests.rs filename filter; executable parent remains measured"
-context = { "crates/teams-proto/src/http.rs" = "799ea62729160fa5c0f3104397a97849a249f5300e5c727679fd8a7ce792257a" }
+context = { "crates/teams-proto/src/http.rs" = "3a5c7ade456c72c71994233c5a8cfa4ddfcec2333474757810f15ca2bf4ebfa3" }
 
 [unmapped_sources."crates/teams-core/src/attachments_tests.rs"]
 sha256 = "9dd845ed73f53a7a32137d505c45018d56bf8529060c3cfdee1ebe7059968e96"
@@ -206,7 +206,7 @@ sha256 = "94a7d873ea44696e94a01687b1cdc7d6777a90debf73b79a3743a00282a7f2d6"
 reason = "Windows-only app restart with explicit handle transfer and rewritten descriptor arguments; actual app_descriptors subprocess tests exercise success and failure on Windows, pending whole-app integration."
 
 [unmapped_sources."crates/teams-platform/src/windows_job.rs"]
-sha256 = "a2cd8de50eb53c0a437fa5d5824ab9a736ba6e3fd3620ec7f6418c0eb8df9ea5"
+sha256 = "5aa1e03698bdc84abc802e1cb46eddbcdefcdad24a3240e011af47d165275b02"
 reason = "Windows-only native runner/job implementation; measured by the Windows portability gate with synthetic subprocesses, no live client or GUI."
 
 [unmapped_sources."crates/teams-runner/src/windows.rs"]
@@ -286,7 +286,7 @@ sha256 = "a6f2ec0d6d3739d55bd3ea8712c10a64d77f30241135c2556443b8a36553cf5c"
 reason = "Windows and macOS only: GPUI's image path for video (Linux paints its external surface); measured by the Windows video fixture in the win11 console"
 
 [unmapped_sources."crates/teams-ui/src/local_ai/windows_prompt.rs"]
-sha256 = "12e293514261be58d38d44d77a0ba0d3cc133f7797a40ffa83585fe4748ab6db"
+sha256 = "5ae8cffe6c697246a2f6203356bb05040fd2a2bbfff80031817697fce044f078"
 reason = "Windows-only Claude batch-shim private prompt-file adapter; native windows_local_ai exercises exact multiline instructions and prompt lifetime through a synthetic batch/PowerShell process tree without an account or network."
 
 [unmapped_sources."crates/teams-ui/src/desktop/windows/apartment.rs"]
@@ -302,7 +302,7 @@ sha256 = "2d9947ba59d53b94bd258189c605789af95a0d26bdc31a09ef7f9a140800c702"
 reason = "Windows-only native shell integration with no Linux LLVM mapping. The authorized console fixture exercises visible body/Answer/Decline COM activation, stale/foreign arguments, toast history and native tray/taskbar primitives without an account. Native whole-application coverage remains a final port gate."
 
 [unmapped_sources."crates/teams-ui/src/desktop/windows/toasts.rs"]
-sha256 = "ecdad3b5d65f6a46ea6d0c4bfccd8862f5223ee73ed1edb3c5c9460996f794dd"
+sha256 = "6d0c5eae108608b7c680ad9fd378f0025f276b5d7f9ac4a8ebbb87015717e9e5"
 reason = "Windows-only native shell integration with no Linux LLVM mapping. The authorized console fixture exercises visible body/Answer/Decline COM activation, stale/foreign arguments, toast history and native tray/taskbar primitives without an account. Native whole-application coverage remains a final port gate."
 
 [unmapped_sources."crates/teams-ui/src/desktop/windows/tray.rs"]
@@ -597,14 +597,14 @@ reason = "Linux-only WPE/GPUI sign-in source selected by the cfg(target_os = \"l
 context = { "crates/teams-signin/src/lib.rs" = "a7b946e05829938c67d8c83c2f95877bbe47a5351f68ba7e8bd036149f3132ab" }
 
 [unmapped_sources_windows."crates/teams-ui/src/notify/linux.rs"]
-sha256 = "419bb65bc6b399c4234dfa1e46f79e0ecb65dfd33a9f4411d5c0b53b688229a1"
+sha256 = "e11d043bb9278f1d7deeebbf5691845cb357b43531d5295f78bca0fab9c498f4"
 reason = "Linux-only freedesktop notification D-Bus transport; notify.rs selects this module only under cfg(target_os = \"linux\"), so it is absent from native Windows compilation and remains required on Linux"
-context = { "crates/teams-ui/src/lib.rs" = "3c5faf32cfaf41a378f5cd80710fd3eb344b4770ce6e907e4ad759a62c1c6794", "crates/teams-ui/src/notify.rs" = "9bd2a19d2ab55ccf6994a44372c710074d246edb8ae84b11e7356282c71e70bb" }
+context = { "crates/teams-ui/src/lib.rs" = "12c582c45a75fab13995bdc703ae5572698d6acbcb25167ddb9161a985649a27", "crates/teams-ui/src/notify.rs" = "465fe3d89ab6ec59f754a766aa59815a0d9617892bf82e4774300ecb10101f67" }
 
 [unmapped_sources_windows."crates/teams-ui/src/tray/linux.rs"]
 sha256 = "ceed6565f30d059be5e8b6c0901fcba714248fe4ba0998e40c912d90db539ade"
 reason = "Linux-only StatusNotifierItem, D-Bus menu and launcher unread transport; tray.rs selects this module only under cfg(target_os = \"linux\"), so it is absent from native Windows compilation and remains required on Linux"
-context = { "crates/teams-ui/src/lib.rs" = "3c5faf32cfaf41a378f5cd80710fd3eb344b4770ce6e907e4ad759a62c1c6794", "crates/teams-ui/src/tray.rs" = "761e00a9301f59539a3edca854dfd467ac83a8f68dcd509ef18e4eaa07d7a1ab" }
+context = { "crates/teams-ui/src/lib.rs" = "12c582c45a75fab13995bdc703ae5572698d6acbcb25167ddb9161a985649a27", "crates/teams-ui/src/tray.rs" = "761e00a9301f59539a3edca854dfd467ac83a8f68dcd509ef18e4eaa07d7a1ab" }
 
 [unmapped_sources_windows."crates/ngteams/src/ctl/socket/unix.rs"]
 sha256 = "ea79c3378f2968223f72f282f2514e5cd6cb8ff57c9d0dc46b9130aa2b7bc50e"
@@ -643,7 +643,7 @@ sha256 = "f8695424981879c878659211b5b8b47c7cec742923f8ef5a61bc44e04f6a7fef"
 reason = "macOS-only AppKit/WebKit sign-in window; no Linux LLVM mapping; compiled and linted by the macOS portability workflow, run on the Mac console"
 
 [unmapped_sources."crates/teams-ui/src/desktop/macos.rs"]
-sha256 = "c33ed8427900a1b87176a20e6a760f096d644db25aa9346daae1f1f79062840f"
+sha256 = "b58d99803b48f62d8020c273341365b20bf6091e34a9e14966082f65ae191445"
 reason = "macOS-only notifications (posted to the notification center with a picture attachment, GPUI's binding for responses and dismissal) and Dock badge; no Linux LLVM mapping; its tags, actions and picture files are tested natively by the macOS portability workflow, the notification center and the Dock on the Mac console"
 
 [unmapped_sources."crates/ngteams/src/mac_app.rs"]
@@ -651,14 +651,19 @@ sha256 = "f628603547e10947867d75d9b13b8034b8be79c513286a00c85fc21a587d7cf4"
 reason = "macOS-only menu bar, Dock reopen and AppKit terminate routing; no Linux LLVM mapping; compiled and linted by the macOS portability workflow, run on the Mac console"
 
 [unmapped_sources."crates/teams-ui/src/meeting_alert/tests.rs"]
-sha256 = "63bb8f8ab6aaaec1cfac0b5eb49a7f3eb65a9795065e7742a356adf6bfd2fbab"
+sha256 = "1957d1d18badb89aaccd1076d057c4f6894cf22ddf8701396753dc3cb1f2ed7f"
 reason = "unit-test module included only by meeting_alert.rs cfg(test); omitted by cargo-llvm-cov's test-file filter"
-context = { "crates/teams-ui/src/meeting_alert.rs" = "be5825947b396fe792bc9f0fe9d4f284a47a3156292b503e78dc6374372d41eb" }
+context = { "crates/teams-ui/src/meeting_alert.rs" = "313cbe8b80a236f1c5c1db5545608dfaf457ed0325214b497e6fd63b03815d6d" }
+
+[unmapped_sources."crates/teams-ui/src/meeting_reminder/tests.rs"]
+sha256 = "7a7955ca3a4b8cce2c254bac771408a408d195007d02e6f4fa8ff5ebd76fe04d"
+reason = "unit-test module included only by meeting_reminder.rs cfg(test); omitted by cargo-llvm-cov's test-file filter"
+context = { "crates/teams-ui/src/meeting_reminder.rs" = "6aa3cb87934821ef924384d417df0916317856b8fddefbc515ea380436ff269e" }
 
 [unmapped_sources."crates/teams-proto/src/http/cloud_tests.rs"]
-sha256 = "ddbea3ab77189948d34689fbb2f2d3ec498ba1823a5c0e37ca8ec8dbb2e78487"
+sha256 = "d782175be3712d32b82427f86fa2f39fdf6f66074dc1935be0aa963a0b8e7044"
 reason = "unit-test module included only under cfg(test); omitted by cargo-llvm-cov default tests.rs/_tests.rs filename filter; executable parent remains measured"
-context = { "crates/teams-proto/src/http.rs" = "799ea62729160fa5c0f3104397a97849a249f5300e5c727679fd8a7ce792257a" }
+context = { "crates/teams-proto/src/http.rs" = "3a5c7ade456c72c71994233c5a8cfa4ddfcec2333474757810f15ca2bf4ebfa3" }
 
 [unmapped_sources."crates/teams-sdp/src/lib.rs"]
 sha256 = "2dfe9b286b9ebca1a0c6c3ee22c751f4886f6f8bd7d397bc684c79a5eba33862"

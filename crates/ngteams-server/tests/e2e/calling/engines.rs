@@ -14,8 +14,8 @@ use teams_core::{
     CallAction, CallFloor, CallId, CallMedia, CallParts, CallStatus, CallVideo, CallView, End, IncomingCall, Outbox,
     Relay, VideoOutput,
 };
-use teams_media::devices::file::{AudioInput, FileDevices, FrameCounter, Pacing, PatternCamera};
-use teams_media::devices::{DeviceError, VideoFrame, VideoSink, wav};
+use teams_media::devices::file::{AudioInput, FileDevices, FrameCounter, Pacing, PatternCamera, StillSource};
+use teams_media::devices::{AudioSink, AudioSource, DeviceError, Devices, VideoFrame, VideoSink, VideoSource, wav};
 use teams_media::processing::ProcessingConfig;
 use teams_media::session::SessionConfig;
 use teams_media::test_turn::{self, TurnServer};
@@ -100,6 +100,42 @@ impl VideoOutput for Shown {
     }
 }
 
+/// The screen an engine shares: the file backend's moving pattern, or one that holds still after its first frames, as a
+/// desktop's does while nothing on it changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Screen {
+    Moving,
+    Still,
+}
+
+/// The file backend's devices, its screen as [`Screen`] says.
+struct TestDevices {
+    files: FileDevices,
+    screen: Screen,
+}
+
+impl Devices for TestDevices {
+    fn microphone(&self) -> Result<Box<dyn AudioSource>, DeviceError> {
+        self.files.microphone()
+    }
+
+    fn speaker(&self) -> Result<Box<dyn AudioSink>, DeviceError> {
+        self.files.speaker()
+    }
+
+    fn camera(&self) -> Result<Box<dyn VideoSource>, DeviceError> {
+        self.files.camera()
+    }
+
+    fn screen(&self) -> Result<Box<dyn VideoSource>, DeviceError> {
+        let screen = self.files.screen()?;
+        Ok(match self.screen {
+            Screen::Moving => screen,
+            Screen::Still => Box::new(StillSource::new(screen, 3)),
+        })
+    }
+}
+
 /// One account's engine, its calls' media a tone in and a recording out.
 pub(super) struct Engine {
     pub(super) mri: String,
@@ -133,7 +169,19 @@ impl Engine {
         (tone, dir, camera): (Tone, &Path, PatternCamera),
     ) -> Self {
         let transports = (account.transport(nodes.1), account.transport(nodes.1));
-        Self::start_on(account, name, nodes, transports, (tone, dir, camera)).await
+        Self::start_on(account, name, nodes, transports, (tone, dir, camera, Screen::Moving)).await
+    }
+
+    /// [`Engine::start`] that shares `screen`.
+    pub(super) async fn start_sharing(
+        account: &Account,
+        name: &str,
+        nodes: (&TestServer, &TestServer),
+        (tone, dir, screen): (Tone, &Path, Screen),
+    ) -> Self {
+        let transports = (account.transport(nodes.1), account.transport(nodes.1));
+        let film = (tone, dir, PatternCamera::default(), screen);
+        Self::start_on(account, name, nodes, transports, film).await
     }
 
     /// [`Engine::start`] with every service base the account's authz names, as the account's bring-up sets them: the
@@ -149,7 +197,8 @@ impl Engine {
             crate::teams::transport(&account.session, nodes.1, id).await,
             crate::teams::transport(&account.session, nodes.1, id).await,
         );
-        Self::start_on(account, name, nodes, transports, (tone, dir, PatternCamera::default())).await
+        let film = (tone, dir, PatternCamera::default(), Screen::Moving);
+        Self::start_on(account, name, nodes, transports, film).await
     }
 
     async fn start_on(
@@ -157,7 +206,7 @@ impl Engine {
         name: &str,
         (socket, http): (&TestServer, &TestServer),
         (transport, reads): (crate::trouter::Transport, crate::trouter::Transport),
-        (tone, dir, camera): (Tone, &Path, PatternCamera),
+        (tone, dir, camera, screen): (Tone, &Path, PatternCamera, Screen),
     ) -> Self {
         let cloud = Cloud::own(ORIGIN).unwrap();
         let mri = Mri::new(account.mri.clone());
@@ -175,11 +224,14 @@ impl Engine {
         let recording = dir.join(format!("{name}.wav"));
         let video = Shown::default();
         let media = CallMedia {
-            devices: Arc::new(FileDevices {
-                input: AudioInput::Tone(tone),
-                recording: Some(recording.clone()),
-                camera,
-                pacing: Pacing::RealTime,
+            devices: Arc::new(TestDevices {
+                files: FileDevices {
+                    input: AudioInput::Tone(tone),
+                    recording: Some(recording.clone()),
+                    camera,
+                    pacing: Pacing::RealTime,
+                },
+                screen,
             }),
             relay: Relay::Teams,
             session: SessionConfig {

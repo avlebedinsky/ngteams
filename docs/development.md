@@ -37,7 +37,10 @@ language (the header's translation button): its messages are shown translated by
 → Chat translation), the account's own are sent in the chat's language and shown as written, and the translations
 are kept in the store, so a chat opened again is not translated twice. Its last message in the chat list, its new
 messages' desktop notifications, its messages found by the search and a reply's quote read in that language too (a
-notification waits at most a few seconds for its translation); the language menu filters as you type. See [channel management](protocol/channels.md#managing-an-existing-channel),
+notification waits at most a few seconds for its translation); the language menu filters as you type. One message
+can be translated alone, as in Teams: its "More options" → Translation → Translate (T on the selected message) shows
+it in the "Translate to" language of the message box, by the same chat translator, until "See original message"; the
+store keeps which messages show translated, so they stay so in a later run. See [channel management](protocol/channels.md#managing-an-existing-channel),
 [workflows](protocol/workflows.md), and [live captions](protocol/live-captions.md).
 
 ## Layout
@@ -508,7 +511,12 @@ it, and its More options downloads a recording the account may download
 as Fathom's call summaries (purpose, key takeaways, topics with their moments, next steps with owners, open
 questions), by Claude Code or the Codex CLI with any model it takes (by default Claude Sonnet or GPT-6.1-Terra;
 Settings → Calls → Meeting recaps, the same tool-and-model control as the captions'): the transcript then goes to that
-tool and its provider. It is kept per recording, copied as Markdown, or sent to the
+tool and its provider. Each AI setting can also pick an AI provider that the app asks with an API key: the Anthropic
+API, the OpenAI API, or an OpenAI-compatible server at its own base URL (`crates/teams-ui/src/local_ai/providers.rs`,
+`api.rs`; the requests are `teams-core`'s `ai_api`, as `teams-ui` holds no HTTP client; Settings → General → AI
+providers). Automatic is the first provider in the user's order that can work. A
+Claude Code or Codex CLI found on the `PATH` joins the list by itself. The keys stay in the system keyring; the
+settings file keeps only `key = "keyring"`. The summary is kept per recording, copied as Markdown, or sent to the
 meeting's chat after a preview. Settings control appearance, notifications, privacy,
 calls/devices and diagnostics. Native sandbox tests in `crates/ngteams/tests/{window,accounts_window,call_window,ui_tour}.rs`
 exercise these views against the mock.
@@ -548,17 +556,25 @@ to paste. There is no separate write-decision log.
 
 #### Translating the message you write
 
-Every message box (a chat's, a channel's post and reply boxes, editing a message, New message) has Translate beside
-Correct (Ctrl+Shift+Y), with the language button next to it. Translate replaces the draft with its translation, in
-place and as one edit, so Ctrl+Z brings the draft back; mentions, links that show their address, inline code, blocks
-of code, pictures and line breaks never go to the tool and come back as they were, and formatted words stay formatted.
-While it runs, a line over the box shows the language and the tool with Cancel (Escape or the button again cancel
-too); a failure keeps the draft and says why, with Try again, and with no tool installed it offers the settings. The
-language button opens a searchable list of common languages, and any other language can be typed. The language is one
-setting for every box and account in the app, kept across restarts; it and the tool are in Settings → General →
-Message translation (the tool: Automatic, which is Claude Code when installed and else Codex, or either one; by
-default Claude Sonnet or GPT-6.1-Terra). Only the draft's words and the language go to the tool and its provider,
-never the chat, names or tokens (`crates/teams-ui/src/draft_translate.rs`).
+Every message box (a chat's, a channel's post and reply boxes, editing a message, New message) has Translate
+(Ctrl+Shift+Y) in the menu of its AI button, with Correct and the "Translation language" row. Translate replaces the
+draft with its translation, in place and as one edit, so Ctrl+Z brings the draft back; mentions, links that show their
+address, inline code, blocks of code, pictures and line breaks never go to the tool and come back as they were, and
+formatted words stay formatted. While it runs, a line over the box shows the language and the tool with Cancel (Escape
+or the menu's "Stop translating" row cancel too); a failure keeps the draft and says why, with Try again, and with no
+tool installed it offers the settings. The "Translation language" row opens a searchable list of common languages, and
+any other language can be typed. The language is one setting for every box and account in the app, kept across restarts;
+it and the tool are in Settings → General → Message translation (the tool: Automatic, which is Claude Code when
+installed and else Codex, or either one; by default Claude Sonnet or GPT-6.1-Terra). Only the draft's words and the
+language go to the tool and its provider, never the chat, names or tokens (`crates/teams-ui/src/draft_translate.rs`).
+
+#### The message box toolbar
+
+The toolbar shows Format, Emoji, Attach files, Loop components, "+" (Actions and apps), the AI button and Send. To
+hide a button, right-click the toolbar or select "Customize toolbar" at the end of "+", and remove its check; the
+same list is in Settings → Appearance → Message box toolbar. "+" and Send cannot hide. A hidden button's action
+stays in "+", with its icon and key. The choice is one setting for every box, kept across restarts
+(`crates/teams-ui/src/compose/menus.rs`).
 
 ## Captures and fixtures
 
@@ -1022,6 +1038,28 @@ cargo test --locked -p teams-platform -p teams-log -p teams-store -p teams-auth 
     -p teams-update -- --test-threads=1
 NGTEAMS_KEYCHAIN_TESTS=1 cargo test -p teams-auth --lib keychain   # needs an unlocked login keychain (not over SSH)
 scripts/run-lab-macos.py --build-only                     # lab-marked ngteams and ngteams-webview in target/lab
+```
+
+The call tests (`teams-media`, and `teams-core --test calls`) open many sockets and load GStreamer. Run them so:
+
+- Set `ulimit -n 4096` first. An SSH shell starts at 256. At that limit the share and group tests fail with
+  "no relayed candidate" or "Too many open files".
+- Do not use `/usr/bin/timeout`. SIP protects it, so macOS removes `DYLD_FALLBACK_LIBRARY_PATH` from what it starts,
+  and the test cannot load GStreamer. Use a watchdog of the shell: start `cargo test` in the background, then kill
+  it after the limit if it did not stop.
+- Every macOS link must have `-ObjC` (`.cargo/config.toml`). Without it, the first libwebrtc factory aborts with
+  `+[NSString stringForStdString:]: unrecognized selector`. If you set `RUSTFLAGS`, add `-C link-arg=-ObjC` to it:
+  the build script of `teams-media` stops a macOS build without it.
+- On a Mac with VPN interfaces (`utun`), run `teams-core --test calls group::` with `--test-threads 1`. TURN
+  allocations from those interfaces to the loopback relay of the tests get no answer. Two group tests that start
+  together can then fail.
+
+```sh
+ulimit -n 4096
+export DYLD_FALLBACK_LIBRARY_PATH=~/ngteams-agent/gstreamer/lib
+cargo test -p teams-media --test share & pid=$!
+( sleep 1200; pkill -TERM -P $pid; kill $pid ) & watchdog=$!
+wait $pid; rc=$?; kill $watchdog 2>/dev/null; (exit $rc)
 ```
 
 What macOS has of its own: data and config under `~/Library/Application Support/ngteams/{data,config}` (the lab's

@@ -357,6 +357,8 @@ async fn serve_api(
     tracing::info!(address = %listener.local_addr()?, origin = %app.config.origin(), tls = tls.is_some(), "serving");
     let sweeper = tokio::spawn(crate::calling::keep_sweeping(std::sync::Arc::clone(app)));
     let senders = (app.config.apps.enabled).then(|| crate::bots::Senders::start(std::sync::Arc::clone(app)));
+    let hooks =
+        (app.config.outgoing_webhooks.enabled).then(|| crate::outgoing::Senders::start(std::sync::Arc::clone(app)));
     let db = app.db.clone();
     let indexing = tokio::spawn(async move {
         match crate::search::backfill(&db).await {
@@ -376,6 +378,11 @@ async fn serve_api(
         // still hold them
         let lease = std::time::Duration::from_secs(app.config.bots.delivery_lease);
         senders.stop(lease).await;
+    }
+    if let Some(hooks) = hooks {
+        // the requests under way end in their limit and their replies are posted
+        let limit = std::time::Duration::from_millis(app.config.outgoing_webhooks.timeout_ms);
+        hooks.stop(limit + std::time::Duration::from_secs(2)).await;
     }
     Ok(served?)
 }

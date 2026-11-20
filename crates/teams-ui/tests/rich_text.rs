@@ -924,6 +924,63 @@ fn a_message_of_pictures_alone_is_drawn_bare() {
     assert!(!rendered.pictures_only() && !rendered.bare, "{rendered:#?}");
 }
 
+/// A made-up sticker on Teams' sticker CDN, as a message names it.
+const STICKER: &str = "https://teams.public.onecdn.static.microsoft/evergreen-assets/stickerassets/madeup-250x250/en-us/MadeUp_Hi.gif?v=5";
+
+#[test]
+fn a_message_of_a_sticker_alone_is_the_sticker_bare_at_its_size() {
+    // read back: the bare `img` between two blank paragraphs; as sent: in its `readonly` element
+    let read_back = format!(
+        "<p>&nbsp;</p>\r\n<img src=\"{STICKER}\" height=\"180\" alt=\"A made-up sticker\" width=\"180\" \
+         itemtype=\"http://schema.skype.com/Sticker\">\r\n<p>&nbsp;</p>"
+    );
+    let sent = format!(
+        "<p>&nbsp;</p><readonly aria-label=\"A made-up label\" contenteditable=\"false\" \
+         itemtype=\"http://schema.skype.com/Sticker\" title=\"A made-up label\"><img src=\"{STICKER}\" height=\"180\" \
+         alt=\"A made-up label\" width=\"180\" data-image-type=\"standard\" data-image-mode=\"single\" \
+         itemtype=\"http://schema.skype.com/Sticker\"></readonly><p>&nbsp;</p>"
+    );
+    for (content, label) in [(read_back, "A made-up sticker"), (sent, "A made-up label")] {
+        let rendered = laid_out(&content);
+        assert!(rendered.bare, "no bubble behind it: {rendered:#?}");
+        let [Block::Picture(picture)] = &rendered.blocks[..] else {
+            panic!("the sticker alone, no blank lines: {rendered:#?}");
+        };
+        assert!(picture.sticker);
+        assert_eq!((picture.src.as_str(), picture.size), (STICKER, Some((180, 180))));
+        assert_eq!(picture.alt.as_deref(), Some(label));
+        assert_eq!(picture.fallback.text, format!("[{IMAGE_PLACEHOLDER}: {label}]"));
+        assert_eq!(rendered.sticker_alone(), Some(picture));
+        assert!(rendered.pictures().is_empty(), "no click opens a sticker in the viewer");
+    }
+}
+
+#[test]
+fn a_sticker_beside_text_or_in_a_quote_is_no_bare_message() {
+    let sticker = format!(
+        "<img src=\"{STICKER}\" width=\"180\" height=\"180\" alt=\"s\" itemtype=\"http://schema.skype.com/Sticker\">"
+    );
+    // with words: the sticker in the bubble, under them
+    let with_text = laid_out(&format!("<p>made-up words</p>{sticker}"));
+    assert!(!with_text.bare && with_text.sticker_alone().is_none(), "{with_text:#?}");
+    assert!(matches!(&with_text.blocks[..], [Block::Text(_), Block::Picture(picture)] if picture.sticker));
+    // two stickers: neither alone
+    let two = laid_out(&format!("{sticker}{sticker}"));
+    assert!(two.sticker_alone().is_none());
+    // a quoted one is its placeholder, as another message's picture is
+    let quoted = laid_out(&format!("<blockquote>{sticker}</blockquote><p>made-up reply</p>"));
+    assert!(quoted.sticker_alone().is_none() && !quoted.bare);
+    let Some(Block::Quote(quote)) = quoted.blocks.first() else {
+        panic!("a quote: {quoted:#?}");
+    };
+    assert!(matches!(&quote.blocks[..], [Block::Text(text)] if text.text == format!("[{IMAGE_PLACEHOLDER}: s]")));
+    // off Teams' sticker CDN and the media service: its placeholder, no sticker
+    let elsewhere = laid_out(
+        "<img src=\"https://images.example.test/a.gif\" alt=\"e\" itemtype=\"http://schema.skype.com/Sticker\">",
+    );
+    assert!(elsewhere.sticker_alone().is_none() && !elsewhere.bare, "{elsewhere:#?}");
+}
+
 /// The engine's side a message's pictures and emoticons are asked of: answers from its own pictures, no animation,
 /// and records what it was asked.
 #[derive(Default)]

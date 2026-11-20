@@ -119,11 +119,19 @@ pub struct FakeCore {
     pub expirations: Mutex<HashMap<String, i64>>,
     /// The account's read horizons by conversation.
     pub horizons: Mutex<HashMap<String, ReadHorizon>>,
+    /// Where the account marked conversations unread (`unread_mark`), by conversation.
+    pub unread_marks: Mutex<HashMap<String, i64>>,
     /// Per conversation, the service's older pages `load_older` brings into `messages`, the next one first (each the
     /// newest first); once none is left it answers `None`. A conversation not named answers `None` at once.
     pub older: Mutex<HashMap<String, Vec<Vec<Message>>>>,
     pub hold_older: Mutex<bool>,
     pub held_older: Mutex<Vec<Answer<Option<Synced>>>>,
+    /// While set, a read of the kept translations is held in `held_translations` for the test to send.
+    pub hold_translations: Mutex<bool>,
+    pub held_translations: Mutex<Vec<Answer<Vec<StoredTranslation>>>>,
+    /// While set, a mark's write is recorded but neither kept nor answered, as a catch-up holds it.
+    pub hold_marks: Mutex<bool>,
+    pub held_marks: Mutex<Vec<Answer<OutboxEntry>>>,
     pub previews: Mutex<HashMap<String, Message>>,
     /// Conversations never synced: `history_complete` answers `None` for them; for any other, whether `older` has
     /// no page left.
@@ -150,6 +158,7 @@ pub struct FakeCore {
     pub own_answers: Mutex<VecDeque<Result<TransientSent, EngineError>>>,
     /// Every row resent, by id, in order.
     pub resent: Mutex<Vec<i64>>,
+    pub resend_errors: Mutex<VecDeque<EngineError>>,
     /// The outbox rows that aren't sent, of any conversation, the oldest first.
     pub unsettled: Mutex<Vec<OutboxEntry>>,
     /// While set, `outbox_unsettled` isn't answered (as the engine's loop doesn't while it sends): its answers are kept
@@ -201,6 +210,8 @@ pub struct FakeCore {
     pub app_listing: Mutex<teams_core::AppListing>,
     pub user_apps: Mutex<Vec<teams_proto::StoreApp>>,
     pub chat_apps: Mutex<Vec<teams_proto::StoreApp>>,
+    /// The account's apps with a message extension, as `Core::message_extensions` answers them.
+    pub extension_apps: Mutex<Vec<teams_proto::ExtensionApp>>,
     /// The bots' apps, by the bot's bare id in lower case: `Core::bot_app` and `Core::known_bot_app` answer from it.
     pub bot_apps: Mutex<HashMap<String, teams_proto::StoreApp>>,
     /// How many next `Core::bot_app` asks fail: each is answered `None`, as the engine answers a read that failed.
@@ -260,6 +271,8 @@ pub struct FakeCore {
     pub meeting_options: Mutex<Option<teams_proto::MeetingOptions>>,
     /// The app's read-only mode, as `Core::read_only` answers it.
     pub read_only: Mutex<bool>,
+    /// What `link_permission` answers for any file (none: the answer named no link).
+    pub link_permission: Mutex<Option<teams_proto::chat::LinkPermission>>,
     /// The optional services the account's cloud serves, as `Core::capabilities` answers them: all when `None`.
     pub capabilities: Mutex<Option<teams_core::Capabilities>>,
     /// Every bot ask, in order; each answered from `bot_answers`, else `Done`; with `hold_bot_answers` set, each
@@ -278,6 +291,8 @@ pub struct FakeCore {
     pub translations: Mutex<Vec<StoredTranslation>>,
     /// The account's own messages as written, kept when they were sent translated.
     pub sent_originals: Mutex<Vec<SentOriginal>>,
+    /// The messages translated one at a time, by conversation and message id.
+    pub translated_messages: Mutex<Vec<(String, String)>>,
     /// Translated chats' glossaries, as the store keeps them (the newest named last).
     pub glossary: Mutex<Vec<GlossaryTerm>>,
     /// The calls' captions saved on this computer, as the store keeps them.
@@ -437,6 +452,9 @@ fn conversation_of(action: &Action) -> Option<String> {
         | Action::React { conversation, .. }
         | Action::Unreact { conversation, .. }
         | Action::Read { conversation, .. }
+        | Action::MarkUnread { conversation, .. }
+        | Action::MarkRead { conversation }
+        | Action::EndUnreadMark { conversation }
         | Action::AddMembers { conversation, .. } => Some(conversation.clone()),
         Action::ActivityRead { .. } | Action::ActivitySeen | Action::ActivityAllRead => {
             Some(teams_core::activity::FEED.to_owned())
@@ -458,6 +476,32 @@ impl FakeCore {
             return Reply::ready(Err(EngineError::Stopped));
         }
         Reply::ready(Ok(answer()))
+    }
+
+    /// What the engine's store keeps of a mark's write: the mark 1 ms before the message it names (the newest without
+    /// one), or none once it ends.
+    fn keep_mark(&self, action: &Action) {
+        match action {
+            Action::MarkUnread {
+                conversation,
+                message_id,
+            } => {
+                let arrival = locked(&self.messages).get(conversation).and_then(|messages| {
+                    messages
+                        .iter()
+                        .filter(|message| message_id.as_ref().is_none_or(|id| &message.id == id))
+                        .map(|message| message.arrival_time)
+                        .max()
+                });
+                if let Some(arrival) = arrival {
+                    locked(&self.unread_marks).insert(conversation.clone(), arrival - 1);
+                }
+            }
+            Action::MarkRead { conversation } | Action::EndUnreadMark { conversation } => {
+                locked(&self.unread_marks).remove(conversation);
+            }
+            _ => {}
+        }
     }
 
     pub fn asked(&self) -> Vec<&'static str> {
@@ -711,6 +755,10 @@ impl Core for FakeCore {
         Reply::ready(Ok(locked(&self.chat_apps).clone()))
     }
 
+    fn message_extensions(&self) -> Reply<Vec<teams_proto::ExtensionApp>> {
+        Reply::ready(Ok(locked(&self.extension_apps).clone()))
+    }
+
     fn bot_app(&self, bot: String) -> Reply<Option<teams_proto::StoreApp>> {
         let key = bot.trim_start_matches("28:").to_ascii_lowercase();
         let mut failures = locked(&self.bot_app_failures);
@@ -848,6 +896,17 @@ impl Core for FakeCore {
         if let Some(error) = locked(&self.write_errors).pop_front() {
             return Reply::ready(Err(error));
         }
+        if *locked(&self.hold_marks)
+            && matches!(
+                action,
+                Action::MarkUnread { .. } | Action::MarkRead { .. } | Action::EndUnreadMark { .. }
+            )
+        {
+            let (answer, reply) = Reply::later();
+            locked(&self.held_marks).push(answer);
+            return reply;
+        }
+        self.keep_mark(&action);
         self.answer("write", || {
             if let Some(row) = locked(&self.write_answers).pop_front() {
                 return row;
@@ -860,6 +919,9 @@ impl Core for FakeCore {
 
     fn resend(&self, id: i64) -> Reply<OutboxEntry> {
         locked(&self.resent).push(id);
+        if let Some(error) = locked(&self.resend_errors).pop_front() {
+            return Reply::ready(Err(error));
+        }
         self.answer("resend", || outbox_row(id, OutboxKind::Send, OutboxState::Pending))
     }
 
@@ -1118,6 +1180,11 @@ impl Core for FakeCore {
         Reply::ready(Err(teams_core::EngineError::FileUnavailable))
     }
 
+    fn link_permission(&self, _: String, _: String) -> Reply<Option<teams_proto::chat::LinkPermission>> {
+        let permission = locked(&self.link_permission).clone();
+        self.answer("link_permission", || permission)
+    }
+
     fn profile_card(&self, mri: String) -> Reply<teams_core::ProfileCard> {
         locked(&self.asked).push("profile_card");
         let card = locked(&self.profile_cards).get(&mri).cloned();
@@ -1186,7 +1253,16 @@ impl Core for FakeCore {
         self.answer("read_horizon", || locked(&self.horizons).get(&conversation).cloned())
     }
 
+    fn unread_mark(&self, conversation: String) -> Reply<Option<i64>> {
+        self.answer("unread_mark", || locked(&self.unread_marks).get(&conversation).copied())
+    }
+
     fn translations(&self, conversation: String, language: String, ids: Vec<String>) -> Reply<Vec<StoredTranslation>> {
+        if *locked(&self.hold_translations) {
+            let (answer, reply) = Reply::later();
+            locked(&self.held_translations).push(answer);
+            return reply;
+        }
         self.answer("translations", || {
             locked(&self.translations)
                 .iter()
@@ -1219,6 +1295,26 @@ impl Core for FakeCore {
                 .filter(|kept| kept.conversation_id == conversation && keys.contains(&kept.key))
                 .cloned()
                 .collect()
+        })
+    }
+
+    fn translated_messages(&self, conversation: String, ids: Vec<String>) -> Reply<Vec<String>> {
+        self.answer("translated_messages", || {
+            locked(&self.translated_messages)
+                .iter()
+                .filter(|(chat, id)| *chat == conversation && ids.contains(id))
+                .map(|(_, id)| id.clone())
+                .collect()
+        })
+    }
+
+    fn keep_translated_message(&self, conversation: String, message: String, translated: bool) -> Reply<()> {
+        self.answer("keep_translated_message", || {
+            let mut kept = locked(&self.translated_messages);
+            kept.retain(|(chat, id)| !(*chat == conversation && *id == message));
+            if translated {
+                kept.push((conversation, message));
+            }
         })
     }
 

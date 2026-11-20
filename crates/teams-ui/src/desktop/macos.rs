@@ -27,7 +27,8 @@ use gpui::{App, AsyncApp, SystemNotification, SystemNotificationAction, SystemNo
 
 use super::Desktop;
 use crate::notify::{
-    ANSWER_ACTION, BannerFiles, DECLINE_ACTION, DEFAULT_ACTION, JOIN_ACTION, Notice, NoticeKind, NotificationServer,
+    ANSWER_ACTION, BannerFiles, DECLINE_ACTION, DEFAULT_ACTION, DISMISS_ACTION, JOIN_ACTION, Notice, NoticeKind,
+    NotificationServer, SNOOZE_ACTION,
 };
 use crate::tray::TrayIcon;
 
@@ -133,6 +134,18 @@ fn system_notification(notice: &Notice, tag: String) -> SystemNotification {
             id: JOIN_ACTION.into(),
             label: "Join".into(),
         }]
+    } else if notice.kind == NoticeKind::Reminder {
+        [
+            (JOIN_ACTION, "Join"),
+            (SNOOZE_ACTION, "Snooze"),
+            (DISMISS_ACTION, "Dismiss"),
+        ]
+        .into_iter()
+        .map(|(id, label)| SystemNotificationAction {
+            id: id.into(),
+            label: label.into(),
+        })
+        .collect()
     } else {
         Vec::new()
     };
@@ -148,7 +161,7 @@ fn system_notification(notice: &Notice, tag: String) -> SystemNotification {
 fn action_of(response: &SystemNotificationResponse) -> Option<&str> {
     match response.action_id.as_deref() {
         None => Some(DEFAULT_ACTION),
-        Some(action @ (ANSWER_ACTION | DECLINE_ACTION | JOIN_ACTION)) => Some(action),
+        Some(action @ (ANSWER_ACTION | DECLINE_ACTION | JOIN_ACTION | SNOOZE_ACTION | DISMISS_ACTION)) => Some(action),
         Some(_) => None,
     }
 }
@@ -267,10 +280,14 @@ fn notifications(desktop: &WeakEntity<Desktop>, files: Option<BannerFiles>, cx: 
 const CALL_CATEGORY: &str = "ngteams-call";
 /// The category of a notification with Join: a started meeting's.
 const MEETING_CATEGORY: &str = "ngteams-meeting";
+/// The category of a notification with Join, Snooze and Dismiss: a meeting reminder's.
+const REMINDER_CATEGORY: &str = "ngteams-reminder";
 
 /// The category of a notification offering `actions` (some).
 fn category_of(actions: &[SystemNotificationAction]) -> &'static str {
-    if actions.iter().any(|action| action.id.as_ref() == JOIN_ACTION) {
+    if actions.iter().any(|action| action.id.as_ref() == SNOOZE_ACTION) {
+        REMINDER_CATEGORY
+    } else if actions.iter().any(|action| action.id.as_ref() == JOIN_ACTION) {
         MEETING_CATEGORY
     } else {
         CALL_CATEGORY
@@ -503,6 +520,35 @@ mod tests {
     }
 
     #[test]
+    fn a_meeting_reminder_offers_join_snooze_and_dismiss() {
+        let (server, queue) = server();
+        let _ = server
+            .show(&notice(NoticeKind::Reminder), 0)
+            .now_or_never()
+            .expect("ready");
+        let Ok(Command::Show(Banner {
+            notification: shown, ..
+        })) = queue.try_recv()
+        else {
+            panic!("nothing shown")
+        };
+        let actions: Vec<(&str, &str)> = shown
+            .actions
+            .iter()
+            .map(|action| (action.id.as_ref(), action.label.as_ref()))
+            .collect();
+        assert_eq!(
+            actions,
+            [
+                (JOIN_ACTION, "Join"),
+                (SNOOZE_ACTION, "Snooze"),
+                (DISMISS_ACTION, "Dismiss")
+            ]
+        );
+        assert_eq!(category_of(&shown.actions), "ngteams-reminder");
+    }
+
+    #[test]
     fn an_app_activity_item_shows_as_a_plain_banner() {
         let (server, queue) = server();
         let id = server
@@ -586,6 +632,8 @@ mod tests {
         assert_eq!(action_of(&response(Some(ANSWER_ACTION))), Some(ANSWER_ACTION));
         assert_eq!(action_of(&response(Some(DECLINE_ACTION))), Some(DECLINE_ACTION));
         assert_eq!(action_of(&response(Some(JOIN_ACTION))), Some(JOIN_ACTION));
+        assert_eq!(action_of(&response(Some(SNOOZE_ACTION))), Some(SNOOZE_ACTION));
+        assert_eq!(action_of(&response(Some(DISMISS_ACTION))), Some(DISMISS_ACTION));
         assert_eq!(action_of(&response(Some("other"))), None);
     }
 

@@ -438,6 +438,36 @@ async fn a_gif_and_a_link_preview_s_picture_are_cached_by_what_they_are_of() {
 }
 
 #[tokio::test]
+async fn a_teams_sticker_is_read_from_its_cdn_once_and_then_from_the_cache() {
+    const GIF: &[u8] = b"GIF89a made-up sticker";
+    const STICKER: &str = "/evergreen-assets/stickerassets/madeup-250x250/en-us/MadeUp_Hi.gif";
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(STICKER))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(GIF.to_vec(), "image/gif"))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let store_file = store_file(&dir);
+    let src = format!("https://teams.public.onecdn.static.microsoft{STICKER}?v=5");
+
+    let first = engine(&server, &store_file);
+    let read = first.requests().message_picture(src.clone()).await.unwrap().unwrap();
+    assert_eq!((read.format, read.bytes.as_slice()), (PastedFormat::Gif, GIF));
+    first.shutdown();
+
+    // the next run: the same sticker on Teams' other static host, from the cache
+    let second = engine(&server, &store_file);
+    let statics = format!("https://statics.teams.cdn.office.net{STICKER}");
+    assert_eq!(
+        second.requests().message_picture(statics).await.unwrap().unwrap().bytes,
+        GIF
+    );
+    second.shutdown();
+    assert_eq!(requests_to(&server, STICKER).await, 1);
+}
+
+#[tokio::test]
 async fn an_app_s_tile_is_read_once_cached_by_its_version_and_refused_off_the_cdn() {
     const TILE: &str = "/teamsappdata/evergreen-assets/apps/00000000-0000-4000-8000-00000000a002_largeImage.png";
     let url = |version: &str| format!("https://res.cdn.office.net{TILE}?v={version}");

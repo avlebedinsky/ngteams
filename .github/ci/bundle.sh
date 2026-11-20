@@ -1,6 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 case "$1" in
+    strip)
+        python3 - "${2:-target/test-shards.json}" <<'PY'
+import json
+from pathlib import Path
+import subprocess
+import sys
+shards = json.loads(Path(sys.argv[1]).read_text())
+executables = {Path(test['executable']) for shard in shards for test in shard}
+before = sum(path.stat().st_size for path in executables)
+for path in sorted(executables):
+    subprocess.run(['strip', '--strip-unneeded', '--keep-section=__llvm_covmap',
+                    '--keep-section=__llvm_covfun', '--', str(path)], check=True)
+after = sum(path.stat().st_size for path in executables)
+print(f'Test executables: {before} bytes before strip, {after} bytes after strip')
+PY
+        ;;
     pack)
         python3 - <<'PY'
 import json
@@ -26,6 +42,11 @@ PY
             name=${list#target/bundle-}
             name=${name%-files}
             tar -I 'zstd --long=30 -T4 -3' -cf "target/coverage-$name.tar.zst" -T "$list"
+            if [[ "$name" == shard-* ]]; then
+                while IFS= read -r executable; do
+                    rm -- "${executable:?}"
+                done < "$list"
+            fi
         done
         du -h target/coverage-*.tar.zst
         ;;

@@ -450,6 +450,32 @@ fn a_picture_is_never_wider_than_the_width_there_is() {
 }
 
 #[test]
+fn a_sticker_in_a_narrow_room_is_scaled_down_whole_its_frame_square() {
+    let sticker = (180, 180);
+    // room enough: as any picture, at its size
+    assert_eq!(
+        sides(Shape::whole_in(sticker, (250, 250), Some(gpui::px(600.0)))),
+        sides(Shape::of(sticker, (250, 250), None))
+    );
+    assert_eq!(
+        sides(Shape::whole_in(sticker, (250, 250), None)),
+        ((PICTURE_BOX, PICTURE_BOX), (PICTURE_BOX, PICTURE_BOX))
+    );
+    // narrower than it, border and all: the frame scaled with the picture, still square
+    let ((frame_w, frame_h), (image_w, image_h)) = sides(Shape::whole_in(sticker, (250, 250), Some(gpui::px(101.0))));
+    assert_eq!((frame_w, frame_h), (image_w, image_h));
+    assert!(
+        frame_w < 101.0 && (frame_w - frame_h).abs() < f32::EPSILON,
+        "{frame_w} by {frame_h}"
+    );
+    let outer = Shape::whole_in(sticker, (250, 250), Some(gpui::px(101.0))).outer();
+    assert!((f32::from(outer.width) - 101.0).abs() < 0.01, "{outer:?}");
+    // a smaller one in its square frame keeps both in proportion
+    let ((frame_w, frame_h), (image_w, image_h)) = sides(Shape::whole_in((100, 100), (100, 100), Some(gpui::px(92.0))));
+    assert!((frame_w - frame_h).abs() < f32::EPSILON && image_w < frame_w && (image_w - image_h).abs() < f32::EPSILON);
+}
+
+#[test]
 fn an_emoticon_in_text_stands_on_the_bottom_of_the_text_s_font_as_teams_draws_it() {
     use gpui::{point, px};
     use inline::{INLINE_EMOTICON_REMS, LineMetrics, inline_emoticon_origin};

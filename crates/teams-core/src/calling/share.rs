@@ -21,6 +21,11 @@
 //!   ([`media::share_group`]); as the web client does, the account tells the conversation it shares and describes its
 //!   lines again with the sharing line `sendonly` (`Calls::describe_share`), renegotiating nothing. Stop sharing
 //!   stops the frames and describes that line `recvonly` again.
+//! - **The media set up again** (a new mixer session, as when someone is added to a 1:1 call): as in Teams, a share
+//!   goes on. The old session gives its screen back ([`MediaDone::ScreenKept`]), and the screen goes out on the new
+//!   session's sharing line as a group call's share does ([`Calling::screen_kept`]). The share stays told as on
+//!   meanwhile. A Stop sharing before the screen came drops it, and one while it starts to go out stops it once it
+//!   went ([`Calling::group_shared`]).
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -28,12 +33,52 @@ use std::time::Instant;
 use teams_call::{CallId, Screen};
 use teams_media::devices::VideoSource;
 use teams_media::sdp::{NgcSdp, SharingLine};
+use teams_media::session::MediaSession;
 use teams_proto::{Credentials, HttpError, Transport};
 use tokio::sync::oneshot;
 
-use super::media::{self, MediaDone};
+use super::media::{self, LiveMedia, MediaDone};
 use super::{CallActionError, Calling, Waiting};
 use crate::{EngineError, Event};
+
+/// The shares of the session that the call's media replaces ([`Calling::rebuilt`]).
+#[derive(Default)]
+pub(super) struct OldShares {
+    /// A share switch that waited for the old session's renegotiation: it goes on the new session.
+    pub(super) waits: Option<media::ShareWait>,
+    shared: bool,
+    /// The old session's share step not done yet: a Stop sharing made keeps nothing.
+    turning: Option<bool>,
+    told: bool,
+    shown: bool,
+}
+
+impl OldShares {
+    /// The shares of `old`, its waiting switch taken.
+    pub(super) fn of(old: &mut LiveMedia) -> Self {
+        Self {
+            waits: old.share_waits.take(),
+            shared: old.shares.own,
+            turning: old.shares.turning,
+            told: old.shares.told,
+            shown: old.shares.theirs,
+        }
+    }
+
+    /// As in Teams, a screen the old session shared goes on in the new one, unless a switch waits.
+    fn kept(&self) -> bool {
+        self.shared && self.turning != Some(false) && self.waits.is_none()
+    }
+
+    /// The new session `live` starts as the share was told; a kept screen stays told as on while it comes.
+    pub(super) fn carry(&self, live: &mut LiveMedia) {
+        live.shares.told = self.told;
+        if self.kept() {
+            live.shares.turning = Some(true);
+            live.screen_coming = true;
+        }
+    }
+}
 
 impl<C, T> Calling<C, T>
 where
@@ -61,6 +106,14 @@ where
             let _ = reply.send(Ok(call));
             return;
         }
+        if !on && std::mem::take(&mut live.screen_coming) {
+            // the old session's screen has not come yet: it goes no more, and nothing shares on this session
+            log::info!("call {}: its kept screen goes no more", call.get());
+            live.shares.turning = None;
+            self.tell_sharing(call);
+            let _ = reply.send(Ok(call));
+            return;
+        }
         if on {
             // the portal asks the user and waits for their answer: the call's negotiations go on meanwhile
             let step = media::pick_screen(call, Arc::clone(&self.media.devices), reply);
@@ -68,9 +121,7 @@ where
             return;
         }
         if live.is_group() {
-            let step = media::share_group(live, None, reply);
-            self.media_steps.spawn_blocking(step);
-            return;
+            return self.stop_group_share(call, reply);
         }
         match self.calls.begin_renegotiation(call) {
             Ok(()) => {
@@ -87,10 +138,29 @@ where
         }
     }
 
+    /// Stop sharing in the group call `call`. A screen that still starts to go out stops once it went
+    /// ([`Self::group_shared`]), as the two steps run in no fixed order.
+    fn stop_group_share(&mut self, call: CallId, reply: Waiting) {
+        let Some(live) = self.live.as_mut().filter(|live| live.call == call) else {
+            return refuse(reply, CallActionError::NoMedia);
+        };
+        let starting = live.shares.turning == Some(true);
+        live.shares.turning = Some(false);
+        if starting {
+            log::info!("call {}: its screen stops once it went out", call.get());
+            self.tell_sharing(call);
+            let _ = reply.send(Ok(call));
+            return;
+        }
+        let step = media::share_group(live, None, reply);
+        self.media_steps.spawn_blocking(step);
+    }
+
     /// A share's media step done: the screen picked, or shared (or no longer) on a line of its own or a group call's.
     pub(super) fn share_step_done(&mut self, done: MediaDone, now: Instant) {
         match done {
             MediaDone::ScreenPicked { call, result, reply } => self.screen_picked(call, result, reply),
+            MediaDone::ScreenKept { call, screen } => self.screen_kept(call, screen),
             MediaDone::GroupShared {
                 call,
                 on,
@@ -231,6 +301,66 @@ where
         self.media_steps.spawn_blocking(step);
     }
 
+    /// Lets go of the old `session` of `call`: it closes, once it gave back the screen it shared when that goes on.
+    pub(super) fn let_go_of(&mut self, call: CallId, session: Arc<MediaSession>, old: &OldShares) {
+        if old.kept() {
+            let from = Arc::clone(&session);
+            self.media_steps.spawn_blocking(move || MediaDone::ScreenKept {
+                call,
+                screen: from.take_screen(),
+            });
+        }
+        tokio::task::spawn_blocking(move || super::close(call, session));
+    }
+
+    /// The shares of `call` once its new session replaced the old one: the new session shows no share yet, so a
+    /// screen the old one showed is told gone (its sharing line tells it again, `show_participants`). A screen the old
+    /// one shared goes on ([`Self::screen_kept`]), unless a switch waits.
+    pub(super) fn shares_replaced(&mut self, call: CallId, old: &OldShares) {
+        if old.shared || old.shown {
+            self.calls.set_screen(call, None);
+        }
+        if old.kept() {
+            log::info!(
+                "call {}: its shared screen goes on once its media is set up again",
+                call.get()
+            );
+        } else if old.shared {
+            log::info!(
+                "call {}: sharing its screen false: its media was set up again",
+                call.get()
+            );
+        }
+        if old.shown {
+            log::info!(
+                "call {}: a shared screen shown false: its media was set up again",
+                call.get()
+            );
+            self.emit(Event::CallRemoteShare { call, on: false });
+        }
+    }
+
+    /// The screen the old session shared, given back once the media of `call` was set up again ([`Self::rebuilt`]): it
+    /// goes on in the new session as a screen that waited does ([`Self::share_after_rebuild`]), unless Stop sharing
+    /// came meanwhile. A screen whose stream ended meanwhile ends the share.
+    pub(super) fn screen_kept(&mut self, call: CallId, screen: Option<Box<dyn VideoSource>>) {
+        let Some(live) = self.live.as_mut().filter(|live| live.call == call) else {
+            return;
+        };
+        if !std::mem::take(&mut live.screen_coming) {
+            return;
+        }
+        live.shares.turning = None;
+        match screen {
+            Some(screen) => self.share_after_rebuild(call, media::ShareWait::Start(screen)),
+            None => log::info!(
+                "call {}: its shared screen ended while its media was set up again",
+                call.get()
+            ),
+        }
+        self.tell_sharing(call);
+    }
+
     /// The account's screen shared (`on`) or no longer, with the offer that adds or rejects its line: the sharer's
     /// participant properties told (sharing), the modalities named, the renegotiation sent, the state told.
     pub(super) fn shared(
@@ -291,12 +421,21 @@ where
         let Some(live) = self.live.as_mut().filter(|live| live.call == call) else {
             return refuse(reply, CallActionError::NoMedia);
         };
-        // the share step of a screen that waited for the media to be set up again is done
-        live.shares.turning = None;
+        // the share step is done; a Stop sharing that came while it started the screen stops it now
+        let stopped = live.shares.turning.take() == Some(false) && on;
         if let Err(why) = result {
             log::info!("call {}: its screen isn't shared: {why}", call.get());
             self.tell_sharing(call);
             return refuse(reply, CallActionError::Media(why));
+        }
+        if stopped {
+            // nothing was told or described yet
+            log::info!("call {}: its screen stopped as it went out", call.get());
+            let session = Arc::clone(&live.session);
+            tokio::task::spawn_blocking(move || session.stop_group_screen());
+            self.tell_sharing(call);
+            let _ = reply.send(Ok(call));
+            return;
         }
         if on && let Err(error) = self.calls.tell_screen_shared(call) {
             log::info!(
@@ -330,6 +469,17 @@ where
         }
         self.tell_sharing(call);
         let _ = reply.send(Ok(call));
+    }
+
+    /// The call's media controller asked for the account's video again (a viewer starts to watch it): a keyframe of
+    /// the shared screen, as Teams for the web makes. The camera's keyframes are libwebrtc's, at the mixer's FIR.
+    pub(super) fn video_asked(&self, call: CallId, camera: bool) {
+        if camera {
+            return;
+        }
+        if let Some(live) = self.live.as_ref().filter(|live| live.call == call) {
+            live.session.ask_screen_keyframe();
+        }
     }
 
     /// The screen the account shares ended at the desktop: stopped, as Stop sharing does (nobody waits for it).

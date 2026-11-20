@@ -98,6 +98,42 @@ dialog card (`task` `continue`) that asks to add it, its `Action.Submit` `data` 
 <middle tier>/beta/chats/<chat>/apps/entitlements`) and sends the `submitAction` again with that data, answered 200
 with an empty body. The app then posts its card as the user ("<name> via <app>"), with `properties.onbehalfof`.
 
+## Message extensions
+
+Seen in the lab's catalogue reads (lab account a, 2026-11-14) and in browser Teams' compose box and message menu:
+
+- **Where the commands come from**: an app's definition in the account's apps (`POST beta/users/apps/aggregatedEntitlements`,
+  `docs/protocol/apps.md`) lists them under `inputExtensions` (a manifest's `composeExtensions`): per extension its
+  bot (`botId`), `fetchCommands` (the app gives its commands at run time, `composeExtension/fetchCommands`) and
+  `commands`. A command has an `id`, a `type` (`Action`; none is a search), `context` (`Compose`, `Commandbox`,
+  `Message`; none or an empty list is the compose box and the command box, as the manifest schema's default says), a
+  `title` and a `description`, a search's `parameters` (`name`, `title`, `description`, `isRequired`, `value`) and
+  `initialRun`, and for an action either `fetchTask` (its dialog is the app's answer to `fetchTask`) or a static
+  `taskInfo` (`title`, `width`, `height`, `url`: in every app seen, a web page).
+- **The compose box's "+"** (Actions and apps): a flyout with "Search for apps", Teams' own actions (Schedule message,
+  Set delivery options, Schedule meeting, Record video clip), a hairline, the account's apps whose commands run in the
+  compose box (`Installed`, `InstalledAndPermanent`: Clipchamp, Workflows, Approvals, Power BI, Praise, Updates in the
+  lab), and "Get more apps". An app chosen opens its dialog, titled with the app's picture, name and the command's
+  title ("Praise · Send praise to people"); those apps' dialogs were all web pages.
+- **A message's "More actions"**: Teams' own (Share to Outlook, Translate, Immersive Reader), then the commands that run
+  on a message, each with its app's picture: the account's (Create Planner task) upright, the store's offers
+  (`Featured`: Azure Boards, Jira, Polly) in italics; then "Create workflows".
+- **A search command** (unseen): a search field under the app's name, the results of `composeExtension/query` as a
+  list (each its `preview`: a thumbnail or hero card's `title`, `text` and picture), run at once with no words when
+  `initialRun`. A result chosen goes into the compose box as its card; a preview whose `tap` is an `invoke` first asks
+  the app for the card (`composeExtension/selectItem`).
+- **A card chosen into the compose box** is sent as a link's app card is (`chat.md`, "App cards"): a span of itemtype
+  `InputExtension` after the text and the card in `properties.cards` (`appId`, `appName`, `appIcon`, `cardClientId`,
+  `contentType`, `content`). Unseen for a message extension's result; a message with only a card sends no text before
+  the span (own design).
+
+The native client (`NGTEAMS_BOTS=1`): `teams_proto::ExtensionApp` and `ExtensionCommand` read the definitions;
+`teams_ui::apps_flyout` is the "+" (it lists no Teams action: this app has none of them for a chat),
+`teams_ui::app_dialog` the dialog, and a chat's "More actions" lists the commands after the workflows (an app not
+added opens its details, where it is added). A dialog that is a web page needs Teams' JavaScript host, which the native
+client doesn't have, so the dialog says the app opens in Teams on the web and offers that link. Synthetic apps:
+`tests/fixtures/bots/extension-apps.json`.
+
 ## The answers
 
 The chat service answers with the bot's status and body. Seen: HTTP 200 with
@@ -136,8 +172,77 @@ flag (`NGTEAMS_BOTS=1`), only a build run with it asks a bot (`teams_ui::bot_car
   on the web (sign-in cards and the apps' dialogs come later);
 - a card's `refresh` runs by itself (`trigger` `automatic`) once for each version of the message's cards while the
   chat is open when its `userIds` name the account (its MRI or its object id), and by hand from the message's "More options" → "Refresh card" (`manual`);
-- a `task/fetch` button opens the message in Teams on the web until the apps' dialogs are built; `signin` opens its
-  page in the browser;
+- a `task/fetch` button asks the bot for its dialog (`task/fetch`) and opens it (`teams_ui::app_dialog`): a card
+  across the dialog, its Submit a `task/submit`; a message extension's action command opens the same dialog, its Submit
+  a `composeExtension/submitAction`. The dialog's answer closes it (done), takes its place (a next dialog), goes into the
+  compose box (a result's card; in a channel the reply box of the post's thread, which opens), or shows (a message, an error); `signin` opens its page in the browser;
 - the bot's app id is the bot's own id until the engine knows each bot's app.
 
 Without the flag, or in read-only mode, a card's bot buttons open the message in Teams on the web, as before.
+
+## Outgoing webhooks
+
+A team's outgoing webhook is an app that the team's people @mention in its channels. Teams sends the mention to the
+webhook's service and posts the answer as the webhook's reply in the post's thread. Nothing here was seen in the
+lab: a webhook made in the lab tenant would send lab channel content to an outside address, which the lab rule does
+not allow (`docs/lab-rules.md`). The web client's own requests are still to be captured (client task 412, with every
+write held). Thus each part below is marked **documented** (Microsoft's public documentation and samples), **third
+party** (other services' documents) or **own design** (the own server's choice until a capture shows Teams' form).
+
+### What Teams does (documented)
+
+- **Make it.** A team owner opens Manage team > Apps > "Create an outgoing webhook" and gives a name (also what
+  people @mention), a callback URL (HTTPS), a description and an optional picture. Teams then shows a security token
+  once: an HMAC key in base64. The token does not expire.
+- **Where it works.** In the team's public (standard) channels, only when a message @mentions it. Not in chats, not
+  in private channels, not in another team. It sends nothing by itself, and it can't call any other API.
+- **The request.** `POST <callback URL>` with a Bot Framework `message` activity as the JSON body and
+  `Authorization: HMAC <base64 of HMAC-SHA256(key, the exact body bytes)>`. The key is the token's base64 decoded.
+- **The answer.** Within 5 seconds, an activity: `{"type": "message", "text": …}`, or `attachments` with Adaptive or
+  hero cards. A webhook's cards act only by opening a link (`openUrl`).
+- **A failure (third party).** When the service fails or does not answer in 5 seconds, the webhook's reply in the
+  thread says "Sorry, there was a problem encountered with your request".
+
+### The activity (documented, from Microsoft's samples)
+
+```json
+{"type": "message", "id": "<message id>", "timestamp": "…", "localTimestamp": "…",
+ "serviceUrl": "…", "channelId": "msteams",
+ "from": {"id": "29:<user>", "name": "<display name>", "aadObjectId": "<object id>"},
+ "conversation": {"isGroup": true, "id": "<channel>;messageid=<post>", "name": null,
+                  "conversationType": "channel", "tenantId": "<tenant>"},
+ "recipient": null, "textFormat": "plain", "locale": "en-US",
+ "text": "<at>Webhook name</at> the words",
+ "attachments": [{"contentType": "text/html", "content": "<the message's HTML>"}],
+ "entities": [{"type": "clientInfo", "locale": "en-US"}],
+ "channelData": {"teamsChannelId": "<channel>", "teamsTeamId": "<team>", "channel": {"id": "<channel>"},
+                 "team": {"id": "<team>"}, "tenant": {"id": "<tenant>"}}}
+```
+
+`conversation.id` names the post's thread, for a post and for a reply in its thread alike. The `serviceUrl` is
+Teams' own: a webhook has no credential to call it.
+
+### The middle tier's routes (own design)
+
+Under the account's middle tier (`<middle tier>/beta/teams/<team>/outgoingWebhooks`), with the account's token for
+`https://api.spaces.skype.com`. The team is its thread id. When a capture shows Teams' own form, the client and the
+own server change together.
+
+| Method | Path | Body | Answer |
+|---|---|---|---|
+| `GET` | `…/outgoingWebhooks` | none | 200 `{"value": [<webhook>]}`, ordered by name; for each of the team's people |
+| `POST` | `…/outgoingWebhooks` | `{"name", "callbackUrl", "description"?, "picture"?}` | 201 `{"value": <webhook> + "securityToken"}`: the only answer that shows the token |
+| `PUT` | `…/outgoingWebhooks/<id>` | any of the same fields; `"picture": null` removes it | 200 `{"value": <webhook>}` |
+| `DELETE` | `…/outgoingWebhooks/<id>` | none | 204 |
+| `GET` | `…/outgoingWebhooks/<id>/picture` | none | the picture (PNG or JPEG) |
+
+A webhook: `{"id", "mri": "28:<id>", "teamId", "name", "description", "canManage", "createdBy": "8:orgid:<id>",
+"createdTime", "pictureUrl"?, "callbackUrl"?}`. `callbackUrl` shows only to those who may change it (`canManage`).
+`picture` is a PNG or JPEG in base64. A refusal is `{"errorCode", "message"}`: 400 `BadRequest` (a form the server
+doesn't take, an address it doesn't send to), 403 `Forbidden` or `OperationNotAllowedOnArchivedTeam`, 404 `NotFound`
+(no such team or webhook for the caller), 409 `OutgoingWebhookNameAlreadyExists` (a name, in any letter case, that
+the team already has), or 409 `OutgoingWebhookChanged` (a concurrent update changed or removed the webhook).
+A delete also returns `OutgoingWebhookChanged` if a concurrent update changed the picture.
+
+A mention of a webhook is an ordinary mention in the message's `properties.mentions`, with `mri` `28:<id>`. Its
+replies come from `28:<id>`, with the webhook's name as `imdisplayname`, in the thread of the post.

@@ -4,6 +4,8 @@
 //! change it holds no token), and what an administrator does to the accounts (`/api/admin/v1/users…`) with the
 //! account's access token for `https://api.spaces.skype.com`.
 //!
+//! An administrator's apps and bots are in [`apps`].
+//!
 //! Only an own server has these: [`AdminClient::for_cloud`] refuses Microsoft's cloud, so no request of this module
 //! can reach a Microsoft host, and every URL is built on the account's own origin.
 
@@ -18,6 +20,11 @@ use crate::cloud::Cloud;
 use crate::secrets::Secret;
 use crate::token::retry_after;
 use crate::wire;
+
+mod apps;
+pub use apps::{
+    AdminApp, AdminBot, AppChanges, AppSource, BotAuthMode, BotMetadata, MAX_PACKAGE, MadeApp, NewBot, apps_not_served,
+};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// The longest refusal message kept: the server's are one sentence.
@@ -50,6 +57,26 @@ pub enum Refusal {
     NotAdmin,
     /// The asking account is disabled or deleted.
     AccountDisabled,
+    /// An app's id is registered already.
+    AppExists,
+    /// A bot's id is another app's bot, or a person's.
+    BotExists,
+    /// A new package of an app names another bot.
+    BotChanged,
+    /// The app has no bot.
+    NoBot,
+    /// The bot's endpoint isn't one the server takes.
+    InvalidEndpoint,
+    /// The server takes no unsigned bot.
+    UnsignedNotAllowed,
+    /// An account named isn't one the server has.
+    UnknownUser,
+    /// The app package isn't one the server takes.
+    InvalidPackage,
+    /// The app package is over the server's limit.
+    PackageTooLarge,
+    /// The request isn't one the server reads.
+    InvalidRequest,
     /// A code this client doesn't know.
     Other,
 }
@@ -69,6 +96,16 @@ impl Refusal {
             "NotFound" => Self::NotFound,
             "NotAdmin" => Self::NotAdmin,
             "AccountDisabled" => Self::AccountDisabled,
+            "AppExists" => Self::AppExists,
+            "BotExists" => Self::BotExists,
+            "BotChanged" => Self::BotChanged,
+            "NoBot" => Self::NoBot,
+            "InvalidEndpoint" => Self::InvalidEndpoint,
+            "UnsignedNotAllowed" => Self::UnsignedNotAllowed,
+            "UnknownUser" => Self::UnknownUser,
+            "InvalidPackage" => Self::InvalidPackage,
+            "PackageTooLarge" => Self::PackageTooLarge,
+            "InvalidRequest" => Self::InvalidRequest,
             _ => Self::Other,
         }
     }

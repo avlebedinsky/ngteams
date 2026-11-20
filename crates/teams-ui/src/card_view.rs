@@ -48,9 +48,9 @@ use gpui_component::button::Button;
 use gpui_component::{Disableable as _, Selectable as _, Sizable as _};
 use teams_proto::LinkPreviewPicture;
 use teams_proto::chat::card::{
-    self, Action, ActionKind, BotAction, Card, CardApp, CardMessage, Column, ColumnSet, Container, ContainerStyle,
-    DateFormat, Element, Frame, HAlign, Image, ImageSize, Input, Kind, Media, RichTextBlock, Spacing, Table, TextBlock,
-    TextColor, TextLook, TextPart, TextSize, TextWeight, VAlign, Width,
+    self, Action, ActionKind, Card, CardApp, CardMessage, Column, ColumnSet, Container, ContainerStyle, DateFormat,
+    Element, Frame, HAlign, Image, ImageSize, Input, Kind, Media, RichTextBlock, Spacing, Table, TextBlock, TextColor,
+    TextLook, TextPart, TextSize, TextWeight, VAlign, Width,
 };
 use teams_proto::chat::parse_html;
 
@@ -207,6 +207,8 @@ pub struct CardsElement {
     /// Whether a button that sends to the bot is drawn: not where the account's cloud serves no bot invokes.
     submits: bool,
     bot: Option<BotHook>,
+    /// Drawn as an app's dialog's body: across it, with no surface of its own.
+    bare: bool,
 }
 
 impl CardsElement {
@@ -223,7 +225,16 @@ impl CardsElement {
             in_teams: None,
             submits: true,
             bot: None,
+            bare: false,
         }
+    }
+
+    /// Drawn as an app's dialog's body ([`crate::app_dialog`]): across the dialog, with no border, shadow or padding
+    /// of its own.
+    #[must_use]
+    pub fn bare(mut self, bare: bool) -> Self {
+        self.bare = bare;
+        self
     }
 
     /// The message's bot state: its inputs drawn, its buttons asking the bot.
@@ -311,6 +322,7 @@ impl RenderOnce for CardsElement {
             on_state: self.on_state.as_ref(),
             in_teams: self.in_teams.as_deref(),
             submits: self.submits,
+            bare: self.bare,
             base: &base,
             bot: bot.as_ref(),
             at: 0,
@@ -349,6 +361,7 @@ struct Draw<'a> {
     on_state: Option<&'a OnState>,
     in_teams: Option<&'a str>,
     submits: bool,
+    bare: bool,
     base: &'a HashMap<String, bool>,
     bot: Option<&'a BotDraw<'a>>,
     at: usize,
@@ -364,8 +377,8 @@ struct BotDraw<'a> {
 
 impl BotDraw<'_> {
     /// A button that sends asks the bot (else it opens in Teams on the web).
-    fn asks(&self, action: &BotAction) -> bool {
-        bot_card::asks(self.shown.reaches, self.read_only, action)
+    fn asks(&self) -> bool {
+        bot_card::asks(self.shown.reaches, self.read_only)
     }
 }
 
@@ -446,6 +459,17 @@ fn card_surface(draw: &Draw<'_>, at: usize, shown: &Card, cx: &mut App) -> AnyEl
         .map(|line| answer_line(draw, &path, line));
     // a card that asks for answers is as wide as a card is, as Teams draws a form
     let form = draw.bot.is_some() && !draw.inputs.is_empty();
+    if draw.bare {
+        return div()
+            .debug_selector(move || selector)
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(card_body(draw, &path, shown, cx))
+            .children(line.map(|line| div().w_full().child(line)))
+            .into_any_element();
+    }
     let surface = div()
         .debug_selector(move || selector)
         .w_full()
@@ -1325,7 +1349,7 @@ fn action_button(draw: &Draw<'_>, key: &str, action: &Action, set: &[String]) ->
 /// Whether `action` asks the card's bot (with the bot state, not read-only, a button that sends; see the module docs).
 fn asks_bot(draw: &Draw<'_>, action: &Action) -> bool {
     match (&action.kind, draw.bot) {
-        (ActionKind::Submit(sent), Some(bot)) => bot.asks(sent),
+        (ActionKind::Submit(_), Some(bot)) => bot.asks(),
         _ => false,
     }
 }

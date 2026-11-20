@@ -7,8 +7,11 @@
 //! walks the views one step at a time (no chat open; the a–b chat with a message selected and its actions shown; a
 //! reply begun; the account menu; every page of the settings, Calls with made-up devices; the appearance and the chat
 //! again in Teams Dark; messages with files (text with three, then one, two, and five in a grid), their cards and
-//! thumbnails, in Teams Dark and Light, its first video played in its card and paused; a message of lines, small
-//! pictures and a block of code, in Teams Dark and Light; a picture opened in the picture viewer, fitted and zoomed;
+//! thumbnails, in Teams Dark and Light, its first video played in its card and paused, "Share this file" from a
+//! video's card (empty, its "More actions", two recipients and a message, the format bar and emoji picker, shared, and
+//! Copy link's "Link created"); a message of lines, small
+//! pictures and a block of code, in Teams Dark and Light; stickers alone with no bubble, in Teams Dark and Light; a
+//! picture opened in the picture viewer, fitted and zoomed;
 //! the 12-hour time format and a chat's times on it; a group chat's presence; the "Chats" section's See more, what it
 //! brings and a chat opened from below the rows shown; New message, its To: line's suggestions, the chat two people
 //! already have and a group name, in Teams Dark and Light; a favourite channel opened from "Favorites", a post's hover
@@ -32,6 +35,8 @@ use std::{fs, future, io, thread};
 
 use gpui::{App, AsyncApp, Context, Entity, ListOffset, Window, WindowHandle, WindowingModes, px};
 use ngteams::app::{self, Launch};
+#[path = "ui_tour_compose_edge.rs"]
+mod compose_edge;
 #[path = "../window.rs"]
 mod support;
 use ngteams::descriptors::adopt_trace;
@@ -58,11 +63,11 @@ use teams_ui::VideoFeed;
 use teams_ui::call_stage::CallStage;
 use teams_ui::chat_people::{ChatPeople, HistoryChoice, Picked};
 use teams_ui::chat_view::{Item, MessageAction};
-use teams_ui::compose::Compose;
+use teams_ui::compose::{Compose, MenuKind};
 use teams_ui::global_search::{Mode as SearchMode, Tab};
 use teams_ui::new_chat::{NewChat, Recipient, Suggested};
 use teams_ui::profile_card::{CardOf, CardTab, Form};
-use teams_ui::settings::VideoEffect;
+use teams_ui::settings::{ComposeTool, VideoEffect};
 use teams_ui::settings_view::Page;
 use teams_ui::shell::Shell;
 use teams_ui::sidebar::Sidebar;
@@ -190,7 +195,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 5 + 320 + 8 + 5 + 15] = [
+const STEPS: [Step; 5 + 328 + 8 + 5 + 15 + 7 + 6 + 12 + 10 + 5] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -335,6 +340,12 @@ const STEPS: [Step; 5 + 320 + 8 + 5 + 15] = [
         fixed_theme(shell, None, cx);
         hover_none(shell, cx);
         select_last_message(shell, window, cx);
+    }),
+    // the box without the focus, which is on the message list: its border alone, no accent line
+    ("compose-unfocused", |shell, window, cx| {
+        if let Some(chat) = shell.read(cx).chat().cloned() {
+            chat.read(cx).focus_handle().clone().focus(window, cx);
+        }
     }),
     ("chat-reply", |shell, window, cx| {
         if let Some((chat, message)) = last_message(shell, cx) {
@@ -500,6 +511,86 @@ const STEPS: [Step; 5 + 320 + 8 + 5 + 15] = [
         cx.set_global(teams_ui::local_ai::Tools::default());
         clear_compose(shell, window, cx);
     }),
+    // a message's More options: "Mark as unread" after a hairline under copy, before the translation
+    ("message-mark-unread-menu", |shell, window, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
+        shell.update(cx, |shell, cx| {
+            shell.show_chats(window, cx);
+            shell.open_chat(AB_CHAT.to_owned(), window, cx);
+        });
+        if let Some((chat, id)) = last_markable(shell, cx) {
+            chat.update(cx, |chat, cx| {
+                chat.select(Some(id.clone()), cx);
+                chat.toggle_options(&id, cx);
+            });
+        }
+    }),
+    ("message-mark-unread-menu-dark", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
+    }),
+    // chosen: the chat stays open with "New messages" before the message, its row bold with its count
+    ("message-marked-unread", |shell, window, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
+        if let Some((chat, id)) = last_markable(shell, cx) {
+            chat.update(cx, |chat, cx| chat.act(MessageAction::MarkUnread, &id, window, cx));
+        }
+    }),
+    ("message-marked-unread-dark", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
+    }),
+    // the chat row's "More chat options" on the unread chat: "Mark as read" (opened in Teams Dark: the light shot
+    // follows a frame later)
+    ("chat-row-menu-dark", |shell, window, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
+        let list = shell.read(cx).list().clone();
+        let at = list.read(cx).rows().iter().position(|row| row.id == AB_CHAT);
+        if let Some(at) = at {
+            list.update(cx, |list, cx| {
+                list.open_row_menu(AB_CHAT, &format!("chat-row-{at}"), true, window, cx);
+            });
+        }
+    }),
+    ("chat-row-menu", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
+    }),
+    // "Mark as read" chosen: the row is read again
+    ("chat-row-marked-read", |shell, _, cx| {
+        fixed_theme(shell, None, cx);
+        let list = shell.read(cx).list().clone();
+        list.update(cx, |list, cx| list.mark(AB_CHAT, true, cx));
+    }),
+    // one message translated alone: the chat's last, its More options open on Translation's list
+    ("message-translate-menu", |shell, _, cx| {
+        staged_chat_tools(cx);
+        translation_list_of_last(shell, cx);
+    }),
+    // Translate chosen, the made-up tool not answering yet: "Translating…" beside its time, faded
+    ("message-translating", |shell, _, cx| {
+        if let Some((chat, id)) = translatable_last_message(shell, cx) {
+            chat.update(cx, |chat, cx| chat.translate(&id, cx));
+        }
+    }),
+    // its translation in the "Translate to" language, with Teams' mark; the other messages as written
+    ("message-translated", |_, _, _| {
+        release_staged(1);
+        release_staged(2);
+    }),
+    // in Teams Dark, its Translation list now offers "See original message"
+    ("message-translated-menu-dark", |shell, window, cx| {
+        show_chat_in_theme(shell, teams_ui::theme::DARK_KEY, window, cx);
+        translation_list_of_last(shell, cx);
+    }),
+    // "See original message": as written again, unmarked
+    ("message-translated-original-dark", |shell, _, cx| {
+        if let Some((chat, id)) = translatable_last_message(shell, cx) {
+            chat.update(cx, |chat, cx| chat.translate(&id, cx));
+        }
+    }),
+    // the same in Teams Light
+    ("message-translated-original", |shell, window, cx| {
+        show_chat_in_theme(shell, teams_ui::theme::LIGHT_KEY, window, cx);
+        cx.set_global(teams_ui::local_ai::Tools::default());
+    }),
     // a draft being corrected by the AI: the line over the box, Correct lit in the toolbar
     ("compose-correcting", |shell, window, cx| {
         chat_tools(CORRECTING_CLAUDE, cx);
@@ -547,7 +638,7 @@ const STEPS: [Step; 5 + 320 + 8 + 5 + 15] = [
         cx.set_global(teams_ui::local_ai::Tools::default());
         clear_compose(shell, window, cx);
     }),
-    // Translate and its language button in the box's toolbar, the language German
+    // a draft in the box with the AI button, the translation language German
     ("compose-translate", |shell, window, cx| {
         tour_translator(cx);
         set_message_language(shell, "German", cx);
@@ -600,6 +691,34 @@ const STEPS: [Step; 5 + 320 + 8 + 5 + 15] = [
         set_message_language(shell, teams_ui::draft_translate::DEFAULT_LANGUAGE, cx);
         teams_ui::draft_translate::set_engine(cx, std::sync::Arc::new(teams_ui::draft_translate::LocalTools));
         cx.set_global(teams_ui::local_ai::Tools::default());
+        show_chat_in_theme(shell, teams_ui::theme::LIGHT_KEY, window, cx);
+    }),
+    // the box's one AI button, its menu open: Correct, Translate and the language
+    ("compose-ai-menu", |shell, window, cx| {
+        type_in_compose(shell, TOUR_DRAFT, window, cx);
+        with_compose(shell, cx, |compose, cx| compose.open_menu(MenuKind::Ai, window, cx));
+    }),
+    // the customize list: each button that can hide with its check, "+" and Send always shown
+    ("compose-customize", |shell, window, cx| {
+        with_compose(shell, cx, |compose, cx| {
+            compose.close_more(window, cx);
+            compose.customize_toolbar(window, cx);
+        });
+    }),
+    // Format and Emoji hidden: their rows in "+", with their keys, over Customize toolbar
+    ("compose-hidden-plus", |shell, window, cx| {
+        with_compose(shell, cx, |compose, cx| compose.close_customize(window, cx));
+        hide_compose_tools(shell, &[ComposeTool::Format, ComposeTool::Emoji], cx);
+        with_compose(shell, cx, |compose, cx| compose.open_menu(MenuKind::Plus, window, cx));
+    }),
+    // the same in Teams Dark
+    ("compose-hidden-plus-dark", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
+    }),
+    ("compose-toolbar-over", |shell, window, cx| {
+        with_compose(shell, cx, |compose, cx| compose.close_more(window, cx));
+        hide_compose_tools(shell, &[], cx);
+        clear_compose(shell, window, cx);
         show_chat_in_theme(shell, teams_ui::theme::LIGHT_KEY, window, cx);
     }),
     // text selected with the mouse from the second-to-last message into the last, on the selection colour, then its
@@ -967,6 +1086,7 @@ const STEPS: [Step; 5 + 320 + 8 + 5 + 15] = [
         shell.update(cx, Shell::toggle_status_menu);
         show_page(shell, Page::General, cx);
     }),
+    ("settings-accounts", |shell, _, cx| show_page(shell, Page::Accounts, cx)),
     ("settings-appearance", |shell, _, cx| {
         show_page(shell, Page::Appearance, cx);
     }),
@@ -1074,6 +1194,54 @@ const STEPS: [Step; 5 + 320 + 8 + 5 + 15] = [
     }),
     // the local AI tools in Teams Dark
     ("settings-ai-tools-dark", |shell, _, cx| show_ai_tools(shell, cx)),
+    // the AI notice, as the app shows it once after the first run's screen (or after an upgrade)
+    ("ai-notice", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
+        ask_ai_notice(shell, cx);
+    }),
+    ("ai-notice-dark", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
+    }),
+    // "Keep AI features on": the chat's box with Correct and Translate, the header's language, a message's menu
+    ("chat-ai-on-dark", |shell, window, cx| {
+        made_up_ai_tools(cx);
+        use_ai(shell, true, cx);
+        show_ai_chat(shell, window, cx);
+    }),
+    // "Use AI features" off: none of them
+    ("chat-ai-off-dark", |shell, window, cx| {
+        use_ai(shell, false, cx);
+        show_ai_chat(shell, window, cx);
+    }),
+    ("chat-ai-off", |shell, window, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
+        show_ai_chat(shell, window, cx);
+    }),
+    ("chat-ai-on", |shell, window, cx| {
+        use_ai(shell, true, cx);
+        show_ai_chat(shell, window, cx);
+    }),
+    // the switch in Settings under General: off, then on with the AI boxes under it
+    ("settings-ai-off", |shell, window, cx| {
+        close_ai_chat(shell, window, cx);
+        use_ai(shell, false, cx);
+        show_page(shell, Page::General, cx);
+        shell.read(cx).settings_view().read(cx).scroll_to_end();
+    }),
+    ("settings-ai-off-dark", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
+        shell.read(cx).settings_view().read(cx).scroll_to_end();
+    }),
+    ("settings-ai-on", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
+        made_up_ai_tools(cx);
+        use_ai(shell, true, cx);
+        show_page(shell, Page::General, cx);
+    }),
+    // the tour goes on in Teams Dark
+    ("settings-ai-on-dark", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
+    }),
     ("channel-dialog-dark", |shell, window, cx| {
         open_channel_dialog(shell, window, cx);
         with_channel_dialog(shell, cx, |dialog, cx| fill_channel_dialog(dialog, window, cx));
@@ -1118,8 +1286,25 @@ const STEPS: [Step; 5 + 320 + 8 + 5 + 15] = [
         update_shown(UpdateStatus::Ready(TOUR_RELEASE.into()), cx);
     }),
     ("update-failed-dark", |_, _, cx| update_shown(update_failed(), cx)),
-    ("chat-dark-compose", |shell, window, cx| {
+    // the a–b chat's box without the focus, editing a's last message, then holding a draft in a larger text size: its
+    // border and focus line in each
+    ("compose-unfocused-dark", |shell, window, cx| {
         update_shown(UpdateStatus::None, cx);
+        shell.update(cx, |shell, cx| shell.open_chat(AB_CHAT.to_owned(), window, cx));
+        if let Some(chat) = shell.read(cx).chat().cloned() {
+            chat.read(cx).focus_handle().clone().focus(window, cx);
+        }
+    }),
+    ("compose-edit-dark", |shell, window, cx| {
+        edit_last_own(shell, window, cx);
+    }),
+    ("compose-font-18-dark", |shell, window, cx| {
+        with_compose(shell, cx, |compose, cx| compose.cancel(window, cx));
+        set_font_size(shell, 18, cx);
+        type_in_compose(shell, "Lunch at noon?", window, cx);
+    }),
+    ("chat-dark-compose", |shell, window, cx| {
+        set_font_size(shell, teams_ui::theme::FONT_SIZE, cx);
         type_in_compose(shell, "Lunch at noon?\nThe usual place, or the new one?", window, cx);
     }),
     ("chat-dark-compose-expanded", |shell, window, cx| {
@@ -1164,11 +1349,16 @@ const STEPS: [Step; 5 + 320 + 8 + 5 + 15] = [
             });
         });
     }),
+    // the same in Teams Light: the header's face with its initials
+    ("picture-viewer-zoomed", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
+    }),
     // c's messages with files (`seed_files`), the newest at the bottom: a grid of five cards, two in a row, the videos'
     // with their thumbnails as Graph and the media host (the mock) gave them, the zip's and the document's with their
     // type's icon, in Teams Dark
     ("chat-files-dark", |shell, window, cx| {
         picture_viewer::close(cx);
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
         shell.update(cx, |shell, cx| shell.open_chat(AC_CHAT.to_owned(), window, cx));
     }),
     // the first video played in its card, its bytes from the mock's download link (`seed_files`): loading, then
@@ -1184,10 +1374,24 @@ const STEPS: [Step; 5 + 320 + 8 + 5 + 15] = [
     ("chat-files-few-dark", |shell, _, cx| show_message(shell, 1, cx)),
     // its fourth from its top: the grid of five
     ("chat-files-grid-dark", |shell, _, cx| show_message(shell, 3, cx)),
+    // "Share this file" from the grid's first video's Share (`share_file`), in Teams Dark: empty with Share off, what
+    // the link lets people do under the file's name; its "More actions" open on "Share outside Teams"; Lab B and the
+    // team's General picked, with a message; the format bar over the message and the emoji picker open; shared, the
+    // dialog closed and Teams' toast at the bottom left; then opened again and Copy link pressed: "Link created"
+    ("share-file-dark", |shell, window, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
+        open_share_file(shell, window, cx);
+    }),
+    ("share-file-more-dark", open_share_file_more),
+    ("share-file-ready-dark", fill_share_file),
+    ("share-file-format-dark", format_share_file),
+    ("share-file-sent-dark", send_share_file),
+    ("share-file-link-dark", copy_share_file_link),
     // x's message of text, two small pictures and a block of code (`seed_mixed`), in Teams Dark: the a–x chat opened
     // (at its newest, the forwards), then scrolled to its first message, each picture at its own size in the flow and
     // the code in Teams' code card
     ("chat-mixed-dark", |shell, window, cx| {
+        close_share_file(shell, cx);
         shell.update(cx, |shell, cx| shell.open_chat(AX_CHAT.to_owned(), window, cx));
     }),
     ("chat-mixed-dark-read", |shell, _, cx| show_first_message(shell, cx)),
@@ -1395,9 +1599,20 @@ const STEPS: [Step; 5 + 320 + 8 + 5 + 15] = [
     ("chat-files-first", |shell, _, cx| show_first_message(shell, cx)),
     ("chat-files-few", |shell, _, cx| show_message(shell, 1, cx)),
     ("chat-files-grid", |shell, _, cx| show_message(shell, 3, cx)),
+    // "Share this file" again, in Teams Light, not the system's: the later Dark steps set only the theme key
+    ("share-file", |shell, window, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
+        open_share_file(shell, window, cx);
+    }),
+    ("share-file-more", open_share_file_more),
+    ("share-file-ready", fill_share_file),
+    ("share-file-format", format_share_file),
+    ("share-file-sent", send_share_file),
+    ("share-file-link", copy_share_file_link),
     // the a–b–c chat: its senders' presence as the view asked the engine and the mock's UPS answered (`seed_group`),
     // b's and c's badges on their avatars
     ("chat-group-presence", |shell, window, cx| {
+        close_share_file(shell, cx);
         shell.update(cx, |shell, cx| shell.open_chat(ABC_CHAT.to_owned(), window, cx));
     }),
     // `@` typed in the a–b–c chat: the mention picker over the box, the chat's members, then Everyone; above it b's
@@ -1771,9 +1986,10 @@ const STEPS: [Step; 5 + 320 + 8 + 5 + 15] = [
         });
     }),
     // two messages b sent in the a–b–c chat, forwarded to a by the outsider (`seed_forwards`): each in Teams' card
-    // under the arrow, b's avatar and name and the original's time, the second's picture drawn in it
+    // under the arrow, b's avatar and name and the original's time, the second's picture drawn in it, in Teams Light
     ("chat-forward", |shell, window, cx| {
         event_form::close(cx);
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
         shell.update(cx, |shell, cx| shell.open_chat(AX_CHAT.to_owned(), window, cx));
     }),
     // the right-click menu of the forwarded note's link, as a right-click on it opens it: Copy link and Open link; in
@@ -1824,6 +2040,17 @@ const STEPS: [Step; 5 + 320 + 8 + 5 + 15] = [
         model.update(cx, |model, cx| {
             model.change(|settings| settings.appearance.theme = teams_ui::theme::LIGHT_KEY, cx);
         });
+    }),
+    // stickers from Teams' own packs in the "Lab stickers" chat (`seed_stickers`), as Teams draws them: b's under b's
+    // words and a's own, each alone at its 180 by 180 with no bubble; in Teams Dark, then in Teams Light
+    ("chat-sticker-dark", |shell, window, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::DARK_KEY), cx);
+        if let Some(chat) = STICKER_CHAT.get().cloned() {
+            shell.update(cx, |shell, cx| shell.open_chat(chat, window, cx));
+        }
+    }),
+    ("chat-sticker", |shell, _, cx| {
+        fixed_theme(shell, Some(teams_ui::theme::LIGHT_KEY), cx);
     }),
     // messages a tenant's policy blocked, as Teams shows them: a's own with its text and file put back from the
     // service's copy under the red notice and its link, b's with the notice alone (a file type, then a policy); in
@@ -1932,7 +2159,7 @@ const STEPS: [Step; 5 + 320 + 8 + 5 + 15] = [
                 |settings| {
                     settings.appearance.theme = teams_ui::theme::DARK_KEY;
                     settings.caption_translator = teams_ui::translate::AiChoice::of(
-                        teams_ui::local_ai::ToolChoice::Only(teams_ui::translate::Backend::Codex),
+                        teams_ui::local_ai::ToolChoice::cli(teams_ui::translate::Backend::Codex),
                     );
                 },
                 cx,
@@ -2764,6 +2991,54 @@ fn compact_card_in_channel(shell: &Entity<Shell>, window: &mut Window, cx: &mut 
     });
 }
 
+/// The settings as the app has them at the start: the AI notice waits, after the first run's screen was confirmed.
+fn ask_ai_notice(shell: &Entity<Shell>, cx: &mut App) {
+    let model = shell.read(cx).settings().clone();
+    model.update(cx, |model, cx| {
+        let held = teams_ui::SettingsModel::in_memory(teams_ui::settings::Settings::default());
+        *model = std::mem::replace(model, held).requiring_first_run();
+        model.change(
+            |settings| {
+                settings.first_run = teams_ui::settings::FirstRunState::Confirmed;
+                settings.ai_features = None;
+            },
+            cx,
+        );
+        cx.notify();
+    });
+}
+
+/// "Use AI features" turned on or off, as the notice and the settings' switch do.
+fn use_ai(shell: &Entity<Shell>, on: bool, cx: &mut App) {
+    let model = shell.read(cx).settings().clone();
+    model.update(cx, |model, cx| model.set_ai_features(on, cx));
+}
+
+/// The a–b chat with a draft in its box and the last message's "More options" open.
+fn show_ai_chat(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) {
+    shell.update(cx, |shell, cx| shell.open_chat(AB_CHAT.to_owned(), window, cx));
+    type_in_compose(shell, "Can we move the review to Friday?", window, cx);
+    if let Some((chat, message)) = last_message(shell, cx) {
+        chat.update(cx, |chat, cx| {
+            if chat.options().is_none() {
+                chat.toggle_options(&message, cx);
+            }
+        });
+    }
+}
+
+/// The chat's menu closed and its draft gone.
+fn close_ai_chat(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) {
+    if let Some((chat, message)) = last_message(shell, cx) {
+        chat.update(cx, |chat, cx| {
+            if chat.options().is_some() {
+                chat.toggle_options(&message, cx);
+            }
+        });
+    }
+    type_in_compose(shell, "", window, cx);
+}
+
 /// The app in Teams Dark (`Some` of its key), or back to following the system's light or dark (`None`).
 fn fixed_theme(shell: &Entity<Shell>, key: Option<&'static str>, cx: &mut App) {
     let model = shell.read(cx).settings().clone();
@@ -3353,11 +3628,11 @@ fn show_ai_tools(shell: &Entity<Shell>, cx: &mut App) {
         model.change(
             |settings| {
                 settings.caption_translator = AiChoice {
-                    tool: ToolChoice::Only(Backend::Claude),
+                    tool: ToolChoice::cli(Backend::Claude),
                     model: Model::Named("opus".to_owned()),
                 };
                 settings.recap_summarizer = AiChoice {
-                    tool: ToolChoice::Only(Backend::Codex),
+                    tool: ToolChoice::cli(Backend::Codex),
                     model: Model::Named("my-team-model".to_owned()),
                 };
             },
@@ -3833,6 +4108,14 @@ fn tour(sandbox: &Sandbox) -> SandboxResult {
         .line_where(STARTUP, |line| line == "ready")
         .map_err(|error| running.fail(&format!("no ready line: {error:?}")))?;
     for (name, _) in tour_steps() {
+        let edge = if compose_edge::SHOTS.contains(&name) {
+            let said = running
+                .line_where(WAIT, |line| line.starts_with(compose_edge::PREFIX))
+                .map_err(|error| running.fail(&format!("no compose edge for {name}: {error:?}")))?;
+            Some(said)
+        } else {
+            None
+        };
         running
             .line_where(WAIT, |line| line == format!("shot {name}"))
             .map_err(|error| running.fail(&format!("no shot {name}: {error:?}")))?;
@@ -3845,6 +4128,9 @@ fn tour(sandbox: &Sandbox) -> SandboxResult {
         fs::copy(&png, shots_dir()?.join(&file))?;
         if RINGING_SHOTS.contains(&name) {
             band_drawn(&png).map_err(|error| running.fail(&format!("{name}: {error}")))?;
+        }
+        if let Some(said) = edge {
+            compose_edge::check(&png, &said).map_err(|error| running.fail(&format!("{name}: {error}")))?;
         }
         fs::write(sandbox.dir().join(NEXT), "")?;
     }
@@ -3929,6 +4215,22 @@ fn select_across_last_two(shell: &Entity<Shell>, cx: &mut App) {
 fn toggle_first_video(cx: &mut App) {
     if let Some(player) = teams_ui::video_player::players(cx).first() {
         player.update(cx, teams_ui::video_player::VideoPlayer::toggle);
+    }
+}
+
+/// Edits the account's last message in its chat, as its Edit action does.
+fn edit_last_own(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) {
+    let Some(chat) = shell.read(cx).chat().cloned() else {
+        return;
+    };
+    let message = chat.read(cx).items().iter().rev().find_map(|item| match item {
+        Item::Message(message) if message.own && message.actions().contains(&MessageAction::Edit) => {
+            Some(message.id.clone())
+        }
+        _ => None,
+    });
+    if let Some(message) = message {
+        chat.update(cx, |chat, cx| chat.act(MessageAction::Edit, &message, window, cx));
     }
 }
 
@@ -4199,10 +4501,101 @@ fn open_kept_new_chat(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) 
 }
 
 /// Changes New message, while it is open.
+/// "Share this file" for the grid's first video (the a–c chat's fourth message, its second file), as its Share opens
+/// it.
+fn open_share_file(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) {
+    show_message(shell, 3, cx);
+    let Some(chat) = shell.read(cx).chat().cloned() else {
+        return;
+    };
+    let file = chat
+        .read(cx)
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            Item::Message(message) => Some(message),
+            _ => None,
+        })
+        .nth(3)
+        .and_then(|message| message.files.get(1).cloned());
+    if let Some(file) = file {
+        shell.update(cx, |shell, cx| shell.open_share_file(file, window, cx));
+    }
+}
+
+/// The open "Share this file" with its "More actions" open.
+fn open_share_file_more(shell: &Entity<Shell>, _: &mut Window, cx: &mut App) {
+    if let Some(dialog) = shell.read(cx).share_dialog().cloned() {
+        dialog.update(cx, teams_ui::share_file::ShareFileDialog::toggle_more);
+    }
+}
+
+/// The open "Share this file" with the format bar over its message and the emoji picker open.
+fn format_share_file(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) {
+    if let Some(dialog) = shell.read(cx).share_dialog().cloned() {
+        dialog.update(cx, |dialog, cx| {
+            dialog.toggle_formatting(window, cx);
+            dialog.toggle_emoji(window, cx);
+        });
+    }
+}
+
+/// "Link created" closed with its X, so it covers no later step.
+fn close_share_file(shell: &Entity<Shell>, cx: &mut App) {
+    if let Some(dialog) = shell.read(cx).share_dialog().cloned() {
+        dialog.update(cx, teams_ui::share_file::ShareFileDialog::close);
+    }
+}
+
+/// "Share this file" opened again, and its Copy link pressed: "Link created".
+fn copy_share_file_link(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) {
+    open_share_file(shell, window, cx);
+    if let Some(dialog) = shell.read(cx).share_dialog().cloned() {
+        dialog.update(cx, teams_ui::share_file::ShareFileDialog::copy_link);
+    }
+}
+
+/// The open "Share this file" with Lab B and the team's General picked, and a message.
+fn fill_share_file(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) {
+    let Some(dialog) = shell.read(cx).share_dialog().cloned() else {
+        return;
+    };
+    dialog.update(cx, |dialog, cx| {
+        if dialog.more_open() {
+            dialog.toggle_more(cx);
+        }
+        for query in ["Lab B", "General"] {
+            dialog.set_query(query, window, cx);
+            dialog.choose(0, window, cx);
+        }
+        dialog.set_message("Made-up take for the review, have a look", cx);
+    });
+}
+
+/// Share pressed on the open "Share this file": the mock takes the posts, the dialog closes and the toast shows.
+fn send_share_file(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) {
+    if let Some(dialog) = shell.read(cx).share_dialog().cloned() {
+        dialog.update(cx, |dialog, cx| {
+            if dialog.emoji_open() {
+                dialog.toggle_emoji(window, cx);
+            }
+            dialog.share(window, cx);
+        });
+    }
+}
+
 fn with_new_chat(shell: &Entity<Shell>, cx: &mut App, change: impl FnOnce(&mut NewChat, &mut Context<NewChat>)) {
     if let Some(view) = shell.read(cx).new_chat().cloned() {
         view.update(cx, change);
     }
+}
+
+/// Hides `tools` from every box's toolbar, and shows the others.
+fn hide_compose_tools(shell: &Entity<Shell>, tools: &[ComposeTool], cx: &mut App) {
+    let model = shell.read(cx).settings().clone();
+    model.update(cx, |model, cx| {
+        model.change(|settings| settings.compose_hidden = tools.to_vec(), cx);
+    });
 }
 
 fn with_compose(shell: &Entity<Shell>, cx: &mut App, change: impl FnOnce(&mut Compose, &mut Context<Compose>)) {
@@ -4270,6 +4663,41 @@ fn type_in_compose(shell: &Entity<Shell>, text: &str, window: &mut Window, cx: &
             editor.insert(text, cx);
         });
     });
+}
+
+/// The last message that offers its translation (Teams offers it on the account's own too), and its chat.
+fn translatable_last_message(
+    shell: &Entity<Shell>,
+    cx: &App,
+) -> Option<(Entity<teams_ui::chat_view::ChatView>, String)> {
+    let chat = shell.read(cx).chat()?.clone();
+    let message = chat.read(cx).items().iter().rev().find_map(|item| match item {
+        Item::Message(message) if message.translate.is_some() => Some(message.id.clone()),
+        _ => None,
+    })?;
+    Some((chat, message))
+}
+
+/// The open chat's newest message that offers "Mark as unread" (the account's own too, as in Teams), with the chat's
+/// view.
+fn last_markable(shell: &Entity<Shell>, cx: &App) -> Option<(Entity<teams_ui::chat_view::ChatView>, String)> {
+    let chat = shell.read(cx).chat()?.clone();
+    let message = chat.read(cx).items().iter().rev().find_map(|item| match item {
+        Item::Message(message) if message.actions().contains(&MessageAction::MarkUnread) => Some(message.id.clone()),
+        _ => None,
+    })?;
+    Some((chat, message))
+}
+
+/// That message selected (its hover bar shows), its More options open on Translation's list.
+fn translation_list_of_last(shell: &Entity<Shell>, cx: &mut App) {
+    if let Some((chat, id)) = translatable_last_message(shell, cx) {
+        chat.update(cx, |chat, cx| {
+            chat.select(Some(id.clone()), cx);
+            chat.toggle_options(&id, cx);
+            chat.open_translation_list(cx);
+        });
+    }
 }
 
 fn select_last_message(shell: &Entity<Shell>, _: &mut Window, cx: &mut App) {
@@ -4425,6 +4853,14 @@ fn walk(window: WindowHandle<KitRoot>, cx: &mut App) {
                 let _ = window.update(cx, |_, window, cx| step(&shell, window, cx));
             }
             cx.background_executor().timer(SETTLE).await;
+            if compose_edge::SHOTS.contains(&name) {
+                let edge = shown(window, cx).and_then(|shell| {
+                    window
+                        .update(cx, |_, window, cx| compose_edge::line(&shell, window, cx))
+                        .ok()
+                });
+                say(&edge.unwrap_or_else(|| format!("{}none", compose_edge::PREFIX)));
+            }
             say(&format!("shot {name}"));
             while fs::remove_file(&next).is_err() {
                 cx.background_executor().timer(Duration::from_millis(100)).await;
@@ -4679,6 +5115,7 @@ impl MockLab {
         seed_activity(&mock)?;
         seed_forwards(&mock, &runtime)?;
         seed_cards(&mock)?;
+        seed_stickers(&mock, &runtime)?;
         seed_blocked(&mock)?;
         seed_profile_cards(&mock, &runtime);
         let dir = tempfile::tempdir()?;
@@ -5119,6 +5556,15 @@ fn seed_files(mock: &ChatServiceMock, runtime: &tokio::runtime::Runtime) -> Sand
     }
     for (at, file) in MADE_UP_FILES.iter().chain(&MORE_MADE_UP_FILES).enumerate() {
         serve_file(mock, runtime, file, at)?;
+        // what its link lets people do, as "Share this file" reads it on the sharer's site
+        let token = teams_proto::chat::share_token(&share_url(file));
+        let permission = serde_json::json!({"id": format!("made-up-permission-{at}"), "roles": ["write"],
+            "link": {"scope": "anonymous", "type": "edit", "localizedDescription": "Anyone with the link can edit"}});
+        runtime.block_on(mock.serve_bytes(
+            &format!("/personal/made_up_user_contoso_test/_api/v2.0/shares/{token}/permission"),
+            "application/json",
+            permission.to_string().into_bytes(),
+        ));
     }
     Ok(())
 }
@@ -5282,6 +5728,75 @@ fn made_up_phone() -> image::RgbaImage {
     fill(94, 300, 66, 80, [200, 200, 210]);
     fill(14, 400, 226, 50, [90, 200, 210]);
     picture
+}
+
+/// The "Lab stickers" chat `seed_stickers` made.
+static STICKER_CHAT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// A made-up sticker on Teams' sticker CDN (served by the mock as that CDN would), as a message names it.
+const STICKER_SRC: &str = "https://teams.public.onecdn.static.microsoft/evergreen-assets/stickerassets/madeup-250x250/en-us/MadeUp_Hi.gif?v=5";
+
+/// A "Lab stickers" chat of a and b: b's words, then b's sticker as the service gives one back (the bare `img`), then
+/// a's own as the web client sent it (in its `readonly` element), both the same made-up sticker.
+fn seed_stickers(mock: &ChatServiceMock, runtime: &tokio::runtime::Runtime) -> SandboxResult {
+    let mut gif = Vec::new();
+    write_made_up_sticker(&mut gif)?;
+    runtime.block_on(mock.serve_bytes(
+        "/evergreen-assets/stickerassets/madeup-250x250/en-us/MadeUp_Hi.gif",
+        "image/gif",
+        gif,
+    ));
+    let chat = mock.add_group("Lab stickers", &[LAB_A, LAB_B]).ok_or("no chat made")?;
+    mock.post_as(LAB_B, &chat, "<p>Made-up sticker test</p>")
+        .ok_or("b's words refused")?;
+    let read_back = format!(
+        "<p>&nbsp;</p>\r\n<img src=\"{STICKER_SRC}\" height=\"180\" alt=\"A made-up sticker says hi\" width=\"180\" \
+         itemtype=\"http://schema.skype.com/Sticker\">\r\n<p>&nbsp;</p>"
+    );
+    mock.post_as(LAB_B, &chat, &read_back).ok_or("b's sticker refused")?;
+    let sent = format!(
+        "<p>&nbsp;</p><readonly aria-label=\"A made-up sticker says hi\" contenteditable=\"false\" \
+         itemtype=\"http://schema.skype.com/Sticker\" title=\"A made-up sticker says hi\"><img src=\"{STICKER_SRC}\" \
+         height=\"180\" alt=\"A made-up sticker says hi\" width=\"180\" data-image-type=\"standard\" \
+         data-image-mode=\"single\" itemtype=\"http://schema.skype.com/Sticker\"></readonly><p>&nbsp;</p>"
+    );
+    mock.post_as(LAB_A, &chat, &sent).ok_or("a's sticker refused")?;
+    STICKER_CHAT.set(chat).map_err(|_| "the sticker chat was set twice")?;
+    Ok(())
+}
+
+/// A made-up animated sticker, 180 by 180 on a clear ground: a yellow face whose mouth opens and closes over four
+/// frames, a blue speech mark beside it.
+fn write_made_up_sticker(out: &mut Vec<u8>) -> SandboxResult {
+    let mut encoder = image::codecs::gif::GifEncoder::new(out);
+    encoder.set_repeat(image::codecs::gif::Repeat::Infinite)?;
+    for at in 0u32..4 {
+        let mut frame = image::RgbaImage::from_pixel(180, 180, image::Rgba([0, 0, 0, 0]));
+        for y in 0..180u32 {
+            for x in 0..180u32 {
+                let (dx, dy) = (i64::from(x) - 80, i64::from(y) - 100);
+                let face = dx * dx + dy * dy <= 60 * 60;
+                let rim = face && dx * dx + dy * dy >= 56 * 56;
+                let eye = (dx + 20).pow(2) + (dy + 15).pow(2) <= 64 || (dx - 20).pow(2) + (dy + 15).pow(2) <= 64;
+                let open = 4 + i64::from(at % 2) * 10;
+                let mouth = dx.abs() <= 22 && (dy - 22).abs() <= open / 2 + 2;
+                let mark = (130..170).contains(&x) && (20..55).contains(&y);
+                let colour = if rim || eye || (face && mouth) {
+                    [60, 40, 20, 255]
+                } else if face {
+                    [250, 200, 40, 255]
+                } else if mark {
+                    [70, 110, 220, 255]
+                } else {
+                    continue;
+                };
+                frame.put_pixel(x, y, image::Rgba(colour));
+            }
+        }
+        let delay = image::Delay::from_numer_denom_ms(250, 1);
+        encoder.encode_frame(image::Frame::from_parts(frame, 0, 0, delay))?;
+    }
+    Ok(())
 }
 
 /// The Workflows bot, as it posts its cards.

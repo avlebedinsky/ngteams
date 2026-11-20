@@ -56,9 +56,7 @@ pub(super) async fn post(
         .await?
         .ok_or(Error::Denied)?;
     let row = &posted.row;
-    if posted.queued {
-        crate::bots::wake(&app).await;
-    }
+    wake(&app, &posted).await;
     if posted.inserted {
         events::tell(&app, "NewMessage", &row.value()?, &posted.readers, &posted.told).await;
     }
@@ -75,6 +73,16 @@ pub(super) async fn post(
         Json(json!({"OriginalArrivalTime": row.id})),
     )
         .into_response())
+}
+
+/// Wakes the senders a post queued something for, after its commit.
+async fn wake(app: &App, posted: &message_repo::Posted) {
+    if posted.queued {
+        crate::bots::wake(app).await;
+    }
+    if posted.hooked {
+        crate::outgoing::wake(app).await;
+    }
 }
 
 /// The message a post or an edit `sent` to `chat` (`chat_id` its row) stores, its quotes (`qtdMsgs`) checked against

@@ -22,6 +22,7 @@ mod first_write_cancel;
 mod media;
 mod migrations;
 mod node;
+mod outgoing;
 mod people;
 mod presence;
 mod search;

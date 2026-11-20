@@ -205,7 +205,11 @@ impl OwnPresence {
                 self.policy.stopped();
             }
             FeedEvent::OwnReport { status, sent } => self.answered(*status, Ok(sent), cx),
-            FeedEvent::Arrived { .. } | FeedEvent::Read { .. } | FeedEvent::Changed { .. } | FeedEvent::Down { .. } => {
+            FeedEvent::Arrived { .. }
+            | FeedEvent::Read { .. }
+            | FeedEvent::Changed { .. }
+            | FeedEvent::Down { .. }
+            | FeedEvent::MeetingPushed(_) => {
                 return;
             }
         }

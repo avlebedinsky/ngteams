@@ -1602,10 +1602,17 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         Ok(())
     }
 
-    /// The account's seen horizon and all-read bookmark, from a listing or conversation delivery.
+    /// The account's seen horizon and its bookmark (all read, or marked unread), from a listing or conversation
+    /// delivery.
     pub(crate) fn store_horizon(&self, store: &mut Store, listed: &chat::Conversation) -> Result<(), CatchUpError> {
-        if let Some(bookmark) = listed.horizon_bookmark().and_then(|ms| i64::try_from(ms).ok()) {
-            let applied = store.set_horizon_bookmark(&listed.id, bookmark)?;
+        if let Some(bookmark) = listed.unread_bookmark()
+            && let Some(time) = bookmark.updated.and_then(|ms| i64::try_from(ms).ok())
+        {
+            let arrival = bookmark
+                .last_read_arrival
+                .and_then(|ms| i64::try_from(ms).ok())
+                .unwrap_or_default();
+            let applied = store.set_unread_bookmark(&listed.id, arrival, time)?;
             self.conversation_changed(&listed.id, applied);
         }
         if let Some(horizon) = listed.consumption_horizon()

@@ -17,7 +17,6 @@
 pub mod menu;
 pub mod prompt;
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -26,7 +25,7 @@ use std::time::Duration;
 use gpui::{App, Global};
 
 use crate::editor::doc::Doc;
-use crate::local_ai::{Backend, Failure, Launch, Model, Tool, Work};
+use crate::local_ai::{Backend, Failure, Launch, Model, Target, Tool, Work};
 use crate::message_correct::draft::Encoded;
 use crate::translate::TARGET_LANGUAGES;
 
@@ -201,7 +200,7 @@ impl Default for Limits {
 #[derive(Clone, Debug)]
 pub struct Request {
     pub backend: Backend,
-    pub program: PathBuf,
+    pub target: Target,
     pub model: Model,
     /// The language's name, as the settings keep it.
     pub language: String,
@@ -320,7 +319,7 @@ fn tell(out: &async_channel::Sender<Outcome>, stop: &AtomicBool, outcome: Outcom
 fn translate(request: &Request, engine: &dyn Engine, stop: &AtomicBool, out: &async_channel::Sender<Outcome>) {
     let launch = Launch {
         backend: request.backend,
-        program: request.program.clone(),
+        target: request.target.clone(),
         work: Work::Draft,
         model: request.model.clone(),
         instructions: prompt::instructions(),
@@ -348,10 +347,10 @@ fn ask(session: &mut dyn Session, request: &Request, stop: &AtomicBool) -> Outco
         &request.draft,
     )
     .ok_or_else(|| {
-        Failure::Stopped(
+        request.target.named(Failure::Stopped(
             request.backend,
             Some("its answer didn't keep the message's formatting.".to_owned()),
-        )
+        ))
     })
 }
 

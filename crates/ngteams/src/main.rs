@@ -106,15 +106,7 @@ fn main() -> ExitCode {
         eprintln!("teams: {refusal}");
         return ExitCode::FAILURE;
     }
-    // the sign-in window's engine worker, held from here so an update replacing the files can't swap it under this run
-    #[cfg(target_os = "linux")]
-    if let Err(error) = teams_wpe_client::worker::pin_worker() {
-        eprintln!("teams: {error}");
-    }
-    #[cfg(any(windows, target_os = "macos"))]
-    if let Err(error) = teams_signin::window::pin_worker() {
-        eprintln!("teams: {error}");
-    }
+    pin_sign_in_worker();
     let cli = Cli::parse_from(ngteams::cli::shell_arguments(std::env::args_os()));
     if cli.build_identity {
         println!("{}", env!("CARGO_PKG_VERSION"));
@@ -127,6 +119,13 @@ fn main() -> ExitCode {
             ngteams::refusal::marker_name(ngteams::refusal::INSTALLED, ngteams::refusal::LAB_BUILD)
         );
         return ExitCode::SUCCESS;
+    }
+    if cli.prepare {
+        #[cfg(windows)]
+        if let Err(error) = ngteams::prepare::end_children_with_this_run() {
+            eprintln!("teams: prepare: {error}");
+        }
+        return prepare(ngteams::prepare::steps());
     }
     if let Some(archive) = &cli.install_web_engine {
         return install_web_engine(archive);
@@ -180,6 +179,34 @@ fn main() -> ExitCode {
             eprintln!("teams: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Holds the sign-in window's engine worker from the start, so an update that replaces the files can't swap it under
+/// this run.
+fn pin_sign_in_worker() {
+    #[cfg(target_os = "linux")]
+    if let Err(error) = teams_wpe_client::worker::pin_worker() {
+        eprintln!("teams: {error}");
+    }
+    #[cfg(target_os = "macos")]
+    if let Err(error) = teams_signin::window::pin_worker() {
+        eprintln!("teams: {error}");
+    }
+    // off the main thread: after a restart of Windows, Defender reads the whole file again before it opens
+    #[cfg(windows)]
+    std::thread::spawn(|| {
+        if let Err(error) = teams_signin::window::pin_worker() {
+            eprintln!("teams: {error}");
+        }
+    });
+}
+
+/// The installer's run of the app ([`ngteams::prepare`]). The installer goes on also when this run fails.
+fn prepare(steps: Vec<ngteams::prepare::Step>) -> ExitCode {
+    match ngteams::prepare::run(steps, ngteams::prepare::LIMIT) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => failed("prepare", &error),
     }
 }
 

@@ -57,9 +57,8 @@ impl ProfileCard {
             .flex_none()
             .size(px(size))
             .child(
-                people::avatar(Some(&name), self.of.picture.as_ref(), Size::Large)
-                    .size(px(size))
-                    .text_size(px(size * 0.4)),
+                people::avatar(Some(&name), self.of.picture.as_ref(), Size::Size(px(size)))
+                    .font_weight(gpui::FontWeight::SEMIBOLD),
             )
             .children(badge)
             .into_any_element()
@@ -791,7 +790,11 @@ impl ProfileCard {
             .relative()
             .flex_none()
             .size(px(size))
-            .child(people::avatar(of.name.as_ref(), of.picture.as_ref(), Size::Medium).size(px(size)))
+            .child(people::avatar(
+                of.name.as_ref(),
+                of.picture.as_ref(),
+                Size::Size(px(size)),
+            ))
             .children(badge)
             .into_any_element()
     }

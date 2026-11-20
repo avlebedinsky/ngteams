@@ -16,11 +16,12 @@ use teams_auth::token::TokenError;
 use teams_mock::{AB_CHAT, ABC_CHAT, CHANNEL, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, NOTIFICATIONS, TENANT};
 use teams_proto::chat::{
     AppConsumptionHorizon, ChatReadError, ChatReads, Code, CodeRun, Conversation, ConversationKind, ConversationList,
-    Field, FileKind, FilePreview, List, MAX_CONTENT, MAX_DEPTH, Marks, MemberList, MentionKind, Message, MessagePage,
-    MessageType, Node, Quote, RichText, SharedFile, SharedFiles, Table, TableCell, Thread, Token, Unshown, WEB_CLIENT,
-    forwarded, link_endpoint, parse_html, shared_files, unshown_parts, web_chat_link,
+    Field, FileKind, FilePreview, LinkPermission, List, MAX_CONTENT, MAX_DEPTH, Marks, MemberList, MentionKind,
+    Message, MessagePage, MessageText, MessageType, Node, Quote, RichText, STICKER_ITEMTYPE, SharedFile, SharedFiles,
+    Sticker, Table, TableCell, Thread, Token, Unshown, WEB_CLIENT, forwarded, link_endpoint, onedrive_page, parse_html,
+    read_link_permission, share_entry, share_token, shared_files, unshown_parts, web_chat_link,
 };
-use teams_proto::{Client, Credentials, HttpError, HttpTransport};
+use teams_proto::{Client, Cloud, Credentials, HttpError, HttpTransport};
 use wiremock::matchers::{method, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -430,6 +431,78 @@ fn a_mention_reads_in_the_captured_form_from_content_and_properties_as_sent_and_
         );
     }
     Ok(())
+}
+
+#[test]
+fn a_sticker_reads_as_one_with_its_label_as_sent_and_read_back() -> TestResult {
+    let fixture = fixture("sticker.json")?;
+    let label = "A made-up sticker says \"Hi there\"";
+    // as sent its `img` is in a `readonly` element; read back it is bare, without the editor's attributes
+    for form in [&fixture["request"]["body"], &fixture["read_back"]] {
+        let rich = message(form)?.rich_text().ok_or("no rich text")?;
+        let blank = || Node::Paragraph(vec![text("\u{a0}")]);
+        let [first, Node::Sticker(sticker), last] = &rich.nodes[..] else {
+            panic!("a sticker between two blank paragraphs: {rich:#?}");
+        };
+        assert_eq!((first, last), (&blank(), &blank()));
+        assert_eq!(sticker.label.as_deref(), Some(label));
+        assert_eq!(sticker.image.item_type.as_deref(), Some(STICKER_ITEMTYPE));
+        assert_eq!(sticker.image.size, Some((180, 180)));
+        assert!(sticker.image.src.contains("/stickerassets/madeup-250x250/"));
+        assert_eq!(rich.plain_text().trim_matches(['\u{a0}', '\n']), label);
+    }
+    Ok(())
+}
+
+#[test]
+fn a_sticker_elements_label_wins_over_its_pictures() {
+    // a picture sent to the media service in the element: the element's label, not the picture's `alt`
+    let ams = parse_html(
+        "<readonly aria-label=\"A made-up caption\" itemtype=\"http://schema.skype.com/Sticker\" title=\"t\"><img \
+         src=\"https://us-api.asm.skype.com/v1/objects/0-eus-d1-0000000000000000000000000000000a/views/imgo\" \
+         itemtype=\"http://schema.skype.com/AMSImage\" width=\"240\" height=\"180\" alt=\"image\"></readonly>",
+    );
+    let [Node::Sticker(Sticker { image, label })] = &ams.nodes[..] else {
+        panic!("a sticker: {ams:#?}");
+    };
+    assert_eq!(label.as_deref(), Some("A made-up caption"));
+    assert_eq!((image.alt.as_deref(), image.size), (Some("image"), Some((240, 180))));
+    // the title when there is no aria-label, the picture's alt when neither says anything
+    let titled = parse_html(
+        "<readonly title=\"Titled\" itemtype=\"http://schema.skype.com/Sticker\"><img \
+         src=\"https://teams.public.onecdn.static.microsoft/evergreen-assets/stickerassets/a-250x250/A.gif\" alt=\"a\"></readonly>",
+    );
+    assert!(matches!(&titled.nodes[..], [Node::Sticker(Sticker { label: Some(label), .. })] if label == "Titled"));
+    let bare = parse_html(
+        "<readonly aria-label=\" \" itemtype=\"http://schema.skype.com/Sticker\"><img \
+         src=\"https://teams.public.onecdn.static.microsoft/evergreen-assets/stickerassets/a-250x250/A.gif\" alt=\"Alt\"></readonly>",
+    );
+    assert!(matches!(&bare.nodes[..], [Node::Sticker(Sticker { label: Some(label), .. })] if label == "Alt"));
+}
+
+#[test]
+fn a_sticker_element_of_no_picture_and_any_other_readonly_element_stay_as_they_were() {
+    // an element of no picture keeps its text; a mention's element is unknown markup as before
+    let empty = parse_html("<readonly itemtype=\"http://schema.skype.com/Sticker\">made-up words</readonly>");
+    assert_eq!(empty.nodes, [text("made-up words")]);
+    let other = parse_html(
+        "<p><readonly itemtype=\"http://schema.skype.com/Mention\"><img \
+         src=\"https://teams.public.onecdn.static.microsoft/evergreen-assets/stickerassets/a-250x250/A.gif\" alt=\"x\"></readonly></p>",
+    );
+    assert!(
+        matches!(&other.nodes[..], [Node::Paragraph(children)] if matches!(&children[..], [Node::Image(_)])),
+        "{other:#?}"
+    );
+    // an emoticon in the element is no sticker
+    let emoticon = parse_html(
+        "<readonly itemtype=\"http://schema.skype.com/Sticker\"><img itemtype=\"http://schema.skype.com/Emoji\" \
+         src=\"https://statics.teams.cdn.office.net/evergreen-assets/personal-expressions/v2/assets/emoticons/laugh/default/20_f.png\" \
+         itemid=\"laugh\" alt=\"x\"></readonly>",
+    );
+    assert!(
+        matches!(&emoticon.nodes[..], [Node::Image(image)] if image.is_emoji()),
+        "{emoticon:#?}"
+    );
 }
 
 /// Each reaction's key and how many users it lists, in the order read.
@@ -1542,6 +1615,160 @@ fn a_message_of_five_files_and_no_text_reads_every_file_with_where_it_is_kept() 
     Ok(())
 }
 
+#[test]
+fn a_file_shared_on_from_another_chat_reads_as_its_file() -> TestResult {
+    // Teams' "Share this file" posts the entry with `state` null
+    let message = message(&fixture("file-shared-on.json")?["read_back"])?;
+    let SharedFiles { files, unread } = message.files();
+    assert_eq!(unread, None, "the shared entry is read");
+    assert_eq!(message.unshown(), Vec::new());
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].name, "made-up-camera-take-1.mp4");
+    assert_eq!(files[0].kind(), FileKind::Video);
+    assert!(files[0].share_url.is_some() && files[0].object_url.is_some());
+    // any other state is still not a file's
+    let mut entries = grid_entries()?;
+    entries[1]["state"] = json!("deleted");
+    assert_eq!(shared_files(Some(&Value::Array(entries))).files.len(), 4);
+    Ok(())
+}
+
+#[test]
+fn a_share_posts_the_files_entry_as_teams_does() -> TestResult {
+    let read = fixture("file-shared-on.json")?;
+    let sent: Vec<Value> = serde_json::from_str(read["sent"]["properties"]["files"].as_str().ok_or("files")?)?;
+    let file = shared_files(Some(&Value::Array(grid_entries()?))).files.remove(1);
+    let entry = share_entry(&Cloud::Microsoft, &file, Some("anonymous")).ok_or("an entry")?;
+    assert_eq!(entry, sent[0]);
+    // no scope read: the entry names none; an unknown scope is left out too
+    let unscoped = share_entry(&Cloud::Microsoft, &file, None).ok_or("an entry")?;
+    assert!(unscoped.get("permissionScope").is_none());
+    let odd = share_entry(&Cloud::Microsoft, &file, Some("everyone")).ok_or("an entry")?;
+    assert!(odd.get("permissionScope").is_none());
+    // a file read with no entry, or on another cloud, is not shared on
+    assert_eq!(
+        share_entry(
+            &Cloud::Microsoft,
+            &SharedFile {
+                entry: None,
+                ..file.clone()
+            },
+            None
+        ),
+        None
+    );
+    let own = Cloud::own("https://chat.example:8443")?;
+    assert_eq!(share_entry(&own, &file, None), None);
+    Ok(())
+}
+
+#[test]
+fn a_message_sharing_a_file_on_posts_its_entry_and_keeps_it_when_stored() -> TestResult {
+    let read = fixture("file-shared-on.json")?;
+    let file = shared_files(Some(&Value::Array(grid_entries()?))).files.remove(1);
+    let entry = share_entry(&Cloud::Microsoft, &file, Some("anonymous")).ok_or("an entry")?;
+    let text = MessageText::plain("Made-up share note")?.with_shared(vec![entry.clone()]);
+    assert_eq!(text.html(), read["sent"]["content"].as_str().ok_or("content")?);
+    let files: Value = serde_json::from_str(&text.files_property())?;
+    let sent: Value = serde_json::from_str(read["sent"]["properties"]["files"].as_str().ok_or("files")?)?;
+    assert_eq!(files, sent);
+    let stored = serde_json::to_value(&text)?;
+    let restored: MessageText = serde_json::from_value(stored.clone())?;
+    assert_eq!(restored, text);
+    assert_eq!(restored.shared(), std::slice::from_ref(&entry));
+    assert_eq!(text.clone().for_cloud(&Cloud::Microsoft)?, text);
+    // an entry that isn't a file on the account's service is refused, stored or sent
+    let mut outside = entry;
+    outside["fileInfo"]["shareUrl"] = json!("https://files.example/made-up");
+    outside["objectUrl"] = json!("https://files.example/made-up");
+    outside["fileInfo"]["fileUrl"] = json!("https://files.example/made-up");
+    let off = MessageText::plain("Made-up share note")?.with_shared(vec![outside.clone()]);
+    assert!(off.for_cloud(&Cloud::Microsoft).is_err());
+    let mut stored = stored;
+    stored["shared"] = json!([outside]);
+    assert!(serde_json::from_value::<MessageText>(stored).is_err());
+    Ok(())
+}
+
+#[test]
+fn a_shared_file_and_an_app_card_survive_storage_and_cloud_conversion() -> TestResult {
+    let file = shared_files(Some(&Value::Array(grid_entries()?))).files.remove(1);
+    let entry = share_entry(&Cloud::Microsoft, &file, Some("anonymous")).ok_or("an entry")?;
+    let card = teams_proto::chat::AppCard::new(
+        "00000000-0000-4000-8000-0000000000a0".to_owned(),
+        "Made-up Finder".to_owned(),
+        None,
+        "application/vnd.microsoft.card.adaptive".to_owned(),
+        json!({"type": "AdaptiveCard", "body": []}),
+    );
+    let text = MessageText::plain("Made-up share note")?
+        .with_shared(vec![entry.clone()])
+        .with_cards(vec![card.clone()]);
+    let restored: MessageText = serde_json::from_value(serde_json::to_value(&text)?)?;
+    assert_eq!(restored, text);
+    assert_eq!(restored.shared(), std::slice::from_ref(&entry));
+    assert_eq!(restored.cards(), std::slice::from_ref(&card));
+    assert_eq!(restored.for_cloud(&Cloud::Microsoft)?, text);
+    Ok(())
+}
+
+#[test]
+fn a_share_refuses_any_link_that_the_file_reader_discarded() -> TestResult {
+    let file = shared_files(Some(&Value::Array(grid_entries()?))).files.remove(1);
+    let good = share_entry(&Cloud::Microsoft, &file, Some("anonymous")).ok_or("an entry")?;
+    for path in [
+        "/objectUrl",
+        "/fileInfo/shareUrl",
+        "/fileInfo/fileUrl",
+        "/filePreview/previewUrl",
+    ] {
+        for link in [
+            "https://outside.example/secret.txt",
+            "https://x@contoso-my.sharepoint.com/secret.txt",
+        ] {
+            let mut mixed = good.clone();
+            *mixed.pointer_mut(path).ok_or("link field")? = json!(link);
+            let read = shared_files(Some(&json!([mixed.clone()])));
+            assert_eq!(read.files.len(), 1, "the other valid link still draws a card");
+            assert!(share_entry(&Cloud::Microsoft, &read.files[0], Some("anonymous")).is_none());
+            let text = MessageText::plain("test")?.with_shared(vec![mixed]);
+            assert!(text.for_cloud(&Cloud::Microsoft).is_err());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn a_sharing_links_permission_is_read_by_its_scope_and_words() {
+    let body = json!({"@odata.context": "made-up", "hasPassword": false, "id": "made-up-permission", "roles": ["write"],
+        "link": {"scope": "anonymous", "type": "edit", "localizedDescription": "Anyone with the link can edit",
+        "webUrl": "https://contoso-my.sharepoint.com/:v:/g/personal/made_up_user_contoso_test/MadeUp"}});
+    let read = read_link_permission(body.to_string().as_bytes());
+    assert_eq!(
+        read,
+        Some(LinkPermission {
+            scope: "anonymous".to_owned(),
+            description: Some("Anyone with the link can edit".to_owned()),
+        })
+    );
+    let no_words = json!({"link": {"scope": "organization"}});
+    assert_eq!(
+        read_link_permission(no_words.to_string().as_bytes()).and_then(|read| read.description),
+        None
+    );
+    for odd in [
+        json!({"link": {"scope": "everyone"}}),
+        json!({"roles": ["write"]}),
+        json!([]),
+    ] {
+        assert_eq!(read_link_permission(odd.to_string().as_bytes()), None, "{odd}");
+    }
+    assert_eq!(
+        share_token("https://contoso-my.sharepoint.com/:v:/g/x"),
+        "u!aHR0cHM6Ly9jb250b3NvLW15LnNoYXJlcG9pbnQuY29tLzp2Oi9nL3g"
+    );
+}
+
 /// The five entries of `files-grid.json`, as a list.
 fn grid_entries() -> TestResult<Vec<Value>> {
     let read = fixture("files-grid.json")?;
@@ -1683,10 +1910,18 @@ fn a_received_messages_files_are_read_by_name_type_and_links() -> TestResult {
     let message = files_message()?;
     let SharedFiles { files, unread } = message.files();
     assert_eq!(unread, None);
+    assert!(files.iter().all(|file| file.entry.is_some()), "each keeps its entry");
+    let read: Vec<SharedFile> = files
+        .iter()
+        .map(|file| SharedFile {
+            entry: None,
+            ..file.clone()
+        })
+        .collect();
     let personal = "https://contoso-my.sharepoint.com/personal/made_up_user_contoso_test";
     let shared = "https://contoso-my.sharepoint.com/:{kind}:/g/personal/made_up_user_contoso_test";
     assert_eq!(
-        files,
+        read,
         [
             SharedFile {
                 name: "02-made-up-rehearsal-cut-v3.mp4".to_owned(),
@@ -1700,6 +1935,7 @@ fn a_received_messages_files_are_read_by_name_type_and_links() -> TestResult {
                 )),
                 preview: None,
                 location: Some("personal > made_up_user_contoso_test".to_owned()),
+                entry: None,
             },
             SharedFile {
                 name: "01-made-up-stage-plan.pdf".to_owned(),
@@ -1713,6 +1949,7 @@ fn a_received_messages_files_are_read_by_name_type_and_links() -> TestResult {
                 )),
                 preview: None,
                 location: Some("personal > made_up_user_contoso_test".to_owned()),
+                entry: None,
             },
         ]
     );
@@ -2261,6 +2498,7 @@ fn an_own_servers_drive_names_its_owners_account() {
         object_url: None,
         preview: None,
         location: None,
+        entry: None,
     };
     let own =
         file("https://chat.example:8443/sp/personal/0000000000004000800000000000000B/Documents/made-up%20plan.pdf");
@@ -2275,5 +2513,75 @@ fn an_own_servers_drive_names_its_owners_account() {
         "https://chat.example:8443/personal/0000000000004000800000000000000b/Documents/a.pdf",
     ] {
         assert_eq!(file(link).site_owner(), None, "{link}");
+    }
+}
+
+#[tokio::test]
+async fn a_sharing_links_permission_is_read_on_the_files_site_with_its_token() -> TestResult {
+    let server = MockServer::start().await;
+    let site = "https://contoso-my.sharepoint.com/personal/made_up_user_contoso_test/";
+    let object = format!("{site}Documents/Microsoft%20Teams%20Chat%20Files/made-up.mp4");
+    let share = "https://contoso-my.sharepoint.com/:v:/g/personal/made_up_user_contoso_test/MadeUpLink";
+    let token = share_token(share);
+    Mock::given(method("GET"))
+        .and(path_regex(format!(
+            "^/personal/made_up_user_contoso_test/_api/v2.0/shares/{}/permission$",
+            regex_escape(&token)
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"roles": ["write"],
+            "link": {"scope": "anonymous", "type": "edit", "localizedDescription": "Anyone with the link can edit"}})))
+        .mount(&server)
+        .await;
+    let client = client_for(&server.uri(), "made-up-site-token")?;
+    let answer = client.transport().sharing_link_permission(&object, share).await?;
+    let read = read_link_permission(answer.body()).ok_or("a permission")?;
+    assert_eq!(read.scope, "anonymous");
+    // a link or an address off the account's file service is refused before anything is sent
+    for (object, share) in [
+        (object.as_str(), "https://files.example/made-up"),
+        ("https://files.example/made-up", share),
+    ] {
+        let refused = client.transport().sharing_link_permission(object, share).await;
+        assert!(matches!(refused, Err(HttpError::Refused(_))), "{refused:?}");
+    }
+    assert_eq!(server.received_requests().await.ok_or("recorded")?.len(), 1);
+    Ok(())
+}
+
+/// `text` with the characters a regex gives a meaning to escaped.
+fn regex_escape(text: &str) -> String {
+    text.chars()
+        .flat_map(|c| {
+            let escaped = matches!(
+                c,
+                '.' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '^' | '$' | '\\'
+            );
+            escaped.then_some('\\').into_iter().chain([c])
+        })
+        .collect()
+}
+
+#[test]
+fn share_outside_teams_opens_onedrives_page_of_the_file() {
+    let file = shared_files(Some(&Value::Array(grid_entries().unwrap())))
+        .files
+        .remove(1);
+    assert_eq!(
+        onedrive_page(&file).as_deref(),
+        Some(
+            "https://contoso-my.sharepoint.com/personal/made_up_user_contoso_test/_layouts/15/onedrive.aspx?id=%2Fpersonal%2Fmade_up_user_contoso_test%2FDocuments%2FMicrosoft%20Teams%20Chat%20Files%2Fmade-up-camera-take-1.mp4&parent=%2Fpersonal%2Fmade_up_user_contoso_test%2FDocuments%2FMicrosoft%20Teams%20Chat%20Files"
+        )
+    );
+    // an own server's file, a team site's or one with no address of its own has none
+    for object in [
+        Some("https://chat.example:8443/sp/personal/0000000000004000800000000000000B/Documents/plan.pdf"),
+        Some("https://contoso.sharepoint.com/sites/made-up/Shared%20Documents/plan.pdf"),
+        None,
+    ] {
+        let other = SharedFile {
+            object_url: object.map(str::to_owned),
+            ..file.clone()
+        };
+        assert_eq!(onedrive_page(&other), None, "{object:?}");
     }
 }

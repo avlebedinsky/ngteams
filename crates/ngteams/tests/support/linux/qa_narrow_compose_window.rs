@@ -14,6 +14,11 @@
 //!   and keeps the draft and the focus. A thread's pane and a channel's box. At a normal width nothing changes.
 //! - **Odd cases**: the largest font (more tools in the menu), a reply over the box, an attachment chip, Teams Dark,
 //!   the keyboard only.
+//! - **The box's edge** (QA of task 581): no glow or shadow around a box, its border grey, the brand line just inside
+//!   its bottom border only while it has the focus, in the chat (not focused, typed, more lines, the format bar, a
+//!   reply, a file, an edit, other font sizes), a channel post and its thread (the line moves with the focus), New
+//!   message, the call's Chat pane and a narrow window, in Teams Light and Dark. The tour's pixel check reads each
+//!   shot.
 //!
 //! `QA_NARROW_ONLY` (a comma list of check names) runs only those. `QA_NARROW_EVIDENCE` names a directory that gets the
 //! screenshots and the results too. Screenshots also go to `target/ui-shots/qa429-*.png`. Every name, id and text is
@@ -66,6 +71,12 @@ use tokio::sync::broadcast;
 use ui_sandbox::input::{VirtualInput, keys};
 use ui_sandbox::{Running, Sandbox, SandboxOptions, SandboxResult, sandbox_or_skip, wait_until};
 
+#[path = "ui_tour_compose_edge.rs"]
+#[expect(
+    dead_code,
+    reason = "the tour's own half of the edge check, its steps and its child's line, is not used here"
+)]
+mod compose_edge;
 #[path = "../window.rs"]
 mod support;
 use support::{Alias, display_name};
@@ -168,7 +179,7 @@ fn wanted(name: &str) -> bool {
 
 type Check = (&'static str, fn(&mut User<'_>) -> SandboxResult);
 
-const CHECKS: [Check; 12] = [
+const CHECKS: [Check; 17] = [
     ("group_call_chat_pane_by_click", group_call_chat_pane_by_click),
     ("type_paste_send", type_paste_send),
     ("long_message_and_edit", long_message_and_edit),
@@ -181,6 +192,11 @@ const CHECKS: [Check; 12] = [
     ("meeting_chat_pane", meeting_chat_pane),
     ("main_window_resize", main_window_resize),
     ("channel_and_thread", channel_and_thread),
+    ("edge_chat_box", edge_chat_box),
+    ("edge_focus_moves", edge_focus_moves),
+    ("edge_new_chat", edge_new_chat),
+    ("edge_narrow_window", edge_narrow_window),
+    ("edge_call_chat", edge_call_chat),
 ];
 
 fn parent() -> SandboxResult {
@@ -1087,10 +1103,10 @@ fn keyboard_only(user: &mut User<'_>) -> SandboxResult {
         ensure(boxed["language_open"] == false, || {
             format!("stop {tabs} is a hidden one: Enter opened the language menu: {boxed}")
         })?;
-        // the stops are Format, Emoji, Attach, More options, then Send
-        if tabs == 5 {
+        // the stops are Format, Emoji, Attach, "+", More options, then Send
+        if tabs == 6 {
             ensure(text_of(boxed).is_empty(), || {
-                format!("Enter on stop 5 did not send: {boxed}")
+                format!("Enter on stop 6 did not send: {boxed}")
             })?;
         }
         seen.push(format!(
@@ -1284,6 +1300,291 @@ fn channel_and_thread(user: &mut User<'_>) -> SandboxResult {
     }
     say(&format!("  channel: {}", seen.join("; ")));
     Ok(())
+}
+
+// --- task 581: the box's edge ---
+
+/// The text of the main window's chat box at 1280 px.
+const CHAT_TEXT: (i32, i32) = (700, 750);
+
+/// The box under `key` in the state: `call` for the call's Chat pane, else the main window's (`chat`, `post`,
+/// `thread`, `new_chat`).
+fn box_at<'a>(state: &'a Value, key: &str) -> &'a Value {
+    if key == "call" { call_box(state) } else { &state[key] }
+}
+
+/// A place in the box's text near its left end: on its first line, or, for a box with a row over its text (a thread's
+/// "Send to"), on its last line, beside its tools.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a window's logical px are small whole numbers"
+)]
+fn in_text(boxed: &Value, foot: bool) -> SandboxResult<(i32, i32)> {
+    let at = |index: usize| boxed["bounds"][index].as_f64().map(|value| value.round() as i32);
+    let (Some(x), Some(y), Some(height)) = (at(0), at(1), at(3)) else {
+        return Err(format!("the box was not drawn: {boxed}").into());
+    };
+    Ok((x + 40, if foot { y + height - 27 } else { y + 20 }))
+}
+
+impl User<'_> {
+    /// A shot of the screen as it stands; the edge check on each box of `keys` in it.
+    fn edge_shot(&mut self, name: &str, keys: &[&str]) -> SandboxResult {
+        self.park()?;
+        let edges = |state: &Value| {
+            keys.iter()
+                .map(|key| box_at(state, key)["edge"].clone())
+                .collect::<Vec<_>>()
+        };
+        // a loaded compositor can show a frame late: the boxes stand still from before the shot to after it
+        let mut tries = 0;
+        let (state, png) = loop {
+            thread::sleep(SETTLE);
+            let before = self.state()?;
+            thread::sleep(SETTLE);
+            let png = self.shot(name)?;
+            let after = self.state()?;
+            tries += 1;
+            if edges(&before) == edges(&after) || tries == 3 {
+                break (after, png);
+            }
+        };
+        for key in keys {
+            let said = box_at(&state, key)["edge"]
+                .as_str()
+                .ok_or_else(|| format!("{name}: no {key} box: {state}"))?;
+            say(&format!("  {name} {key}: {said}"));
+            compose_edge::check(&png, said).map_err(|error| format!("{name}, the {key} box: {error}"))?;
+        }
+        Ok(())
+    }
+
+    /// [`Self::edge_shot`] in Teams Light and Teams Dark; Teams Light after.
+    fn edge_shots(&mut self, name: &str, keys: &[&str]) -> SandboxResult {
+        self.edge_shot(&format!("{name}-light"), keys)?;
+        self.ask("theme-dark")?;
+        let dark = self.edge_shot(&format!("{name}-dark"), keys);
+        self.ask("theme-light")?;
+        thread::sleep(SETTLE);
+        dark
+    }
+
+    /// The chat's box emptied, then clicked: "clear" also empties a channel kept from before, which takes the focus.
+    fn clear_chat_box(&mut self) -> SandboxResult {
+        self.ask("clear")?;
+        self.click(CHAT_TEXT)?;
+        self.until("the chat box empty and focused", |state| {
+            text_of(main_box(state)).is_empty() && main_box(state)["focused"] == true
+        })?;
+        Ok(())
+    }
+
+    /// The main window 1280 px wide, Teams Light at 14 px, the a–b chat open and its box empty and focused.
+    fn main_chat(&mut self) -> SandboxResult<Value> {
+        self.hang_up()?;
+        self.focus_window(self.main_window)?;
+        self.resize_focused(1280)?;
+        self.ask("theme-light")?;
+        self.ask("font 14")?;
+        self.ask(&format!("open {AB_CHAT}"))?;
+        self.ask("clear")?;
+        self.click(CHAT_TEXT)?;
+        self.until("the chat box empty and focused", |state| {
+            text_of(main_box(state)).is_empty() && main_box(state)["focused"] == true
+        })
+    }
+}
+
+/// The chat's box in each state a user meets: no focus, empty, typed, more lines, the format bar and its menu, the
+/// emoji picker, a reply, a file, an edit, other font sizes.
+fn edge_chat_box(user: &mut User<'_>) -> SandboxResult {
+    user.main_chat()?;
+    // a click in the messages leaves the focus in the box, as in Teams; Escape in the empty box gives it to the list
+    user.press("escape")?;
+    user.until("the box without the focus", |state| main_box(state)["focused"] == false)?;
+    user.edge_shots("edge-chat-unfocused", &["chat"])?;
+    user.click(CHAT_TEXT)?;
+    user.until("the box focused", |state| main_box(state)["focused"] == true)?;
+    user.edge_shots("edge-chat-empty", &["chat"])?;
+    user.type_text("Lunch at noon?")?;
+    user.edge_shots("edge-chat-typed", &["chat"])?;
+    user.press("shift+enter")?;
+    user.type_text("The usual place, or the new one?")?;
+    user.press("shift+enter")?;
+    user.type_text("Either is fine.")?;
+    user.until("the three lines", |state| {
+        text_of(main_box(state)).ends_with("Either is fine.")
+    })?;
+    user.edge_shots("edge-chat-lines", &["chat"])?;
+    user.clear_chat_box()?;
+    // the format bar by its key, Send lit by a draft
+    user.press("ctrl+shift+x")?;
+    user.until("the format bar", |state| main_box(state)["expanded"] == true)?;
+    user.type_text("Lunch at noon?")?;
+    user.edge_shots("edge-chat-format", &["chat"])?;
+    // a menu of the bar and the emoji picker open over the box, not cut by it
+    user.ask("format-menu")?;
+    user.settled_shot("edge-chat-format-menu")?;
+    user.ask("format-menu")?;
+    user.press("ctrl+shift+x")?;
+    user.until("no format bar", |state| main_box(state)["expanded"] == false)?;
+    user.press("ctrl+;")?;
+    user.until("the emoji picker", |state| main_box(state)["emoji_open"] == true)?;
+    user.settled_shot("edge-chat-emoji")?;
+    user.press("escape")?;
+    user.until("the emoji picker closed", |state| {
+        main_box(state)["emoji_open"] == false
+    })?;
+    user.clear_chat_box()?;
+    edge_reply_file_edit(user)?;
+    for size in [10, 15, 18, 24] {
+        user.ask(&format!("font {size}"))?;
+        thread::sleep(SETTLE);
+        user.click(CHAT_TEXT)?;
+        user.until("the box focused", |state| main_box(state)["focused"] == true)?;
+        user.edge_shots(&format!("edge-chat-font-{size}"), &["chat"])?;
+    }
+    user.ask("font 14")?;
+    user.clear_chat_box()?;
+    Ok(())
+}
+
+/// A reply with its quote, a pasted file's chip and the edit of a sent message, each in the chat's box.
+fn edge_reply_file_edit(user: &mut User<'_>) -> SandboxResult {
+    let reply = user.ask("reply-last")?;
+    ensure(reply == "ok", || format!("no reply: {reply}"))?;
+    user.until("the reply", |state| main_box(state)["mode"] == "reply")?;
+    user.type_text("Yes, at noon.")?;
+    user.edge_shots("edge-chat-reply", &["chat"])?;
+    user.clear_chat_box()?;
+    let file = user.sandbox.path("made-up-agenda.txt");
+    fs::write(&file, "made-up agenda\n")?;
+    user.sandbox.set_clipboard(vec![(
+        "text/uri-list".to_owned(),
+        format!("file://{}\r\n", file.display()).into_bytes(),
+    )])?;
+    user.click(CHAT_TEXT)?;
+    user.press("ctrl+v")?;
+    user.until("the file's chip", |state| main_box(state)["attachments"] == 1)?;
+    user.edge_shots("edge-chat-attachment", &["chat"])?;
+    user.clear_chat_box()?;
+    let mark = user.mark();
+    user.type_text(&format!("to edit {mark}"))?;
+    user.press("enter")?;
+    user.wait_sent("POST", &mark)?;
+    user.until("the box empty", |state| text_of(main_box(state)).is_empty())?;
+    thread::sleep(SETTLE);
+    user.press("up")?;
+    user.until("the edit", |state| main_box(state)["mode"] == "edit")?;
+    user.edge_shots("edge-chat-edit", &["chat"])?;
+    user.press("escape")?;
+    user.until("the edit ended", |state| main_box(state)["mode"] == "new")?;
+    user.clear_chat_box()?;
+    Ok(())
+}
+
+/// A channel's post box and its thread's reply box side by side: the line goes with the focus from one to the other.
+fn edge_focus_moves(user: &mut User<'_>) -> SandboxResult {
+    user.main_chat()?;
+    user.ask("open-channel")?;
+    user.until("the channel", |state| !state["post"].is_null())?;
+    user.ask("open-thread")?;
+    user.until("the thread", |state| !state["thread"].is_null())?;
+    // the boxes' places once the thread's pane has narrowed the channel
+    thread::sleep(SETTLE);
+    let state = user.state()?;
+    user.click(in_text(&state["post"], false)?)?;
+    let state = user.until("the post box focused", |state| state["post"]["focused"] == true)?;
+    ensure(state["thread"]["focused"] == false, || format!("both focused: {state}"))?;
+    user.type_text("A made-up post")?;
+    user.edge_shots("edge-focus-post", &["post", "thread"])?;
+    user.click(in_text(&state["thread"], true)?)?;
+    let state = user.until("the thread box focused", |state| state["thread"]["focused"] == true)?;
+    ensure(state["post"]["focused"] == false, || format!("both focused: {state}"))?;
+    user.type_text("A made-up reply")?;
+    user.edge_shots("edge-focus-thread", &["post", "thread"])?;
+    user.press("shift+tab")?;
+    user.edge_shot("edge-focus-thread-shift-tab-light", &["post", "thread"])?;
+    user.ask("clear")?;
+    user.ask("close-thread")?;
+    Ok(())
+}
+
+/// New message: the box without the focus while To: has it, then focused with a draft.
+fn edge_new_chat(user: &mut User<'_>) -> SandboxResult {
+    user.main_chat()?;
+    user.press("ctrl+n")?;
+    let state = user.until("New message", |state| {
+        state["main"] == "NewChat" && !state["new_chat"].is_null()
+    })?;
+    ensure(state["new_chat"]["focused"] == false, || {
+        format!("the box has the focus, not To: {state}")
+    })?;
+    user.edge_shots("edge-new-chat-to", &["new_chat"])?;
+    user.click(in_text(&state["new_chat"], false)?)?;
+    user.until("the new chat's box focused", |state| {
+        state["new_chat"]["focused"] == true
+    })?;
+    user.type_text("Lunch on Friday?")?;
+    user.edge_shots("edge-new-chat-typed", &["new_chat"])?;
+    user.press("ctrl+a")?;
+    user.press("backspace")?;
+    user.until("the new chat's box empty", |state| {
+        text_of(&state["new_chat"]).is_empty()
+    })?;
+    user.ask(&format!("open {AB_CHAT}"))?;
+    Ok(())
+}
+
+/// The main window narrowed with a draft: the stacked box keeps its edge, also at the largest font.
+fn edge_narrow_window(user: &mut User<'_>) -> SandboxResult {
+    user.main_chat()?;
+    user.type_text("A draft in a narrow window")?;
+    for width in [800, 640, 560] {
+        user.resize_focused(width)?;
+        user.edge_shot(&format!("edge-main-{width}-light"), &["chat"])?;
+    }
+    user.ask("font 24")?;
+    thread::sleep(SETTLE);
+    user.edge_shots("edge-main-560-font-24", &["chat"])?;
+    user.ask("font 14")?;
+    user.resize_focused(1280)?;
+    user.ask("clear")?;
+    Ok(())
+}
+
+/// The call's Chat pane: typed, without the focus, a reply, the largest font.
+fn edge_call_chat(user: &mut User<'_>) -> SandboxResult {
+    user.call_chat()?;
+    user.type_text("A note in the call")?;
+    user.edge_shots("edge-call-typed", &["call"])?;
+    // the call's stage, left of the pane
+    user.click((400, 400))?;
+    user.until("the call box without the focus", |state| {
+        call_box(state)["focused"] == false
+    })?;
+    user.edge_shots("edge-call-unfocused", &["call"])?;
+    user.ask("call-clear")?;
+    let mark = user.mark();
+    user.type_text(&format!("to reply to {mark}"))?;
+    user.press("enter")?;
+    user.wait_sent("POST", &mark)?;
+    user.until("the call box empty", |state| text_of(call_box(state)).is_empty())?;
+    thread::sleep(SETTLE);
+    let reply = user.ask("call-reply-last")?;
+    ensure(reply == "ok", || format!("no reply: {reply}"))?;
+    user.until("the reply", |state| call_box(state)["mode"] == "reply")?;
+    user.type_text("A reply in the call")?;
+    user.edge_shots("edge-call-reply", &["call"])?;
+    user.ask("call-clear")?;
+    user.ask("font 24")?;
+    thread::sleep(SETTLE);
+    user.ask("call-focus")?;
+    user.type_text("big font")?;
+    user.edge_shots("edge-call-font-24", &["call"])?;
+    user.ask("font 14")?;
+    user.ask("call-clear")?;
+    user.hang_up()
 }
 
 fn short_body(body: &str) -> String {
@@ -1698,6 +1999,7 @@ fn on_shell(shell: &Entity<Shell>, verb: &str, window: &mut Window, cx: &mut App
             });
             "ok".to_owned()
         }
+        "reply-last" | "format-menu" => on_chat(shell, verb, window, cx),
         "close-thread" => {
             if let Some(channel) = shell.read(cx).channel().cloned() {
                 channel.update(cx, teams_ui::ChannelView::close_thread);
@@ -1735,6 +2037,21 @@ fn on_shell(shell: &Entity<Shell>, verb: &str, window: &mut Window, cx: &mut App
             }
         }
     }
+}
+
+/// The main window's chat: its last message quoted in a reply, or the format bar's colour menu opened or closed.
+fn on_chat(shell: &Entity<Shell>, verb: &str, window: &mut Window, cx: &mut App) -> String {
+    let Some(chat) = shell.read(cx).chat().cloned() else {
+        return "no chat".to_owned();
+    };
+    if verb == "reply-last" {
+        return reply_to_last(&chat, window, cx);
+    }
+    let bar = chat.read(cx).compose().read(cx).format_bar().clone();
+    bar.update(cx, |bar, cx| {
+        bar.toggle(teams_ui::editor::toolbar::Menu::FontColour, window, cx);
+    });
+    "ok".to_owned()
 }
 
 fn change_settings(shell: &Entity<Shell>, cx: &mut App, change: impl FnOnce(&mut teams_ui::settings::Settings)) {
@@ -1782,10 +2099,15 @@ fn state_of(shell: &Entity<Shell>, window: &Window, cx: &App) -> Value {
                     .map(|(_, thread)| box_state(thread.read(cx).compose(), window, cx)),
             )
         });
+    let new_chat = shell_ref
+        .new_chat()
+        .filter(|_| *shell_ref.main() == Main::NewChat)
+        .map(|view| box_state(&view.read(cx).compose(cx), window, cx));
     let calls = shell_ref.models().calls.read(cx);
     json!({
         "main": main,
         "chat": chat,
+        "new_chat": new_chat,
         "post": post,
         "thread": thread,
         "prejoin": calls.prejoin().is_some(),
@@ -1805,7 +2127,7 @@ fn box_state(compose: &Entity<Compose>, window: &Window, cx: &App) -> Value {
         "text": compose.value(cx).to_string(),
         "mode": mode,
         "focused": compose.focused(window, cx),
-        "stacked": compose.is_stacked(),
+        "stacked": compose.is_stacked(cx),
         "narrow": compose.is_narrow(),
         "more_open": compose.more_open(),
         "expanded": compose.is_expanded(),
@@ -1816,5 +2138,28 @@ fn box_state(compose: &Entity<Compose>, window: &Window, cx: &App) -> Value {
         "translation": format!("{:?}", compose.draft_translation_status()),
         "attachments": compose.attachments().len(),
         "problem": compose.problem().map(ToString::to_string),
+        "bounds": compose.box_bounds().map(|bounds| {
+            [bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height].map(f32::from)
+        }),
+        "edge": edge_line(compose, window, cx),
     })
+}
+
+/// The box as the tour's edge check reads it: where it is inside its border, the scale, the rem, its focus, the brand.
+fn edge_line(compose: &Compose, window: &Window, cx: &App) -> String {
+    let Some(bounds) = compose.box_bounds() else {
+        return format!("{}none", compose_edge::PREFIX);
+    };
+    format!(
+        "{}{} {} {} {} {} {} {} {:06x}",
+        compose_edge::PREFIX,
+        f32::from(bounds.origin.x),
+        f32::from(bounds.origin.y),
+        f32::from(bounds.size.width),
+        f32::from(bounds.size.height),
+        window.scale_factor(),
+        f32::from(window.rem_size()),
+        compose.focused(window, cx),
+        teams_ui::theme::current(cx).brand,
+    )
 }

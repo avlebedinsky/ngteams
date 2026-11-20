@@ -1,5 +1,5 @@
-//! The menu that picks the language drafts are translated into: the compose box's language button and the settings'
-//! row open the same menu, and both set the one setting every box reads
+//! The menu that picks the language drafts are translated into: the compose box's AI menu row "Translation language"
+//! and the settings' row open the same menu, and both set the one setting every box reads
 //! ([`crate::settings::Settings::message_translate_to`]).
 //!
 //! A search field on top, as the chat header's language menu has it, and the language chosen first; typing filters

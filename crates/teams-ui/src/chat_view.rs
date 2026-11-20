@@ -88,10 +88,11 @@
 //!   chat's messages, each post's replies summed up under it ([`Replies`]), its compose box "Message in <channel>"
 //!   posting to the channel; a post's "Reply in thread" (on the hover bar, in place of a chat's
 //!   quote) or its summary opens its thread beside it ([`ChatViewEvent::OpenThread`]), a view of its own
-//!   ([`Place::Thread`]: the post and its replies, its box "Reply in thread" posting to the post's chain). Reactions,
-//!   edits, deletes, copying and workflows work as in a chat; a channel sends no read receipt and no typing, and its
-//!   box takes no file (a channel's files go to its team's site). What a channel's messages are besides a chat's
-//!   (meeting cards, a channel meeting's call, the channel's own events) is [`channel`]'s.
+//!   ([`Place::Thread`]: the post and its replies, its box "Reply in thread" posting to the post's chain). A post
+//!   marked unread here gets Teams' "Last read" divider over it and "New" beside its header and each later post's.
+//!   Reactions, edits, deletes, copying and workflows work as in a chat; a channel sends no read receipt and no
+//!   typing, and its box takes no file (a channel's files go to its team's site). What a channel's messages are
+//!   besides a chat's (meeting cards, a channel meeting's call, the channel's own events) is [`channel`]'s.
 //!
 //! What the view shows is traced (`chat-view shown`: the conversation, its newest message ids and their kinds;
 //! `chat-view revealed`: the message opened at; `quoted shown`: the message a quote went to; `typing shown`/`cleared`;
@@ -152,13 +153,16 @@ use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::{presence, presence_badge};
 
+mod app_actions;
 mod bot_chat;
 mod bots;
 pub mod channel;
 mod email;
 mod events;
+mod menu_keys;
 pub mod reactors;
 mod saved;
+mod translate;
 
 use channel::{ChannelLooks, THREAD_EVENT};
 pub use channel::{MeetingCall, MeetingCard, Place, Replies};
@@ -182,7 +186,10 @@ actions!(
         PickThird,
         PickFourth,
         PickMore,
-        CopySelected
+        CopySelected,
+        TranslateSelected,
+        OpenSelectedMenu,
+        MarkUnreadSelected
     ]
 );
 
@@ -213,6 +220,18 @@ const AVATAR: f32 = 32.0;
 type FacesPlaced = Rc<std::cell::RefCell<HashMap<String, Bounds<Pixels>>>>;
 #[cfg(not(feature = "test-support"))]
 type FacesPlaced = ();
+
+/// Where the last frame drew what others place things by.
+#[derive(Default)]
+struct Placed {
+    /// Each sender's face, by message, in a test build only: the UI tour opens a profile card beside one
+    /// ([`ChatView::face_bounds`]). The card itself is placed by its anchor's own bounds.
+    #[cfg_attr(not(feature = "test-support"), expect(dead_code, reason = "a test build's hook"))]
+    faces: FacesPlaced,
+    /// The messages, between the header and the compose box: the window's meeting cards go there
+    /// ([`ChatView::messages_area`]).
+    messages: Rc<Cell<Option<Bounds<Pixels>>>>,
+}
 /// Between the avatar's column and the bubble, px.
 const AVATAR_GAP: f32 = 12.0;
 /// A bubble's text inset, px: the reactions start there too.
@@ -221,6 +240,10 @@ const BUBBLE_INSET: f32 = 16.0;
 const MARK_COLUMN: f32 = 28.0;
 /// A message's header's height, rem: the avatar beside it starts below it, level with the bubble.
 const HEADER_REMS: f32 = 1.5;
+/// The line over a follow-up message's bubble that holds its translation mark, px (Teams' is 20).
+const MARK_LINE: f32 = 20.0;
+/// How far the hover bar keeps from the bubble's edge while that line shows, px: past the mark.
+const MARK_CLEARANCE: f32 = 28.0;
 /// Messages read from the store at a time; older ones load when fewer rows than this are above the view.
 pub const PAGE: usize = 50;
 /// A sender's messages within this long of the one before are grouped under one name and time, ms.
@@ -248,6 +271,10 @@ pub const OPEN_ON_THE_WEB: &str = "Open in Teams on the web";
 pub const VIEW_RECAP: &str = "View recap";
 /// The divider at the read horizon.
 pub const NEW_MESSAGES: &str = "New messages";
+/// The divider over a channel's post marked unread, as Teams words it.
+pub const LAST_READ: &str = "Last read";
+/// Beside the header of a channel's post after that divider, as Teams marks it.
+pub const NEW_POST: &str = "New";
 /// Older loads in a row that may bring nothing before rows near the top stop asking for more by themselves.
 pub const MAX_FRUITLESS: u32 = 3;
 /// How many older pages the view reads at most for a message it opens at that the store didn't hold
@@ -285,6 +312,7 @@ pub fn init(cx: &mut App) {
         return;
     }
     cx.set_global(Bound);
+    menu_keys::bind(cx);
     let context = Some(CONTEXT);
     cx.bind_keys([
         KeyBinding::new("up", SelectPrevious, context),
@@ -301,6 +329,11 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("4", PickFourth, context),
         KeyBinding::new("5", PickMore, context),
         KeyBinding::new("secondary-c", CopySelected, context),
+        KeyBinding::new("t", TranslateSelected, context),
+        KeyBinding::new("u", MarkUnreadSelected, context),
+        // Teams' context menu keys; macOS takes the same Shift+F10
+        KeyBinding::new("shift-f10", OpenSelectedMenu, context),
+        KeyBinding::new("menu", OpenSelectedMenu, context),
         KeyBinding::new("right", reactors::NextReaction, context),
         KeyBinding::new("left", reactors::PreviousReaction, context),
         KeyBinding::new("space", reactors::PressReaction, context),
@@ -309,7 +342,8 @@ pub fn init(cx: &mut App) {
     let input = Some(crate::card_view::INPUT_CONTEXT);
     cx.bind_keys(
         [
-            "up", "down", "r", "a", "e", "delete", "escape", "enter", "1", "2", "3", "4", "5", "right", "left", "space",
+            "up", "down", "r", "a", "e", "t", "delete", "escape", "enter", "1", "2", "3", "4", "5", "right", "left",
+            "space",
         ]
         .map(|key| KeyBinding::new(key, gpui::NoAction, input)),
     );
@@ -328,6 +362,8 @@ pub enum MessageAction {
     Delete,
     /// Its text to the clipboard.
     Copy,
+    /// Teams' "Mark as unread": the chat unread from this message on, until it is opened again.
+    MarkUnread,
 }
 
 impl MessageAction {
@@ -340,6 +376,7 @@ impl MessageAction {
             Self::Edit => "Edit",
             Self::Delete => "Delete",
             Self::Copy => "Copy text",
+            Self::MarkUnread => "Mark as unread",
         }
     }
 
@@ -354,6 +391,7 @@ impl MessageAction {
             Self::Edit => Glyph::PENCIL,
             Self::Delete => Glyph::TRASH,
             Self::Copy => Glyph::COPY,
+            Self::MarkUnread => Glyph::GLASSES_OFF,
         }
     }
 
@@ -365,6 +403,7 @@ impl MessageAction {
             Self::Edit => &EditSelected,
             Self::Delete => &DeleteSelected,
             Self::Copy => &CopySelected,
+            Self::MarkUnread => &MarkUnreadSelected,
         }
     }
 
@@ -378,8 +417,17 @@ impl MessageAction {
             Self::Edit => "edit",
             Self::Delete => "delete",
             Self::Copy => "copy",
+            Self::MarkUnread => "mark-unread",
         }
     }
+}
+
+/// A list a message's more-options menu shows beside it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SideList {
+    MoreActions,
+    /// Its "Translation" list ([`translate`]).
+    Translation,
 }
 
 /// What a meeting chat's recap card asks the Recap tab to show.
@@ -409,6 +457,15 @@ pub enum ChatViewEvent {
     },
     /// "More actions" → "Create workflows" on a message: the Workflows dialog for it.
     CreateWorkflows(crate::workflow_run::MessageRef),
+    /// An app's dialog opens over the window ([`crate::app_dialog`]): an action command from the compose box's Actions
+    /// and apps or a message's "More actions", or a card's `task/fetch` button.
+    AppDialog(Box<crate::app_dialog::DialogSeed>),
+    /// Actions and apps' "Get more apps": the store opens.
+    ShowStore,
+    /// An app the account hasn't added was chosen in a message's "More actions": its details open, to add it.
+    AppDetails(Box<teams_proto::StoreApp>),
+    /// A message's "Translation" → "Settings": the settings' page that holds the "Translate to" language.
+    TranslationSettings,
     /// A recap card's View recap, Transcript or thumbnail: the chat's Recap tab, at the card's recording (its sharing
     /// link) when the meeting was recorded, showing `open`. A call transcribed alone names its transcript's item's
     /// sharing link as `recording`, and `transcribed` is the part it stands for, shown when the recap's read lists none
@@ -421,6 +478,9 @@ pub enum ChatViewEvent {
     /// A call's end row's Transcript chip: the chat's call captions saved on this computer by that id
     /// ([`crate::call_transcript`]), shown in the chat's Recap tab.
     OpenSavedTranscript(i64),
+    /// A file card's Share, or its "More options > Share": "Share this file" for that file (`crate::share_file`, the
+    /// shell's to open, as it knows the account's chats and channels).
+    ShareFile(Box<SharedFile>),
     /// A channel post's "Reply in thread" or its replies' summary: its thread, opened beside the channel.
     OpenThread { post: String },
     /// A channel meeting card's Edit: the meeting's details, read from the team's calendar by its id (`ical_uid`),
@@ -619,8 +679,11 @@ pub struct MessageItem {
     pub thread: Threaded,
     /// A channel post's replies, summed up under it ([`Place::Channel`]); none without any.
     pub replies: Option<Box<Replies>>,
-    /// How its translation is marked beside its time, while the chat is translated ([`crate::chat_translate`]).
+    /// How its translation is marked beside its time, while it is read in a language ([`crate::chat_translate`]).
     pub translation: Option<chat_translate::Mark>,
+    /// What its "More options" menu offers for its translation: "Translate", "See original message" or "See
+    /// translation".
+    pub translate: Option<chat_translate::Offer>,
 }
 
 /// Where a message stands in a channel's threads.
@@ -776,7 +839,7 @@ impl MessageItem {
         if matches!(self.body, Body::Cards(_) | Body::Meeting(_)) {
             return reply
                 .into_iter()
-                .chain([MessageAction::React, MessageAction::Copy])
+                .chain([MessageAction::React, MessageAction::Copy, MessageAction::MarkUnread])
                 .collect();
         }
         let mut actions = vec![
@@ -785,12 +848,12 @@ impl MessageItem {
             MessageAction::Copy,
         ];
         if self.own {
-            // a forward is the original's content: Teams offers no edit of it, and a write of one was never captured
-            if !self.is_forward() {
+            if self.is_editable() {
                 actions.push(MessageAction::Edit);
             }
             actions.push(MessageAction::Delete);
         }
+        actions.push(MessageAction::MarkUnread);
         actions
     }
 
@@ -799,7 +862,7 @@ impl MessageItem {
     fn thread_actions(&self) -> Vec<MessageAction> {
         let mut actions = vec![MessageAction::React, MessageAction::Copy];
         if self.own && matches!(self.body, Body::Text(_)) {
-            if !self.is_forward() {
+            if self.is_editable() {
                 actions.push(MessageAction::Edit);
             }
             actions.push(MessageAction::Delete);
@@ -812,6 +875,20 @@ impl MessageItem {
     #[must_use]
     pub fn offers_workflows(&self) -> bool {
         self.writes == ChatWrites::Taken && matches!(self.body, Body::Text(_))
+    }
+
+    /// Whether an edit of it is offered: not of a forward (the original's content: Teams offers no edit of it, and a
+    /// write of one was never captured), nor of a sticker alone (the sticker is all it says, and no text to edit).
+    fn is_editable(&self) -> bool {
+        !self.is_forward() && self.sticker_alone().is_none()
+    }
+
+    /// Its sticker, when it shows nothing else ([`rich_text::Rendered::sticker_alone`]).
+    fn sticker_alone(&self) -> Option<&rich_text::PictureBlock> {
+        match &self.body {
+            Body::Text(text) => text.0.sticker_alone(),
+            _ => None,
+        }
     }
 
     /// Whether its text holds a forwarded message's content (`rich_text::Block::Forward`).
@@ -874,9 +951,22 @@ pub fn arrange<Tz: TimeZone>(
     horizon: Option<i64>,
     tz: &Tz,
 ) -> Vec<Item> {
+    arrange_marked(conversation, messages, history, (horizon, None), tz)
+}
+
+/// [`arrange`], with the read horizon and where the chat was marked unread ("Mark as unread"): with a mark, the
+/// divider stands before the first message after it that the store counts, the account's own too, as Teams draws it.
+#[must_use]
+pub fn arrange_marked<Tz: TimeZone>(
+    conversation: &str,
+    messages: Vec<MessageItem>,
+    history: History,
+    (horizon, mark): (Option<i64>, Option<i64>),
+    tz: &Tz,
+) -> Vec<Item> {
     let mut items = vec![Item::Top(history)];
     let mut day = None;
-    let mut placed = horizon.is_none();
+    let mut placed = horizon.is_none() && mark.is_none();
     let mut before: Option<MessageItem> = None;
     for mut item in messages {
         let today = day_of(item.arrival_time, tz);
@@ -887,10 +977,11 @@ pub fn arrange<Tz: TimeZone>(
         }
         // what the store counts unread: someone else's message, not deleted, after the horizon; without a horizon the
         // store counts every one, but nothing marks where reading stopped: no divider
-        let unread = !item.own
-            && counts_unread(conversation, &item.message_type)
-            && item.body != Body::Deleted
-            && horizon.is_some_and(|at| item.arrival_time > at);
+        let counts = counts_unread(conversation, &item.message_type) && item.body != Body::Deleted;
+        let unread = match mark {
+            Some(at) => counts && item.arrival_time > at,
+            None => !item.own && counts && horizon.is_some_and(|at| item.arrival_time > at),
+        };
         let divider = !placed && unread;
         if divider {
             placed = true;
@@ -1033,8 +1124,9 @@ pub struct ChatView {
     /// Where the store's next older page starts; `None` once the store has no older message.
     next: Option<PageCursor>,
     history: History,
-    /// The account's read horizon when the chat opened.
-    horizon: Option<i64>,
+    /// The account's read horizon when the chat opened, where the chat was marked unread ("Mark as unread"), and what
+    /// the view does about the mark.
+    marked: Marked,
     /// People as the engine has them, by MRI: the ask whose answer the entry takes, and that answer (`None`: asked,
     /// no answer yet or none).
     people: HashMap<String, (u64, Option<Shown>)>,
@@ -1078,10 +1170,7 @@ pub struct ChatView {
     /// The message whose hover bar is under the pointer: the bar floats over the message above its own, outside its
     /// row, so it keeps itself shown.
     bar_hovered: Option<String>,
-    /// Where each sender's face was drawn in the last frame, by message, in a test build only: the UI tour opens a
-    /// profile card beside one ([`ChatView::face_bounds`]). The card itself is placed by its anchor's own bounds.
-    #[cfg_attr(not(feature = "test-support"), expect(dead_code, reason = "a test build's hook"))]
-    faces_placed: FacesPlaced,
+    placed: Placed,
     selected: Option<String>,
     focus: FocusHandle,
     traced: Option<Vec<Traced>>,
@@ -1107,10 +1196,10 @@ pub struct ChatView {
     options: Option<String>,
     /// Where the open more-options menu's button was last drawn, in the window: the menu opens under it.
     options_at: Rc<Cell<Option<Bounds<Pixels>>>>,
-    /// The message whose more-options menu shows its "More actions" list.
-    more_actions: Option<String>,
-    /// Where that list was last drawn: a click in it is not a click outside the menu.
-    more_at: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The list the open more-options menu shows beside it ("More actions" or "Translation"), and its message.
+    side_list: Option<(SideList, String)>,
+    /// The more-options menu's keyboard, and where its list was last drawn ([`menu_keys`]).
+    menu_keys: menu_keys::MenuKeys,
     /// The account's workflows that run from a message, read each time a message's menu opens.
     workflows: Option<Entity<crate::workflow_run::menu::MessageWorkflows>>,
     /// The message whose delete waits for its confirmation.
@@ -1249,7 +1338,7 @@ impl ChatView {
             reactions: HashMap::new(),
             next: None,
             history: History::More,
-            horizon: None,
+            marked: Marked::default(),
             people: HashMap::new(),
             bot_faces: bot_chat::BotFaces::default(),
             asks: 0,
@@ -1273,7 +1362,7 @@ impl ChatView {
             drawn: Vec::new(),
             hovered: None,
             bar_hovered: None,
-            faces_placed: FacesPlaced::default(),
+            placed: Placed::default(),
             selected: None,
             focus: cx.focus_handle(),
             traced: None,
@@ -1290,8 +1379,8 @@ impl ChatView {
             text_selection: TextSelection::default(),
             options: None,
             options_at: Rc::default(),
-            more_actions: None,
-            more_at: Rc::default(),
+            side_list: None,
+            menu_keys: menu_keys::MenuKeys::new(cx),
             workflows: None,
             deleting: None,
             resending: None,
@@ -1451,6 +1540,8 @@ impl ChatView {
         });
         let compose_events = cx.subscribe_in(compose, window, |this: &mut Self, _, event, window, cx| match event {
             ComposeEvent::EditLast => this.edit_last(window, cx),
+            ComposeEvent::AppDialog(seed) => cx.emit(ChatViewEvent::AppDialog(seed.clone())),
+            ComposeEvent::ShowStore => cx.emit(ChatViewEvent::ShowStore),
             ComposeEvent::Sent | ComposeEvent::Start(_) => {}
         });
         let activation = cx.observe_window_activation(window, |this: &mut Self, window, cx| {
@@ -1526,6 +1617,15 @@ impl ChatView {
         }
         self.shown = if shown { Visibility::Shown } else { Visibility::Hidden };
         if shown {
+            // shown again: the chat is opened again, so a mark made here or on the chat list ends
+            if self.marked.standing == Standing::MadeHere && self.marked.writing > 0 {
+                // the store has no mark to read yet (a catch-up holds its write): the end goes after it
+                self.marked.standing = Standing::ToEnd;
+                self.end_mark(cx);
+            } else {
+                self.marked.standing = Standing::Nothing;
+                self.reread_mark(cx);
+            }
             self.want_receipt(cx);
         } else {
             self.receipt = None;
@@ -1620,6 +1720,18 @@ impl ChatView {
         })
     }
 
+    /// What a file card's Share calls: "Share this file" for its file, through the shell; none in the read-only app,
+    /// which shares nothing.
+    fn file_sharer(&self, cx: &Context<Self>) -> Option<files::ShareFile> {
+        if self.core.read_only() {
+            return None;
+        }
+        let view = cx.entity().downgrade();
+        Some(files::ShareFile::new(move |file, _, cx| {
+            let _ = view.update(cx, |_, cx| cx.emit(ChatViewEvent::ShareFile(Box::new(file.clone()))));
+        }))
+    }
+
     /// What a click on a reply's quote calls: the view going to the quoted message ([`Self::go_to_quoted`]).
     fn quote_opener(cx: &Context<Self>) -> rich_text::OpenQuoted {
         let view = cx.entity().downgrade();
@@ -1695,6 +1807,15 @@ impl ChatView {
             Item::Message(message) => Some(&**message),
             _ => None,
         })
+    }
+
+    /// The posts Teams' "New" stands beside: a channel's posts after the "Last read" divider, the oldest first.
+    #[must_use]
+    pub fn new_posts(&self) -> Vec<String> {
+        self.message_items()
+            .filter(|item| self.new_post(item))
+            .map(|item| item.id.clone())
+            .collect()
     }
 
     /// How many messages the view holds.
@@ -2047,6 +2168,7 @@ impl ChatView {
                 self.focus.focus(window, cx);
             }
             MessageAction::Copy => self.copy_text(message, cx),
+            MessageAction::MarkUnread => self.mark_unread(message, cx),
         }
         cx.notify();
     }
@@ -2074,12 +2196,10 @@ impl ChatView {
     fn edit(&mut self, message: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(held) = self.held_message(message) else { return };
         let mentioned = rich_text::mentioned(held.properties.as_deref());
-        // in a translated chat the edit starts from the text shown (what the account wrote), and goes out translated
-        let text = self
-            .translated
-            .0
-            .text_of(held)
-            .map_or_else(|| compose::rich_text_of(held), |shown| shown.as_ref().clone());
+        // in a translated chat the edit starts from the text shown (what the account wrote), and goes out translated;
+        // else from the text as sent, also when the message shows translated alone (the edit goes out as written)
+        let shown = self.translated.0.language.and_then(|_| self.translated.0.text_of(held));
+        let text = shown.map_or_else(|| compose::rich_text_of(held), |shown| shown.as_ref().clone());
         let loaded = compose::load(&text, &mentioned);
         // the apps of the message's bots, only while the bots are shown (`NGTEAMS_BOTS=1`): with the bots hidden, the
         // box refuses to send a bot's mention, as for a pasted one
@@ -2154,13 +2274,18 @@ impl ChatView {
         }
     }
 
-    /// Puts `message`'s text on the clipboard, as the reader sees it (a quote it carries left out).
+    /// Puts `message`'s text on the clipboard, as the reader sees it (a quote it carries left out); of a sticker alone,
+    /// its label, the words the chat list and search show for it.
     fn copy_text(&self, message: &str, cx: &mut Context<Self>) {
         let text = self
             .message_items()
             .find(|item| item.id == message)
             .and_then(|item| match &item.body {
-                Body::Text(text) => Some(plain_text(&text.0)),
+                Body::Text(text) => Some(
+                    text.0
+                        .sticker_alone()
+                        .map_or_else(|| plain_text(&text.0), sticker_label),
+                ),
                 Body::Cards(cards) => Some(
                     teams_proto::chat::card::plain_words(&cards.0)
                         .iter()
@@ -2206,9 +2331,12 @@ impl ChatView {
         } else {
             Some(message.to_owned())
         };
-        self.more_actions = None;
+        self.side_list = None;
         if self.options.is_some() && !self.core.read_only() && self.core.capabilities().workflows {
             self.read_workflows(cx);
+        }
+        if self.options.is_some() {
+            self.read_app_actions(cx);
         }
         cx.notify();
     }
@@ -2242,7 +2370,7 @@ impl ChatView {
     /// Runs `flow` on `message`, as a workflow chosen in its menu.
     pub fn run_workflow(&mut self, flow: crate::workflow_dialog::FlowRef, message: &str, cx: &mut Context<Self>) {
         self.options = None;
-        self.more_actions = None;
+        self.side_list = None;
         let message = self.message_ref(message);
         cx.emit(ChatViewEvent::RunWorkflow { flow, message });
         cx.notify();
@@ -2251,7 +2379,7 @@ impl ChatView {
     /// "Create workflows" on `message`.
     pub fn create_workflows(&mut self, message: &str, cx: &mut Context<Self>) {
         self.options = None;
-        self.more_actions = None;
+        self.side_list = None;
         let message = self.message_ref(message);
         cx.emit(ChatViewEvent::CreateWorkflows(message));
         cx.notify();
@@ -2260,7 +2388,7 @@ impl ChatView {
     /// Shows the open menu's "More actions" list, as its row does.
     pub fn open_more_actions(&mut self, cx: &mut Context<Self>) {
         if self.options.is_some() {
-            self.more_actions.clone_from(&self.options);
+            self.side_list = self.options.clone().map(|message| (SideList::MoreActions, message));
             cx.notify();
         }
     }
@@ -2520,6 +2648,10 @@ impl ChatView {
             self.reveal_at(target, pages, cx);
         }
         self.kick(cx);
+        self.end_mark(cx);
+        if load == Load::Window {
+            self.reread_made_mark(cx);
+        }
         self.want_receipt(cx);
     }
 
@@ -2531,10 +2663,24 @@ impl ChatView {
             .update(cx, |translation, cx| translation.follow(&held, &name_of, cx));
     }
 
+    /// The first load's read horizon and mark: where the divider stands, and whether the mark is to end.
+    fn take_horizon(&mut self, horizon: Option<i64>, mark: Option<i64>) {
+        // a channel's post or a thread marks no "New messages": no read receipt moves its horizon here
+        self.marked.horizon = horizon.filter(|_| !self.place.in_channel());
+        if self.marked.standing != Standing::MadeHere {
+            self.marked.at = mark.filter(|_| !self.place.in_channel());
+            // the channel's posts end its mark, not a thread opened beside them
+            self.marked.standing = if mark.is_some() && !matches!(self.place, Place::Thread { .. }) {
+                Standing::ToEnd
+            } else {
+                Standing::Nothing
+            };
+        }
+    }
+
     fn take(&mut self, load: Load, read: Read) {
-        if let Horizon::Read(horizon) = read.horizon {
-            // a channel's post or a thread marks no "New messages": no read receipt moves its horizon here
-            self.horizon = horizon.filter(|_| !self.place.in_channel());
+        if let Horizon::Read(horizon, mark) = read.horizon {
+            self.take_horizon(horizon, mark);
         }
         if let Some(roots) = read.roots {
             self.roots = roots;
@@ -2624,7 +2770,8 @@ impl ChatView {
     /// members (the account too in a meeting chat, whose events name it by its name, and as a recording's owner),
     /// forwarded messages' original senders (the account too: a forward names it, never "You"), everyone who gave a
     /// reaction on a message held (the account too: the who-reacted card names it, never "You"; asked when the chat
-    /// loads, so the names are there once a card opens) and who is typing.
+    /// loads, so the names are there once a card opens), the owners of files kept on an own server (the account too)
+    /// and who is typing.
     fn want_names(&mut self, cx: &mut Context<Self>) {
         let mut wanted: Vec<String> = Vec::new();
         let mut originals: Vec<String> = Vec::new();
@@ -2649,6 +2796,16 @@ impl ChatView {
                     forwarded::forwarded_from(message.properties.as_deref()).and_then(|from| from.sender)
             {
                 originals.push(sender);
+            }
+            // a file shared on from another chat names a site owner who may never post here
+            if is_text_type(&message.message_type)
+                && message.delete_time.is_none()
+                && message
+                    .properties
+                    .as_deref()
+                    .is_some_and(|text| text.contains("personal"))
+            {
+                originals.extend(files_of(message).iter().filter_map(SharedFile::site_owner));
             }
         }
         // an email post's "Reply in thread" shows the account's own face
@@ -3083,6 +3240,9 @@ impl ChatView {
         let translation = matches!(body, Body::Text(_))
             .then(|| self.translated.0.mark_of(message))
             .flatten();
+        let translate = matches!(body, Body::Text(_))
+            .then(|| self.translated.0.offer_of(message))
+            .flatten();
         let own = message.sender.as_deref() == Some(me.as_str());
         let policy = matches!(body, Body::Text(_))
             .then(|| policy_notice::of(message.properties.as_deref(), own))
@@ -3109,13 +3269,7 @@ impl ChatView {
             email,
             app_cards,
             unshown,
-            writes: if self.core.read_only() {
-                ChatWrites::AppReadOnly
-            } else if self.conversation == NOTES {
-                ChatWrites::ReadOnly
-            } else {
-                ChatWrites::Taken
-            },
+            writes: self.writes(),
             forwarded,
             thread: match self.place {
                 Place::Chat => Threaded::No,
@@ -3124,7 +3278,19 @@ impl ChatView {
             },
             replies: None,
             translation,
+            translate,
         })
+    }
+
+    /// Which writes the chat's messages take.
+    fn writes(&self) -> ChatWrites {
+        if self.core.read_only() {
+            ChatWrites::AppReadOnly
+        } else if self.conversation == NOTES {
+            ChatWrites::ReadOnly
+        } else {
+            ChatWrites::Taken
+        }
     }
 
     /// A channel post's subject and the email it came from ([`email`]); none in a chat, or for what isn't a text.
@@ -3336,7 +3502,21 @@ impl ChatView {
             events::drop_bare_starts(&mut rows, &messages);
         }
         self.messages = messages;
-        let mut items = arrange(&self.conversation, rows, self.history, self.horizon, &Local);
+        let mut items = arrange_marked(
+            &self.conversation,
+            rows,
+            self.history,
+            (self.marked.horizon, self.marked.at),
+            &Local,
+        );
+        // each of a channel's posts after "Last read" has its header, which holds Teams' "New"
+        for item in &mut items {
+            if let Item::Message(message) = item
+                && self.new_post(message)
+            {
+                message.header = true;
+            }
+        }
         items.extend(self.pending(&known, now_ms).into_iter().map(Item::Pending));
         let anchor = Anchor::of(&self.list, &self.items);
         splice(&self.list, &self.items, &items);
@@ -3435,6 +3615,7 @@ impl ChatView {
             // a channel's horizon isn't moved from here: no capture showed a channel's receipt
             && !self.place.in_channel()
             && !self.core.read_only()
+            && self.marked.standing != Standing::MadeHere
             && self.settings.read(cx).sends_read_receipts();
         if !wanted {
             return None;
@@ -3476,6 +3657,109 @@ impl ChatView {
             message_id,
         }));
         self.want_receipt(cx);
+    }
+
+    /// Whether `item` is a channel's post after the "Last read" divider of a mark, which Teams marks "New".
+    fn new_post(&self, item: &MessageItem) -> bool {
+        self.place == Place::Channel
+            && self.marked.at.is_some_and(|at| item.arrival_time > at)
+            && counts_unread(&self.conversation, &item.message_type)
+            && item.body != Body::Deleted
+    }
+
+    /// "Mark as unread" on `message`: the chat is unread from it on, the divider moves before it, and no read receipt
+    /// goes while the view stays shown. A channel's post is marked by its thread's newest message, as Teams marks it.
+    fn mark_unread(&mut self, message: &str, cx: &mut Context<Self>) {
+        let Some(arrival) = self.held_message(message).map(|held| held.arrival_time) else {
+            return;
+        };
+        let named = if self.place.in_channel() {
+            self.messages
+                .iter()
+                .filter(|held| self.root_of(&held.id) == message)
+                .max_by_key(|held| (held.arrival_time, held.id.clone()))
+                .map_or_else(|| message.to_owned(), |newest| newest.id.clone())
+        } else {
+            message.to_owned()
+        };
+        self.receipt = None;
+        // a channel's post gets "Last read" over it and "New" beside its header, as Teams marks it at once
+        self.marked.at = (!matches!(self.place, Place::Thread { .. })).then_some(arrival - 1);
+        self.marked.standing = Standing::MadeHere;
+        self.marked.made += 1;
+        self.marked.writing += 1;
+        // the row comes back as the engine's events; once the write is answered, the store holds the mark
+        let written = self.core.write(Action::MarkUnread {
+            conversation: self.conversation.clone(),
+            message_id: Some(named),
+        });
+        cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let _ = written.await;
+            let _ = this.update(cx, |view, cx| {
+                view.marked.writing = view.marked.writing.saturating_sub(1);
+                view.reread_made_mark(cx);
+            });
+        })
+        .detach();
+        self.rebuild(cx);
+    }
+
+    /// Reads the mark made here again, once the store holds it: a mark that ended elsewhere (the chat list's "Mark as
+    /// read", another client) lets the chat be read here again.
+    fn reread_made_mark(&mut self, cx: &mut Context<Self>) {
+        if self.marked.standing != Standing::MadeHere || self.marked.writing > 0 {
+            return;
+        }
+        let made = self.marked.made;
+        let reply = self.core.unread_mark(self.conversation.clone());
+        cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let Ok(None) = reply.await else { return };
+            let _ = this.update(cx, |view, cx| {
+                if view.marked.standing != Standing::MadeHere || view.marked.writing > 0 || view.marked.made != made {
+                    return;
+                }
+                view.marked.standing = Standing::Nothing;
+                view.marked.at = None;
+                view.rebuild(cx);
+                view.want_receipt(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Reads the chat's mark again (the view is shown again): one there is ends, its divider shown where it was.
+    fn reread_mark(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.place, Place::Thread { .. }) {
+            return;
+        }
+        let reply = self.core.unread_mark(self.conversation.clone());
+        cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let Ok(Some(mark)) = reply.await else { return };
+            let _ = this.update(cx, |view, cx| {
+                if view.marked.standing == Standing::MadeHere {
+                    return;
+                }
+                if !view.place.in_channel() {
+                    view.marked.at = Some(mark);
+                    view.rebuild(cx);
+                }
+                view.marked.standing = Standing::ToEnd;
+                view.end_mark(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Ends the mark the chat had when it opened, once the view is shown, as Teams does on opening a marked chat.
+    fn end_mark(&mut self, cx: &mut Context<Self>) {
+        if self.marked.standing != Standing::ToEnd || !self.is_shown() || self.core.read_only() {
+            return;
+        }
+        self.marked.standing = Standing::Nothing;
+        drop(self.core.write(Action::EndUnreadMark {
+            conversation: self.conversation.clone(),
+        }));
+        cx.notify();
     }
 
     /// Traces the rows shown, when they changed: the newest [`TRACED`] messages with their kinds, and which of them
@@ -3557,7 +3841,7 @@ impl ChatView {
         match self.items.get(index) {
             Some(Item::Top(history)) => top_row(*history, &self.place, palette, cx),
             Some(Item::Day(day)) => day_row(*day, palette),
-            Some(Item::NewMessages) => new_messages_row(palette),
+            Some(Item::NewMessages) => new_messages_row(&self.place, palette),
             Some(Item::Message(item)) => {
                 let item = item.clone();
                 let row = self.message_row(&item, palette, cx);
@@ -3674,8 +3958,7 @@ impl ChatView {
             crate::bot_face::tile(self.bot_faces.apps.get(bot), AVATAR, palette).into_any_element()
         } else {
             item.face
-                .avatar(&item.sender_name, Size::Medium)
-                .size(px(AVATAR))
+                .avatar(&item.sender_name, Size::Size(px(AVATAR)))
                 .into_any_element()
         };
         let id = item.id.clone();
@@ -3683,8 +3966,7 @@ impl ChatView {
             .debug_selector(move || format!("avatar-{id}"))
             .relative()
             .size(px(AVATAR))
-            // the kit's own sizes: 48 px with small initials, drawn at Teams' 32 (an exact `Size::Size` gives
-            // the initials half its width, too narrow for two)
+            // the wrapper keeps the face's 32 px side, so the presence badge sits on the face's corner
             .child(face)
             .children(badge);
         // a click on the face opens their full card, a rest on it the compact one, as Teams' does
@@ -3703,10 +3985,17 @@ impl ChatView {
         column.pt(rems(HEADER_REMS)).child(avatar)
     }
 
+    /// Where the messages are drawn, set each frame the view is drawn: the shell takes it to place its cards over the
+    /// messages, clear of the header and the compose box.
+    #[must_use]
+    pub fn messages_area(&self) -> Rc<Cell<Option<Bounds<Pixels>>>> {
+        Rc::clone(&self.placed.messages)
+    }
+
     /// `avatar`, its bounds recorded for [`Self::face_bounds`].
     #[cfg(feature = "test-support")]
     fn face_placed(&self, item: &MessageItem, avatar: AnyElement) -> AnyElement {
-        let (placed, at) = (Rc::clone(&self.faces_placed), item.id.clone());
+        let (placed, at) = (Rc::clone(&self.placed.faces), item.id.clone());
         div()
             .on_children_prepainted(move |children, _, _| {
                 if let Some(bounds) = children.first() {
@@ -3721,7 +4010,28 @@ impl ChatView {
     #[cfg(feature = "test-support")]
     #[must_use]
     pub fn face_bounds(&self, id: &str) -> Option<Bounds<Pixels>> {
-        self.faces_placed.borrow().get(id).copied()
+        self.placed.faces.borrow().get(id).copied()
+    }
+
+    /// A message's header ([`header_line`]), with Teams' "New" after it on a channel's new post.
+    fn header(
+        &self,
+        item: &MessageItem,
+        looks: (Palette, HourCycle),
+        mark: Option<AnyElement>,
+        cards: &Entity<profile_card::CardAsks>,
+    ) -> AnyElement {
+        let header = header_line(item, looks, mark, cards);
+        if !self.new_post(item) {
+            return header;
+        }
+        div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(header)
+            .child(new_post_mark(&item.id, looks.0))
+            .into_any_element()
     }
 
     /// A message's column: its header, its bubble (with the "mentions you" mark beside it and its hover bar over its
@@ -3742,27 +4052,38 @@ impl ChatView {
             column.items_start()
         };
         let cycle = clock::cycle(cx);
-        // Teams' translation mark stands beside the time, or under the bubble when there is no header to hold it
+        // Teams' translation mark stands beside the time, or on a line of its own over the bubble when there is no
+        // header to hold it
         let mut mark = translation_mark(item, palette, cx);
         let cards = &self.models.cards;
         // an email post's header, reactions and rows are in its card, as Teams draws them
         let (head, header) = match &item.email {
             Some(post) => (
-                item.header.then(|| email_head(item, post, cycle, mark.take(), palette)),
+                item.header
+                    .then(|| email_head(item, post, (cycle, self.new_post(item)), mark.take(), palette)),
                 None,
             ),
             None => (
                 None,
                 item.header
-                    .then(|| header_line(item, (palette, cycle), mark.take(), cards)),
+                    .then(|| self.header(item, (palette, cycle), mark.take(), cards)),
             ),
         };
         let (foot, footer) = match &item.email {
             Some(post) => (Some(self.email_foot(item, post, palette, cx)), None),
-            None => (None, footer_line(item, mark, &self.reactors, palette, cx)),
+            None => (None, footer_line(item, &self.reactors, palette, cx)),
         };
+        let mark_line = mark.filter(|_| follow_up_marked(item)).map(|mark| {
+            div()
+                .debug_selector(|| format!("translation-mark-line-{}", item.id))
+                .h(px(MARK_LINE))
+                .flex()
+                .items_center()
+                .child(mark)
+        });
         column
             .children(header)
+            .children(mark_line)
             .child(bubble_line(
                 item,
                 InChat {
@@ -3778,6 +4099,7 @@ impl ChatView {
                     bots: self.core.capabilities().apps,
                     head,
                     foot,
+                    share: self.file_sharer(cx),
                 },
                 highlighted,
                 palette,
@@ -3985,6 +4307,17 @@ pub fn quick_reactions(frequent: &[String]) -> Vec<String> {
     quick
 }
 
+/// A sticker's label: its words, else "Sticker", as a sticker with none is sent.
+fn sticker_label(sticker: &rich_text::PictureBlock) -> String {
+    sticker
+        .alt
+        .as_deref()
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .unwrap_or("Sticker")
+        .to_owned()
+}
+
 /// A message's text as the reader sees it, its paragraphs a line each (an emoticon as its emoji), a list's items each
 /// after its marker; a quote it carries (a reply's) and its pictures left out.
 fn plain_text(rendered: &Rendered) -> String {
@@ -4081,7 +4414,14 @@ impl ChatView {
             .min_w(relative(1.0))
             .flex()
             .justify_end();
-        let place = if item.own { place.right_0() } else { place.left_0() };
+        // a follow-up's translation mark stands on its own line over the bubble, on the bubble's side: the bar keeps
+        // clear of it
+        let inset = px(if follow_up_marked(item) { MARK_CLEARANCE } else { 0.0 });
+        let place = if item.own {
+            place.right(inset)
+        } else {
+            place.left(inset)
+        };
         Some(place.child(bar).into_any_element())
     }
 
@@ -4110,6 +4450,7 @@ impl ChatView {
     fn options_overlay(&mut self, palette: Palette, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let Some(message) = self.options.clone() else {
             self.options_at.set(None);
+            self.settle_menu_keys(false, window, cx);
             return None;
         };
         let at = self.options_at.get()?;
@@ -4119,6 +4460,13 @@ impl ChatView {
             .filter(|action| actions.contains(action))
             .map(|action| menu_entry(&message, action, palette, window, cx))
             .collect::<Vec<_>>();
+        // Teams' own group after a hairline: Mark as unread, then the translation
+        if actions.contains(&MessageAction::MarkUnread) {
+            entries.push(crate::workflow_run::menu::separator(palette));
+            entries.push(menu_entry(&message, MessageAction::MarkUnread, palette, window, cx));
+        }
+        entries.extend(self.translation_entry(&message, palette, cx));
+        let translation_menu = self.translation_menu(&message, palette, window, cx);
         entries.extend(self.refresh_entry(&message, palette, cx));
         // Teams' workflows run on any message of a chat that takes the account's writes
         let offers_workflows = self.core.capabilities().workflows
@@ -4131,13 +4479,22 @@ impl ChatView {
         } else {
             Vec::new()
         };
-        let more = offers_workflows.then(|| self.more_actions_list(&message, &workflows, palette, cx));
+        // apps' actions on a message that takes the account's writes, beside the workflows or alone
+        let offers_apps = !actions.is_empty() && !self.message_app_actions().is_empty();
+        let more = (offers_workflows || offers_apps)
+            .then(|| self.more_actions_list(&message, &workflows, offers_workflows, palette, cx));
         if offers_workflows {
             entries.extend(self.workflow_entries(&message, &workflows, palette, cx));
+        } else if offers_apps {
+            entries.push(crate::workflow_run::menu::separator(palette));
+            entries.push(self.more_actions_entry(&message, palette, cx));
         }
         let menu = div()
             .id("message-menu")
             .debug_selector(|| "message-menu".to_owned())
+            .track_focus(&self.menu_keys.menu)
+            // a click in the menu leaves the focus where it is (the compose box, as in Teams)
+            .capture_any_mouse_down(|_, window, _| window.prevent_default())
             // Teams' menu widens for the workflows' names
             .w(px(if workflows.is_empty() {
                 MENU_WIDTH
@@ -4155,15 +4512,10 @@ impl ChatView {
             .shadow_lg()
             .occlude()
             .on_mouse_down_out(cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                // a click on its own button toggles it there; one in "More actions"' list is the menu's own
-                let in_list = this.more_actions.is_some()
-                    && this.more_at.get().is_some_and(|list| list.contains(&event.position));
-                if !at.contains(&event.position) && !in_list {
-                    this.options = None;
-                    cx.notify();
-                }
+                this.click_out_of_menu(at, event, cx);
             }))
             .children(entries);
+        self.settle_menu_keys(true, window, cx);
         Some(
             deferred(
                 anchored()
@@ -4171,12 +4523,9 @@ impl ChatView {
                     .position(at.bottom_right())
                     .snap_to_window_with_margin(px(8.0))
                     .child(
-                        div()
-                            .pt_1()
-                            .flex()
-                            .items_end()
-                            .gap_1()
+                        Self::menu_keys_on(div().pt_1().flex().items_end().gap_1(), cx)
                             .children(more.flatten())
+                            .children(translation_menu)
                             .child(menu),
                     ),
             )
@@ -4187,6 +4536,21 @@ impl ChatView {
 }
 
 impl ChatView {
+    /// A click outside the more-options menu, whose button is at `button`, closes it; a click on its own button toggles
+    /// it there, and one in the list beside it is the menu's own.
+    fn click_out_of_menu(&mut self, button: Bounds<Pixels>, event: &gpui::MouseDownEvent, cx: &mut Context<Self>) {
+        let in_list = self.side_list.is_some()
+            && self
+                .menu_keys
+                .side_at
+                .get()
+                .is_some_and(|list| list.contains(&event.position));
+        if !button.contains(&event.position) && !in_list {
+            self.options = None;
+            cx.notify();
+        }
+    }
+
     /// The menu's workflows group (the first [`crate::workflow_run::menu::MAIN_MENU`] workflows that run from a
     /// message) and "More actions", after a hairline.
     fn workflow_entries(
@@ -4205,41 +4569,49 @@ impl ChatView {
                 let _ = view.update(cx, |this, cx| this.run_workflow(flow_ref.clone(), &message, cx));
             }));
         }
-        let view = cx.entity().downgrade();
         // one hairline between the groups when there are no workflows to list
         if !workflows.is_empty() {
             entries.push(menu::separator(palette));
         }
-        let open = self.more_actions.as_deref() == Some(message);
-        let shown = message.to_owned();
-        entries.push(menu::more_actions_row(open, palette, move |_, _, cx| {
-            let _ = view.update(cx, |this, cx| {
-                this.more_actions = if this.more_actions.is_some() {
-                    None
-                } else {
-                    Some(shown.clone())
-                };
-                cx.notify();
-            });
-        }));
+        entries.push(self.more_actions_entry(message, palette, cx));
         entries
     }
 
-    /// "More actions"' list beside the menu, while it is open: the other workflows, then "Create workflows".
+    /// "More actions", which opens and closes its list beside the menu.
+    fn more_actions_entry(&self, message: &str, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let view = cx.entity().downgrade();
+        let open = self.side_open(SideList::MoreActions, message);
+        let shown = message.to_owned();
+        let handle = self.menu_keys.opener(SideList::MoreActions);
+        crate::workflow_run::menu::more_actions_row(open, handle, palette, move |event, _, cx| {
+            let keyed = event.is_keyboard();
+            let _ = view.update(cx, |this, cx| {
+                this.toggle_side_list(SideList::MoreActions, &shown, cx);
+                if keyed {
+                    this.side_list_keyed();
+                }
+            });
+        })
+    }
+
+    /// "More actions"' list beside the menu, while it is open: the other workflows, the apps' actions, then "Create
+    /// workflows" (where the account's cloud serves `workflows`).
     fn more_actions_list(
         &self,
         message: &str,
         workflows: &[crate::workflow_dialog::FlowRef],
+        offers_workflows: bool,
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         use crate::workflow_run::menu;
-        if self.more_actions.as_deref() != Some(message) {
+        if !self.side_open(SideList::MoreActions, message) {
             return None;
         }
         let mut list = menu::panel("message-more-actions-menu", palette)
+            .track_focus(&self.menu_keys.side)
             .relative()
-            .child(measured(&self.more_at));
+            .child(measured(&self.menu_keys.side_at));
         let rest: Vec<_> = workflows.iter().skip(menu::MAIN_MENU).collect();
         for flow in &rest {
             let (flow_ref, message) = ((*flow).clone(), message.to_owned());
@@ -4248,7 +4620,13 @@ impl ChatView {
                 let _ = view.update(cx, |this, cx| this.run_workflow(flow_ref.clone(), &message, cx));
             }));
         }
-        if !rest.is_empty() {
+        let apps = self.app_action_rows(message, palette, cx);
+        let listed = !rest.is_empty() || !apps.is_empty();
+        list = list.children(apps);
+        if !offers_workflows {
+            return Some(list.into_any_element());
+        }
+        if listed {
             list = list.child(menu::separator(palette));
         }
         let (view, message) = (cx.entity().downgrade(), message.to_owned());
@@ -4387,7 +4765,7 @@ fn menu_entry(
         palette.foreground
     };
     let selector = format!("action-{}", action.name());
-    div()
+    let row = div()
         .id(ElementId::Name(selector.clone().into()))
         .debug_selector(move || selector.clone())
         .w_full()
@@ -4407,8 +4785,8 @@ fn menu_entry(
         }))
         .child(action.glyph().icon().size(px(14.0)))
         .child(div().flex_1().child(action.label()))
-        .children(key)
-        .into_any_element()
+        .children(key);
+    crate::keyboard::stop(format!("action-{}", action.name()), row, palette).into_any_element()
 }
 
 /// An outbox row's state under the message it concerns, with "send again" when it is offered.
@@ -4476,6 +4854,7 @@ fn pending_row(
             &format!("pending-{row}"),
             &pending.files,
             None,
+            None,
             palette,
         ))
         .child(note_line(&pending.note, palette, cx))
@@ -4488,16 +4867,58 @@ pub fn message_key(item: &MessageItem) -> MessageKey {
     MessageKey::new((item.arrival_time, 0), item.id.clone())
 }
 
+/// Teams' "New" beside the header of a channel's post after the "Last read" divider; its test selector
+/// `post-new-<id>`.
+fn new_post_mark(id: &str, palette: Palette) -> AnyElement {
+    let selector = format!("post-new-{id}");
+    div()
+        .debug_selector(move || selector.clone())
+        .px_2()
+        .rounded_full()
+        .bg(rgb(palette.brand))
+        .text_color(rgb(palette.on_brand))
+        .text_xs()
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .child(NEW_POST)
+        .into_any_element()
+}
+
 /// A pending post's place among the view's messages for the text selection: after every message, by its row.
 fn pending_key(pending: &PendingItem) -> MessageKey {
     MessageKey::new((i64::MAX, pending.note.row), format!("pending-{}", pending.note.row))
 }
 
+/// Where the "New messages" divider stands: before the first message after the mark ("Mark as unread": when the chat
+/// opened, or here since), else after the read horizon as the chat opened.
+#[derive(Default)]
+struct Marked {
+    horizon: Option<i64>,
+    at: Option<i64>,
+    standing: Standing,
+    /// How many marks the view made; an answer read before the newest one is stale.
+    made: u64,
+    /// The view's mark writes that the engine did not answer yet: until then the store may not hold the mark.
+    writing: u32,
+}
+
+/// What the view does about the chat's mark.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Standing {
+    #[default]
+    Nothing,
+    /// The chat had the mark when it opened, or when it was shown again: the mark ends once the view is shown.
+    ToEnd,
+    /// The chat was marked unread while this view shows it: no read receipt goes until it is shown again, as Teams
+    /// keeps the chat unread until it is opened again.
+    MadeHere,
+}
+
 /// Whether a load read the account's read horizon, and what it was.
 enum Horizon {
     NotRead,
-    /// The last read message's arrival time; `None` when the account has none in the chat.
-    Read(Option<i64>),
+    /// The last read message's arrival time (`None` when the account has none in the chat), and where the chat was
+    /// marked unread (`None` when it isn't).
+    Read(Option<i64>, Option<i64>),
 }
 
 /// What a load read.
@@ -4571,7 +4992,8 @@ async fn window(
     let mut outbox = outbox_read(core, conversation).await;
     outbox.stored = stored_posts(core, conversation, find).await;
     let horizon = if first {
-        Horizon::Read(outbox.read_upto)
+        let mark = core.unread_mark(conversation.to_owned()).await.ok().flatten();
+        Horizon::Read(outbox.read_upto, mark)
     } else {
         Horizon::NotRead
     };
@@ -4857,8 +5279,15 @@ fn day_row(day: NaiveDate, palette: Palette) -> AnyElement {
         .into_any_element()
 }
 
-fn new_messages_row(palette: Palette) -> AnyElement {
+/// The divider over the first unread message: "Last read" in a channel, "New messages" elsewhere. Its test selector
+/// is `new-messages`, its label's `new-messages-label <label>`.
+fn new_messages_row(place: &Place, palette: Palette) -> AnyElement {
     let rule = || div().flex_1().h(px(1.0)).bg(rgb(palette.brand));
+    let label = if *place == Place::Channel {
+        LAST_READ
+    } else {
+        NEW_MESSAGES
+    };
     div()
         .debug_selector(|| "new-messages".to_owned())
         .w_full()
@@ -4870,7 +5299,11 @@ fn new_messages_row(palette: Palette) -> AnyElement {
         .text_xs()
         .text_color(rgb(palette.brand))
         .child(rule())
-        .child(NEW_MESSAGES)
+        .child(
+            div()
+                .debug_selector(move || format!("new-messages-label {label}"))
+                .child(label),
+        )
         .child(rule())
         .into_any_element()
 }
@@ -4923,16 +5356,18 @@ fn header_line(
         .into_any_element()
 }
 
-/// The top of an email post's card ([`email::head`]): its sender with its time and marks, its "To:" line.
+/// The top of an email post's card ([`email::head`]): its sender with its time and marks (Teams' "New" on a
+/// channel's new post, [`ChatView::new_post`]), its "To:" line.
 fn email_head(
     item: &MessageItem,
     post: &EmailPost,
-    cycle: HourCycle,
+    (cycle, new): (HourCycle, bool),
     mark: Option<AnyElement>,
     palette: Palette,
 ) -> AnyElement {
     let time = clock::message_time(item.arrival_time, &Local::now(), cycle);
     let edited = item.edited.then(|| edited_mark().into_any_element());
+    let mark = mark.into_iter().chain(new.then(|| new_post_mark(&item.id, palette)));
     email::head(
         &item.id,
         email::Head {
@@ -4975,17 +5410,29 @@ fn translating_mark(id: &str, palette: Palette, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// Teams' translation mark of a message of a translated chat: a click shows it as sent, and back; while its
-/// translation comes, "Translating…" ([`translating_mark`]); one that couldn't be translated, a mark that says so.
+/// Teams' translation mark of a message read in a language (the language of a translated chat, or the "Translate to"
+/// language of a message translated alone): a click does what the message offers (see the original, see the
+/// translation, or try again after a stop); while its translation comes, "Translating…" ([`translating_mark`]); one
+/// that couldn't be translated, a mark that says so.
 fn translation_mark(item: &MessageItem, palette: Palette, cx: &mut Context<ChatView>) -> Option<AnyElement> {
     use chat_translate::Mark;
     let mark = item.translation.as_ref()?;
     let id = item.id.clone();
+    let offer = match mark {
+        Mark::Stopped { .. } => chat_translate::Offer::Translate,
+        Mark::Original { .. } => chat_translate::Offer::SeeTranslation,
+        _ => chat_translate::Offer::SeeOriginal(None),
+    };
     let (tip, color, toggles): (SharedString, u32, bool) = match mark {
         Mark::Translated { tip } => (tip.clone(), palette.muted_foreground, true),
         Mark::Original { tip } => (tip.clone(), palette.brand, true),
         Mark::Waiting => return Some(translating_mark(&id, palette, cx)),
         Mark::Failed => ("This message couldn't be translated".into(), theme::DANGER, false),
+        Mark::Stopped { why } => (
+            format!("This message wasn't translated. {why} Select to try again.").into(),
+            theme::DANGER,
+            true,
+        ),
     };
     let selector = format!("translation-mark-{id}");
     let glyph = Glyph::LANGUAGES.icon().size(px(14.0)).text_color(rgb(color));
@@ -5004,7 +5451,7 @@ fn translation_mark(item: &MessageItem, palette: Palette, cx: &mut Context<ChatV
             .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
                 cx.stop_propagation();
                 this.translation
-                    .update(cx, |translation, cx| translation.toggle_original(&id, cx));
+                    .update(cx, |translation, cx| translation.offered(offer, &id, cx));
             }))
     } else {
         face
@@ -5137,6 +5584,8 @@ struct InChat<'a> {
     head: Option<AnyElement>,
     /// An email post's foot, drawn at the bottom of its card ([`ChatView::email_foot`]).
     foot: Option<AnyElement>,
+    /// What its file cards' Share calls ([`ChatView::file_sharer`]).
+    share: Option<files::ShareFile>,
 }
 
 impl InChat<'_> {
@@ -5235,7 +5684,13 @@ fn bubble(
     let id: SharedString = format!("message-text-{}", item.id).into();
     let (files, links) = match &item.body {
         Body::Text(text) => (
-            files::file_cards(&item.id, &item.files, text.0.source.as_ref(), palette),
+            files::file_cards(
+                &item.id,
+                &item.files,
+                text.0.source.as_ref(),
+                chat.share.as_ref(),
+                palette,
+            ),
             link_preview::cards(&item.id, &item.links, text.0.source.as_ref(), palette),
         ),
         _ => (None, None),
@@ -5342,20 +5797,25 @@ fn muted(text: &'static str, palette: Palette) -> AnyElement {
         .into_any_element()
 }
 
+/// Whether the message's translation mark stands on its own line over its bubble: a follow-up's, with no header to
+/// hold it.
+fn follow_up_marked(item: &MessageItem) -> bool {
+    !item.header && item.email.is_none() && item.translation.is_some()
+}
+
 /// The reactions as Teams draws them, over the bubble's bottom edge from its text's inset: a pill per key (its count
 /// once more than one reacted, the account's own ringed in the brand colour; a click sets or takes back the account's
 /// own), then "Add reaction", which opens the reactions on the message. "Edited" stands here when there is no header
 /// to hold it.
 fn footer_line(
     item: &MessageItem,
-    mark: Option<AnyElement>,
     reactors: &reactors::Reactors,
     palette: Palette,
     cx: &mut Context<ChatView>,
 ) -> Option<AnyElement> {
     let edited =
         (item.edited && !item.header).then(|| edited_mark().text_xs().text_color(rgb(palette.muted_foreground)));
-    if edited.is_none() && mark.is_none() && item.reactions.is_empty() {
+    if edited.is_none() && item.reactions.is_empty() {
         return None;
     }
     let reactions = item
@@ -5374,7 +5834,6 @@ fn footer_line(
     };
     Some(
         line.children(edited)
-            .children(mark)
             .children(reactions)
             .children(add)
             .into_any_element(),
@@ -5488,6 +5947,9 @@ fn hover_bar_keys(list: gpui::Div, cx: &mut Context<ChatView>) -> gpui::Div {
                 this.act_on_selected(MessageAction::Copy, window, cx);
             }
         }))
+        .on_action(cx.listener(|this, _: &MarkUnreadSelected, window, cx| {
+            this.act_on_selected(MessageAction::MarkUnread, window, cx);
+        }))
 }
 
 impl ChatView {
@@ -5531,6 +5993,8 @@ impl ChatView {
             .on_action(cx.listener(|this, _: &DeleteSelected, window, cx| {
                 this.act_on_selected(MessageAction::Delete, window, cx);
             }))
+            .on_action(cx.listener(|this, _: &TranslateSelected, _, cx| this.translate_selected(cx)))
+            .on_action(cx.listener(|this, _: &OpenSelectedMenu, window, cx| this.open_selected_menu(window, cx)))
             .on_action(cx.listener(|this, _: &ClearSelection, window, cx| this.escape(window, cx)))
             .on_action(cx.listener(|this, _: &ConfirmDelete, _, cx| this.confirm_delete(cx)))
     }
@@ -5590,7 +6054,7 @@ impl Render for ChatView {
         let palette = theme::current(cx);
         self.drawn.clear();
         #[cfg(feature = "test-support")]
-        self.faces_placed.borrow_mut().clear();
+        self.placed.faces.borrow_mut().clear();
         let more = self.more_overlay();
         let options = self.options_overlay(palette, window, cx);
         let selection_menu = self.selection_menu(palette, window, cx);
@@ -5603,6 +6067,10 @@ impl Render for ChatView {
         .pb_3();
         self.centre(cx);
         let pill = self.jump_pill(cx);
+        let area = Rc::clone(&self.placed.messages);
+        let area_probe = canvas(move |bounds, _, _| area.set(Some(bounds)), |_, (), _, _| {})
+            .absolute()
+            .size_full();
         let typing = self.typing_line(palette, cx);
         let messages = reactors::reaction_keys(hover_bar_keys(div(), cx), cx)
             .key_context(CONTEXT)
@@ -5615,10 +6083,19 @@ impl Render for ChatView {
             .relative()
             .flex_1()
             .min_h_0()
+            .child(area_probe)
             .child(rows)
             .children(self.bot_intro(palette))
             .children(pill);
         Self::file_drop_target(cx)
+            // Escape with a more-options menu open closes the menu first, as in Teams, wherever the focus is
+            .capture_action(cx.listener(|this, _: &ComposeEscape, _, cx| {
+                if this.options.take().is_some() {
+                    this.side_list = None;
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
             // Escape the compose box handed on (nothing to cancel there): the list takes the focus
             .on_action(cx.listener(|this, _: &ComposeEscape, window, cx| this.focus_messages(window, cx)))
             // a press anywhere in the view lets the selected text go (a press on text then starts a new selection;

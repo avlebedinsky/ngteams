@@ -28,7 +28,7 @@ built for your desktop instead of a web page in a wrapper.
 **Chat**
 - One-on-one and group chats, with formatting, emoji, @mentions, replies, reactions, edits and deletes
 - Drop in files, or paste screenshots and pictures straight into a message
-- Search messages and people, and keep unread counts in sync with your other devices
+- Search messages and people, mark chats as read or unread, and keep unread counts in sync with your other devices
 - Click or hover anyone's picture or name for their profile card, as in Teams: their availability, work hours and local time, contact details, who they work with and their org chart, with Chat, a quick message, and video and audio calls right there
 - Drafts stay put while you move around
 
@@ -43,6 +43,7 @@ built for your desktop instead of a web page in a wrapper.
 **Calls and meetings**
 - One-on-one and group audio and video calls, and scheduled or instant meetings
 - A notification with Join when a meeting you're invited to, or a Meet now in one of your group chats, starts
+- A reminder with Join and Snooze before each meeting on your calendar, at the meeting's reminder time (15 minutes by default), and again as it starts
 - Screen sharing, background blur and virtual backgrounds
 - Gallery and speaker views, raise hand, reactions, hold, transfer and inviting people mid-call
 - Recording and transcription, live captions, and meeting recaps with recordings and transcripts
@@ -54,16 +55,18 @@ built for your desktop instead of a web page in a wrapper.
 
 **Optional extras on your computer**
 - Read and write a chat in another language, with translated messages kept for next time
+- Translate one message from its More options menu, and see its original again
 - Have a draft corrected before you send it, in any language: spelling, grammar and the word that fits best, previewed word by word
 - Translate the message you are writing into any language, in place, keeping its mentions, links and formatting (Ctrl+Z brings it back)
 - Translate live captions as people speak
 - Keep every call's captions as a searchable transcript, saved only on this computer
 - Get an AI summary of a meeting: purpose, key takeaways, topics, next steps and open questions
 
-Translation, corrections and summaries use your own [Claude Code](https://claude.com/product/claude-code) or Codex CLI, and stay off until you turn them on.
+Translation, corrections and summaries use your own [Claude Code](https://claude.com/product/claude-code) or Codex CLI, or your own Anthropic, OpenAI or OpenAI-compatible API key (OpenRouter, Ollama, LM Studio, Azure). Each feature can use a different provider (Settings > General > AI providers), and all stay off until you turn them on. API keys stay in the system keyring. At the first start, a short notice explains this and lets you turn every AI feature off; **Use AI features** in Settings > General changes it later.
 
 **Make it yours**
 - Teams Light and Dark, High Contrast, Solarized Light and Dark, Nord and Dracula themes
+- Hide the message box buttons that you do not use (right-click its toolbar, or Settings > Appearance). A hidden button stays in its "+" menu
 
 <table>
   <tr>
@@ -107,6 +110,7 @@ Every release is on the [releases page](https://github.com/nickalie/ngteams/rele
 | Arch Linux | `ngteams-*-x86_64.pkg.tar.zst` | `sudo pacman -U ./ngteams-*-x86_64.pkg.tar.zst` |
 | Anything with glibc 2.39 or newer | `ngteams-*-linux-x86_64.tar.gz` | unpack it and run `ngteams/install.sh` (no root, see below) |
 | | `ngteams-*-linux-x86_64.AppImage` | `chmod +x` it and run it |
+| NixOS, or Nix on Linux x86_64 | this repository's flake | `nix profile install github:nickalie/ngteams#ngteams` (see below) |
 
 **Updates**: ngteams checks for a newer release once an hour. When there is one, it downloads it in the background and checks it against the release's `SHA256SUMS`. Then **Restart to update** appears in its title bar: select it, and ngteams installs the update and restarts. If a call is going on or you have a message you haven't sent, the button says so and waits: end the call or send the message, then select it again. A download that fails is tried again at the next check. On Windows, ngteams closes and the new installer upgrades it and opens it again.
 
@@ -141,6 +145,63 @@ sudo apparmor_parser -r /etc/apparmor.d/ngteams
 
 For the tarball, run its `ngteams/install.sh` instead of the first line.
 
+**On NixOS, or with Nix**, use the flake in this repository. It installs the release's own Linux binaries and runs
+them in an FHS environment, so the sign-in window and its downloaded WPE WebKit work as on other distributions. To
+try it with no install:
+
+```sh
+nix run github:nickalie/ngteams
+```
+
+To install it in your Nix profile:
+
+```sh
+nix profile install github:nickalie/ngteams#ngteams
+```
+
+For NixOS or Home Manager, add the flake as an input named `ngteams` to your configuration's flake, and turn on its
+module:
+
+```nix
+{
+  inputs.ngteams.url = "github:nickalie/ngteams";
+  inputs.ngteams.inputs.nixpkgs.follows = "nixpkgs";
+
+  outputs = { nixpkgs, ngteams, ... }: {
+    nixosConfigurations.my-host = nixpkgs.lib.nixosSystem {
+      modules = [
+        ./configuration.nix
+        ngteams.nixosModules.default
+        { programs.ngteams.enable = true; }
+      ];
+    };
+  };
+}
+```
+
+For Home Manager, add `ngteams.homeManagerModules.default` to your Home Manager modules instead, with
+`programs.ngteams.enable = true;`. Both modules also have `programs.ngteams.package`. The NixOS module installs ngteams
+for all users and turns on `hardware.graphics` (as `mkDefault`). The modules do not choose a keyring for you: ngteams
+needs a Secret Service, for example `services.gnome.gnome-keyring.enable = true;` on NixOS, or KeePassXC. The FHS
+environment needs user namespaces, which NixOS permits by default.
+
+**Updates with Nix**: ngteams cannot replace files in the Nix store. When a newer release is out, **Update available**
+appears in its title bar. Its tooltip gives the command to run, and a click copies it:
+
+| Installed with | Update with |
+|---|---|
+| `nix profile install` | `nix profile upgrade ngteams` |
+| the NixOS module | `sudo nix flake update ngteams --flake /etc/nixos && sudo nixos-rebuild switch --flake /etc/nixos`; if your system flake is not in `/etc/nixos`, use its folder |
+| the Home Manager module | `nix flake update ngteams && home-manager switch --flake .`, in your Home Manager flake's folder |
+| Home Manager as a NixOS module | the NixOS module's command |
+| `nix run`, or the flake's overlay | no command: the tooltip tells you to update with Nix as you installed it |
+
+If you put the flake's package in a package list yourself, give it your kind of install, so that the tooltip names
+the right command, for example `ngteams.packages.x86_64-linux.ngteams.override { nixInstall = "nixos"; }` (or
+`"home-manager"`, `"other"`).
+
+The flake gets each new release some minutes after the release is published.
+
 **From source** on Arch, the system it's developed on:
 
 ```sh
@@ -171,6 +232,10 @@ source with Xcode's command line tools, the repository's Rust and GStreamer's of
 
 To add another account, press **+** under your avatar on the left.
 
+If two accounts have the same profile picture, give one of them a picture of its own: click its avatar, then
+**Change picture** (or go to **Settings > Accounts**). The picture shows only in ngteams, so you can tell the accounts
+apart. Teams doesn't get it, and others still see your profile picture. **Use profile picture** goes back.
+
 ## Your own server
 
 ngteams can also sign in to a server you run yourself instead of Microsoft's. `ngteams-server` speaks the same
@@ -198,7 +263,7 @@ Add the other people in **Settings → Manage users**. Deployment, backups, TLS 
 | <kbd>Ctrl</kbd>+<kbd>2</kbd> | Go to the chat list |
 | <kbd>Ctrl</kbd>+<kbd>4</kbd> | Open the calendar |
 | <kbd>Enter</kbd> / <kbd>Shift</kbd>+<kbd>Enter</kbd> | Send / new line |
-| <kbd>R</kbd>, <kbd>A</kbd>, <kbd>E</kbd> on a selected message | Reply, react, edit |
+| <kbd>R</kbd>, <kbd>A</kbd>, <kbd>E</kbd>, <kbd>U</kbd> on a selected message | Reply, react, edit, mark as unread |
 | <kbd>Left</kbd> / <kbd>Right</kbd>, <kbd>Space</kbd> on a selected message | See who reacted, add or remove your reaction |
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd> | Mute or unmute in a call |
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>O</kbd> | Turn the camera on or off |
@@ -227,7 +292,8 @@ The [full command list](docs/development.md#ngteamsctl) covers chats, calls, the
 - Your messages and settings are stored on your computer, and your sign-in is kept in your desktop keyring.
 - Your camera starts off, and only you can turn it on.
 - The update check asks GitHub for ngteams' latest release. It sends no account data and no sign-in, only the app's name and version.
-- If you turn on translation or AI summaries, or ask for a correction, that text goes to the tool you picked and its provider. Translating a chat also sends its earlier messages, its title and its members' names; a correction also sends the chat's recent messages. Translating the message you are writing sends only its words and the language.
+- With **Use AI features** off, no text goes to an AI tool or provider, and the app does not look for the tools.
+- If you turn on translation or AI summaries, or ask for a correction, that text goes to the tool you picked and its provider. Translating a chat, or one of its messages, also sends its earlier messages, its title and its members' names; a correction also sends the chat's recent messages. Translating the message you are writing sends only its words and the language.
 - Logs at the debug level contain message text, so don't post them publicly.
 
 ## Good to know

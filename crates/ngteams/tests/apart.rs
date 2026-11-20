@@ -221,21 +221,30 @@ fn the_install_marker_is_confined_to_refusals_runners_and_authorized_builders() 
 
 #[test]
 fn the_binary_refuses_first() {
-    // from the first function on (the imports above it name what comes later)
     let text = fs::read_to_string(root().join("crates/ngteams/src/main.rs")).unwrap();
-    let main = &text[text.find("fn main()").unwrap()..];
+    let main = text.split_once("fn main()").unwrap().1.split_once("\n}").unwrap().0;
     let refused = main.find("ngteams::refusal()").unwrap();
-    // the keyring is opened only through `ngteams::accounts`, which `main` reaches after the refusal; the sign-in
-    // window's page engine is served after it too
     for later in [
-        "pin_worker",
+        "pin_sign_in_worker(",
         "Cli::parse",
-        "Setup::from_env",
-        "platform::application",
-        "accounts::",
+        "prepare(",
+        "install_web_engine(",
+        "broker(",
+        "lab_broker(",
+        "lab_sign_in(",
+        "take_snapshot(",
+        "run_read_only(",
+        "run_lab(",
+        "run(",
     ] {
         assert!(
             main.find(later).is_some_and(|at| at > refused),
+            "{later} before the refusal"
+        );
+    }
+    for later in ["pin_worker", "Setup::from_env", "platform::application", "accounts::"] {
+        assert!(
+            main.find(later).is_none_or(|at| at > refused),
             "{later} before the refusal"
         );
     }

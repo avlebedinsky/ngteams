@@ -4,8 +4,8 @@
 use super::{Apartment, activation::Activator, registration};
 use crate::notify::picture::{file_key, toast_image};
 use crate::notify::{
-    ANSWER_ACTION, BannerFiles, DECLINE_ACTION, DEFAULT_ACTION, JOIN_ACTION, Notice, NoticeKind, NotificationServer,
-    escape_markup,
+    ANSWER_ACTION, BannerFiles, DECLINE_ACTION, DEFAULT_ACTION, DISMISS_ACTION, JOIN_ACTION, Notice, NoticeKind,
+    NotificationServer, SNOOZE_ACTION, escape_markup,
 };
 use futures_util::future::BoxFuture;
 use std::{
@@ -315,7 +315,10 @@ impl Center {
     }
 }
 fn valid_action(action: &str) -> bool {
-    matches!(action, DEFAULT_ACTION | ANSWER_ACTION | DECLINE_ACTION | JOIN_ACTION)
+    matches!(
+        action,
+        DEFAULT_ACTION | ANSWER_ACTION | DECLINE_ACTION | JOIN_ACTION | SNOOZE_ACTION | DISMISS_ACTION
+    )
 }
 
 /// A started meeting's toast's Join button ([`crate::meeting_alert`]); its body opens the chat.
@@ -325,12 +328,22 @@ fn meeting_actions(key: &str) -> String {
     )
 }
 
+/// A meeting reminder's toast's Join, Snooze and Dismiss ([`crate::meeting_reminder`]); a reminder stays until it is
+/// acted on, as Outlook's does.
+fn reminder_actions(key: &str) -> String {
+    format!(
+        r#"<actions><action content="Join" arguments="{key}:{JOIN_ACTION}" activationType="foreground"/><action content="Snooze" arguments="{key}:{SNOOZE_ACTION}" activationType="foreground"/><action content="Dismiss" arguments="{key}:{DISMISS_ACTION}" activationType="foreground"/></actions>"#
+    )
+}
+
 /// Only an opaque per-notice key and fixed actions are launch arguments. Display text is XML-escaped and remains plain
 /// text; `picture` is the notice's picture's element ([`toast_image`]), when it has one.
 fn xml(notice: &Notice, key: &str, picture: Option<&str>) -> String {
     let call = notice.kind == NoticeKind::Call;
     let scenario = if call {
         " scenario=\"incomingCall\" duration=\"long\" useButtonStyle=\"true\""
+    } else if notice.kind == NoticeKind::Reminder {
+        " scenario=\"reminder\""
     } else {
         ""
     };
@@ -340,6 +353,8 @@ fn xml(notice: &Notice, key: &str, picture: Option<&str>) -> String {
         )
     } else if notice.kind == NoticeKind::Meeting {
         meeting_actions(key)
+    } else if notice.kind == NoticeKind::Reminder {
+        reminder_actions(key)
     } else {
         String::new()
     };

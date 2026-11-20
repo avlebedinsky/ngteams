@@ -1340,3 +1340,29 @@ fn own_invitations_refuse_foreign_and_mixed_controller_origins() {
     assert_eq!(tracker().observe_delivery(&mixed), Observed::Ignored);
     assert_eq!(unread_invitation(&cloud, &mixed), "it names no conversation");
 }
+
+/// The media controller's notice for the account's video at a live call's own `controlVideoStreaming` callback (one a
+/// request of the account handed out) may get its receipt, once, as Teams for the web answers it; one at a callback
+/// the call never handed out is no delivery of it.
+#[test]
+fn a_video_control_at_the_call_s_own_callback_may_get_its_receipt_once() {
+    use teams_proto::CallState as _;
+    let tracker = current_reply_tracker();
+    let callback = format!("{CALLBACKS}/09090909/call/controlVideoStreaming/");
+    let path = Url::parse(&callback).unwrap().path().to_owned();
+    let body =
+        json!({"controlVideoStreaming": {"sequenceNumber": 1, "controlInfo": [{"control": 0, "sourceId": 851}]}});
+    let notice = delivery(22, &path, body.to_string().into_bytes());
+    assert_eq!(tracker.observe_delivery(&notice), Observed::Nothing);
+    assert!(!tracker.response_allowed(CONNECTION, notice.id, &plain_receipt(&notice)));
+
+    let mut request = callback_request_body(&callback);
+    request["links"] = json!({});
+    request["clientContentForMediaController"] = json!({"controlVideoStreaming": callback});
+    let request = write(&acknowledge_url("one"), request);
+    assert!(tracker.call_allowed(request.call_url().unwrap(), request.body().as_ref()));
+    tracker.before(&request);
+    assert_eq!(tracker.observe_delivery(&notice), Observed::VideoControl);
+    assert!(tracker.response_allowed(CONNECTION, notice.id, &plain_receipt(&notice)));
+    assert!(!tracker.response_allowed(CONNECTION, notice.id, &plain_receipt(&notice)));
+}

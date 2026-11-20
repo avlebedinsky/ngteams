@@ -158,6 +158,9 @@ takes a double underscore: `NGTEAMS_SERVER_TLS__CERT`, `NGTEAMS_SERVER_TOKENS__A
 | `bots.retry_delays` | `[15, 45]` | seconds before each new attempt of an activity a bot didn't take; one attempt more than there are entries |
 | `bots.delivery_lease` | `30` | seconds a node holds an activity it sends before another node may take it over; longer than `bots.send_timeout` |
 | `bots.send_timeout` | `10` | seconds a send to a bot may take, from connecting to the end of its answer |
+| `outgoing_webhooks.enabled` | `true` | whether the server serves a team's outgoing webhooks ([below](#outgoing-webhooks)): their routes, their mentions and authz's `outgoingWebhookService` |
+| `outgoing_webhooks.timeout_ms` | `5000` | milliseconds a webhook has for its answer, from connecting to its end: Teams' 5 seconds |
+| `outgoing_webhooks.max_picture_bytes` | `1048576` | the largest picture (PNG or JPEG) a webhook may have |
 | `[[rooms]]` | none | the meeting rooms the room finder lists, each `name`, `address` (its mailbox) and optionally `list` (its building), `capacity`, `floor`, `street`, `audio_device`, `video_device`, `display_device`, `wheelchair` |
 
 ## Operations
@@ -505,7 +508,9 @@ account's token for `https://api.spaces.skype.com`; the shapes are those of `doc
   `…/cancel` and `…/respond`. Times are kept as instants and answered in UTC; an event keeps the zone it names
   (`eventTimeZone`, by the middle tier's names: `TurkeySt`) and `beta/me/calendarEvents/timeZoneSettingsWithOffset`
   names an IANA zone that way. What is kept of a sent event is a fixed list of the form's own fields; who
-  organizes it, who answered what and the meeting's links are the server's. A calendar request's body is at most
+  organizes it, who answered what and the meeting's links are the server's. An invitee's copy carries the invitee's
+  own reminder, Outlook's default of 15 minutes (`isReminderSet`, `reminderMinutesBeforeStart`), not the organizer's.
+  A calendar request's body is at most
   1 MiB (an event's text can be long); a larger one is refused (400 `BadRequest`).
 - **A series** (`eventRecurrencePattern`, `eventRecurrenceRange`) is one row, read as its occurrences: the rule
   runs on the clock of the series' own zone (the `rrule` crate), so an occurrence keeps its time of day across a
@@ -802,6 +807,52 @@ makes the first key and rotates these keys, at its start and at its housekeeping
 
 With `apps.enabled = false` none of these routes is served.
 
+## Outgoing webhooks
+
+A team's outgoing webhook works as in Teams ([`docs/protocol/bots.md`](protocol/bots.md#outgoing-webhooks)): a
+message in one of the team's standard channels that @mentions it goes to its callback URL, and the answer is the
+webhook's reply in the post's thread. It needs no app registration and no administrator.
+
+**Registration** is on the middle tier, `beta/teams/<team>/outgoingWebhooks` (the routes are in the protocol note).
+The team's owners make, change and remove its webhooks; so do its members while the team's settings let them add
+custom apps (`uploadCustomApp`), and the server's administrators for any team. The team's people list them and read
+their pictures, and only those who may change a webhook see its callback URL. A name is one per team in any letter
+case. The callback URL must be one the server sends to (the address guard of [bot delivery](#bot-chats-and-delivery),
+with `bots.allow_http_endpoints` and `bots.allowed_networks`); an address written in the URL is checked at once, a
+name when the server sends. Each webhook is an app account (`users.kind` `app`, `28:<id>`, which signs in nowhere and
+is in no chat). Its token is 32 random bytes, shown in base64 once, in the answer that made it. The server keeps it
+in the database as it keeps its other signing keys, because it signs with it. A removed webhook's account stays,
+deleted, for the replies it posted. While `outgoing_webhooks.enabled`, authz names `outgoingWebhookService` (the
+middle tier's base), so the client shows webhooks for the account.
+
+**A mention** in a standard channel of the webhook's team (a post, or a reply in a post's thread) by a person makes
+a row of the outbox (`outgoing_webhook_deliveries`) in the message's own transaction. A chat, a private channel, a
+mention of another team's webhook, an edit or an app's message makes none. The activity is Teams'
+(`conversation.id` `<channel>;messageid=<post>`, `text` with `<at>name</at>`, `from` `29:<id>`, `recipient` null,
+`channelData` with the team, the channel and the tenant); no token is in it, and it carries no credential to call the
+server back.
+
+**Delivery.** Every API node sends rows. A node takes a row from `pending` to `sending` with a compare-and-set update,
+so one node sends it, and posts it once, signed with `Authorization: HMAC <base64 HMAC-SHA256 of the exact body>`,
+through the address guard, with `outgoing_webhooks.timeout_ms` for the whole exchange. A post wakes every node's
+sender through the fan-out (`webhooks:wake`); a one-second poll covers a lost wake-up. The node that still holds the
+row commits its terminal state and replies in one transaction. Replies use the webhook's current name in the post's thread:
+
+- a 2xx answer with an activity: its text (Markdown, plain or XML, as a bot's) and its cards (Adaptive, hero,
+  thumbnail), each card's actions cut to those that open a link, as Teams allows a webhook;
+- a 2xx answer with an empty body, or an activity with no text and no card: no reply;
+- anything else (another status, no answer in time, a refused address, a body that is not an activity, an attachment
+  the client does not draw): Teams' reply "Sorry, there was a problem encountered with your request".
+
+If a reply insert fails, the transaction rolls back all replies and the terminal state. The sweep then posts the apology.
+A row is never sent twice. When a node dies while it sends, its row stays `sending` until its lease
+(`outgoing_webhooks.timeout_ms` + 10 s) runs out; then any node's sweep fails it with the apology and sends nothing.
+A row that waited more than a minute fails unsent, with no reply. A planned stop waits for the requests under way and
+their replies. Done and failed rows go after a day.
+
+With `outgoing_webhooks.enabled = false` none of this is served: no routes, no sends, no `outgoingWebhookService`. A
+mention of a webhook made before is kept but not sent: when the webhooks are on again, it fails unsent and silent.
+
 ## Prefix table
 
 Every service lives under the public origin with a fixed prefix. `Served` means the server answers it now, and authz
@@ -832,6 +883,7 @@ hands out its GTM where it has one.
 | Power Apps connections | `workflowsService` announces it; requests go to the client's fixed base | `/workflow-connections/` | the account's Teams connections, while `workflows.enabled` |
 | A bot's token endpoint and metadata | (the bot's authority) | `/<tenant>/oauth2/v2.0/token`, `/<tenant>/v2.0/.well-known/`, `/adfs/` | while `apps.enabled` |
 | The keys bots check activities with | (the bot's settings) | `/bot/v1/.well-known/`, `/<tenant>/discovery/v2.0/keys` | while `apps.enabled` |
+| A team's outgoing webhooks | `outgoingWebhookService` (the middle tier's base) | `/api/mt/part/<partition>/beta/teams/<team>/outgoingWebhooks` | while `outgoing_webhooks.enabled` |
 
 ## Optional services
 
@@ -848,6 +900,7 @@ account starts on the region it has). Each optional service has a GTM that annou
 | Live captions | `captionsService` | no | a call's Language and speech, the captions key and command, the saved captions |
 | Recording and transcription | `recordingService` | no | a call's Record and transcribe |
 | The app catalogue and bots | `appsService` | no | a team's Apps tab, Get more apps, a copied team's Apps, a bot card's buttons that send to the bot |
+| A team's outgoing webhooks | `outgoingWebhookService` | while `outgoing_webhooks.enabled` | Manage team's "Create an outgoing webhook" and the team's webhooks (client task 412) |
 
 `docs/protocol/endpoints.md` names for every request the client sends whether the server serves it, the client hides
 it, it goes to a public host, or it is a known gap (`own server: …`); `cargo test -p ngteams-server endpoints` checks
@@ -976,7 +1029,9 @@ limits the whole of each request, a download too: none is set by default. These 
 
 Keys in the bucket: `ams/<object>/<version>` (pictures: each upload of an object's bytes gets a key of its own, and
 the database names the one the object reads from), `drive/<item>` (files), `drive-thumbnails/<item>/…` (thumbnails),
-`profile-pictures/<account>/<upload>` (an account's picture).
+`profile-pictures/<account>/<upload>` (an account's picture), and `outgoing-webhooks/<webhook>/pictures/<upload>`
+(a webhook's picture, with its etag as the upload name). Each upload of a webhook's picture gets its own key.
+Old webhook pictures use `outgoing-webhooks/<webhook>/picture` until a manager replaces or removes them.
 
 ## Pictures, files and link previews
 
@@ -1024,6 +1079,16 @@ The client sends a file the way it sends one to OneDrive, and the server keeps o
    `GET /graph/v1.0/shares/u!<link, base64url>/driveItem` (the item with `@microsoft.graph.downloadUrl`) and
    `…/driveItem/thumbnails` (Graph's `small`, `medium` and `large`, 96, 176 and 800 pixels). 403 for an account
    the file isn't shared with.
+4. **A file shared on** ("Share this file", `docs/protocol/chat.md`, "Files: shared on"): the client posts the file's
+   entry again in another chat or channel. When a post names a file of this server and its sender has access to
+   the file, the server gives each reader of that chat or channel access too (the readers the post's push goes to),
+   as an anyone link reaches them on Microsoft's service. A post by someone without access gives nobody access.
+   The message and its file grants commit in one transaction. A grant error rolls both back. A post checks at most
+   ten file entries. A link with userinfo or a different origin gives no access.
+   Anyone with access reads what the link lets people do:
+   `GET /sp/personal/<owner>/_api/v2.0/shares/u!<link, base64url>/permission` answers the link with `scope`
+   `users`, `type` `edit` and the words "People you choose can edit". 403 for an account without access, 404 for a
+   link to another drive.
 
 Download and thumbnail links are `<origin>/sp/download/<item>?tempauth=…` and
 `<origin>/sp/thumbnail/<item>/<size>?tempauth=…`. The `tempauth` is a JWT the server signs for that one item and
@@ -1262,6 +1327,10 @@ the calendar's ([above](#the-calendar-and-meetings)); its organizer is the meeti
   (`403`). Two
   first starts at once make one call (the group calls' unique index), the second joining it. The chat gets
   `callStarted` naming the call's conversation and, at the end, `callEnded`.
+- **The start's push**: when a scheduled meeting's call starts, each calling endpoint of the meeting chat's other
+  members gets `{"evt": 128, "gp": <base64 JSON>}` (`MeetingStart`, its call, chat, subject, starter and
+  `meetingInfo`); a first joiner that waits in the lobby is pushed to the organizer only (`MeetingStartFromLobby`).
+  A channel's meeting pushes none.
 - **The lobby** is the meeting's `AutoAdmittedUsers`, read at each join: the organizer always comes in; under
   `InvitedUsers` the meeting chat's people do, under `OrganizerOnly` nobody else; any other value lets every account
   in (they are all of the company). Whom it holds waits: its roster entry has a `lobby` endpoint (`modalityJoined`
@@ -1524,7 +1593,9 @@ native engine following every backward continuation. Message arrays stay below a
 Read horizons are stored per `(chat, account)` and returned only in that account's conversation listing.
 Their own endpoints receive a `ConversationUpdate` with `propertiesUpdated` and the changed property. Other
 members get an internal `ReadReceipt` resource (`id`, `mri`, `consumptionhorizon`); that is separate from the own
-horizon update, which must never mark another member's conversation read.
+horizon update, which must never mark another member's conversation read. A conversation's
+`consumptionHorizonBookmark` ("Mark as unread" and its end) is kept the same way, per `(chat, account)`: its listing
+and its own endpoints only, and other members are told nothing.
 
 Own user properties persist `userGraphSettings` as its native JSON text and `appConsumptionHorizon` as JSON text
 or an object. Mark-all-read may be reset, as in Teams. Writes retain the account's other properties and publish
@@ -1713,7 +1784,9 @@ The client also uses the [first-admin setup](#the-first-admin), the [admin API](
 [account's own endpoints](#the-accounts-own-endpoints): the account window asks `GET /api/admin/v1/setup` for a
 server's address and creates the first administrator there; it replaces a password that must change with
 `POST /api/account/v1/password`; and an administrator's Settings have a "Manage users" page over
-`/api/admin/v1/users` (the page is offered when `GET /api/account/v1/me` says `admin`).
+`/api/admin/v1/users` (the page is offered when `GET /api/account/v1/me` says `admin`); with `NGTEAMS_BOTS=1` they also
+have a "Manage apps" page over `/api/admin/v1/apps` (offered when that list answers) that reads
+`/bot/v1/.well-known/openidconfiguration` for the settings it shows each bot.
 
 ## Tests
 
@@ -1724,10 +1797,12 @@ through its loopback TURN server) against an in-process server on loopback, on S
 Redis cases. The picture and file tests keep their blobs in the S3 store `NGTEAMS_SERVER_S3_URL` names
 (`http://<access key>:<secret>@<host>:<port>/<bucket>`; they make the bucket), else in a temporary directory. CI's
 Coverage job sets all three from its service containers (RustFS for S3). Each test's deployment has a database and a
-Redis namespace of its own, so the tests run in parallel on one Postgres and one Redis. Locally:
+Redis namespace of its own, so the tests run in parallel on one Postgres and one Redis. That Postgres takes 300
+connections (CI's too): four test threads of two deployments with two nodes each, each node's pool 16. Locally:
 
 ```sh
-podman run -d --rm --name ngts-pg -e POSTGRES_PASSWORD=ngts -p 55432:5432 docker.io/library/postgres:17
+podman run -d --rm --name ngts-pg -e POSTGRES_PASSWORD=ngts -p 55432:5432 docker.io/library/postgres:17 \
+  -c max_connections=300
 podman run -d --rm --name ngts-redis -p 56379:6379 docker.io/library/redis:7
 podman run -d --rm --name ngts-s3 -p 59000:9000 -e RUSTFS_ACCESS_KEY=ngtsaccess -e RUSTFS_SECRET_KEY=ngtssecret \
   docker.io/rustfs/rustfs:1.0.5

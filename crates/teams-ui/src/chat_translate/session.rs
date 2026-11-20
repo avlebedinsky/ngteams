@@ -28,7 +28,6 @@
 //!   one. Nothing here logs a message, a translation or the tool's output.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -37,7 +36,7 @@ use std::time::Duration;
 
 use super::prompt::{self, Answer, Brief, Item, Preface, Said, Term};
 pub use crate::local_ai::Failure;
-use crate::local_ai::{Backend, Launch, Model, Tool, Work};
+use crate::local_ai::{Backend, Launch, Model, Target, Tool, Work};
 use crate::translate::TARGET_LANGUAGES;
 
 /// How long a wait for the next job polls before it looks at whether the session was dropped.
@@ -81,10 +80,10 @@ impl Default for Limits {
 #[derive(Clone, Debug)]
 pub struct Spec {
     pub backend: Backend,
-    pub program: PathBuf,
+    pub target: Target,
     pub model: Model,
     /// The chat's language's English name, as the instructions name it.
-    pub language: &'static str,
+    pub language: gpui::SharedString,
     pub limits: Limits,
 }
 
@@ -138,6 +137,8 @@ pub struct Session {
     jobs: mpsc::Sender<Job>,
     stop: Arc<AtomicBool>,
     outcomes: async_channel::Receiver<Outcome>,
+    /// What a send that waits on it fails with when it stops: its provider named.
+    stopped: Failure,
 }
 
 impl Session {
@@ -147,6 +148,7 @@ impl Session {
         let (jobs, queued) = mpsc::channel();
         let (out, outcomes) = async_channel::unbounded();
         let stop = Arc::new(AtomicBool::new(false));
+        let stopped = spec.target.named(Failure::Stopped(spec.backend, None));
         let worker = Worker {
             spec,
             jobs: queued,
@@ -159,7 +161,18 @@ impl Session {
         let _ = thread::Builder::new()
             .name("chat-translate".into())
             .spawn(move || worker.run());
-        Self { jobs, stop, outcomes }
+        Self {
+            jobs,
+            stop,
+            outcomes,
+            stopped,
+        }
+    }
+
+    /// What a send that waits on it fails with when it stops.
+    #[must_use]
+    pub fn stopped(&self) -> Failure {
+        self.stopped.clone()
     }
 
     /// Hands `job` to the tool.
@@ -303,12 +316,12 @@ impl Worker {
     fn batch(&mut self, id: u64, brief: &Brief, context: &[Said], items: &[Item]) -> Outcome {
         let out = self.out.clone();
         let stop = Arc::clone(&self.stop);
-        let reading = self.spec.language;
+        let reading = self.spec.language.clone();
         let echoed = self.echoed.clone();
         let mut told = HashMap::new();
         let mut partial = |so_far: &str| {
             let fresh = fresh_answers(so_far, &mut told);
-            let (fresh, _) = judge_echoes(fresh, &told, items, reading, &echoed);
+            let (fresh, _) = judge_echoes(fresh, &told, items, &reading, &echoed);
             if !fresh.is_empty() && !stop.load(Ordering::Relaxed) {
                 let _ = out.try_send(Outcome::Partial { id, answers: fresh });
             }
@@ -319,7 +332,7 @@ impl Worker {
         match answer {
             Ok((text, terms)) => {
                 let all = prompt::read_batch(&text);
-                let (answers, held) = judge_echoes(all.clone(), &all, items, reading, &self.echoed);
+                let (answers, held) = judge_echoes(all.clone(), &all, items, &reading, &self.echoed);
                 // one left out keeps its echo: asked again, its next echo is taken
                 for item in items.iter().filter(|item| answers.contains_key(&item.n)) {
                     self.echoed.remove(&item.key);
@@ -358,7 +371,9 @@ impl Worker {
             .ask(brief, context, &[], &mut |_| {}, |preface| {
                 prompt::outgoing(preface, to, re, text)
             })
-            .and_then(|(text, _)| prompt::read_outgoing(&text).ok_or_else(|| not_a_translation(backend)));
+            .and_then(|(text, _)| {
+                prompt::read_outgoing(&text).ok_or_else(|| self.spec.target.named(not_a_translation(backend)))
+            });
         Outcome::Outgoing { id, answer }
     }
 
@@ -401,10 +416,10 @@ impl Worker {
             Tool::start(
                 &Launch {
                     backend: self.spec.backend,
-                    program: self.spec.program.clone(),
+                    target: self.spec.target.clone(),
                     work: Work::Chat,
                     model: self.spec.model.clone(),
-                    instructions: prompt::instructions(self.spec.language),
+                    instructions: prompt::instructions(&self.spec.language),
                     first: limits.first,
                 },
                 &self.stop,

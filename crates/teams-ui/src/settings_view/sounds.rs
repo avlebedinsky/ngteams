@@ -460,6 +460,7 @@ impl SettingsView {
             directories: adding == Adding::Pack(ImportKind::Folder),
             multiple: false,
             prompt: Some("Add".into()),
+            ..PathPromptOptions::default()
         });
         self.adding = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let source = picked

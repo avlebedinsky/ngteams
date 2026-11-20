@@ -60,6 +60,9 @@ pub enum Observed {
     /// A media negotiation delivery of a live call or an answered invitation's (a renegotiation, an answer): the link
     /// its answer or acknowledgement goes to is bound.
     Renegotiation,
+    /// The media controller's notice at a live call's or an answered invitation's own `controlVideoStreaming`
+    /// callback: its receipt may go.
+    VideoControl,
 }
 
 /// Where a call is in its life.
@@ -189,6 +192,12 @@ fn is_media_callback(agent: &Callback, path: &str) -> bool {
         && (path.ends_with("/call/mediaRenegotiation/")
             || path.ends_with("/call/mediaAnswer/")
             || is_acknowledged_at(path))
+}
+
+/// Whether `path` is a call's `controlVideoStreaming` callback (`…/call/controlVideoStreaming/`), where the media
+/// controller tells the account's video what to send.
+fn is_video_control_callback(path: &str) -> bool {
+    path.ends_with("/call/controlVideoStreaming/")
 }
 
 /// Whether `path` is a call's `transfer` callback (`…/call/transfer/`), where a transfer the far end asked for is
@@ -580,6 +589,17 @@ impl Tracker {
                 return Observed::Nothing;
             }
             return Observed::Renegotiation;
+        }
+        if is_video_control_callback(&delivery.path)
+            && (inner
+                .calls
+                .iter()
+                .any(|call| call.state == State::Live && call.context.owns_callback(&delivery.path))
+                || inner.offers.iter().any(|offer| {
+                    offer.state == offer::OfferState::Answered && offer.context.owns_callback(&delivery.path)
+                }))
+        {
+            return Observed::VideoControl;
         }
         let found = inner.calls.iter_mut().find_map(|call| {
             if call.state == State::Ended {

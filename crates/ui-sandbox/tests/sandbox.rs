@@ -94,6 +94,29 @@ fn a_missing_sandbox_skips_or_fails() {
     assert!(error.contains("GPUI_SMOKE_REQUIRE=1"), "{error}");
 }
 
+#[test]
+fn large_outputs_start_with_both_shells() {
+    for (width, height) in [(1440, 800), (1280, 900), (1440, 900), (1920, 1080)] {
+        for fill_output in [false, true] {
+            let options = SandboxOptions {
+                width,
+                height,
+                fill_output,
+                ..SandboxOptions::default()
+            };
+            let Some(sandbox) = ui_sandbox::sandbox_or_skip("large_outputs_start_with_both_shells", &options)
+                .unwrap_or_else(|error| panic!("{options:?}: {error}"))
+            else {
+                return;
+            };
+            let png = sandbox.screenshot("large-output.png", false).unwrap();
+            let dimensions = image::open(png).unwrap().to_rgb8().dimensions();
+            let expected = if fill_output { (width, height) } else { (1280, 800) };
+            assert_eq!(dimensions, expected, "{options:?}");
+        }
+    }
+}
+
 /// The subprocess supplies its own environment, avoiding changes to this test process's shared environment.
 #[test]
 fn clean_commands_keep_only_the_profile_path_and_the_allowed_environment() {

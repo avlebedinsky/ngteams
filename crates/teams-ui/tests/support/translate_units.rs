@@ -32,33 +32,62 @@ fn a_track_is_in_the_target_language_by_its_language_script_or_country() {
 
 #[test]
 fn the_tools_are_chosen_claude_first() {
-    for choice in TranslatorChoice::ALL {
+    for choice in [
+        TranslatorChoice::Automatic,
+        TranslatorChoice::cli(Backend::Claude),
+        TranslatorChoice::cli(Backend::Codex),
+    ] {
         assert_eq!(TranslatorChoice::from_key(choice.key()), Some(choice));
     }
-    assert_eq!(TranslatorChoice::from_key("luna"), None);
+    assert_eq!(
+        TranslatorChoice::from_key("luna"),
+        Some(TranslatorChoice::Only("luna".to_owned()))
+    );
+    let pick = |tools: &Translators, choice: &TranslatorChoice| {
+        crate::local_ai::providers::pick_from(
+            &crate::local_ai::providers::effective(&[], tools),
+            tools,
+            &crate::local_ai::AiKeys::default(),
+            choice,
+        )
+    };
     let both = Translators::with(vec![
         (Backend::Codex, "/synthetic/codex".into()),
         (Backend::Claude, "/synthetic/claude".into()),
     ]);
-    assert_eq!(both.installed().collect::<Vec<_>>(), Backend::ALL);
-    assert_eq!(both.pick(TranslatorChoice::Automatic).unwrap().0, Backend::Claude);
+    assert_eq!(both.installed().collect::<Vec<_>>(), Backend::CLI);
     assert_eq!(
-        both.pick(TranslatorChoice::Only(Backend::Codex)).unwrap().1,
-        PathBuf::from("/synthetic/codex")
+        pick(&both, &TranslatorChoice::Automatic).unwrap().backend,
+        Backend::Claude
     );
+    assert!(matches!(
+        pick(&both, &TranslatorChoice::cli(Backend::Codex)).unwrap().target,
+        crate::local_ai::Target::Program(path) if path == std::path::Path::new("/synthetic/codex")
+    ));
     let codex = Translators::with(vec![(Backend::Codex, "/synthetic/codex".into())]);
-    assert_eq!(codex.pick(TranslatorChoice::Automatic).unwrap().0, Backend::Codex);
     assert_eq!(
-        codex.pick(TranslatorChoice::Only(Backend::Claude)),
-        Err(Failure::NotInstalled(Some(Backend::Claude)))
+        pick(&codex, &TranslatorChoice::Automatic).unwrap().backend,
+        Backend::Codex
     );
     assert_eq!(
-        Translators::default().pick(TranslatorChoice::Automatic),
-        Err(Failure::NotInstalled(None))
+        pick(&codex, &TranslatorChoice::cli(Backend::Claude)).err(),
+        Some(Failure::NotInstalled(Some(Backend::Claude)))
     );
-    for backend in Backend::ALL {
+    assert_eq!(
+        pick(&Translators::default(), &TranslatorChoice::Automatic).err(),
+        Some(Failure::NotInstalled(None))
+    );
+}
+
+#[test]
+fn every_kind_has_its_names() {
+    for backend in Backend::CLI {
         assert_eq!(backend.program(), backend.key());
-        assert!(!backend.label(Work::Captions).is_empty() && !backend.model(Work::Captions).is_empty());
+        assert!(!backend.label(Work::Captions).is_empty() && backend.recommended(Work::Captions).is_some());
+    }
+    for backend in Backend::ALL {
+        assert_eq!(Backend::from_key(backend.key()), Some(backend));
+        assert!(!backend.name().is_empty() && !backend.tool().is_empty() && !backend.provider().is_empty());
     }
 }
 

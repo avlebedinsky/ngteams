@@ -1,4 +1,5 @@
-# Per-user setup. Never starts ngteams. Windows PowerShell 5.1 is sufficient.
+# Per-user setup. Starts ngteams only as its --prepare run (no window, account or network). Windows PowerShell 5.1 is
+# sufficient.
 # Run -VerifyOnly to validate the extracted package without installing anything.
 [CmdletBinding()]
 param([switch]$VerifyOnly)
@@ -92,6 +93,13 @@ $link.WorkingDirectory = Split-Path $exe
 $link.IconLocation = "$exe,0"
 $link.Description = 'ngteams'
 $link.Save()
+# The app's installer run: Defender checks each new program file and GStreamer lists its plugins now, not at the
+# first start. It opens no window or account and sends nothing. The setup goes on also when it cannot start, fails or
+# is not done after 3 minutes (the run stops itself after 2 minutes).
+try {
+    $prepare = Start-Process -FilePath $exe -ArgumentList '--prepare' -WorkingDirectory (Split-Path $exe) -WindowStyle Hidden -PassThru
+    if (!$prepare.WaitForExit(180000)) { $prepare.Kill(); Write-Warning 'ngteams --prepare was not done after 3 minutes.' }
+} catch { Write-Warning "ngteams --prepare did not run: $_" }
 # On its first normal launch, the app sets this shortcut's AppUserModelID and toast activator properties and
 # registers its native COM notification server. Setup does not launch a sending client to do that.
 $program = 'HKCU:/Software/Classes/ngteams.msteams'

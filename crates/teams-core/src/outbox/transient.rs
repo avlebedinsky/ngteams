@@ -227,7 +227,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
                 Tried::Denied(denied) => {
                     return TransientSent::Denied { reason: denied.clone() };
                 }
-                Tried::NotSent(reason) => return TransientSent::Dropped { reason },
+                Tried::NotSent(reason) | Tried::Offline(reason) => return TransientSent::Dropped { reason },
                 Tried::Throttled { wait, .. } => return self.wait_transient(transient, wait, waited),
                 Tried::Uncertain(error) => {
                     return TransientSent::Dropped {

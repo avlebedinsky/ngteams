@@ -9,7 +9,7 @@ use teams_core::{CallAction, CallId, CallParticipant, CallStatus, CallView};
 use teams_media::devices::file::PatternCamera;
 use teams_media::session::SHARING_LINE;
 
-use super::engines::{A_TONE, B_TONE, Engine, FRAMES, wait_until};
+use super::engines::{A_TONE, B_TONE, Engine, FRAMES, Screen, wait_until};
 use super::group_media::{C_TONE, Mixed, connect_all, group_chat, hang_up_all};
 use crate::support::backends;
 
@@ -211,6 +211,102 @@ async fn a_shared_screen_reaches_the_others_until_it_stops() {
         for (engine, told) in [(&a, a_told), (&c, c_told)] {
             stopped(engine, SHARING_LINE, "b's screen", told).await;
         }
+        hang_up_all(&mut [&mut a, &mut b, &mut c], &calls).await;
+        for engine in [a, b, c] {
+            engine.shut_down().await;
+        }
+        mixed.stop().await;
+    }
+}
+
+/// How many frames of a still screen a viewer must show of each share: more than the screen gave.
+const STILL_SHOWN: u64 = 10;
+
+/// Waits until `engine` shows `sharer` sharing in `call` and its sharing line [`STILL_SHOWN`] frames of a 16:9 screen
+/// more than `before`.
+async fn sees_screen(engine: &mut Engine, call: CallId, sharer: &str, before: u64) {
+    engine
+        .view(call, |view| party(view, sharer).is_some_and(|party| party.sharing))
+        .await;
+    let what = format!("{}: {sharer}'s still screen", engine.mri);
+    wait_until(&what, || {
+        let seen = engine.seen(SHARING_LINE);
+        seen.frames >= before + STILL_SHOWN && (shape(seen.width, seen.height) - 16.0 / 9.0).abs() < 0.1
+    })
+    .await;
+    eprintln!("{what}: {:?}", engine.seen(SHARING_LINE));
+}
+
+/// Waits until `engine` shows that `sharer` shares no more in `call`.
+async fn sees_share_end(engine: &mut Engine, call: CallId, sharer: &str) {
+    engine
+        .view(call, |view| party(view, sharer).is_some_and(|party| !party.sharing))
+        .await;
+}
+
+/// `sharer` shares its screen in `call` (`on`) or stops.
+async fn share(sharer: &Engine, call: CallId, on: bool) {
+    sharer.call(CallAction::Share { call, on }).await;
+}
+
+/// A screen that holds still (as a desktop's does while nothing on it changes) reaches a late joiner: it joins while b
+/// shares and sees b's screen too, from a keyframe of b's last picture.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_late_joiner_sees_a_still_screen_that_is_shared() {
+    for backend in backends() {
+        let mixed = Mixed::start(backend).await;
+        let mut a = mixed.engine("Ada", A_TONE).await;
+        let mut b = mixed.engine_sharing("Bert", B_TONE, Screen::Still).await;
+        let mut c = mixed.engine("Cora", C_TONE).await;
+        let chat = group_chat(&a, &[&b, &c], &[]).await;
+        let mut calls = connect_all(&chat, &mut [&mut a, &mut b]).await;
+        let rung = c.incoming().await;
+        c.call(CallAction::Decline { call: rung.call }).await;
+        let sharer = b.mri.clone();
+        share(&b, calls[1], true).await;
+        sees_screen(&mut a, calls[0], &sharer, 0).await;
+        // c joins the call while b shares: b's screen comes to it too
+        assert!(c.handle.sync().await.unwrap().failed.is_empty());
+        let joined = c.call(CallAction::Join { chat: chat.clone() }).await;
+        c.status(joined, &CallStatus::Connected).await;
+        calls.push(joined);
+        sees_screen(&mut c, joined, &sharer, 0).await;
+        hang_up_all(&mut [&mut a, &mut b, &mut c], &calls).await;
+        for engine in [a, b, c] {
+            engine.shut_down().await;
+        }
+        mixed.stop().await;
+    }
+}
+
+/// A still screen shared, stopped and shared again reaches the others each time, and so does another's share that
+/// starts after it stopped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_still_screen_shared_again_and_another_s_share_after_it_reach_the_others() {
+    for backend in backends() {
+        let mixed = Mixed::start(backend).await;
+        let mut a = mixed.engine("Ada", A_TONE).await;
+        let mut b = mixed.engine_sharing("Bert", B_TONE, Screen::Still).await;
+        let mut c = mixed.engine_sharing("Cora", C_TONE, Screen::Still).await;
+        let chat = group_chat(&a, &[&b, &c], &[]).await;
+        let calls = connect_all(&chat, &mut [&mut a, &mut b, &mut c]).await;
+        mixed.connected(&mixed.open_call().await, 3).await;
+        let (b_mri, c_mri) = (b.mri.clone(), c.mri.clone());
+        for round in 1..=2 {
+            let before = (a.seen(SHARING_LINE).frames, c.seen(SHARING_LINE).frames);
+            share(&b, calls[1], true).await;
+            eprintln!("b shares, round {round}");
+            sees_screen(&mut a, calls[0], &b_mri, before.0).await;
+            sees_screen(&mut c, calls[2], &b_mri, before.1).await;
+            share(&b, calls[1], false).await;
+            sees_share_end(&mut a, calls[0], &b_mri).await;
+            sees_share_end(&mut c, calls[2], &b_mri).await;
+        }
+        // c shares after b stopped: a and b see c's screen
+        let before = (a.seen(SHARING_LINE).frames, b.seen(SHARING_LINE).frames);
+        share(&c, calls[2], true).await;
+        sees_screen(&mut a, calls[0], &c_mri, before.0).await;
+        sees_screen(&mut b, calls[1], &c_mri, before.1).await;
         hang_up_all(&mut [&mut a, &mut b, &mut c], &calls).await;
         for engine in [a, b, c] {
             engine.shut_down().await;

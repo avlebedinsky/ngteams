@@ -106,7 +106,7 @@ impl CallStage {
     /// Opens or closes the Call health pane, as More → Settings → Call health does; it opens on its overview.
     pub fn show_health(&mut self, open: bool, cx: &mut Context<Self>) {
         if open {
-            self.pane = Pane::Health;
+            self.open_pane(Pane::Health, cx);
             self.effects = None;
             match self.health.as_mut().filter(|pane| pane.call == self.call) {
                 Some(pane) => pane.page = None,

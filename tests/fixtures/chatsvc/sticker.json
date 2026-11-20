@@ -1,0 +1,82 @@
+{
+  "_synthetic": "Written synthetic-from-capture, made-up values: a's sticker in the a-b 1:1 chat, team-manage runs of 2026-11-19 (captures team-manage/20261119T163307Z as a and 20261119T164448Z as b, read locally). A click on a sticker in the web client's Stickers tab puts it in the compose box; Send posts it. Sent, the content is the sticker's GIF on Teams' public sticker CDN (no AMS upload, amsreferences empty) in a readonly element of itemtype Sticker labelled by its aria-label and title, between two blank paragraphs; read back, the readonly wrapper and the img's data-image-* attributes are gone and the paragraphs are apart by CRLF. The pack folder, the file and the label are made up. captioned_compose is the compose box of a sticker after Edit sticker (a PNG drawn in the page) and the AMS object its send created; that send's PUT never finished under the capture, so its message is not here. <guid:a>, <guid:b> are lab accounts' object ids; tests fill them in; <blob> stands for the page's blob id. See docs/protocol/chat.md.",
+  "request": {
+    "method": "POST",
+    "path": "/api/chatsvc/<region>/v1/users/ME/conversations/19%3A<guid:a>_<guid:b>%40unq.gbl.spaces/messages",
+    "body": {
+      "id": "-1",
+      "type": "Message",
+      "conversationid": "19:<guid:a>_<guid:b>@unq.gbl.spaces",
+      "conversationLink": "blah/19:<guid:a>_<guid:b>@unq.gbl.spaces",
+      "from": "8:orgid:<guid:a>",
+      "fromUserId": "8:orgid:<guid:a>",
+      "composetime": "2026-01-01T00:01:10.000Z",
+      "originalarrivaltime": "2026-01-01T00:01:10.000Z",
+      "content": "<p>&nbsp;</p><readonly aria-label=\"A made-up sticker says &quot;Hi there&quot;\" contenteditable=\"false\" itemtype=\"http://schema.skype.com/Sticker\" title=\"A made-up sticker says &quot;Hi there&quot;\"><img src=\"https://teams.public.onecdn.static.microsoft/evergreen-assets/stickerassets/madeup-250x250/en-us/MadeUp_HiThere.gif?v=5\" height=\"180\" alt=\"A made-up sticker says &quot;Hi there&quot;\" width=\"180\" data-image-type=\"standard\" data-image-mode=\"single\" itemtype=\"http://schema.skype.com/Sticker\"></readonly><p>&nbsp;</p>",
+      "messagetype": "RichText/Html",
+      "contenttype": "Text",
+      "imdisplayname": "Lab A",
+      "clientmessageid": "8888888888888888888",
+      "callId": "",
+      "state": 0,
+      "version": "0",
+      "amsreferences": [],
+      "properties": {
+        "importance": "",
+        "subject": "",
+        "title": "",
+        "cards": "[]",
+        "links": "[]",
+        "mentions": "[]",
+        "onbehalfof": null,
+        "files": "[]",
+        "policyViolation": null,
+        "formatVariant": "TEAMS"
+      },
+      "crossPostChannels": []
+    }
+  },
+  "response": {
+    "status": 201,
+    "body": {"OriginalArrivalTime": 1767225670000}
+  },
+  "read_back": {
+    "sequenceId": 104,
+    "conversationid": "19:<guid:a>_<guid:b>@unq.gbl.spaces",
+    "conversationLink": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/conversations/19:<guid:a>_<guid:b>@unq.gbl.spaces",
+    "contenttype": "Text",
+    "type": "Message",
+    "amsreferences": [],
+    "fromGivenNameInToken": "Lab",
+    "id": "1767225670000",
+    "clientmessageid": "8888888888888888888",
+    "version": "1767225670000",
+    "messagetype": "RichText/Html",
+    "content": "<p>&nbsp;</p>\r\n<img src=\"https://teams.public.onecdn.static.microsoft/evergreen-assets/stickerassets/madeup-250x250/en-us/MadeUp_HiThere.gif?v=5\" height=\"180\" alt=\"A made-up sticker says &quot;Hi there&quot;\" width=\"180\" itemtype=\"http://schema.skype.com/Sticker\">\r\n<p>&nbsp;</p>",
+    "from": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/contacts/8:orgid:<guid:a>",
+    "imdisplayname": "Lab A",
+    "composetime": "2026-01-01T00:01:10.0000000Z",
+    "originalarrivaltime": "2026-01-01T00:01:10.0000000Z",
+    "properties": {
+      "mentions": "[]",
+      "cards": "[]",
+      "links": "[]",
+      "files": "[]",
+      "formatVariant": "TEAMS"
+    }
+  },
+  "captioned_compose": {
+    "compose_box": "<p data-placeholder=\"Type a message\"><br data-cke-filler=\"true\"></p><readonly aria-label=\"A made-up caption\" contenteditable=\"false\" itemtype=\"http://schema.skype.com/Sticker\" title=\"A made-up caption\"><img src=\"blob:https://teams.cloud.microsoft/<blob>\" width=\"240\" height=\"180\" data-image-type=\"standard\" data-image-mode=\"single\" itemscope=\"image/png\" itemtype=\"http://schema.skype.com/CachedImage\" alt=\"Sticker image, A made-up caption\" data-cache-key=\"<blob>\"></readonly><p><br data-cke-filler=\"true\"></p>",
+    "object": {
+      "method": "POST",
+      "path": "/v1/objects/",
+      "body": {
+        "type": "pish/image",
+        "permissions": {"19:<guid:a>_<guid:b>@unq.gbl.spaces": ["read"]},
+        "sharingMode": "Inline",
+        "filename": "MicrosoftTeams-image.png"
+      },
+      "then": "PUT /v1/objects/<object>/content/imgpsh with the PNG; the browser cancelled it each time under the capture"
+    }
+  }
+}

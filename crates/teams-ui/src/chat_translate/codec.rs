@@ -138,7 +138,13 @@ fn encode_node(node: &Node, out: &mut String, shells: &mut Shells) {
             let _ = write!(out, "</x{n}>");
         }
         // a table's cells keep their words: no shell holds a row or a cell
-        Node::Break | Node::Mention { .. } | Node::Image(_) | Node::Code(_) | Node::Rule | Node::Table(_) => {
+        Node::Break
+        | Node::Mention { .. }
+        | Node::Image(_)
+        | Node::Sticker(_)
+        | Node::Code(_)
+        | Node::Rule
+        | Node::Table(_) => {
             let n = shells.add(Shell::Atom(node.clone()));
             let _ = write!(out, "<x{n}/>");
         }
@@ -389,9 +395,9 @@ fn restore_lost_atoms(built: &mut Vec<Node>, shells: &Shells, used: &[bool]) {
         .iter()
         .zip(used)
         .filter_map(|(shell, used)| match shell {
-            Shell::Atom(node @ (Node::Mention { .. } | Node::Image(_) | Node::Code(_) | Node::Table(_))) if !used => {
-                Some(node.clone())
-            }
+            Shell::Atom(
+                node @ (Node::Mention { .. } | Node::Image(_) | Node::Sticker(_) | Node::Code(_) | Node::Table(_)),
+            ) if !used => Some(node.clone()),
             _ => None,
         })
         .collect();

@@ -81,6 +81,31 @@ Other selected fields (`categories`, `cleanGlobalObjectId`, `iCalUid`, `lastModi
   scripts (`JoinMeetingSplitButton`'s two items), since the lab's calendar app didn't start under the fence (its
   `POST /owa/startupdata.ashx` was on a contacting service with no row; a carve-out since 2026-11-03). It copies the event's join link.
 
+## Reminders
+
+An event's reminder is its `isReminderSet` and `reminderMinutesBeforeStart` (an event read whole carries both; the
+lab's calendar view answers, 2026-11-06, carried neither, though the web client's reader copies them when present).
+Outlook gives an invitee's copy the invitee's own default reminder, 15 minutes; the scheduling form's default is 15
+minutes too.
+
+The web client's own reminder (read 2026-11-19 from its bundle) is behind a remote switch that is off by default
+(`enableMeetingReminder`): when on, it shows one toast 10 minutes before an accepted or organized online meeting
+(not the event's reminder time), only when the app runs at that moment, with a button that opens the meeting's chat;
+no snooze. The desktop Outlook-style reminder the user knows from Teams on Windows and Mac is not in the web bundle.
+
+The native client reminds as Outlook does, by the event's own reminder (`teams_ui::meeting_reminder`): an online
+meeting, neither cancelled nor declined nor all day, whose reminder is set. The view's event lacking the fields is
+read whole, and again every 5 minutes while it starts within 2 hours (or within its reminder, when longer) so that a
+reminder changed during the run is seen; a meeting that ended is not read. Until the first read answers nothing is
+shown, a failed first read leaves the default 15 minutes, and a failed read again keeps the last one. From the
+reminder time until the start the notice says "Starts in N minutes", and at the start "Starting now" (in the same
+notice's place), until the meeting ends; a run that starts after the reminder time reminds at once, one that starts
+more than 10 minutes after the start doesn't. Join (the calendar's Join), Snooze (the desktop notice's for 5 minutes;
+the window card's 1, 5, 10 or 15 minutes, or until it starts) and Dismiss; a meeting that moves is reminded anew, its
+old notice closed, and one cancelled, declined or deleted closes its notice. The calendar is read from the service
+every 5 minutes (and the store every 15 s), so the reminders don't need the calendar view. Settings → Notifications →
+Meetings → "Meeting reminders" turns them off; notifications off and Do not disturb show none.
+
 ## Writing an event
 
 Written 2026-10-31 from the web client's code (the bundle the lab keeps, read locally) and the `ab-meeting` captures

@@ -6,6 +6,10 @@ use std::path::{Path, PathBuf};
 
 use crate::{Error, Format, IDENTITY, MARKER, Version, error};
 
+/// The Nix store: a copy in it cannot replace its own files, and only Nix updates it.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(crate) const NIX_STORE: &str = "/nix/store";
+
 /// What [`Installation::detect`] reads: the process's executable and its AppImage environment, where a package's
 /// download waits, and the user's directories an update must never replace.
 #[derive(Clone, Debug)]
@@ -67,6 +71,10 @@ impl Installation {
     #[cfg(unix)]
     pub fn detect(places: &Places) -> Result<Self, Error> {
         let executable = fs::canonicalize(executable_on_disk(places.executable.clone()))?;
+        #[cfg(not(target_os = "macos"))]
+        if let Some((root, install)) = nix_install(&executable, Path::new(NIX_STORE)) {
+            return Self::made(places, root, executable, Format::Nix(install));
+        }
         if let (Some(image), Some(appdir)) = (&places.appimage, &places.appdir)
             && executable.starts_with(Path::new(appdir))
         {
@@ -78,23 +86,13 @@ impl Installation {
         }
         #[cfg(target_os = "macos")]
         if let Some(bundle) = app_bundle(&executable) {
-            fs::read_to_string(bundle.join(MARKER))
-                .ok()
-                .and_then(|marker| Format::from_marker(&marker))
+            read_marker(&bundle)
                 .filter(|format| *format == Format::MacApp)
                 .ok_or_else(|| error(NOT_A_RELEASE))?;
             return Self::made(places, bundle, executable, Format::MacApp);
         }
-        let prefix = executable
-            .parent()
-            .filter(|bin| bin.ends_with("usr/bin"))
-            .and_then(Path::parent)
-            .and_then(Path::parent)
-            .ok_or_else(|| error(NOT_A_RELEASE))?;
-        let format = fs::read_to_string(prefix.join(MARKER))
-            .ok()
-            .and_then(|marker| Format::from_marker(&marker))
-            .ok_or_else(|| error(NOT_A_RELEASE))?;
+        let prefix = release_tree(&executable).ok_or_else(|| error(NOT_A_RELEASE))?;
+        let format = read_marker(prefix).ok_or_else(|| error(NOT_A_RELEASE))?;
         if format == Format::Archive && prefix.file_name().is_none_or(|name| name != crate::FOLDER) {
             return Err(error(
                 "To update itself, the unpacked release has to stay in its own folder named ngteams. Rename its \
@@ -268,6 +266,40 @@ fn plain(path: PathBuf) -> PathBuf {
         Some(rest) if rest.as_bytes().get(1) == Some(&b':') && !rest.contains('?') => PathBuf::from(rest),
         _ => path,
     }
+}
+
+/// The release tree that `executable` runs from: the folder that holds its `usr/bin`.
+#[cfg(unix)]
+fn release_tree(executable: &Path) -> Option<&Path> {
+    executable
+        .parent()
+        .filter(|bin| bin.ends_with("usr/bin"))
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+}
+
+/// The format that the [`MARKER`] in `root` names.
+#[cfg(unix)]
+fn read_marker(root: &Path) -> Option<Format> {
+    fs::read_to_string(root.join(MARKER))
+        .ok()
+        .and_then(|marker| Format::from_marker(&marker))
+}
+
+/// The folder and the kind of the Nix install that `executable` runs from, when it is in `store`: the release tree
+/// (the folder that holds `usr/bin`) and its marker, else the executable's folder and [`crate::NixInstall::Other`].
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(crate) fn nix_install(executable: &Path, store: &Path) -> Option<(PathBuf, crate::NixInstall)> {
+    if !executable.starts_with(store) {
+        return None;
+    }
+    let tree = release_tree(executable);
+    let install = tree
+        .and_then(read_marker)
+        .and_then(Format::nix)
+        .unwrap_or(crate::NixInstall::Other);
+    let root = tree.or_else(|| executable.parent())?;
+    Some((root.to_path_buf(), install))
 }
 
 /// The app bundle `executable` runs from (`<name>.app/Contents/MacOS/<program>`), if it does.

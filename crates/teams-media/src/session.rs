@@ -65,10 +65,14 @@ pub use crate::rtc::{SHARING_LINE, SdpAnswer, SdpOffer};
 pub(crate) use crate::video::convert::to_buffer as to_rtc_buffer;
 use control::Control;
 pub use control::SourceRequest;
+pub use keyframes::START_KEYFRAMES_FOR;
+#[cfg(feature = "test-support")]
+pub use keyframes::SenderCounts;
 use video::{CameraLoop, ScreenLoop, VideoShared};
-pub use video::{RemoteSinks, VideoParts, VideoStats};
+pub use video::{RemoteSinks, SCREEN_IDLE_REPEAT, SCREEN_SETTLE, VideoParts, VideoStats};
 
 mod control;
+mod keyframes;
 mod video;
 
 /// How long the capture thread waits for the microphone before it checks whether to stop.
@@ -630,6 +634,7 @@ impl MediaSession {
         let stop = Arc::new(AtomicBool::new(false));
         let looped = ScreenLoop {
             shared: Arc::clone(&self.shared),
+            peer: Arc::clone(&self.peer),
             source,
             screen,
             stop: Arc::clone(&stop),
@@ -677,6 +682,7 @@ impl MediaSession {
         let stop = Arc::new(AtomicBool::new(false));
         let looped = ScreenLoop {
             shared: Arc::clone(&self.shared),
+            peer: Arc::clone(&self.peer),
             source,
             screen,
             stop: Arc::clone(&stop),
@@ -687,6 +693,29 @@ impl MediaSession {
         video.screen = Some((stop, handle));
         self.peer.set_group_screen_sending(true);
         Ok(())
+    }
+
+    /// Has the screen thread make a keyframe of the shared screen at its next read of its sender's counts: the call's
+    /// media controller asked for the screen again, as when a viewer starts to watch it (`controlVideoStreaming`).
+    /// Nothing while no screen goes out.
+    pub fn ask_screen_keyframe(&self) {
+        self.shared.video.screen_asked.store(true, Ordering::Relaxed);
+    }
+
+    /// What libwebrtc counted of the shared screen's sender: the far end's requests for a keyframe, and the keyframes
+    /// made. None while no screen goes out.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn screen_sender_counts(&self) -> Option<SenderCounts> {
+        self.peer.screen_sender().as_ref().and_then(SenderCounts::read)
+    }
+
+    /// Stops sending the shared screen and gives it back, so that it goes on in the session that replaces this one (the
+    /// call's media set up again); `None` when no screen is shared or its stream ended. Nothing is negotiated: the
+    /// session is let go next.
+    #[must_use]
+    pub fn take_screen(&self) -> Option<Box<dyn VideoSource>> {
+        self.video.lock().unwrap_or_else(PoisonError::into_inner).take_screen()
     }
 
     /// Stops sharing the screen in a group call: its thread stopped, the sharing line's encoding off (the line still

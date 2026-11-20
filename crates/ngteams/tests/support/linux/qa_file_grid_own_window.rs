@@ -13,13 +13,16 @@
 //! - **Five files** in one message (a zip, two videos, a PDF and a picture): five cards, two in a row at most, 10 px
 //!   apart, inside the message's bubble, never the line "This message has content that cannot be shown here". Teams
 //!   Light and Teams Dark.
-//! - **The actions**: Share on the videos alone; Share's "Copy link"; "More options" (Teams' rows: "Open in desktop
+//! - **The actions**: Share on the videos alone; Share opens "Share this file" (task 543); "More options" (Teams' rows: "Open in desktop
 //!   app", "Download", "Share", "Copy link"; a video's has no "Open"): "Download" saves the bytes b sent, "Copy link"
 //!   puts the file's link on the clipboard, "Open in desktop app" saves the file and opens it; a click on a video's
 //!   picture plays it in the card.
 //! - **The location**: each card's second line names its owner by name (`personal > Bert Made-Up`), never by the
 //!   account's id.
 //! - **Text over two files** in a second message: its text and two cards in one row; "Download" of its video.
+//! - **Shared on** (task 543): c (a third made-up account, a client in the parent) has a 1:1 chat with a and cannot
+//!   read b's video. a picks c in "Share this file" with the keys and shares the video. Then c's engine reads all of
+//!   the video's bytes, and a's chat with c shows the video's card.
 //!
 //! Every name, address and file is made up; nothing leaves loopback. Screenshots go to `target/ui-shots/qa525-own-*.png`,
 //! and also to the directory `QA_FILE_GRID_OWN_EVIDENCE` names. Without weston 15, niri, `dbus-daemon`, `ffmpeg` or
@@ -107,6 +110,8 @@ const UNSHOWN: &str = "This message has content that can't be shown here";
 /// The people: user name, display name.
 const A: (&str, &str) = ("ada@own.example.test", "Ada Made-Up");
 const B: (&str, &str) = ("bert@own.example.test", "Bert Made-Up");
+/// The account a shares b's file with (task 543).
+const C: (&str, &str) = ("cara@own.example.test", "Cara Made-Up");
 
 /// The text of the second message.
 const NOTE: &str = "Made-up note over two files: the rota and the crowd clip.";
@@ -216,6 +221,7 @@ fn parent() -> SandboxResult {
     let server = BinaryServer::start(&binary)?;
     let a_oid = server.add_user(A.0, A.1)?;
     server.add_user(B.0, B.1)?;
+    server.add_user(C.0, C.1)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -223,13 +229,15 @@ fn parent() -> SandboxResult {
     let ca = server.ca_file.to_string_lossy().into_owned();
     let at = (server.origin.as_str(), ca.as_str());
     let (_, bert) = own_account(&dir.path().join("b"), at, B.0, false)?;
-    let outcome = walk(&sandbox, at, dir.path(), &files, (&bert, &runtime, &a_oid));
+    let (_, cara) = own_account(&dir.path().join("c"), at, C.0, false)?;
+    let outcome = walk(&sandbox, at, dir.path(), &files, ((&bert, &runtime, &a_oid), &cara));
     let log = server.log();
     for evidence in evidence_dirs() {
         let _ = fs::create_dir_all(&evidence);
         let _ = fs::write(evidence.join("qa525-own-server.log"), &log);
     }
     bert.handle.shutdown();
+    cara.handle.shutdown();
     if let Err(error) = outcome {
         return Err(format!("{error}{}", sandbox.logs()).into());
     }
@@ -248,7 +256,13 @@ type Bert<'a> = (
     &'a str,
 );
 
-fn walk(sandbox: &Sandbox, server: (&str, &str), dir: &Path, files: &MadeFiles, bert: Bert<'_>) -> SandboxResult {
+fn walk(
+    sandbox: &Sandbox,
+    server: (&str, &str),
+    dir: &Path,
+    files: &MadeFiles,
+    (bert, cara): (Bert<'_>, &AccountEngine<MemorySecretStore>),
+) -> SandboxResult {
     let downloads = dir.join("downloads");
     fs::create_dir_all(&downloads)?;
     let mut run = AppRun::launch(sandbox, server, &dir.join("a"), &downloads)?;
@@ -266,9 +280,18 @@ fn walk(sandbox: &Sandbox, server: (&str, &str), dir: &Path, files: &MadeFiles, 
             },
         };
         ctx.sender.chat_with(a_oid)?;
+        let cara = Sender {
+            engine: cara,
+            runtime,
+            chat: String::new(),
+        };
+        let mut cara = cara;
+        cara.chat_with(a_oid)?;
+        cara.say_hello()?;
         ctx.five()?;
         ctx.five_actions()?;
-        ctx.text_and_two()
+        ctx.text_and_two()?;
+        ctx.share_on(&cara)
     })();
     if let Err(error) = outcome {
         return Err(run.fail(sandbox, &*error));
@@ -292,6 +315,18 @@ impl Sender<'_> {
         }))?;
         self.chat = made.message_id.ok_or("b's chat with a was not made")?;
         step(&format!("b made the chat {}", self.chat));
+        Ok(())
+    }
+
+    /// A line in the chat, so a's chat list names the chat after its sender.
+    fn say_hello(&self) -> SandboxResult {
+        let row = self.runtime.block_on(self.engine.handle.write(Action::Send {
+            conversation: self.chat.clone(),
+            text: MessageText::plain("Made-up hello")?,
+        }))?;
+        if row.state != teams_store::OutboxState::Sent {
+            return Err(format!("the hello is not sent: {:?}", row.state).into());
+        }
         Ok(())
     }
 
@@ -442,7 +477,7 @@ impl Walk<'_> {
         };
         let link = |at: usize| item.links.get(at).cloned().unwrap_or_default();
         self.share_slots(*zip, *video);
-        self.share(*video, &link(1))?;
+        self.share(*video)?;
         let [pack, _, _, plan, _] = self.files.five();
         self.download(0, pack, "the zip")?;
         self.copy_link(3, &link(3), "the PDF")?;
@@ -471,20 +506,25 @@ impl Walk<'_> {
         ));
     }
 
-    /// Share on a video's card: its menu's "Copy link" puts the file's link on the clipboard.
-    fn share(&mut self, video: Rect, link: &str) -> SandboxResult {
-        let menu = self
-            .run
-            .open_menu(self.sandbox, share_at(video), "qa525-own-share-menu-light.png")?;
-        let Some(menu) = menu else {
-            note("Share on a video's card opens no menu".to_owned());
+    /// Share on a video's card opens "Share this file" (task 543); Escape closes it.
+    fn share(&mut self, video: Rect) -> SandboxResult {
+        let (x, y) = share_at(video);
+        self.run.click(x, y)?;
+        thread::sleep(SETTLE);
+        self.run.shot(self.sandbox, "qa525-own-share-dialog-light.png")?;
+        if !dialog_shown(&self.run.last) {
+            note("Share on a video's card opens no \"Share this file\"".to_owned());
             return Ok(());
-        };
-        let copied = self.run.click_copies(self.sandbox, row_at(menu, 0, 1))?;
-        if copied != link {
-            note(format!("Share's Copy link copies {copied:?}, expected {link}"));
         }
-        step("Share's Copy link copies the file's link");
+        self.run.input.key(keys::ESC)?;
+        thread::sleep(SETTLE);
+        self.run.shot(self.sandbox, "qa525-own-share-dialog-closed-light.png")?;
+        if dialog_shown(&self.run.last) {
+            note("Escape leaves \"Share this file\" open".to_owned());
+            self.run.input.key(keys::ESC)?;
+            thread::sleep(SETTLE);
+        }
+        step("Share opens \"Share this file\"");
         Ok(())
     }
 
@@ -648,6 +688,130 @@ impl Walk<'_> {
     }
 }
 
+// --- shared on (task 543) ---
+
+impl Walk<'_> {
+    /// a shares b's video of the second message with c from "Share this file"; c had no access to it, and c's engine
+    /// then reads all of its bytes, as c's app opens it.
+    fn share_on(&mut self, cara: &Sender<'_>) -> SandboxResult {
+        let crowd = &self.files.two()[1];
+        self.run.open(&self.sender.chat)?;
+        let state = self.run.until("the second message's two files", |state| {
+            state.items.last().is_some_and(|item| item.files.len() == 2)
+        })?;
+        let link = state
+            .items
+            .last()
+            .and_then(|item| item.links.get(1).cloned())
+            .ok_or("no link of the video")?;
+        let reads = cara.engine.handle.requests();
+        if let Ok(size) = cara.runtime.block_on(reads.file_size(link.clone())) {
+            note(format!(
+                "c reads b's video ({size} bytes) before anyone shared it with c"
+            ));
+        }
+        thread::sleep(SETTLE);
+        let cards = last_message(&self.cards_now("share-on-cards")?);
+        let Some(video) = cards.get(1).copied() else {
+            note(format!("share on: no video's card on the screen: {cards:?}"));
+            return Ok(());
+        };
+        let (x, y) = share_at(video);
+        self.run.click(x, y)?;
+        thread::sleep(SETTLE);
+        self.run.shot(self.sandbox, "qa543-own-share-dialog-light.png")?;
+        if !dialog_shown(&self.run.last) {
+            note("share on: Share on the video's card opens no \"Share this file\"".to_owned());
+            return Ok(());
+        }
+        self.run.input.type_text("Cara")?;
+        thread::sleep(Duration::from_millis(1200));
+        self.run.shot(self.sandbox, "qa543-own-share-suggested-light.png")?;
+        self.run.input.key(keys::DOWN)?;
+        self.run.input.key(keys::ENTER)?;
+        thread::sleep(SETTLE);
+        self.run.shot(self.sandbox, "qa543-own-share-picked-light.png")?;
+        self.run.input.key(keys::ENTER)?;
+        let toast = wait_until(WAIT, || {
+            self.run
+                .question("toast")
+                .ok()
+                .filter(|toast| toast.contains("You've shared"))
+        });
+        self.run.shot(self.sandbox, "qa543-own-shared-light.png")?;
+        if toast.is_none() || dialog_shown(&self.run.last) {
+            note(format!(
+                "share on: the share to c did not finish (toast {toast:?}, dialog {})",
+                dialog_shown(&self.run.last)
+            ));
+            return Ok(());
+        }
+        let read = wait_until(WAIT, || {
+            let size = cara.runtime.block_on(reads.file_size(link.clone())).ok()?;
+            let len = u32::try_from(size).ok()?;
+            cara.runtime.block_on(reads.file_range(link.clone(), 0, len)).ok()
+        });
+        match read {
+            None => note("share on: c cannot read b's video after a shared it with c".to_owned()),
+            Some(range) if range.bytes != crowd.bytes => note(format!(
+                "share on: c reads {} bytes of b's video that differ from what b sent",
+                range.bytes.len()
+            )),
+            Some(_) => step("share on: c reads all of b's video after a shared it"),
+        }
+        self.run.open(&cara.chat)?;
+        let shown = self.run.until("the shared video in a's chat with c", |state| {
+            state
+                .items
+                .iter()
+                .any(|item| item.files.iter().any(|name| name == crowd.name))
+        });
+        if let Err(error) = shown {
+            note(format!("share on: {error}"));
+        }
+        self.check_owner_named(crowd.name);
+        self.check_owner_known_to(cara);
+        thread::sleep(SETTLE);
+        self.run.shot(self.sandbox, "qa543-own-shown-light.png")?;
+        Ok(())
+    }
+
+    /// c, who has no chat with b, gets b's name for the card of b's file (round 2): c's chat view names a file's
+    /// owner by what c's engine finds about b.
+    fn check_owner_known_to(&self, cara: &Sender<'_>) {
+        let owner = self.sender.engine.handle.me().to_owned();
+        let named = wait_until(WAIT, || {
+            let person = cara.runtime.block_on(cara.engine.handle.person(owner.clone())).ok()?;
+            (person.name.as_deref() == Some(B.1)).then_some(())
+        });
+        if named.is_some() {
+            step(&format!("share on: c's engine names the owner {:?}", B.1));
+        } else {
+            let last = cara.runtime.block_on(cara.engine.handle.person(owner.clone()));
+            note(format!(
+                "share on: c's engine does not name b, the owner of the shared video: {last:?}"
+            ));
+        }
+    }
+
+    /// The card of `file` in the open chat names b as its owner: b sends nothing in that chat, and the card names b
+    /// as it does in b's chat.
+    fn check_owner_named(&mut self, file: &str) {
+        let owner = format!("personal > {}", B.1);
+        let named = self.run.until("the owner's name on the shared video's card", |state| {
+            state.items.iter().any(|item| {
+                item.files
+                    .iter()
+                    .zip(&item.locations)
+                    .any(|(name, location)| name == file && *location == owner)
+            })
+        });
+        if let Err(error) = named {
+            note(format!("share on: {error}"));
+        }
+    }
+}
+
 /// Checks the cards found on `shot` against `grid`; each difference is a finding.
 fn check_grid(shot: &image::RgbImage, cards: &[Rect], look: Look, what: &str, grid: Grid, path: &Path) {
     let what = format!("{what} ({}, {})", look.name, path.display());
@@ -757,6 +921,14 @@ const fn picture_at(card: Rect) -> (u32, u32) {
 /// "More options" (…) at the header's right end: a button of Teams' 27 px.
 const fn more_at(card: Rect) -> (u32, u32) {
     (card.x1 - 25, card.y0 + HEADER / 2)
+}
+
+/// Whether "Share this file" is on the screen: its 600 px box's surface in the middle of the screen, over the dimmed
+/// window (Teams Light).
+fn dialog_shown(shot: &image::RgbImage) -> bool {
+    let (x, y) = (SCREEN.0 / 2 - 295, SCREEN.1 / 2);
+    let dimmed = at(shot, x - 10, y).iter().all(|&channel| channel < 200);
+    near(at(shot, x, y), LIGHT.surface, 3) && dimmed
 }
 
 /// Share, left of "More options".
@@ -1618,6 +1790,7 @@ fn on_shell(shell: &Entity<Shell>, verb: &str, cx: &App) -> String {
             .read(cx)
             .chat()
             .map_or_else(|| json!({"chat": "", "items": []}), |view| state_of(view.read(cx))),
+        "toast" => json!(shell.read(cx).toast().map(ToString::to_string).unwrap_or_default()),
         "players" => {
             let states: Vec<String> = teams_ui::video_player::players(cx)
                 .iter()

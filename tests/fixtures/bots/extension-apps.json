@@ -1,0 +1,82 @@
+{
+  "_synthetic": "Made up, in the shape of the middle tier's answer to POST beta/users/apps/aggregatedEntitlements?appbarview=userpinned (docs/protocol/apps.md) with apps that have message extensions (inputExtensions, docs/protocol/bots.md, 'Message extensions'), every value made up: ids are <guid:...> placeholders the mock fills in (teams_mock::extension_apps), the links example.invalid. The shapes of inputExtensions (botId, fetchCommands, commands with id, type, context, title, description, parameters, initialRun, fetchTask, taskInfo) follow the lab's catalogue reads of 2026-11-14; no name, link or id of a real app is used.",
+  "value": {
+    "userEntitlements": {
+      "<guid:a>": [
+        {"id": "<guid:app-finder>", "state": "Installed"},
+        {"id": "<guid:app-praise>", "state": "InstalledAndPermanent"},
+        {"id": "<guid:app-tasks>", "state": "Installed"},
+        {"id": "<guid:app-tickets>", "state": "Featured"}
+      ]
+    },
+    "definitions": {
+      "<guid:app-finder>": {
+        "id": "<guid:app-finder>",
+        "name": "Made-up Finder",
+        "developerName": "Made-up Apps",
+        "shortDescription": "Find made-up records and share them in a chat.",
+        "largeImageUrl": "https://example.invalid/finder.png",
+        "accentColor": "#4F6BED",
+        "bots": [{"id": "<guid:bot-finder>", "scopes": ["Personal", "Team", "GroupChat"]}],
+        "inputExtensions": [{
+          "botId": "<guid:bot-finder>",
+          "scopes": ["Personal", "Team", "GroupChat"],
+          "commands": [
+            {"id": "findRecords", "context": ["Compose", "Commandbox"], "initialRun": true, "title": "Find records",
+             "description": "Search the made-up records",
+             "parameters": [{"name": "keyword", "title": "Keyword", "description": "Search by name or number", "isRequired": false}]},
+            {"id": "newRecord", "type": "Action", "context": ["Compose", "Message"], "fetchTask": true, "title": "New record",
+             "description": "Make a record from a form"}
+          ],
+          "messageHandlers": [],
+          "type": "botBased"
+        }]
+      },
+      "<guid:app-praise>": {
+        "id": "<guid:app-praise>",
+        "name": "Made-up Praise",
+        "developerName": "Made-up Apps",
+        "shortDescription": "Thank people with a made-up badge.",
+        "accentColor": "#6264A7",
+        "inputExtensions": [{
+          "botId": "<guid:bot-praise>",
+          "commands": [
+            {"id": "sendPraise", "type": "Action", "context": ["Compose", "Commandbox"], "title": "Send praise to people",
+             "taskInfo": {"title": "Send praise to people", "width": "600", "height": "532", "url": "https://example.invalid/praise"}}
+          ],
+          "type": "botBased"
+        }]
+      },
+      "<guid:app-tasks>": {
+        "id": "<guid:app-tasks>",
+        "name": "Made-up Tasks",
+        "developerName": "Made-up Apps",
+        "shortDescription": "Make a task from a message.",
+        "accentColor": "#038387",
+        "inputExtensions": [{
+          "botId": "<guid:bot-tasks>",
+          "fetchCommands": true,
+          "commands": [
+            {"id": "taskFromMessage", "type": "Action", "context": ["Message"], "fetchTask": true, "title": "Create task",
+             "description": "Make a task from this message"}
+          ],
+          "type": "botBased"
+        }]
+      },
+      "<guid:app-tickets>": {
+        "id": "<guid:app-tickets>",
+        "name": "Made-up Tickets",
+        "developerName": "Made-up Apps",
+        "shortDescription": "File a made-up ticket.",
+        "accentColor": "#0078D4",
+        "inputExtensions": [{
+          "botId": "<guid:bot-tickets>",
+          "commands": [
+            {"id": "fileTicket", "type": "Action", "context": ["Message", "Compose"], "fetchTask": true, "title": "File a ticket"}
+          ],
+          "type": "botBased"
+        }]
+      }
+    }
+  }
+}

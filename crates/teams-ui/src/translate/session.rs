@@ -17,7 +17,6 @@
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -26,7 +25,7 @@ use std::time::Duration;
 
 use super::{LineKey, instructions};
 pub use crate::local_ai::Failure;
-use crate::local_ai::{Backend, Launch, Model, Tool, Work, cap};
+use crate::local_ai::{Backend, Launch, Model, Target, Tool, Work, cap};
 
 /// How long a wait for the next caption polls before it looks at whether the session was dropped.
 const POLL: Duration = Duration::from_millis(100);
@@ -70,7 +69,7 @@ impl Default for Limits {
 #[derive(Clone, Debug)]
 pub struct Spec {
     pub backend: Backend,
-    pub program: PathBuf,
+    pub target: Target,
     pub model: Model,
     /// The target language's English name, as the instructions name it.
     pub language: &'static str,
@@ -318,7 +317,7 @@ impl Worker {
     fn start(&self) -> Result<Tool, Failure> {
         let launch = Launch {
             backend: self.spec.backend,
-            program: self.spec.program.clone(),
+            target: self.spec.target.clone(),
             work: Work::Captions,
             model: self.spec.model.clone(),
             instructions: instructions(self.spec.language),

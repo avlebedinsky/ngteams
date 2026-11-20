@@ -1095,7 +1095,7 @@ fn a_model_typed_is_used_when_the_tool_can_take_it(shell: &Entity<Shell>, cx: &m
     assert_eq!(
         settings_of(shell, cx).caption_translator,
         AiChoice {
-            tool: ToolChoice::Only(Backend::Claude),
+            tool: ToolChoice::cli(Backend::Claude),
             model: Model::Named("claude-next".to_owned()),
         }
     );
@@ -1112,16 +1112,18 @@ fn a_model_typed_is_used_when_the_tool_can_take_it(shell: &Entity<Shell>, cx: &m
 /// The recaps' summarizer: its own choice, and Automatic offers no model by name.
 fn the_recaps_summarizer_is_kept_apart(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     // the recaps' summarizer has the same control, kept apart; Automatic offers no model by name
+    click(cx, "recap-summarizer");
     click(cx, "recap-summarizer-codex");
     click(cx, "recap-summarizer-model");
     click(cx, "recap-summarizer-model-gpt-6.1-sol");
     assert_eq!(
         settings_of(shell, cx).recap_summarizer,
         AiChoice {
-            tool: ToolChoice::Only(Backend::Codex),
+            tool: ToolChoice::cli(Backend::Codex),
             model: Model::Named("gpt-6.1-sol".to_owned()),
         }
     );
+    click(cx, "recap-summarizer");
     click(cx, "recap-summarizer-automatic");
     click(cx, "recap-summarizer-model");
     assert!(bounds(cx, "recap-summarizer-model-recommended").is_some());
@@ -1141,9 +1143,10 @@ fn every_ai_setting_picks_its_tool_then_any_model_the_tool_lists_or_one_typed() 
     synthetic_ai_tools(cx);
     ai_pickers_shown(&shell, cx);
     let captions = |cx: &mut VisualTestContext| settings_of(&shell, cx).caption_translator;
-    let claude = ToolChoice::Only(Backend::Claude);
+    let claude = ToolChoice::cli(Backend::Claude);
 
     // a tool chosen comes with its recommended model; its models are listed, with its own default and Other
+    click(cx, "caption-translator");
     click(cx, "caption-translator-claude");
     assert_eq!(captions(cx), AiChoice::of(claude));
     click(cx, "caption-translator-model");
@@ -1167,14 +1170,15 @@ fn every_ai_setting_picks_its_tool_then_any_model_the_tool_lists_or_one_typed() 
     a_model_typed_is_used_when_the_tool_can_take_it(&shell, cx);
 
     // another tool: its recommended model again
+    click(cx, "caption-translator");
     click(cx, "caption-translator-codex");
-    assert_eq!(captions(cx), AiChoice::of(ToolChoice::Only(Backend::Codex)));
+    assert_eq!(captions(cx), AiChoice::of(ToolChoice::cli(Backend::Codex)));
     assert!(bounds(cx, "caption-translator-model-name").is_none());
 
     the_recaps_summarizer_is_kept_apart(&shell, cx);
     assert_eq!(
         captions(cx),
-        AiChoice::of(ToolChoice::Only(Backend::Codex)),
+        AiChoice::of(ToolChoice::cli(Backend::Codex)),
         "each setting its own"
     );
 }
@@ -1183,7 +1187,7 @@ fn every_ai_setting_picks_its_tool_then_any_model_the_tool_lists_or_one_typed() 
 fn an_ai_setting_draws_without_its_tool_and_shows_a_model_set_that_isn_t_listed() {
     let rig = seeded();
     let settings = Settings {
-        caption_translator: AiChoice::of(ToolChoice::Only(Backend::Codex)),
+        caption_translator: AiChoice::of(ToolChoice::cli(Backend::Codex)),
         ..Settings::default()
     };
     let (shell, cx) = shell_window(&rig, settings, Arc::new(ViewTrace::off()));
@@ -1209,7 +1213,7 @@ fn an_ai_setting_draws_without_its_tool_and_shows_a_model_set_that_isn_t_listed(
             model.change(
                 |settings| {
                     settings.recap_summarizer = AiChoice {
-                        tool: ToolChoice::Only(Backend::Claude),
+                        tool: ToolChoice::cli(Backend::Claude),
                         model: Model::Named("from-the-file".to_owned()),
                     };
                 },
@@ -1449,6 +1453,163 @@ fn the_first_run_screen_shows_over_everything_until_it_is_confirmed() {
         let model = model.read(cx);
         !model.sends_typing() && model.sends_read_receipts() && model.sends_presence()
     }));
+}
+
+#[test]
+fn the_ai_notice_shows_once_after_the_first_run_and_no_ai_runs_before_the_answer() {
+    let rig = seeded();
+    // the lab app's settings in the tests do not ask
+    let (_, cx) = shell_window(&rig, Settings::default(), Arc::new(ViewTrace::off()));
+    assert!(bounds(cx, "ai-notice").is_none());
+    // the app asks after the first run's screen
+    let model = SettingsModel::in_memory(Settings::default()).requiring_first_run();
+    let (shell, cx) = shell_window_with(&rig, model, Arc::new(ViewTrace::off()));
+    assert!(bounds(cx, "first-run").is_some());
+    assert!(bounds(cx, "ai-notice").is_none(), "the first run's screen comes first");
+    click(cx, "first-run-confirm");
+    assert!(bounds(cx, "ai-notice").is_some());
+    let points = [
+        "ai-notice-features",
+        "ai-notice-providers",
+        "ai-notice-data",
+        "ai-notice-later",
+        "ai-notice-on",
+    ];
+    assert_drawn(cx, &points, true);
+    assert!(teams_ui::ai_notice::DATA.contains("Nothing goes to ngteams or Microsoft"));
+    assert!(
+        !cx.update(|_, cx| teams_ui::local_ai::enabled(cx)),
+        "no AI runs before the answer"
+    );
+    click(cx, "ai-notice-off");
+    assert!(bounds(cx, "ai-notice").is_none(), "gone once answered");
+    assert_eq!(settings_of(&shell, cx).ai_features, Some(false));
+    assert!(!cx.update(|_, cx| teams_ui::local_ai::enabled(cx)));
+    // the next start keeps the answer: nothing asks again
+    let kept = settings_of(&shell, cx);
+    let (_, cx) = shell_window_with(
+        &rig,
+        SettingsModel::in_memory(kept).requiring_first_run(),
+        Arc::new(ViewTrace::off()),
+    );
+    assert_drawn(cx, &["first-run", "ai-notice"], false);
+}
+
+#[test]
+fn an_upgrade_asks_about_the_ai_features_once_and_keep_on_turns_them_on() {
+    let rig = seeded();
+    // a build without the notice confirmed the first run's screen
+    let upgraded = Settings {
+        first_run: FirstRunState::Confirmed,
+        ..Settings::default()
+    };
+    let (shell, cx) = shell_window_with(
+        &rig,
+        SettingsModel::in_memory(upgraded).requiring_first_run(),
+        Arc::new(ViewTrace::off()),
+    );
+    assert!(bounds(cx, "first-run").is_none() && bounds(cx, "ai-notice").is_some());
+    click(cx, "ai-notice-on");
+    assert!(bounds(cx, "ai-notice").is_none());
+    assert_eq!(settings_of(&shell, cx).ai_features, Some(true));
+    assert!(cx.update(|_, cx| teams_ui::local_ai::enabled(cx)));
+}
+
+#[test]
+fn use_ai_features_off_hides_every_ai_control_and_on_brings_them_back() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig, Settings::default(), Arc::new(ViewTrace::off()));
+    // no tool of this computer is asked while the settings are drawn
+    cx.update(|_, cx| {
+        cx.set_global(Tools::default());
+        cx.set_global(Catalog::with(Vec::new(), Vec::new()));
+    });
+    click(cx, "chat-row-1");
+    let chat_controls = ["chat-translate", "compose-ai"];
+    assert_drawn(cx, &chat_controls, true);
+    cx.update(|_, cx| shell.update(cx, Shell::show_settings));
+    let settings_boxes = [
+        "ai-providers",
+        "chat-translator",
+        "message-corrector",
+        "message-translator",
+    ];
+    assert_drawn(cx, &settings_boxes, true);
+    click(cx, "use-ai-features");
+    assert_eq!(settings_of(&shell, cx).ai_features, Some(false));
+    assert!(bounds(cx, "use-ai-features").is_some(), "the switch stays");
+    assert_drawn(cx, &settings_boxes, false);
+    // nothing is asked of a tool or an API while it is off, not even which tools are installed
+    cx.update(|_, cx| {
+        cx.remove_global::<Tools>();
+        cx.remove_global::<Catalog>();
+        assert!(matches!(
+            teams_ui::local_ai::pick(&ToolChoice::Automatic, cx),
+            Err(teams_ui::local_ai::Failure::Off)
+        ));
+        assert_eq!(Tools::of(cx), Tools::default());
+        Tools::look_again(cx);
+        assert!(!cx.has_global::<Tools>(), "no look for the tools");
+        assert_eq!(Catalog::of(cx), Catalog::default());
+        assert!(!cx.has_global::<Catalog>(), "no tool asked for its models");
+    });
+    cx.update(|_, cx| {
+        cx.set_global(Tools::default());
+        cx.set_global(Catalog::with(Vec::new(), Vec::new()));
+    });
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.show_chats(window, cx)));
+    click(cx, "chat-row-1");
+    assert_drawn(cx, &chat_controls, false);
+    // on again: all comes back as before
+    cx.update(|_, cx| shell.update(cx, Shell::show_settings));
+    click(cx, "use-ai-features");
+    assert_eq!(settings_of(&shell, cx).ai_features, Some(true));
+    assert_drawn(cx, &settings_boxes, true);
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.show_chats(window, cx)));
+    click(cx, "chat-row-1");
+    assert_drawn(cx, &chat_controls, true);
+}
+
+#[test]
+fn the_appearance_page_lists_the_message_box_buttons_that_can_hide() {
+    use teams_ui::settings::ComposeTool;
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig, Settings::default(), Arc::new(ViewTrace::off()));
+    cx.update(|_, cx| shell.update(cx, Shell::show_settings));
+    click(cx, "settings-page-appearance");
+    let switches = [
+        "compose-tool-format",
+        "compose-tool-emoji",
+        "compose-tool-attach",
+        "compose-tool-loop",
+        "compose-tool-ai",
+    ];
+    assert_drawn(cx, &switches, true);
+    click(cx, "compose-tool-emoji");
+    assert_eq!(settings_of(&shell, cx).compose_hidden, [ComposeTool::Emoji]);
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.show_chats(window, cx)));
+    click(cx, "chat-row-1");
+    assert!(bounds(cx, "compose-emoji").is_none(), "the box follows the switch");
+    assert!(bounds(cx, "compose-attach").is_some());
+    // with the AI features off, the AI button has no row
+    cx.update(|_, cx| {
+        shell.update(cx, |shell, cx| {
+            shell
+                .settings()
+                .update(cx, |model, cx| model.set_ai_features(false, cx));
+        });
+    });
+    cx.update(|_, cx| shell.update(cx, Shell::show_settings));
+    click(cx, "settings-page-appearance");
+    assert_drawn(cx, &switches[..4], true);
+    assert_drawn(cx, &["compose-tool-ai"], false);
+}
+
+/// Asserts that each of `selectors` is drawn (`shown`), or that none is.
+fn assert_drawn(cx: &mut VisualTestContext, selectors: &[&str], shown: bool) {
+    for selector in selectors {
+        assert_eq!(bounds(cx, selector).is_some(), shown, "{selector} drawn: {shown}");
+    }
 }
 
 /// A settings model kept in a file of its own, so packs can be imported.

@@ -105,7 +105,16 @@ repeated native code across executables, with four compression threads. Extracti
 restores up to four independent archives in parallel. Every shard uses `/workspace`, so compile-time fixture paths
 and source maps stay valid.
 
-Docker Buildx uses a shared GHA image cache (`mode=min`); only the build job exports it. Cargo registry/Git sources
+Docker Buildx uses a shared GHA image cache (`mode=min`); only the build job exports it.
+The build job deletes the local Buildx cache after the image export and load. It keeps the loaded image.
+It deletes bootstrap build files except `proto-lab` before it compiles the instrumented targets.
+It removes static symbol tables from the test executables and keeps the LLVM coverage sections.
+These executables lose symbol names in backtraces. Their tests and coverage counts stay the same.
+After each shard archive succeeds, the bundle script deletes that shard's source executables.
+The common files and dependency artifacts stay for the dependency cache. Each archive keeps the executable's coverage maps.
+The build job reports disk space before and after the bundle step, including when the bundle step fails.
+
+Cargo registry/Git sources
 and the pinned Linux x64 libwebrtc SDK have separate caches. A shard whose source cache is missing fetches the
 locked sources itself, because several tests run Cargo offline. Instrumented third-party dependencies are saved only
 when their compressed archive fits 1 GiB; larger archives are discarded without saving an empty cache entry.
@@ -391,7 +400,8 @@ dir (`scripts/macos-gstreamer.sh`, no admin), then formats, checks and lints eve
 crates compile to nothing there) and runs the offline tests of the crates with macOS code of their own: files, logs,
 stores, authentication with the Keychain store's round trip against the runner's unlocked login keychain
 (`NGTEAMS_KEYCHAIN_TESTS=1`), the control socket and CLI, the runner, updates, the sign-in guard and the native device
-backend's catalog, the app's own and the lab's files (`ngteams`'s `accounts_file::paths` and `lab_mode` tests: the
+backend's catalog, libwebrtc's factory with its H.264 codec list (a binary linked without the `-ObjC` of
+`.cargo/config.toml` aborts there), the app's own and the lab's files (`ngteams`'s `accounts_file::paths` and `lab_mode` tests: the
 Application Support layout, case-only spellings, the console runner's marker), and the macOS notifications' tags and
 actions (`teams-ui`'s `desktop::macos`, no notification center reached). Builds use `CARGO_INCREMENTAL=0` and no debug info to fit the runner's disk.
 
@@ -455,6 +465,39 @@ from it doesn't update itself. The macOS bundle carries `Contents/Resources/ngte
 (`macos-app`): its update unpacks the next zip with `ditto` beside the installed bundle, checks its marker, version,
 programs and code signature (`codesign --verify --deep --strict`), and swaps the bundles by two renames.
 
+### The Nix flake
+
+`flake.nix` at the repository root packages the release's Linux archive for Nix (`packaging/nix/`): the package, a
+NixOS module and a Home Manager module. `packaging/nix/release.json` holds the release that the flake installs: its
+version, and for each Nix system the archive's URL and its SRI hash. The package does not build the workspace. It runs
+the release's binaries in a `buildFHSEnv`, because they and the downloaded WPE runtime expect FHS paths
+(`/lib64/ld-linux-x86-64.so.2`, `/usr/bin/bwrap`, `/usr/bin/xdg-dbus-proxy`), and nixpkgs has no WPE WebKit 2.54. The
+package writes `nix-profile`, `nix-nixos` or `nix-home-manager` into the tree's `update-format`, so that the app shows
+the right nix command in place of a download (`crates/teams-update`, `Format::Nix`). `nix run` and the overlay write
+`nix`: such a copy does not know how it was installed, so the app shows no command. Under Nix, the sign-in worker also
+gives WebKit's sandbox `/nix/store` (and `/run/opengl-driver`) read-only, because the FHS environment's libraries are
+links into the store (`crates/teams-wpe/src/engine/nix.rs`).
+
+The `nix` workflow (`.github/workflows/nix.yml`) keeps `release.json` on the newest published release. It starts
+each time a release run on `main` ends, in any state, also when a newer push cancelled that run after `publish`. It
+has its own concurrency group without `cancel-in-progress`. A run that has started always ends. A run that waits can
+give its place to a newer run, and that run also writes the newest release. It finds the newest published app release (drafts and
+the `web-engine-<key>` prereleases do not count), downloads its `SHA256SUMS` and runs `scripts/release-nix.py`,
+which writes `release.json` from it. The script does not replace a file of the same or a newer release. The workflow
+commits the file to `main` as `github-actions[bot]` with `[skip ci]` and pushes with the workflow's own token
+(`contents: write`), so no new secret is necessary. If `main` moved, it rebases and tries again, three times. That
+commit cannot start a release loop:
+
+- a push with the workflow's own token starts no workflow;
+- `[skip ci]` skips the push workflows of that commit;
+- the release's `paths` leave out `packaging/nix/**`, and Coverage, macOS and Windows leave out `flake.nix`,
+  `flake.lock` and `packaging/nix/**`.
+
+To write the file again, run the `nix` workflow by hand (`workflow_dispatch`), or run
+`python3 scripts/release-nix.py <version> SHA256SUMS packaging/nix/release.json` with that release's `SHA256SUMS`.
+`nix flake check` evaluates the two modules and the package (it builds nothing large). CI does not run Nix: check a
+change to `packaging/nix/` locally, for example in the `docker.io/nixos/nix` image.
+
 ### The Windows installer
 
 `packaging/windows/ngteams.iss` is an [Inno Setup](https://jrsoftware.org/isinfo.php) 7 script, compiled by
@@ -478,13 +521,18 @@ removal of the previous version that failed on a held file, from where the marke
 program, the app's own notification registration, and the shortcut and `msteams:` handler unless they now open
 another copy (a zip's), and keeps `%LOCALAPPDATA%\ngteams` and Credential Manager. The app's updater runs the installer
 with `/VERYSILENT /UPDATEPID=<pid> /DIR=<folder>`: it waits for the app to exit, upgrades, and starts it again, the previous
-version when the upgrade fails. The `windows` job installs and uninstalls it on the
-runner with `scripts/test-windows-installer.ps1` (never starting the app) and checks every installed program file
-against the zip's `PACKAGE-MANIFEST.json`.
+version when the upgrade fails. After the files are in place, setup runs `ngteams.exe --prepare` and waits for it
+(two minutes at most): Microsoft Defender checks each new, unsigned program file on its first use, often for 10 s or
+more, and `GStreamer` lists its plugins. Thus setup does that work, not the first start (`crates/ngteams/src/prepare.rs`).
+The zip's `Install.ps1` does the same. The `windows` job installs and uninstalls it on the runner with
+`scripts/test-windows-installer.ps1` (which starts the app only as that `--prepare` run) and checks every installed
+program file against the zip's `PACKAGE-MANIFEST.json`.
 
 ### Windows code signing
 
-Nothing is signed yet, so SmartScreen may warn on the installer and the app (the README says how to proceed). The
+Nothing is signed yet, so SmartScreen may warn on the installer and the app (the README says how to proceed). Defender
+marks each unsigned file "not trusted" and checks it in the cloud on its first use (on a test VM, 10-16 s for one
+file); a trusted signature can make that check shorter. The
 hook is `scripts/package-release-windows.ps1 -SignCommand '<command>'`: an Inno Setup sign tool command line, `$f`
 for the quoted file and `$q` for a quote, for example `signtool.exe sign /fd sha256 /td sha256 /tr <timestamp URL>
 /f <certificate> $f`. It signs `ngteams.exe`, `ngteams-webview.exe` and `ngteamsctl.exe` before they are staged (so

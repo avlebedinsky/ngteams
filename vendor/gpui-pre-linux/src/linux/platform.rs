@@ -777,11 +777,15 @@ impl Platform for LinuxPlatform {
         #[cfg(any(feature = "wayland", feature = "x11"))]
         self.foreground_executor()
             .spawn(async move {
-                let title = if options.directories {
-                    "Open Folder"
-                } else {
-                    "Open File"
-                };
+                let title = options.title.as_ref().map_or(
+                    if options.directories {
+                        "Open Folder"
+                    } else {
+                        "Open File"
+                    },
+                    gpui::SharedString::as_str,
+                );
+                let filters: Vec<_> = options.filters.iter().map(file_filter).collect();
 
                 let request = match ashpd::desktop::file_chooser::OpenFileRequest::default()
                     .identifier(identifier.await)
@@ -790,6 +794,8 @@ impl Platform for LinuxPlatform {
                     .accept_label(options.prompt.as_ref().map(gpui::SharedString::as_str))
                     .multiple(options.multiple)
                     .directory(options.directories)
+                    .current_filter(filters.first().cloned())
+                    .filters(filters)
                     .send()
                     .await
                 {
@@ -1221,6 +1227,28 @@ pub(super) fn reveal_path_internal(
 pub(super) fn is_within_click_distance(a: Point<Pixels>, b: Point<Pixels>) -> bool {
     let diff = a - b;
     diff.x.abs() <= DOUBLE_CLICK_DISTANCE && diff.y.abs() <= DOUBLE_CLICK_DISTANCE
+}
+
+/// The portal's filter of `filter`: a glob for each extension, in lower and upper case (the portal's globs match
+/// case), and its MIME types; `*` when it names neither.
+#[cfg(any(feature = "wayland", feature = "x11"))]
+fn file_filter(filter: &gpui::PathPromptFilter) -> ashpd::desktop::file_chooser::FileFilter {
+    let mut file_filter = ashpd::desktop::file_chooser::FileFilter::new(&filter.name);
+    if filter.extensions.is_empty() && filter.mime_types.is_empty() {
+        return file_filter.glob("*");
+    }
+    for extension in &filter.extensions {
+        let lower = extension.to_lowercase();
+        let upper = extension.to_uppercase();
+        file_filter = file_filter.glob(&format!("*.{lower}"));
+        if upper != lower {
+            file_filter = file_filter.glob(&format!("*.{upper}"));
+        }
+    }
+    for mime_type in &filter.mime_types {
+        file_filter = file_filter.mimetype(mime_type);
+    }
+    file_filter
 }
 
 /// Creates an XKB context for keymaps supplied by Wayland or X11.

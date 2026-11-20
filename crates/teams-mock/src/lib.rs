@@ -125,7 +125,7 @@ use wiremock::matchers::{any, method};
 use wiremock::{Match, Mock, MockServer, Request, Respond, ResponseTemplate};
 
 pub use apps::{AppPlace, PRE_CONSENTED};
-pub use bots::{BotInvokeRecord, BotReply, bot_answer};
+pub use bots::{BotInvokeRecord, BotReply, bot_answer, extension_apps, extension_apps_answer};
 pub use calling::{ANSWERED_ELSEWHERE, CallPhase, Leg, MockCall, TIMED_OUT};
 pub use channels::{ChannelWrite, NOT_ADDED};
 pub use fixtures::FixtureError;
@@ -770,6 +770,38 @@ impl ChatServiceMock {
         true
     }
 
+    /// `mri`, someone in group call `id` with no client of its own (made up, or the caller the mock plays), sends the
+    /// live reaction `reaction` (`like`, `heart`, `laugh`, …) as its `sendMessage` does: everyone in the call is told.
+    /// `false` when it isn't in such a call.
+    #[must_use = "false says nobody reacted"]
+    pub fn react_made_up(&self, id: &str, mri: &str, reaction: &str) -> bool {
+        let mut state = self.lock();
+        let Some(index) = state
+            .calling
+            .calls
+            .iter()
+            .position(|call| call.id == id && call.roster.iter().any(|party| party.mri == mri && party.active))
+        else {
+            return false;
+        };
+        let name = state.calling.calls[index]
+            .roster
+            .iter()
+            .find(|party| party.mri == mri)
+            .and_then(|party| party.name.clone())
+            .unwrap_or_else(|| state.display_name(mri));
+        let body = serde_json::json!({
+            "from": {"id": mri, "displayName": name},
+            "messageContent": [{
+                "type": "Reaction",
+                "payload": {"values": [{"name": reaction, "count": 1}]},
+                "operationId": trouter::fill_guids("<guid:reaction>"),
+            }],
+        });
+        roster::react(&mut state, index, &body);
+        true
+    }
+
     /// Call `id`'s ring ends with `code` and `phrase` (its caller cancelled, it timed out: see [`TIMED_OUT`]). `false`
     /// when there is no such call.
     #[must_use = "false says there was no such call"]
@@ -881,14 +913,20 @@ impl ChatServiceMock {
     }
 
     /// The mixer of call `id` on `account`'s side tells the dominant speakers, newest first: the audio sources of
-    /// `speakers`' mixers. `false` without such a mixer.
+    /// `speakers`' mixers (of someone made up: the made-up source its roster entry lists). `false` without such a
+    /// mixer.
     #[cfg(feature = "media")]
     #[must_use = "false says nobody was told"]
     pub fn speak(&self, id: &str, account: &str, speakers: &[&str]) -> bool {
         let state = self.lock();
         let sources: Vec<i64> = speakers
             .iter()
-            .filter_map(|speaker| state.mixer_sources(id, speaker).map(|(audio, _)| audio))
+            .filter_map(|speaker| {
+                state
+                    .mixer_sources(id, speaker)
+                    .map(|(audio, _)| audio)
+                    .or_else(|| roster::made_up_audio(&state, id, speaker))
+            })
             .collect();
         state
             .peers

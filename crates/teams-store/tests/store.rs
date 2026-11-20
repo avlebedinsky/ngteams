@@ -254,7 +254,7 @@ fn the_topics_migration_takes_the_chats_without_a_topic_again() -> Result<(), St
          ALTER TABLE teams DROP COLUMN tenant_wide; ALTER TABLE teams DROP COLUMN channel_only; ALTER TABLE teams DROP COLUMN hidden;
          ALTER TABLE teams DROP COLUMN picture_etag; ALTER TABLE teams DROP COLUMN site; ALTER TABLE team_channels DROP COLUMN shown; ALTER TABLE team_channels DROP COLUMN kind; ALTER TABLE team_channels DROP COLUMN description; ALTER TABLE team_channels DROP COLUMN archived; ALTER TABLE team_channels DROP COLUMN owner; ALTER TABLE team_channels DROP COLUMN can_edit; ALTER TABLE team_channels DROP COLUMN can_delete; ALTER TABLE team_channels DROP COLUMN channel_group;
          DROP TABLE app_read_horizon; DROP TABLE calendar_events; DROP TABLE forgotten_conversations;
-         DROP TABLE message_translations; DROP TABLE sent_originals; DROP TABLE call_transcript_lines; DROP TABLE call_transcripts; DROP TABLE translation_glossary; DROP TABLE blocked_copies; DROP TABLE horizon_bookmarks; DROP VIEW pending_conversation_previews; DROP TABLE conversation_previews;
+         DROP TABLE message_translations; DROP TABLE sent_originals; DROP TABLE call_transcript_lines; DROP TABLE call_transcripts; DROP TABLE translation_glossary; DROP TABLE translated_messages; DROP TABLE blocked_copies; DROP TABLE horizon_bookmarks; DROP VIEW pending_conversation_previews; DROP TABLE conversation_previews;
          PRAGMA user_version = 9;",
     )
     .expect("back to schema 9");
@@ -1430,13 +1430,13 @@ fn the_forgotten_threads_migration_keeps_the_conversations_and_forgets_none() ->
     drop(store);
     // the store as schema 18 left it
     let raw = rusqlite::Connection::open(store_path(&dir)).expect("open directly");
-    raw.execute_batch("DROP TABLE forgotten_conversations; DROP TABLE message_translations; DROP TABLE sent_originals; DROP TABLE call_transcript_lines; DROP TABLE call_transcripts; DROP TABLE translation_glossary; DROP TABLE blocked_copies; DROP TABLE horizon_bookmarks; DROP VIEW pending_conversation_previews; DROP TABLE conversation_previews; PRAGMA user_version = 18;")
+    raw.execute_batch("DROP TABLE forgotten_conversations; DROP TABLE message_translations; DROP TABLE sent_originals; DROP TABLE call_transcript_lines; DROP TABLE call_transcripts; DROP TABLE translation_glossary; DROP TABLE translated_messages; DROP TABLE blocked_copies; DROP TABLE horizon_bookmarks; DROP VIEW pending_conversation_previews; DROP TABLE conversation_previews; PRAGMA user_version = 18;")
         .expect("back to schema 18");
     drop(raw);
 
     let mut store = open(&dir)?;
     assert_eq!(store.schema_version()?, SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 25);
+    assert_eq!(SCHEMA_VERSION, 27);
     assert_eq!(store.conversation(GROUP)?.map(|stored| stored.version), Some(3));
     assert_eq!(store.forgotten_thread(GROUP)?, None);
     store.forget_conversation(GROUP)?;
@@ -2336,4 +2336,94 @@ fn a_horizon_bookmark_keeps_the_later_time_and_goes_with_its_conversation() {
     assert_eq!(store.horizon_bookmark(CHAT).expect("moved"), Some(3000));
     store.forget_conversation(CHAT).expect("forget");
     assert_eq!(store.horizon_bookmark(CHAT).expect("gone"), None);
+}
+
+/// The a–b chat with two messages from the peer and our own newest, all read.
+fn read_chat(dir: &tempfile::TempDir) -> Result<Store, StoreError> {
+    let mut store = with_chat(dir)?;
+    for (at, sender) in [(1000, PEER), (2000, PEER), (3000, ME)] {
+        store.upsert_message(&message(&at.to_string(), at, "x", at, sender), None)?;
+    }
+    store.set_read_horizon(&ReadHorizon {
+        conversation_id: CHAT.to_owned(),
+        user: ME.to_owned(),
+        last_read_arrival: 3000,
+        updated: 3000,
+        raw: None,
+    })?;
+    Ok(store)
+}
+
+#[test]
+fn a_chat_marked_unread_counts_from_the_mark_whatever_its_horizon_and_newest_say() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = read_chat(&dir).expect("the chat, read");
+    assert_eq!(store.unread_count(CHAT, ME).expect("read"), 0);
+    assert_eq!(store.unread_mark(CHAT).expect("none"), None);
+
+    // "Mark as unread" on the first message
+    assert_eq!(
+        store.set_unread_bookmark(CHAT, 999, 5000).expect("marked"),
+        Applied::Inserted
+    );
+    assert_eq!(store.unread_mark(CHAT).expect("mark"), Some(999));
+    assert_eq!(store.horizon_bookmark(CHAT).expect("time"), Some(5000));
+    assert_eq!(store.unread_count(CHAT, ME).expect("theirs after the mark"), 2);
+    // the chat list's "Mark as unread" on our own newest message still makes it unread
+    store.set_unread_bookmark(CHAT, 2999, 6000).expect("moved");
+    assert_eq!(store.unread_count(CHAT, ME).expect("at least one"), 1);
+    assert_eq!(
+        store.set_unread_bookmark(CHAT, 999, 5500).expect("older"),
+        Applied::Ignored
+    );
+    assert_eq!(store.unread_mark(CHAT).expect("kept"), Some(2999));
+}
+
+#[test]
+fn a_later_mark_all_read_or_a_bookmark_of_zeros_ends_a_mark() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = read_chat(&dir).expect("the chat, read");
+    store.set_unread_bookmark(CHAT, 2999, 6000).expect("marked");
+    store
+        .set_app_read_horizon(AppReadHorizon { chat: 4000, channel: 0 })
+        .expect("all read before the mark");
+    assert_eq!(store.unread_mark(CHAT).expect("still marked"), Some(2999));
+    // a mark-all-read after the mark reads it as the rest, and tells the chat, though its newest message is older
+    let changed = store
+        .set_app_read_horizon(AppReadHorizon { chat: 7000, channel: 0 })
+        .expect("all read");
+    assert_eq!(changed, [CHAT], "the mark it ends");
+    assert_eq!(store.unread_count(CHAT, ME).expect("all read after the mark"), 0);
+    assert_eq!(store.unread_mark(CHAT).expect("ended by all read"), None);
+    let changed = store.set_app_read_horizon(AppReadHorizon::default()).expect("reset");
+    assert_eq!(changed, [CHAT], "the mark it brings back");
+    assert_eq!(store.unread_count(CHAT, ME).expect("marked again"), 1);
+    assert_eq!(store.unread_mark(CHAT).expect("back"), Some(2999));
+    // the chat opened again: `0;<ms>;0`
+    assert_eq!(store.set_horizon_bookmark(CHAT, 8000).expect("ended"), Applied::Updated);
+    assert_eq!(store.unread_mark(CHAT).expect("ended"), None);
+    assert_eq!(store.unread_count(CHAT, ME).expect("read again"), 0);
+}
+
+#[test]
+fn a_bookmark_stored_before_marks_existed_reads_as_no_mark() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = store_path(&dir);
+    {
+        let mut store = Store::open(&path).expect("open");
+        store
+            .upsert_conversation(&conversation(CHAT, ConversationKind::OneToOne, 1))
+            .expect("conversation");
+        store.set_horizon_bookmark(CHAT, 2000).expect("bookmark");
+    }
+    let raw = rusqlite::Connection::open(&path).expect("raw open");
+    raw.execute_batch("ALTER TABLE horizon_bookmarks DROP COLUMN arrival; PRAGMA user_version = 26;")
+        .expect("schema 26");
+    drop(raw);
+    let mut store = Store::open(&path).expect("migrated");
+    assert_eq!(store.schema_version().expect("version"), SCHEMA_VERSION);
+    assert_eq!(store.horizon_bookmark(CHAT).expect("kept"), Some(2000));
+    assert_eq!(store.unread_mark(CHAT).expect("no mark"), None);
+    store.set_unread_bookmark(CHAT, 999, 3000).expect("marked");
+    assert_eq!(store.unread_mark(CHAT).expect("mark"), Some(999));
 }

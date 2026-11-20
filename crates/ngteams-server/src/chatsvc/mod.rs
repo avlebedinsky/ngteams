@@ -9,7 +9,7 @@ mod create;
 mod events;
 mod member_repo;
 mod members;
-mod message_repo;
+pub(crate) mod message_repo;
 mod messages;
 mod mutations;
 mod properties;

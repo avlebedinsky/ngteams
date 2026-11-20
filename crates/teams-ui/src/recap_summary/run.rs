@@ -4,7 +4,6 @@
 //! tool's process. Nothing here logs the transcript, the notes or the summary.
 
 use std::fmt::Write as _;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -13,7 +12,7 @@ use std::time::Duration;
 use super::{
     FIX_REQUEST, Input, Line, Made, instructions, notes_instructions, parse, sections, stamp, transcript_text,
 };
-use crate::local_ai::{Backend, Failure, Launch, Model, Tool, Work, cap};
+use crate::local_ai::{Backend, Failure, Launch, Model, Target, Tool, Work, cap};
 
 /// The longest notes kept of one section.
 const MAX_NOTES: usize = 12_000;
@@ -77,7 +76,7 @@ pub enum Update {
 #[derive(Clone, Debug)]
 pub struct Request {
     pub backend: Backend,
-    pub program: PathBuf,
+    pub target: Target,
     pub model: Model,
     pub input: Input,
     pub limits: Limits,
@@ -176,13 +175,18 @@ impl Worker {
         };
         let message = format!("<meeting>\n{}</meeting>\n{material}", input.brief);
         let backend = self.request.backend;
+        let target = &self.request.target;
         let summary = self.with_tool(instructions(), |tool, wait, stop| {
             let end = input.end();
             if let Some(summary) = parse(&tool.ask(&message, wait, stop)?, end) {
                 return Ok(summary);
             }
-            parse(&tool.ask(FIX_REQUEST, wait, stop)?, end)
-                .ok_or_else(|| Failure::Stopped(backend, Some("its answer wasn't a summary. Try again.".to_owned())))
+            parse(&tool.ask(FIX_REQUEST, wait, stop)?, end).ok_or_else(|| {
+                target.named(Failure::Stopped(
+                    backend,
+                    Some("its answer wasn't a summary. Try again.".to_owned()),
+                ))
+            })
         })?;
         Ok(Made {
             summary,
@@ -211,7 +215,7 @@ impl Worker {
     ) -> Result<T, Failure> {
         let launch = Launch {
             backend: self.request.backend,
-            program: self.request.program.clone(),
+            target: self.request.target.clone(),
             work: Work::Summary,
             model: self.request.model.clone(),
             instructions,

@@ -474,6 +474,77 @@ impl Prepared for ReadReceipt {
     }
 }
 
+/// Marks a conversation unread from a message on, or ends that mark: `PUT
+/// v1/users/ME/conversations/<conversation>/properties?name=consumptionHorizonBookmark` with
+/// `{"consumptionHorizonBookmark": "<message id - 1>;<ms>;<clientmessageid>"}` ("Mark as unread" on a message, or on the
+/// chat list's row for its newest message), or `"0;<ms>;0"` (the chat opened again, or "Mark as read"). Seen in browser
+/// Teams on a chat and on a channel (`docs/protocol/chat.md`, "Mark as unread"). Nobody else is told.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnreadMark {
+    conversation: String,
+    from: Option<(u64, String)>,
+    time_ms: i64,
+}
+
+impl UnreadMark {
+    /// `conversation` unread from `message_id` (sent with `client_message_id`) on, now; `None` when the message id
+    /// isn't the arrival number a chat's message has.
+    #[must_use]
+    pub fn from_message(
+        conversation: impl Into<String>,
+        message_id: &str,
+        client_message_id: impl Into<String>,
+    ) -> Option<Self> {
+        let arrival = message_id.parse::<u64>().ok().filter(|id| *id > 0)?;
+        Some(Self {
+            conversation: conversation.into(),
+            from: Some((arrival - 1, client_message_id.into())),
+            time_ms: now_ms(),
+        })
+    }
+
+    /// The mark on `conversation` ended, now.
+    #[must_use]
+    pub fn cleared(conversation: impl Into<String>) -> Self {
+        Self {
+            conversation: conversation.into(),
+            from: None,
+            time_ms: now_ms(),
+        }
+    }
+
+    /// The same mark set at `time_ms`.
+    #[must_use]
+    pub fn at(mut self, time_ms: i64) -> Self {
+        self.time_ms = time_ms;
+        self
+    }
+
+    /// The bookmark as sent: `<message id - 1>;<ms>;<clientmessageid>`, or `0;<ms>;0`.
+    #[must_use]
+    pub fn bookmark(&self) -> String {
+        match &self.from {
+            Some((before, client_message_id)) => format!("{before};{};{client_message_id}", self.time_ms),
+            None => format!("0;{};0", self.time_ms),
+        }
+    }
+}
+
+impl Prepared for UnreadMark {
+    fn wire(&self) -> Option<Wire> {
+        let endpoint = Endpoint::new(["v1", "users", "ME", "conversations", &self.conversation, "properties"])
+            .with_query("name", "consumptionHorizonBookmark");
+        Some(Wire {
+            raw: None,
+            service: Service::ChatService,
+            headers: Vec::new(),
+            method: Method::Put,
+            endpoint,
+            body: Some(json!({"consumptionHorizonBookmark": self.bookmark()})),
+        })
+    }
+}
+
 /// Tells the chat the account is typing: the message post with `{"content": "", "contenttype":
 /// "Application/Message", "messagetype": "Control/Typing"}` (`writes.json`). Its target is [`WriteKind::Typing`] on
 /// the chat. Typing stopped (`Control/ClearTyping`) wasn't captured, so it isn't here.
@@ -766,7 +837,7 @@ fn properties(text: &MessageText) -> Map<String, Value> {
         ("importance", json!("")),
         ("subject", json!("")),
         ("title", json!("")),
-        ("cards", json!("[]")),
+        ("cards", json!(text.cards_property())),
         ("links", json!("[]")),
         ("mentions", json!(text.mentions_property())),
         ("onbehalfof", Value::Null),

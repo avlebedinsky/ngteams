@@ -1,6 +1,7 @@
 //! Chats translated on this computer (schema 20): each message's translation by its id, version and target language,
 //! and the account's own messages as written when they were sent translated; and each chat's glossary (schema 22),
-//! the renderings the translator chose for its terms, so a later translation keeps them. The app translates (`teams-ui`'s chat
+//! the renderings the translator chose for its terms, so a later translation keeps them; and the messages the user
+//! translated one at a time (schema 26), so they show translated again. The app translates (`teams-ui`'s chat
 //! translation); the store keeps what it made, so a later run shows it without asking the translator again. The rich
 //! text is kept as the text the app hands in; the store never reads it. `Debug` leaves the text out.
 
@@ -274,6 +275,55 @@ impl Store {
                 original.created_at,
             ],
         )?;
+        Ok(())
+    }
+
+    /// Which of the messages `message_ids` of `conversation_id` the user translated one at a time.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] when the read fails.
+    pub fn translated_messages(
+        &self,
+        conversation_id: &str,
+        message_ids: &[String],
+    ) -> Result<Vec<String>, StoreError> {
+        let mut found = Vec::new();
+        for chunk in message_ids.chunks(CHUNK) {
+            let marks = vec!["?"; chunk.len()].join(", ");
+            let sql = format!(
+                "SELECT message_id FROM translated_messages WHERE conversation_id = ? AND message_id IN ({marks})"
+            );
+            let values = std::iter::once(conversation_id).chain(chunk.iter().map(String::as_str));
+            let rows = self
+                .conn
+                .prepare(&sql)?
+                .query_map(params_from_iter(values), |row| row.get(0))?
+                .collect::<Result<Vec<String>, _>>()?;
+            found.extend(rows);
+        }
+        Ok(found)
+    }
+
+    /// Keeps that the user translated the message `message_id` of `conversation_id` one at a time (`translated`), or
+    /// that it shows as written again. One the store doesn't hold is left out.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] when the write fails.
+    pub fn set_translated_message(
+        &mut self,
+        conversation_id: &str,
+        message_id: &str,
+        translated: bool,
+    ) -> Result<(), StoreError> {
+        let sql = if translated {
+            "INSERT OR IGNORE INTO translated_messages (conversation_id, message_id)
+             SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM messages WHERE conversation_id = ?1 AND id = ?2)"
+        } else {
+            "DELETE FROM translated_messages WHERE conversation_id = ?1 AND message_id = ?2"
+        };
+        self.conn.execute(sql, params![conversation_id, message_id])?;
         Ok(())
     }
 

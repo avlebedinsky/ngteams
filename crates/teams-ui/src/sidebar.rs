@@ -946,16 +946,24 @@ impl Sidebar {
 /// Enter and Space open a chat or a channel, fold a section or a team, or follow a link; Right unfolds and Left folds, or
 /// goes up to the row's team or section; Shift+F10 or the menu key opens a team's "..." menu.
 impl Sidebar {
-    /// Gives the list the keyboard, on the selected row (or the first).
+    /// Gives the list the keyboard, on the open chat's or channel's row; without one, on the row it was on (or the
+    /// first).
     pub fn focus_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.cursor_at().is_none() {
-            let selected = self.list.read(cx).selected().map(str::to_owned);
-            let at = selected
-                .and_then(|id| self.entries.iter().position(|entry| entry.chat() == Some(id.as_str())))
-                .or_else(|| self.rows().next());
-            if let Some(at) = at {
-                self.set_cursor(at);
-            }
+        let chat = self.list.read(cx).selected().map(str::to_owned);
+        let channel = self.teams.read(cx).selected().map(str::to_owned);
+        let at = chat
+            .and_then(|id| self.entries.iter().position(|entry| entry.chat() == Some(id.as_str())))
+            .or_else(|| {
+                channel.and_then(|id| {
+                    self.entries
+                        .iter()
+                        .position(|entry| matches!(entry, Entry::Channel { id: channel, .. } if *channel == id))
+                })
+            })
+            .or_else(|| self.cursor_at())
+            .or_else(|| self.rows().next());
+        if let Some(at) = at {
+            self.set_cursor(at);
         }
         self.focus.focus(window, cx);
         cx.notify();
@@ -1024,6 +1032,9 @@ impl Sidebar {
             return false;
         };
         if crate::keyboard::opens_menu(event) {
+            if self.open_chat_menu(&entry, window, cx) {
+                return true;
+            }
             if let Entry::Channel { id, .. } | Entry::Favorite { id, .. } = &entry
                 && self.teams.read(cx).channel_location(id).is_some()
             {
@@ -1079,6 +1090,24 @@ impl Sidebar {
             },
             _ => return false,
         }
+        true
+    }
+
+    /// The menu key on a chat's row (in "Chats" or "Favorites"): its "More chat options" menu; `false` for any other
+    /// row, a channel's favourite too.
+    fn open_chat_menu(&mut self, entry: &Entry, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let (selector, id) = match entry {
+            Entry::Chat { index, id } => (format!("chat-row-{index}"), id),
+            Entry::Favorite { index, id } if self.teams.read(cx).channel_location(id).is_none() => {
+                (format!("favorite-row-{index}"), id)
+            }
+            _ => return false,
+        };
+        let Some(unread) = self.list.read(cx).row(id).map(|row| row.unread > 0) else {
+            return false;
+        };
+        self.list
+            .update(cx, |list, cx| list.open_row_menu(id, &selector, unread, window, cx));
         true
     }
 

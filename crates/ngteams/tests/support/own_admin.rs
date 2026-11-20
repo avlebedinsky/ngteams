@@ -27,12 +27,12 @@ const CHOSEN: &str = "chosen staple correct";
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
-fn setup_in(dir: &tempfile::TempDir) -> Setup {
+pub(crate) fn setup_in(dir: &tempfile::TempDir) -> Setup {
     let paths = PersonalPaths::new(dir.path().join("config/ngteams"), dir.path().join("share/ngteams"));
     Setup::new(paths).unwrap().with_secrets(AppSecrets::in_memory())
 }
 
-fn at(server: &OwnServer) -> accounts_file::OwnServer {
+pub(crate) fn at(server: &OwnServer) -> accounts_file::OwnServer {
     accounts_file::OwnServer::parse(&server.origin, &server.ca_file.display().to_string()).unwrap()
 }
 
@@ -46,7 +46,7 @@ static SESSIONS: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyL
 });
 
 /// The service of `account`, signed in under `setup`, as the app builds it over the account's session.
-fn service(setup: &Setup, account: &PersonalAccount) -> TestResult<AdminService<AppSecrets>> {
+pub(crate) fn service(setup: &Setup, account: &PersonalAccount) -> TestResult<AdminService<AppSecrets>> {
     let cloud = account.cloud()?;
     let region = Region::load(&setup.paths.region_file(account).ok_or("the account's region file")?)?;
     let session = Session::new(

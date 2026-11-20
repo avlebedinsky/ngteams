@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{LAB_B, Rig, Written};
-use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext, point, px};
+use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext, point, px, size};
 use teams_core::{
     AVAILABLE_REFRESH, Availability, Choice, EngineError, Event, OwnStatus, RegistrationReport, Reporting, Transient,
     TransientSent,
@@ -669,6 +669,23 @@ fn the_account_s_own_dot_is_not_one_of_the_others_presence_dots() {
     // the shell's own chats are empty here: any `presence-…` dot would be the account's, and there is none
     assert!(bounds(cx, "presence-available").is_none());
     assert!(bounds(cx, "presence-unknown").is_none());
+}
+
+#[test]
+fn the_title_bar_s_account_and_its_dot_stay_whole_in_a_narrow_window() {
+    let (rig, _, _, cx) = shell_with_own(Settings::default());
+    registered(&rig);
+    let right_gap = |cx: &mut VisualTestContext| {
+        let face = bounds(cx, "title-account").expect("the title bar's account is drawn");
+        let dot = bounds(cx, "title-account-dot").expect("its dot is drawn");
+        let width = cx.update(|window, _| window.viewport_size().width);
+        assert!(dot.right() <= width, "the dot {dot:?} is inside the window {width:?}");
+        width - face.right()
+    };
+    cx.simulate_resize(size(px(1280.0), px(800.0)));
+    let wide = right_gap(cx);
+    cx.simulate_resize(size(px(480.0), px(800.0)));
+    assert_eq!(right_gap(cx), wide, "the same space right of the account as at 1280 px");
 }
 
 /// An endpoint a registration of this test registered: [`register`] over a fake transport that takes every plain

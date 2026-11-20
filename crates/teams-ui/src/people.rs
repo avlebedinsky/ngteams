@@ -10,7 +10,7 @@ use std::fmt;
 use std::ops::Deref;
 use std::sync::Arc;
 
-use gpui::{AnyElement, Image, ImageFormat, IntoElement as _, Pixels, SharedString, Styled as _};
+use gpui::{AnyElement, Image, ImageFormat, IntoElement as _, Pixels, SharedString, Styled as _, px};
 use gpui_component::avatar::Avatar;
 use gpui_component::{Sizable as _, Size};
 use teams_core::{NameFrom, Person};
@@ -89,6 +89,12 @@ impl Picture {
     pub fn image(&self) -> &Arc<Image> {
         &self.0
     }
+
+    /// The picture of PNG `bytes`.
+    #[must_use]
+    pub fn png(bytes: Vec<u8>) -> Self {
+        Self(Arc::new(Image::from_bytes(ImageFormat::Png, bytes)))
+    }
 }
 
 impl Deref for Picture {
@@ -137,9 +143,60 @@ pub fn avatar(name: Option<&SharedString>, picture: Option<&Picture>, size: Size
     let mut avatar = Avatar::new().with_size(size);
     if let Some(shown) = name.map(|name| initials(name)).filter(|shown| !shown.is_empty()) {
         avatar = avatar.name(initials::kit_name(&shown));
+        if let Size::Size(side) = size {
+            avatar = custom_initials(avatar, f32::from(side));
+        }
     }
     if let Some(picture) = picture {
         avatar = avatar.src(Arc::clone(picture.image()));
     }
     avatar
+}
+
+/// The initials of an avatar `side` px across, in the middle of its circle at Teams' size. The kit gives custom-size
+/// initials a box of half the side and no text size of their own: they took the size of the text round them, and a
+/// small face drew them under its middle, cut by the circle.
+fn custom_initials(avatar: Avatar, side: f32) -> Avatar {
+    avatar
+        .text_size(px(initials_size(side)))
+        .line_height(px(side * 0.5))
+        .text_center()
+        .whitespace_nowrap()
+}
+
+/// The size of the initials on a face `side` px across, as Teams' (Fluent's) avatar sizes them, px.
+fn initials_size(side: f32) -> f32 {
+    match side {
+        ..=24.0 => 10.0,
+        ..=28.0 => 12.0,
+        ..=40.0 => 14.0,
+        ..=56.0 => 16.0,
+        ..=96.0 => 20.0,
+        _ => 24.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::initials_size;
+
+    #[test]
+    fn custom_initials_take_fluent_s_text_size_for_the_side() {
+        let sizes = [
+            (16.0, 10.0),
+            (20.0, 10.0),
+            (24.0, 10.0),
+            (28.0, 12.0),
+            (32.0, 14.0),
+            (40.0, 14.0),
+            (48.0, 16.0),
+            (56.0, 16.0),
+            (64.0, 20.0),
+            (96.0, 20.0),
+            (120.0, 24.0),
+        ];
+        for (side, text) in sizes {
+            assert!((initials_size(side) - text).abs() < f32::EPSILON, "a face of {side} px");
+        }
+    }
 }

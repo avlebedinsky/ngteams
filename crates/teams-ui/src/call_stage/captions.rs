@@ -196,6 +196,7 @@ impl CallStage {
         let font = self.caption_font;
         let top = self.caption_top;
         let translate_to = self.settings.read(cx).settings().caption_translate_to;
+        let translates = crate::local_ai::enabled(cx);
         let settings_model = self.settings.clone();
         let settings = icon_button("call-caption-settings", Glyph::SETTINGS, "Caption settings")
             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, window, cx| {
@@ -204,7 +205,7 @@ impl CallStage {
                 let stage_font = stage.clone();
                 let stage_position = stage.clone();
                 let settings_model = settings_model.clone();
-                menu.submenu(
+                let menu = menu.submenu(
                     format!("Meeting spoken language: {language_label}"),
                     window,
                     cx,
@@ -214,25 +215,24 @@ impl CallStage {
                         }
                         menu.scrollable(true).max_h(px(360.0))
                     },
-                )
-                .submenu(
-                    format!(
-                        "Translate to: {}",
-                        translate_to
-                            .and_then(translate::language)
-                            .map_or("Off", |(_, name)| name)
-                    ),
-                    window,
-                    cx,
-                    move |mut menu, _, _| {
-                        menu = menu.item(translate_item(settings_model.clone(), None, "Off", translate_to));
-                        for &(code, name) in translate::TARGET_LANGUAGES {
-                            menu = menu.item(translate_item(settings_model.clone(), Some(code), name, translate_to));
-                        }
-                        menu.scrollable(true).max_h(px(360.0))
-                    },
-                )
-                .submenu("Caption styles", window, cx, move |mut menu, _, _| {
+                );
+                // the captions' translation runs on the user's AI: none while the AI features are off
+                let menu = if translates {
+                    menu.submenu(
+                        format!(
+                            "Translate to: {}",
+                            translate_to
+                                .and_then(translate::language)
+                                .map_or("Off", |(_, name)| name)
+                        ),
+                        window,
+                        cx,
+                        move |menu, _, _| translate_menu(menu, &settings_model, translate_to),
+                    )
+                } else {
+                    menu
+                };
+                menu.submenu("Caption styles", window, cx, move |mut menu, _, _| {
                     for (size, label) in [(16.0, "Small text"), (18.0, "Medium text"), (22.0, "Large text")] {
                         let stage = stage_font.clone();
                         menu = menu.item(
@@ -417,6 +417,18 @@ fn translated_into(status: &Status) -> Option<gpui::Div> {
             .whitespace_nowrap()
             .child(SharedString::from(format!("Translated into {language} by {by}"))),
     )
+}
+
+/// "Translate to": Off, then each language, `current` checked.
+fn translate_menu(menu: PopupMenu, settings: &Entity<SettingsModel>, current: Option<&'static str>) -> PopupMenu {
+    let menu = menu.item(translate_item(settings.clone(), None, "Off", current));
+    translate::TARGET_LANGUAGES
+        .iter()
+        .fold(menu, |menu, &(code, name)| {
+            menu.item(translate_item(settings.clone(), Some(code), name, current))
+        })
+        .scrollable(true)
+        .max_h(px(360.0))
 }
 
 /// A row of "Translate to": a language, or Off (`None`).

@@ -280,6 +280,8 @@ fn the_settings_ask_for_the_first_run_s_screen() {
     let settings = app::settings(file, None);
     assert!(settings.awaiting_first_run());
     assert!(!settings.sends_typing() && !settings.sends_read_receipts() && !settings.sends_presence());
+    // no AI feature runs before the AI notice is answered, which comes after the first run's screen
+    assert!(!settings.uses_ai() && !settings.awaiting_ai_notice());
 }
 
 /// The window asking for an account the rail's "+" opened: the app's window other than `main`.
@@ -335,6 +337,8 @@ fn the_rail_s_plus_asks_for_an_account_and_says_one_the_app_runs_already() {
         panic!("the window opens");
     };
     cx.run_until_parked();
+    // the app publishes "Use AI features" at start: off until the AI notice is answered
+    assert!(!cx.update(|cx| teams_ui::local_ai::enabled(cx)));
 
     // the rail's "+"
     cx.update(|cx| launched.desktop.update(cx, |_, cx| cx.emit(DesktopEvent::AddAccount)));

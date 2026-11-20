@@ -265,8 +265,10 @@ A 1:1 call's video in the native client (M3 Task 18), as the web client's camera
   the camera as asked, and Stop sharing (or Share) as the share will end. When a camera switch and a share both wait, they go in
   turn, the camera first, each offer once the one before settled. The later switch of each sets how it ends. When the
   service sets the call's media up again for a new mixer session meanwhile, a waiting Share goes out on the new
-  session's sharing line, as a group call's share does; the new session shares nothing else, so a screen shared on the
-  old one is told stopped. The far end's screen shown on the old session is told gone; the new session's sharing
+  session's sharing line, as a group call's share does. A screen shared on the old session goes on in the new one
+  the same way, on the new sharing line described `sendonly`, and stays told as shared; only a switch that still
+  waits decides otherwise. A Stop sharing before the kept screen comes drops it, and one while it starts to go out
+  stops it once it went. The far end's screen shown on the old session is told gone; the new session's sharing
   line shows it again when the roster names the sharer. A renegotiation of the far end's delivered while ours is being made or waits for
   its answer is held until ours settles: after our answer is applied it is answered; when ours is then turned away
   (the controller took the far end's first, as when both cameras went on together) ours gives way to it, and so it
@@ -599,31 +601,57 @@ ring:
 
 - **A group chat's Meet now** (`huddleGroupCall`): titled with the chat's topic, else its members' given names
   ("Ann, Bob +2"), else a placeholder; its line "<name> started a meeting"; its buttons **Join** (into the chat's
-  running call, with no pre-join) and **Open chat**. None shows for a chat the user muted.
+  running call, with no pre-join) and **Message** (the chat). None shows for a chat the user muted.
 - **A meeting** (a meeting chat's, or a channel's): titled with the meeting's subject; its line "<name> started the
   meeting" (Teams' strings `{{meetingCaller}} started the meeting`, `{{audioDropInCaller}} started a meeting`);
-  **Join** (the meeting's join, as from the calendar) and, but for a channel's, **Open chat**.
+  **Join** (the meeting's join, as from the calendar) and, but for a channel's, **Message**.
 - None shows when the user started it (the starter is the user), when the user is in that call already, for a live
   event, or when the switch is off. Each call's start shows once.
 
-The web client learns of a meeting's start two ways: a calling push (an event of its own on the calling endpoint,
-which no lab capture holds yet) and the chat service's call start in the meeting's chat (the `Event/Call`
-`callStarted` message, [chat.md](chat.md#system-messages)). From the chat service's it shows the banner only when the
-user's calendar holds that meeting (its `skypeTeamsData` naming the chat, and for a channel's the post) within a window
-around the meeting's scheduled time, and only for a scheduled meeting: a channel's ad-hoc Meet now and a meeting not
-on the calendar give none.
+The web client learns of a meeting's start two ways (read 2026-11-19 from the bundle a lab profile keeps):
 
-The native client follows the chat service's way for both (`teams_ui::meeting_alert`): a call start delivered in a
-group chat with `huddleGroupCall`, or in a meeting chat or a channel while the account's calendar holds the meeting
-from 15 minutes before its start to 15 minutes after its end (Teams' window lives in its remote configuration, not
-captured). A group chat's plain group call rings its members instead ([The invitation](#the-invitation)). Join of a
+- **The calling push**, at the calling endpoint's root (not a call's callback), as the incoming call's invitation
+  comes: `{"evt": 128, "gp": <base64 JSON>}`, or `"cp"`: the JSON deflated (zlib or gzip), then base64. 128 is the
+  bundle's `MEETING_STARTED_NOTIFICATION`; it handles 115 (an active call started), 116 (no active calls) and 129 (a
+  call's update) the same way and shows nothing for them. The JSON: `notificationType` (`MeetingStart`,
+  `MeetingStartFromLobby`: someone waits in the lobby and nobody who admits is in, `HuddleMeetingStart`: a group
+  chat's Meet now), `callId`, `threadId` (the meeting's chat, or the channel), `messageId` (a channel meeting's post;
+  `"0"` for a meeting with its own chat), `subject`, `groupCallInitiator` and `groupCallInitiatorDisplayName` (who
+  started it, by MRI and name), `firstUserToJoinModality` (whom the push names when it gives no starter's name),
+  `meetingInfo` (`tenantId`, `organizerId`, `replyChainMessageId`) and `meetingData` (`meetingCode`, `passcode`).
+  It comes to a member of the meeting whether or not they opened its chat.
+- **The chat service's call start** in the meeting's chat (the `Event/Call` `callStarted` message,
+  [chat.md](chat.md#system-messages)), turned into the same notification of type `MeetingStartFromChatSvc`; shown only
+  when the running call is a scheduled meeting's.
+
+Before it shows one, the web client checks: the setting (Settings → Notifications and activity → Meetings, "Meeting
+started notification", on unless set off), that the user isn't in that call, that the user didn't start it (chat
+service only), and each call once (the same chat and message within 60 s, the same call within 24 hours). It finds the
+meeting on the user's calendar by its chat (`skypeTeamsData`'s `cid`) and, for a channel's, its post (`mid` or
+`rid`), and shows it only from 15 minutes before its start to 5 minutes after its end (remote configuration
+`meetingStartedNotificationV2Settings.minutesBefore`/`minutesAfter`, those defaults). For the push, a meeting the
+calendar holds outside that window, or not at all, shows none, but one whose calendar can't be read shows; the chat
+service's start always needs the calendar's match. A muted chat is checked only for a Meet now. The banner: the
+subject (else the calendar's, else "(No title)"), "{{meetingCaller}} started the meeting" (the lobby's: "{{meetingCaller}}
+is waiting in the lobby. Join the meeting to let them in."; a Meet now's: "{{audioDropInCaller}} started a meeting"),
+Join and Message (a channel's: Join only), shown 20 s, with a ring of its own.
+
+The native client reads both (`teams_call::meeting_push`, `teams_ui::meeting_alert`): the push of a meeting in a
+meeting chat or a channel shows its banner as above (the push's starter, else the name it gives; the lobby's words for
+`MeetingStartFromLobby`); the chat service's start does so for a group chat's `huddleGroupCall` (its push,
+`HuddleMeetingStart`, is left to that start, since only the start names where its Join goes), and for a meeting
+chat's or a channel's start while the account's calendar holds the meeting from 15 minutes before its start to 5
+minutes after its end. One call (its `callId`) shows one banner, whichever came first. The window shows the banner as
+a card as well, for Teams' 20 s; the desktop's notice stays as its server keeps it. A group chat's plain group call
+rings its members instead ([The invitation](#the-invitation)). Join of a
 group chat's meeting goes where its start says it runs (`<conversationUrl>`, `teams_proto::running_call`): nobody was
 rung, so no invitation named the conversation, and the join is the one a callee makes after its ring ended
 ([Joining a running call](#joining-a-running-call)). The chat's header shows Join while the chat's stored call
 events hold a start no newer end ends, read from the store (at start, and after each start or end), since a catch-up
 brings a page's messages in no set order. The banner closes at its own call's end (one naming its start's `<callId>`,
 or one naming no call), not at another call's in the same chat, and none shows for a start whose end the store holds
-already (`teams_proto::start_ended`).
+already (`teams_proto::start_ended`). Each decision is logged at debug level by the chat's id ("meeting banner: …").
+No lab capture holds the push yet (Linux lab runs wait for the server's keyring): its keys are the bundle's.
 
 ## The lobby
 
@@ -818,6 +846,27 @@ a alone). What each of Teams' remaining call controls sends:
   reader didn't take), so what went out was the line's black keep-alive frames. Run again once the reader took it (a
   sharing to b and c in their chat): b and c showed the screen's moving pattern beside a's blurred camera, and a's
   close log counted 325 of a shared screen sent.
+- **Keyframes of a share.** The mixer forwards a share to a viewer only from a keyframe that comes after the viewer
+  asked for the source (its `sr`). It asks the sharer for that keyframe on the call's signaling: a
+  `controlVideoStreaming` notice at the callback the sharer named in `clientContentForMediaController`
+  (`{"controlVideoStreaming": {"sequenceNumber", "globalTimeStamp", "controlInfo": [{"control": 0, "sourceId": <the
+  sharer's sharing source>, "fmtParams": "max-fps=1500;max-br=<kbit/s>;max-mbps=135000;profile-level-id=42C02A;
+  packetization-mode=1;max-fs=8160"}]}, "debugContent": null}`), about one a second while a share starts and one as
+  each viewer joins, its `max-br` changing as it goes. The web sharer answers each at once (`200`, empty body) and
+  makes one keyframe within a second of each (2026-11-06 group share: 9 notices, 9 keyframes, 0 FIR, 0 PLI). Only
+  `control` `0` was seen. Unanswered, the notice comes again 6 s, 20 s, 26 s, 40 s and 46 s later. The native client
+  first neither answered nor acted on it (win11 QA, 2026-11-19): a viewer who joined a running share got a notice at
+  the sharer within a second of the join, no keyframe came, and the viewer saw nothing for 30 s to 8 min (3 of 3
+  joins). The native client now answers each notice and forces a keyframe of the shared screen
+  (`RtpSenderInterface::GenerateKeyFrame`, bound through `vendor/webrtc-sys`) unless the notice names its camera;
+  `max-br` is logged only. The mixer also sends RTCP FIRs in a share's first seconds, the same sequence number again
+  while it waits; libwebrtc makes one keyframe for each number and ignores the repeats. So the screen sender's FIR,
+  PLI and keyframe counts are read every 250 ms, each request sends the last picture again, a request with no
+  keyframe after 500 ms gets one forced, and a keyframe is forced each second for the first 8 s of a share. A screen
+  that holds still goes again at 5 frames a second for 2 s after a change or a keyframe, then once a second:
+  libwebrtc's receivers ask for a keyframe after 3 s without a frame. While its encoder runs, libwebrtc pads a
+  screen's stream (about 50 kbit/s on loopback, about 100 kbit/s through the mixer), which the mixer forwards; Call
+  health counts RTP headers and padding with the media.
 - **The native client's share, 1:1.** Share asks the desktop's screen-cast portal (`org.freedesktop.portal.ScreenCast`:
   `CreateSession`, `SelectSources` for a monitor or a window with the cursor drawn in, `Start`, `OpenPipeWireRemote`)
   for what to share; the node it names is read over the portal's PipeWire remote for as long as the share, its frames
@@ -1099,8 +1148,10 @@ recording bot's entry into `teams_call::MeetingState` (the bot is left out of th
 shows the timer's bar and editor, the lock's question and notices, Meeting info and the recording's notice and red
 dot, and starts and stops a recording (Record, above). People's Download attendance list is made locally from the
 roster's `endpointJoinTime`s. Not built: Notes (a Loop page), Report a concern (a meeting's only; its target wasn't
-captured), Accessibility settings and Don't show chat bubbles (the app has neither), Apps, and the Dial pad (the user
-doesn't want one).
+captured), Accessibility settings (the app has none), Apps, and the Dial pad (the user doesn't want one). Don't show
+chat bubbles is built: it turns off the in-call bubbles of new chat messages (seen 2026-11-20 in the a–b–c group call:
+a bubble at the stage's top middle with the sender's avatar, name and text, its bell "Mute these notifications" and
+Close, about 4 s; the toolbar's Chat a red dot without a count while the pane is closed).
 
 **Help** (More's last entry in a group call or a meeting, after a separator; a 1:1 call's More has none) opens
 `https://go.microsoft.com/fwlink/?linkid=2163160` in a new browser tab (it lands on Microsoft's Teams support

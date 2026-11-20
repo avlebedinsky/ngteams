@@ -178,6 +178,10 @@ pub enum CallEvent {
     RenegotiationGaveWay { call: CallId },
     /// The call ended. Every call shown ends with this or [`CallEvent::RingEnded`], once.
     Ended { call: CallId, end: End },
+    /// The call's media controller asked for the account's video again, as when a viewer starts to watch it (a
+    /// `controlVideoStreaming` notice, answered at once): Teams for the web makes a keyframe of it at each. `camera`
+    /// when it names the account's camera (its main video's source in the roster), else its shared screen.
+    VideoAsked { call: CallId, camera: bool },
     /// The call's keep-alive fell due (every 90 % of the interval the call's services asked for): it went to the call
     /// leg's own link when the call has one (`sent`), else nothing went.
     KeepAliveDue { call: CallId, sent: bool },
@@ -1612,6 +1616,32 @@ impl Calls {
         }
     }
 
+    /// The media controller's notice for the account's video: each source it starts is told
+    /// ([`CallEvent::VideoAsked`]).
+    fn video_controlled(&mut self, delivery: &Delivery) {
+        let Some(call) = self.call.as_ref().filter(|call| call.phase == Phase::Connected) else {
+            return;
+        };
+        let Some(controls) = read::video_controls(&delivery.body) else {
+            log::info!("call {}: a video control it doesn't read", call.id.get());
+            return;
+        };
+        let camera = call.roster.own_video_source(&self.identity.mri);
+        for control in controls {
+            log::debug!(
+                "call {}: the media controller asks for source {} (control {}, max-br {:?})",
+                call.id.get(),
+                control.source,
+                control.control,
+                control.max_bitrate_kbps
+            );
+            if control.control == read::VIDEO_CONTROL_START {
+                let camera = camera == Some(control.source);
+                self.out.event(CallEvent::VideoAsked { call: call.id, camera });
+            }
+        }
+    }
+
     /// The `leave` was taken: the call is over here.
     fn left(&mut self) {
         let end = match self.call.as_ref().map(|call| call.phase) {
@@ -1671,10 +1701,11 @@ impl Calls {
             self.followed_roster(delivery);
             return;
         };
-        if observed == Observed::Renegotiation {
-            // a renegotiation or its answer, at the call's own callback, gets its receipt at once, as the web client
-            // gives it (M3 Task 18): without one the service delivers it again every few seconds and holds the call's
-            // next negotiation (the acknowledgement answered after 22 s, a renegotiation meanwhile rejected)
+        if matches!(observed, Observed::Renegotiation | Observed::VideoControl) {
+            // a renegotiation, its answer or the mixer's controlVideoStreaming notice gets its receipt at once, as the
+            // web client gives it: without one the service delivers it again every few seconds. An unanswered
+            // renegotiation also holds the next negotiation (M3 Task 18). An unanswered notice keeps late viewers
+            // without a picture.
             self.receipt(delivery);
         }
         match callback {
@@ -1708,6 +1739,9 @@ impl Calls {
                 self.add_failed(delivery);
             }
             (Kind::Call, "transfer") => self.transfer_asked(delivery),
+            (Kind::Call, "controlVideoStreaming") if observed == Observed::VideoControl => {
+                self.video_controlled(delivery);
+            }
             // the far end took the account's transfer: the account leaves, as the web client does
             (Kind::Call, "transferAcceptance")
                 if self.call.as_ref().is_some_and(|call| call.phase == Phase::Connected) =>

@@ -78,6 +78,7 @@ pub struct Config {
     pub workflows: crate::workflows::WorkflowsConfig,
     pub apps: crate::apps::AppsConfig,
     pub bots: crate::apps::BotsConfig,
+    pub outgoing_webhooks: crate::outgoing::OutgoingConfig,
 }
 
 impl std::fmt::Debug for Config {
@@ -98,6 +99,7 @@ impl std::fmt::Debug for Config {
             .field("mixer", &self.mixer)
             .field("apps", &self.apps)
             .field("bots", &self.bots)
+            .field("outgoing_webhooks", &self.outgoing_webhooks)
             .finish_non_exhaustive()
     }
 }
@@ -317,6 +319,7 @@ impl Default for Config {
             workflows: crate::workflows::WorkflowsConfig::default(),
             apps: crate::apps::AppsConfig::default(),
             bots: crate::apps::BotsConfig::default(),
+            outgoing_webhooks: crate::outgoing::OutgoingConfig::default(),
         }
     }
 }

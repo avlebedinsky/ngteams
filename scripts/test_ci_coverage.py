@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import subprocess
 import shutil
+import sys
 import tempfile
 import types
 import unittest
@@ -71,6 +72,11 @@ class EnvironmentTests(unittest.TestCase):
         self.assertIn("image: postgres:17", services)
         self.assertIn("image: redis:7", services)
         self.assertIn("image: rustfs/rustfs:", services)
+        # a namespaces test's 4 nodes × pool 16, on each of the 4 test threads, outgrow Postgres' default 100
+        connections = shards.split("      - name: Let Postgres take every test node's connections", 1)[1]
+        connections = connections.split("      - name: Run every assigned target", 1)[0]
+        self.assertIn("ALTER SYSTEM SET max_connections = 300", connections)
+        self.assertIn('docker restart "$POSTGRES"', connections)
         step = shards.split("      - name: Run every assigned target, retaining failures", 1)[1].split("      - ", 1)[0]
         self.assertIn("NGTEAMS_SERVER_PG_URL: postgres://postgres:ngts@host.docker.internal:5432/postgres", step)
         self.assertIn("NGTEAMS_SERVER_REDIS_URL: redis://host.docker.internal:6379", step)
@@ -267,18 +273,33 @@ class TargetTests(unittest.TestCase):
             self.assertEqual(files("shard-0"), set())
             self.assertEqual(files("shard-1"), {paths[1]})
             self.assertEqual(files("common"), {paths[0], *paths[2:], "target/test-shards.json", fingerprint})
+            self.assertFalse((root / paths[1]).exists())
+            self.assertTrue(excluded.exists())
+            for name in [paths[0], *paths[2:], fingerprint]:
+                self.assertTrue((root / name).exists())
             metadata.unlink()
             subprocess.run(["tar", "-I", "zstd --long=30", "-xf", "target/coverage-common.tar.zst",
                             fingerprint], cwd=root, capture_output=True, text=True, check=True)
             self.assertEqual(json.loads(json.loads(metadata.read_text())["features"]), ["test-support"])
 
             for name in [*paths, fingerprint, "target/test-shards.json"]:
-                (root / name).unlink()
+                (root / name).unlink(missing_ok=True)
             unpack = ["bash", str(ROOT / ".github/ci/unpack.sh"), "target"]
             subprocess.run(unpack, cwd=root, capture_output=True, text=True, check=True)
             for name in paths:
                 self.assertEqual((root / name).read_text(), "synthetic executable\n")
             self.assertEqual(json.loads(json.loads(metadata.read_text())["features"]), ["test-support"])
+            tools = root / "tools"
+            tools.mkdir()
+            tar = tools / "tar"
+            tar.write_text('#!/bin/sh\ncase "$*" in *coverage-shard-1.tar.zst*) exit 78;; esac\n'
+                           f'exec "{shutil.which("tar")}" "$@"\n')
+            tar.chmod(0o755)
+            result = subprocess.run(["bash", str(ROOT / ".github/ci/bundle.sh"), "pack"], cwd=root,
+                                    env=dict(os.environ, PATH=f"{tools}{os.pathsep}{os.environ['PATH']}"),
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 78)
+            self.assertTrue((root / paths[1]).exists())
             (root / "target/corrupt.tar.zst").write_text("synthetic corrupt archive\n")
             self.assertNotEqual(subprocess.run(unpack, cwd=root, capture_output=True).returncode, 0)
             for path in (root / "target").glob("*.tar.zst"):
@@ -342,6 +363,19 @@ class TargetTests(unittest.TestCase):
             self.assertEqual([unit["totals"] for unit in full["data"]],
                              [unit["totals"] for unit in compact["data"]])
             merged = counts(json.dumps(compact))
+            if sys.platform == "linux":
+                command("bash", str(ROOT / ".github/ci/bundle.sh"), "strip", str(manifest))
+                for path in (root / "target/build").rglob("*.profraw"):
+                    path.unlink()
+                for index in range(2):
+                    child = dict(environment, LLVM_PROFILE_FILE_NAME=f"stripped-{index}-%p-%m%c.profraw")
+                    command("bash", "-c", 'eval "$(cargo llvm-cov show-env --sh)"; '
+                            'exec python3 "$1" run "$2" "$3"', "test", str(Path(TARGETS.__file__)),
+                            str(manifest), str(index), env=child)
+                stripped = json.loads(command("cargo", "llvm-cov", "report", "--json", "--summary-only"))
+                self.assertEqual(summaries(compact), summaries(stripped))
+                self.assertEqual([unit["totals"] for unit in compact["data"]],
+                                 [unit["totals"] for unit in stripped["data"]])
             for path in (root / "target/build").rglob("*.profraw"):
                 path.unlink()
             serial = counts(command("cargo", "llvm-cov", "--no-clean", "--json"))

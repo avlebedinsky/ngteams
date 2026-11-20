@@ -81,7 +81,8 @@ async fn a_dead_endpoint_is_retried_then_failed_without_holding_up_another_bot()
 #[tokio::test(flavor = "multi_thread")]
 async fn many_rows_waiting_behind_a_dead_bots_retry_dont_hold_up_another_bot() {
     for backend in backends() {
-        let setup = Setup::open_with(backend, |config| config.bots.retry_delays = vec![60]).await;
+        // Keep the first retry outside the queue setup.
+        let setup = Setup::open_with(backend, |config| config.bots.retry_delays = vec![3600]).await;
         setup.bot.answer(500);
         let dead_chat = setup.chat();
         setup.send(&dead_chat, "first to the dead bot").await;

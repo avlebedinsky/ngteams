@@ -18,8 +18,8 @@
 //! - [`calendar`]: the account's calendar events as the calendar view last read them, each window's read replacing
 //!   the events it overlaps (schema 16);
 //! - [`translations`]: chats translated on this computer, each message's translation by its id, version and language,
-//!   the account's own messages as written when they were sent translated (schema 20), and each translated chat's
-//!   glossary of chosen renderings (schema 22);
+//!   the account's own messages as written when they were sent translated (schema 20), each translated chat's
+//!   glossary of chosen renderings (schema 22), and the messages the user translated one at a time (schema 26);
 //! - [`call_transcripts`]: calls' live captions saved on this computer, a transcript per call by its chat (schema 21);
 //! - [`BlockedCopy`]: the service's copies of the account's own messages a policy blocked, which put their text back
 //!   (schema 25);

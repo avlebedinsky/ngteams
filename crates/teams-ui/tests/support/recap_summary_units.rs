@@ -15,7 +15,6 @@ use teams_proto::chat::MessageText;
 use teams_proto::transcript::{read_vtt, turns};
 
 use super::*;
-use crate::local_ai::ToolChoice;
 
 /// A transcript of two made-up speakers.
 const VTT: &str = "WEBVTT\n\n\
@@ -251,7 +250,7 @@ fn claude_sonnet_reads_a_short_transcript_whole() {
     let dir = tempfile::tempdir().unwrap();
     let job = Summarizing::start(Request {
         backend: Backend::Claude,
-        program: fake_claude(dir.path()),
+        target: crate::local_ai::Target::Program(fake_claude(dir.path())),
         model: Model::Recommended,
         input: input(),
         limits: quick(),
@@ -287,7 +286,7 @@ fn a_long_transcript_is_condensed_by_sections_then_summarized() {
     };
     let job = Summarizing::start(Request {
         backend: Backend::Claude,
-        program: fake_claude(dir.path()),
+        target: crate::local_ai::Target::Program(fake_claude(dir.path())),
         model: Model::Recommended,
         input: input(),
         limits,
@@ -329,7 +328,7 @@ fn an_answer_that_isnt_a_summary_is_asked_for_again_once() {
     fs::write(dir.path().join("bad"), "").unwrap();
     let job = Summarizing::start(Request {
         backend: Backend::Claude,
-        program,
+        target: crate::local_ai::Target::Program(program),
         model: Model::Recommended,
         input: input(),
         limits: quick(),
@@ -362,7 +361,7 @@ done
     let program = fake_tool::write(dir.path(), "codex", &body);
     let job = Summarizing::start(Request {
         backend: Backend::Codex,
-        program,
+        target: crate::local_ai::Target::Program(program),
         model: Model::Recommended,
         input: input(),
         limits: quick(),
@@ -396,7 +395,7 @@ fn a_tool_signed_out_slow_or_gone_says_so() {
     let run = |program: PathBuf, limits: Limits| {
         let job = Summarizing::start(Request {
             backend: Backend::Claude,
-            program,
+            target: crate::local_ai::Target::Program(program),
             model: Model::Recommended,
             input: input(),
             limits,
@@ -434,7 +433,7 @@ fn dropping_a_summary_being_made_ends_its_tool() {
     );
     let job = Summarizing::start(Request {
         backend: Backend::Claude,
-        program,
+        target: crate::local_ai::Target::Program(program),
         model: Model::Recommended,
         input: input(),
         limits: Limits::default(),
@@ -463,13 +462,13 @@ fn dropping_a_summary_being_made_ends_its_tool() {
 #[test]
 #[ignore = "runs the installed claude and codex, which reach their providers"]
 fn the_installed_tools_summarize() {
-    let tools = Tools::detect();
+    let tools = crate::local_ai::Tools::detect();
     for backend in tools.installed() {
-        let (_, program) = tools.pick(ToolChoice::Only(backend)).unwrap();
+        let program = tools.program(backend).unwrap();
         let started = Instant::now();
         let job = Summarizing::start(Request {
             backend,
-            program,
+            target: crate::local_ai::Target::Program(program),
             model: Model::Recommended,
             input: input(),
             limits: Limits::default(),

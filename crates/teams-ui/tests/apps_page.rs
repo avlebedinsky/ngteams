@@ -1174,3 +1174,374 @@ fn bot_mention_pasted_in_other_group(
     cx.run_until_parked();
     (rig, cx)
 }
+
+const CHANNEL: &str = "19:made-up-channel@thread.tacv2";
+const POST: &str = "1700000000001";
+
+/// A made-up team whose General is [`CHANNEL`].
+fn channel_team() -> teams_store::Team {
+    teams_store::Team {
+        id: CHANNEL.to_owned(),
+        name: "Made-up team".to_owned(),
+        channels: vec![teams_store::TeamChannel {
+            id: CHANNEL.to_owned(),
+            name: "General".to_owned(),
+            general: true,
+            kind: teams_store::ChannelKind::Standard,
+            shown: true,
+            about: teams_store::ChannelAbout::default(),
+        }],
+        ..teams_store::Team::default()
+    }
+}
+
+/// A `task/fetch` dialog of Polls' bot in `conversation`: its card's first button submits, its second fetches the
+/// next dialog.
+fn polls_dialog(conversation: &str) -> teams_ui::app_dialog::DialogSeed {
+    use teams_ui::app_dialog::{DialogApp, DialogSeed, Opened};
+    DialogSeed {
+        app: DialogApp::of(&app(POLLS)),
+        target: teams_ui::bot_card::Target {
+            bot: teams_proto::Mri::new("28:b5"),
+            app_id: POLLS.to_owned(),
+            conversation: conversation.to_owned(),
+        },
+        opened: Opened::Task {
+            dialog: teams_proto::TaskDialog {
+                title: Some("Made-up poll".to_owned()),
+                card: Some(
+                    json!({"type": "AdaptiveCard", "body": [{"type": "TextBlock", "text": "Ask"}],
+                    "actions": [
+                        {"type": "Action.Submit", "title": "Send", "data": {"step": "send"}},
+                        {"type": "Action.Submit", "title": "More", "data": {"msteams": {"type": "task/fetch"}}},
+                    ]}),
+                ),
+                url: None,
+                width: None,
+                height: None,
+            },
+            message: Some(POST.to_owned()),
+        },
+        in_teams: None,
+    }
+}
+
+/// A result with one made-up card.
+fn poll_result() -> teams_proto::InvokeAnswer {
+    teams_proto::InvokeAnswer::Results {
+        grid: false,
+        attachments: vec![json!({"contentType": "application/vnd.microsoft.card.adaptive",
+            "content": {"type": "AdaptiveCard", "body": [{"type": "TextBlock", "text": "Made-up poll"}]}})],
+    }
+}
+
+/// The dialog open over the shell.
+fn app_dialog(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<teams_ui::app_dialog::AppDialog> {
+    cx.update(|_, cx| shell.read(cx).team_dialog().cloned())
+        .and_then(|dialog| dialog.downcast::<teams_ui::app_dialog::AppDialog>().ok())
+        .expect("the app's dialog")
+}
+
+/// Opens `seed`'s dialog and presses its button `action`, the bot answering `answer`.
+fn submit_dialog(
+    rig: &Rig,
+    shell: &Entity<Shell>,
+    seed: teams_ui::app_dialog::DialogSeed,
+    action: usize,
+    answer: teams_proto::InvokeAnswer,
+    cx: &mut VisualTestContext,
+) {
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_app_dialog(seed, window, cx)));
+    cx.run_until_parked();
+    let dialog = app_dialog(shell, cx);
+    assert_eq!(cx.update(|_, cx| dialog.read(cx).stage_name()), "card");
+    rig.core.bot_answers.lock().unwrap().push_back(Ok(answer));
+    cx.update(|_, cx| dialog.update(cx, |dialog, cx| dialog.press(action, cx)));
+    cx.run_until_parked();
+}
+
+#[test]
+fn a_dialogs_result_goes_into_the_chats_box() {
+    let rig = Rig::start();
+    let (shell, cx) = shell_window(&rig, true);
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(GROUP_CHAT.to_owned(), window, cx)));
+    cx.run_until_parked();
+    submit_dialog(&rig, &shell, polls_dialog(GROUP_CHAT), 0, poll_result(), cx);
+    assert!(
+        cx.update(|_, cx| shell.read(cx).team_dialog().is_none()),
+        "the dialog closes"
+    );
+    let chat = cx.update(|_, cx| shell.read(cx).chat().cloned()).expect("the chat");
+    let compose = cx.update(|_, cx| chat.read(cx).compose().clone());
+    let cards = cx.update(|_, cx| compose.read(cx).app_cards().to_vec());
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0].app_id, POLLS);
+    assert_eq!(cards[0].content["body"][0]["text"], "Made-up poll");
+}
+
+#[test]
+fn a_channel_dialogs_result_goes_into_the_posts_thread_box() {
+    let rig = Rig::start();
+    *rig.core.teams.lock().unwrap() = Some(vec![channel_team()]);
+    let (shell, cx) = shell_window(&rig, true);
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_channel_id(CHANNEL.to_owned(), window, cx)));
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).main().clone()),
+        Main::Channel(CHANNEL.to_owned())
+    );
+    let chain = teams_proto::reply_chain_id(CHANNEL, POST).expect("a chain");
+    submit_dialog(&rig, &shell, polls_dialog(&chain), 0, poll_result(), cx);
+    assert!(
+        cx.update(|_, cx| shell.read(cx).team_dialog().is_none()),
+        "the dialog closes"
+    );
+    let channel = cx
+        .update(|_, cx| shell.read(cx).channel().cloned())
+        .expect("the channel");
+    let thread = cx
+        .update(|_, cx| {
+            channel
+                .read(cx)
+                .thread()
+                .map(|(post, view)| (post.to_owned(), view.clone()))
+        })
+        .expect("the post's thread opens");
+    assert_eq!(thread.0, POST);
+    let compose = cx.update(|_, cx| thread.1.read(cx).compose().clone());
+    assert_eq!(cx.update(|_, cx| compose.read(cx).app_cards().len()), 1);
+    let posts = cx.update(|_, cx| channel.read(cx).posts().read(cx).compose().clone());
+    assert!(cx.update(|_, cx| posts.read(cx).app_cards().is_empty()));
+    assert!(cx.update(|_, cx| shell.read(cx).toast().is_none()));
+}
+
+#[test]
+fn a_result_with_no_box_shown_says_so() {
+    let rig = Rig::start();
+    let (shell, cx) = shell_window(&rig, true);
+    open_store(&shell, cx);
+    submit_dialog(&rig, &shell, polls_dialog(GROUP_CHAT), 0, poll_result(), cx);
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).toast().cloned()),
+        Some(teams_ui::app_dialog::NO_BOX.into())
+    );
+}
+
+#[test]
+fn a_result_for_a_chat_not_shown_never_goes_into_the_shown_chats_box() {
+    let rig = Rig::start();
+    let (shell, cx) = shell_window(&rig, true);
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(GROUP_CHAT.to_owned(), window, cx)));
+    cx.run_until_parked();
+    submit_dialog(&rig, &shell, polls_dialog(OTHER_GROUP), 0, poll_result(), cx);
+    let chat = cx.update(|_, cx| shell.read(cx).chat().cloned()).expect("the chat");
+    let compose = cx.update(|_, cx| chat.read(cx).compose().clone());
+    assert!(cx.update(|_, cx| compose.read(cx).app_cards().is_empty()));
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).toast().cloned()),
+        Some(teams_ui::app_dialog::NO_BOX.into())
+    );
+}
+
+#[test]
+fn a_result_for_another_channels_post_never_goes_into_the_shown_channels_boxes() {
+    const OTHER_CHANNEL: &str = "19:made-up-other-channel@thread.tacv2";
+    let rig = Rig::start();
+    *rig.core.teams.lock().unwrap() = Some(vec![channel_team()]);
+    let (shell, cx) = shell_window(&rig, true);
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_channel_id(CHANNEL.to_owned(), window, cx)));
+    cx.run_until_parked();
+    let chain = teams_proto::reply_chain_id(OTHER_CHANNEL, POST).expect("a chain");
+    submit_dialog(&rig, &shell, polls_dialog(&chain), 0, poll_result(), cx);
+    let channel = cx
+        .update(|_, cx| shell.read(cx).channel().cloned())
+        .expect("the channel");
+    assert!(
+        cx.update(|_, cx| channel.read(cx).thread().is_none()),
+        "no thread opens"
+    );
+    let posts = cx.update(|_, cx| channel.read(cx).posts().read(cx).compose().clone());
+    assert!(cx.update(|_, cx| posts.read(cx).app_cards().is_empty()));
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).toast().cloned()),
+        Some(teams_ui::app_dialog::NO_BOX.into())
+    );
+}
+
+#[test]
+fn a_task_fetch_button_in_a_dialog_opens_the_next_dialog_in_its_place() {
+    let rig = Rig::start();
+    let (shell, cx) = shell_window(&rig, true);
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(GROUP_CHAT.to_owned(), window, cx)));
+    cx.run_until_parked();
+    let next = teams_proto::InvokeAnswer::Dialog(teams_proto::TaskDialog {
+        title: Some("Made-up next step".to_owned()),
+        card: Some(
+            json!({"type": "AdaptiveCard", "body": [{"type": "TextBlock", "text": "Check"}],
+            "actions": [{"type": "Action.Submit", "title": "Done", "data": {"step": "check"}}]}),
+        ),
+        url: None,
+        width: None,
+        height: None,
+    });
+    submit_dialog(&rig, &shell, polls_dialog(GROUP_CHAT), 1, next, cx);
+    assert!(matches!(
+        rig.core.bot_asks.lock().unwrap().last().map(|ask| &ask.kind),
+        Some(teams_proto::InvokeKind::TaskFetch(_))
+    ));
+    // the next dialog's own button submits its own data
+    let dialog = app_dialog(&shell, cx);
+    cx.update(|_, cx| dialog.update(cx, |dialog, cx| dialog.press(0, cx)));
+    cx.run_until_parked();
+    let asks = rig.core.bot_asks.lock().unwrap();
+    let Some(teams_proto::InvokeKind::TaskSubmit(card)) = asks.last().map(|ask| &ask.kind) else {
+        panic!("a task/submit: {asks:?}");
+    };
+    assert_eq!(card.data["step"], "check");
+}
+
+/// A card asking for a name (required), a number and a note, with one submit.
+fn form_card() -> serde_json::Value {
+    json!({"type": "AdaptiveCard", "body": [
+        {"type": "Input.Text", "id": "name", "label": "Name", "isRequired": true},
+        {"type": "Input.Number", "id": "count", "label": "Count"},
+        {"type": "Input.Text", "id": "note", "label": "Note", "isMultiline": true}
+    ], "actions": [{"type": "Action.Submit", "title": "Create", "data": {"step": "create"}}]})
+}
+
+/// A dialog of [`form_card`].
+fn form_dialog(conversation: &str) -> teams_ui::app_dialog::DialogSeed {
+    let mut seed = polls_dialog(conversation);
+    if let teams_ui::app_dialog::Opened::Task { dialog, .. } = &mut seed.opened {
+        dialog.card = Some(form_card());
+    }
+    seed
+}
+
+/// A click just inside the left edge of `selector`'s frame.
+fn click_edge(cx: &mut VisualTestContext, selector: &str) {
+    let found = bounds(cx, selector).unwrap_or_else(|| panic!("{selector} is drawn"));
+    let at = gpui::point(found.left() + gpui::px(2.0), found.center().y);
+    cx.simulate_mouse_move(at, None, Modifiers::none());
+    cx.simulate_click(at, Modifiers::none());
+    cx.run_until_parked();
+}
+
+/// Keys typed one at a time, as a keyboard sends them: each goes through the window's key handling first.
+fn type_keys(cx: &mut VisualTestContext, keys: &str) {
+    for key in keys.chars() {
+        cx.simulate_keystrokes(&key.to_string());
+    }
+    cx.run_until_parked();
+}
+
+#[test]
+fn a_dialogs_inputs_take_typed_keys_into_its_submit() {
+    let rig = Rig::start();
+    let (shell, cx) = shell_window(&rig, true);
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(GROUP_CHAT.to_owned(), window, cx)));
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.open_app_dialog(form_dialog(GROUP_CHAT), window, cx);
+        });
+    });
+    cx.run_until_parked();
+    let field = |id: &str| format!("card-app-dialog-1-c0-in-{id}");
+    // a click on the field's frame, beside its text, takes the keys as well
+    click_edge(cx, &field("name"));
+    // the chat's own keys (`a` reacts, `r` replies, `1` picks) are text here too
+    type_keys(cx, "ra1");
+    click(cx, &field("count"));
+    type_keys(cx, "42");
+    click_edge(cx, &field("note"));
+    type_keys(cx, "ok");
+    click(cx, "card-app-dialog-1-c0a0");
+    let asks = rig.core.bot_asks.lock().unwrap();
+    let Some(teams_proto::InvokeKind::TaskSubmit(card)) = asks.last().map(|ask| &ask.kind) else {
+        panic!("a task/submit: {asks:?}");
+    };
+    assert_eq!(
+        card.data,
+        json!({"step": "create", "name": "ra1", "count": "42", "note": "ok"})
+    );
+    let chat = cx.update(|_, cx| shell.read(cx).chat().cloned()).expect("the chat");
+    let compose = cx.update(|_, cx| chat.read(cx).compose().clone());
+    assert_eq!(
+        cx.update(|_, cx| compose.read(cx).value(cx).to_string()),
+        "",
+        "nothing goes to the box behind"
+    );
+}
+
+#[test]
+fn an_apps_message_after_its_error_shows_alone() {
+    let rig = Rig::start();
+    let (shell, cx) = shell_window(&rig, true);
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(GROUP_CHAT.to_owned(), window, cx)));
+    cx.run_until_parked();
+    let error = teams_proto::InvokeAnswer::Error {
+        code: Some("Conflict".to_owned()),
+        message: "Made-up error.".to_owned(),
+    };
+    submit_dialog(&rig, &shell, polls_dialog(GROUP_CHAT), 0, error, cx);
+    let dialog = app_dialog(&shell, cx);
+    assert_eq!(
+        cx.update(|_, cx| dialog.read(cx).error().map(str::to_owned)).as_deref(),
+        Some("Made-up error.")
+    );
+    rig.core
+        .bot_answers
+        .lock()
+        .unwrap()
+        .push_back(Ok(teams_proto::InvokeAnswer::Message("Made-up thanks.".to_owned())));
+    cx.update(|_, cx| dialog.update(cx, |dialog, cx| dialog.press(0, cx)));
+    cx.run_until_parked();
+    assert_eq!(cx.update(|_, cx| dialog.read(cx).stage_name()), "note");
+    assert_eq!(cx.update(|_, cx| dialog.read(cx).error().map(str::to_owned)), None);
+    assert!(
+        bounds(cx, "app-dialog-error").is_none(),
+        "no old error under the message"
+    );
+}
+
+#[test]
+fn a_dialog_from_the_plus_takes_typed_keys_after_a_refused_create() {
+    let rig = Rig::start();
+    *rig.core.extension_apps.lock().unwrap() =
+        teams_proto::extension_apps(teams_mock::extension_apps_answer().to_string().as_bytes());
+    let (shell, cx) = shell_window(&rig, true);
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(GROUP_CHAT.to_owned(), window, cx)));
+    cx.run_until_parked();
+    let dialog = teams_proto::InvokeAnswer::Dialog(teams_proto::TaskDialog {
+        title: Some("New record".to_owned()),
+        card: Some(form_card()),
+        url: None,
+        width: None,
+        height: None,
+    });
+    {
+        let mut answers = rig.core.bot_answers.lock().unwrap();
+        answers.push_back(Ok(teams_proto::InvokeAnswer::Results {
+            grid: false,
+            attachments: Vec::new(),
+        }));
+        answers.push_back(Ok(dialog));
+    }
+    click(cx, "compose-apps");
+    click(cx, "apps-flyout-app-00000000-0000-4000-8000-00000000e001");
+    click(cx, "apps-flyout-command-1");
+    let shown = app_dialog(&shell, cx);
+    assert_eq!(cx.update(|_, cx| shown.read(cx).stage_name()), "card");
+    let field = |id: &str| format!("card-app-dialog-1-c0-in-{id}");
+    click(cx, "card-app-dialog-1-c0a0");
+    assert!(bounds(cx, &format!("{}-error", field("name"))).is_some());
+    click_edge(cx, &field("name"));
+    type_keys(cx, "ra1");
+    click(cx, "card-app-dialog-1-c0a0");
+    let asks = rig.core.bot_asks.lock().unwrap();
+    let Some(teams_proto::InvokeKind::SubmitAction { data, .. }) = asks.last().map(|ask| &ask.kind) else {
+        panic!("a submitAction: {asks:?}");
+    };
+    assert_eq!(data["name"], "ra1");
+}

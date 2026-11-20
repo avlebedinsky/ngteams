@@ -10,7 +10,7 @@ use crate::db::{Db, DbError, with_conn};
 
 #[derive(Clone, Queryable, Selectable, Insertable)]
 #[diesel(table_name = chat_messages)]
-pub(super) struct Message {
+pub(crate) struct Message {
     pub chat_id: String,
     pub id: i64,
     pub owner_id: String,
@@ -43,14 +43,16 @@ macro_rules! thread_people {
 }
 
 /// A message as posted: the people who may read it and the activity items it made, as of its transaction.
-pub(super) struct Posted {
+pub(crate) struct Posted {
     pub row: Message,
     /// A second post of a client message is answered with the first and tells nobody.
     pub inserted: bool,
     pub readers: Vec<String>,
-    pub told: Vec<Told>,
+    pub(super) told: Vec<Told>,
     /// It put an activity in the bots' outbox: the senders are woken after the commit.
     pub queued: bool,
+    /// It put a mention in the outgoing webhooks' outbox: their senders are woken after the commit.
+    pub hooked: bool,
 }
 
 /// Whether `$draft`'s owner may post it as `$poster`: a member is in its thread, an app's thread is there.
@@ -83,18 +85,22 @@ pub(super) async fn insert(db: &Db, draft: &Message, base: &str) -> Result<Optio
 
 /// Who a draft's owner is to its thread.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Poster {
+pub(crate) enum Poster {
     /// One of its people.
     Member,
     /// An app posting into it (the Workflows bot), which is none of its people.
     App,
 }
 
-/// Posts `draft` for its owner, `poster` to its thread: a member must be in it, an app's thread must be there.
-pub(super) async fn insert_by(db: &Db, draft: &Message, base: &str, poster: Poster) -> Result<Option<Posted>, DbError> {
-    let at = wire::now();
-    with_conn!(db, |conn| conn
-        .transaction::<_, DbError, _>(async |conn| {
+/// Inserts a message in the caller's transaction.
+macro_rules! insert_in {
+    ($conn:expr, $draft:expr, $base:expr, $poster:expr, $at:expr) => {{
+        let conn = &mut *$conn;
+        let draft = $draft;
+        let base = $base;
+        let poster = $poster;
+        let at = $at;
+        async {
             let version: i64 = advance!(conn, at);
             let allowed: bool = may_post!(conn, draft, poster);
             if !allowed {
@@ -116,6 +122,7 @@ pub(super) async fn insert_by(db: &Db, draft: &Message, base: &str, poster: Post
                         readers: Vec::new(),
                         told: Vec::new(),
                         queued: false,
+                        hooked: false,
                     }));
                 }
             }
@@ -152,14 +159,57 @@ pub(super) async fn insert_by(db: &Db, draft: &Message, base: &str, poster: Post
                 body: &body,
             };
             let queued = crate::bots::outbox::enqueue!(conn, &row.chat_id, &row.owner_id, event, version);
+            let root = row.root_id.unwrap_or(row.id);
+            let hooked = crate::outgoing::enqueue!(conn, &row.chat_id, &row.owner_id, row.id, root, &body, at);
+            let readers = scene.readers(row.id);
+            let files = body.get("properties").and_then(|properties| properties.get("files"));
+            crate::media::share_on!(conn, base, &row.owner_id, files, &readers);
             Ok(Some(Posted {
-                readers: scene.readers(row.id),
+                readers,
                 row,
                 inserted: true,
                 told,
                 queued,
+                hooked,
             }))
-        })
+        }
+        .await
+    }};
+}
+/// A connection that can insert a message in its current transaction.
+pub(crate) trait MessageConnection {
+    fn insert_message(
+        &mut self,
+        draft: &Message,
+        base: &str,
+        poster: Poster,
+        at: i64,
+    ) -> impl Future<Output = Result<Option<Posted>, DbError>> + Send;
+}
+
+macro_rules! message_connection {
+    ($connection:ty) => {
+        impl MessageConnection for $connection {
+            async fn insert_message(
+                &mut self,
+                draft: &Message,
+                base: &str,
+                poster: Poster,
+                at: i64,
+            ) -> Result<Option<Posted>, DbError> {
+                insert_in!(self, draft, base, poster, at)
+            }
+        }
+    };
+}
+message_connection!(diesel_async::AsyncPgConnection);
+message_connection!(crate::db::Sqlite);
+
+/// Posts `draft` for its owner, `poster` to its thread: a member must be in it, an app's thread must be there.
+pub(super) async fn insert_by(db: &Db, draft: &Message, base: &str, poster: Poster) -> Result<Option<Posted>, DbError> {
+    let at = wire::now();
+    with_conn!(db, |conn| conn
+        .transaction::<_, DbError, _>(async |conn| conn.insert_message(draft, base, poster, at).await)
         .await)
 }
 

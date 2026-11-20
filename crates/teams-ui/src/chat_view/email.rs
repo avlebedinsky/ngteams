@@ -75,7 +75,7 @@ pub(super) struct Head {
     pub time: SharedString,
     /// The "To:" line.
     pub to: Option<SharedString>,
-    /// Marks after the time: "Edited", the translation's.
+    /// Marks after the time: "Edited", the translation's, Teams' "New" on a channel's new post.
     pub marks: Vec<AnyElement>,
 }
 
@@ -236,8 +236,7 @@ pub(super) fn original_row(
 pub(super) fn reply_row(id: &str, me: (&SharedString, &Face), palette: Palette, open: OnOpen) -> AnyElement {
     let (name, face) = me;
     let avatar = face
-        .avatar(name, gpui_component::Size::XSmall)
-        .size(px(20.0))
+        .avatar(name, gpui_component::Size::Size(px(20.0)))
         .into_any_element();
     card_row(
         format!("email-reply-{id}"),

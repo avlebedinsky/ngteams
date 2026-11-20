@@ -17,7 +17,6 @@ pub mod draft;
 pub mod final_dot;
 pub mod prompt;
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -25,7 +24,7 @@ use std::time::Duration;
 
 use crate::chat_translate::prompt::Said;
 use crate::editor::doc::Doc;
-use crate::local_ai::{Backend, Failure, Launch, Model, Tool, Work};
+use crate::local_ai::{Backend, Failure, Launch, Model, Target, Tool, Work};
 use diff::Preview;
 use draft::Encoded;
 use prompt::Answer;
@@ -34,8 +33,8 @@ use prompt::Answer;
 pub const MAX_DRAFT: usize = crate::chat_translate::MAX_MESSAGE;
 
 /// The settings' description of where a draft goes.
-pub const SETTINGS_NOTE: &str = "When you ask for a correction, your message and the chat's recent messages go to this \
-                                 tool on your computer and its provider.";
+pub const SETTINGS_NOTE: &str = "When you ask for a correction, your message and the chat's recent messages, with the \
+                                 names of their writers, go to this tool on your computer and its provider.";
 
 /// How long the tool may take.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,7 +58,7 @@ impl Default for Limits {
 #[derive(Clone, Debug)]
 pub struct Request {
     pub backend: Backend,
-    pub program: PathBuf,
+    pub target: Target,
     pub model: Model,
     /// The chat's recent messages, oldest first.
     pub context: Vec<Said>,
@@ -127,7 +126,7 @@ fn tell(out: &async_channel::Sender<Outcome>, stop: &AtomicBool, outcome: Outcom
 fn correct(request: &Request, stop: &AtomicBool, out: &async_channel::Sender<Outcome>) {
     let launch = Launch {
         backend: request.backend,
-        program: request.program.clone(),
+        target: request.target.clone(),
         work: Work::Correction,
         model: request.model.clone(),
         instructions: prompt::instructions(),
@@ -155,10 +154,10 @@ fn ask(tool: &mut Tool, request: &Request, stop: &AtomicBool) -> Outcome {
         &request.draft,
     )
     .map_err(|Unusable| {
-        Failure::Stopped(
+        request.target.named(Failure::Stopped(
             request.backend,
             Some("its answer didn't keep the message's formatting.".to_owned()),
-        )
+        ))
     })
 }
 

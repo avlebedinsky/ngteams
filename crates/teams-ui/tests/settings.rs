@@ -16,8 +16,8 @@ use teams_media::video::effects::{Backdrop, Background};
 use teams_ui::local_ai::ToolChoice as TranslatorChoice;
 use teams_ui::local_ai::{AiChoice, Model};
 use teams_ui::settings::{
-    AccountSettings, DEFAULT_IDLE_MINUTES, FirstRunState, LogLevel, ManualStatus, Notifications, Problem, Settings,
-    SettingsFile, SettingsModel, TimeFormat, VideoEffect, attach_devices, parse, render,
+    AccountSettings, ComposeTool, DEFAULT_IDLE_MINUTES, FirstRunState, LogLevel, ManualStatus, Notifications, Problem,
+    Settings, SettingsFile, SettingsModel, TimeFormat, VideoEffect, attach_devices, parse, render,
 };
 use teams_ui::theme::{self, Appearance, THEMES};
 use teams_ui::translate::Backend;
@@ -60,6 +60,7 @@ fn changed() -> Settings {
         first_run: FirstRunState::Confirmed,
         notifications: Notifications::Mentions,
         meeting_started: false,
+        meeting_reminders: false,
         idle_minutes: 15,
         manual_status: ManualStatus::DoNotDisturb,
         log_level: LogLevel::Debug,
@@ -81,11 +82,11 @@ fn changed() -> Settings {
         time_format: TimeFormat::Twelve,
         caption_translate_to: Some("de"),
         caption_translator: AiChoice {
-            tool: TranslatorChoice::Only(Backend::Codex),
+            tool: TranslatorChoice::cli(Backend::Codex),
             model: Model::Named("gpt-6.1-sol".to_owned()),
         },
         recap_summarizer: AiChoice {
-            tool: TranslatorChoice::Only(Backend::Claude),
+            tool: TranslatorChoice::cli(Backend::Claude),
             model: Model::ToolDefault,
         },
         accounts: [(
@@ -108,19 +109,22 @@ fn changed() -> Settings {
             language: "de",
         }],
         sounds: teams_ui::sounds::SoundSettings::default(),
+        ai_features: Some(false),
         chat_translator: AiChoice {
-            tool: TranslatorChoice::Only(Backend::Codex),
+            tool: TranslatorChoice::cli(Backend::Codex),
             model: teams_ui::local_ai::Model::Named("my-team-model".to_owned()),
         },
         message_corrector: AiChoice {
-            tool: TranslatorChoice::Only(Backend::Claude),
+            tool: TranslatorChoice::cli(Backend::Claude),
             model: teams_ui::local_ai::Model::ToolDefault,
         },
         message_translate_to: "Klingon".to_owned(),
         message_translator: AiChoice {
-            tool: TranslatorChoice::Only(Backend::Codex),
+            tool: TranslatorChoice::cli(Backend::Codex),
             model: teams_ui::local_ai::Model::Recommended,
         },
+        ai_providers: vec![teams_ui::local_ai::Provider::new_api(Backend::Anthropic, &[])],
+        compose_hidden: vec![ComposeTool::Emoji, ComposeTool::Ai],
     }
 }
 
@@ -530,6 +534,79 @@ fn nothing_writes_on_its_own_until_the_first_run_is_confirmed(cx: &mut TestAppCo
 }
 
 #[test]
+fn use_ai_features_is_kept_in_the_file_and_missing_means_not_asked() {
+    // not asked yet: nothing written, read back as not asked
+    let defaults = Settings::default();
+    assert_eq!(defaults.ai_features, None);
+    assert!(!render(&defaults).contains("ai_features"));
+    assert_eq!(parse(&render(&defaults)).expect("TOML").0.ai_features, None);
+    for on in [false, true] {
+        let settings = Settings {
+            ai_features: Some(on),
+            ..Settings::default()
+        };
+        let text = render(&settings);
+        assert!(text.contains(&format!("ai_features = {on}")), "{text}");
+        let (read, problems) = parse(&text).expect("TOML");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(read.ai_features, Some(on));
+    }
+    let (read, problems) = parse("ai_features = \"off\"").expect("TOML");
+    assert_eq!(
+        read.ai_features, None,
+        "a bad value is not an answer: the notice asks again"
+    );
+    assert!(matches!(&problems[..], [Problem::BadValue { key: "ai_features", .. }]));
+}
+
+#[gpui::test]
+fn the_ai_notice_waits_after_the_first_run_and_its_answer_is_kept(cx: &mut TestAppContext) {
+    // the views of tests do not ask: the AI features run
+    let lab = SettingsModel::in_memory(Settings::default());
+    assert!(!lab.awaiting_ai_notice());
+    assert!(lab.uses_ai());
+    // the app asks after the first run's screen, and no AI feature runs before the answer
+    let model = cx.new(|_| SettingsModel::in_memory(Settings::default()).requiring_first_run());
+    cx.read(|cx| {
+        let model = model.read(cx);
+        assert!(model.awaiting_first_run() && !model.awaiting_ai_notice());
+        assert!(!model.uses_ai());
+    });
+    model.update(cx, SettingsModel::confirm_first_run);
+    cx.read(|cx| assert!(model.read(cx).awaiting_ai_notice() && !model.read(cx).uses_ai()));
+    model.update(cx, |model, cx| model.set_ai_features(false, cx));
+    cx.read(|cx| {
+        let model = model.read(cx);
+        assert!(!model.awaiting_ai_notice() && !model.uses_ai());
+        assert!(
+            !teams_ui::local_ai::enabled(cx),
+            "the answer is the app's switch at once"
+        );
+    });
+    model.update(cx, |model, cx| model.set_ai_features(true, cx));
+    cx.read(|cx| assert!(model.read(cx).uses_ai() && teams_ui::local_ai::enabled(cx)));
+    // an upgrade from a build without it: the first run was confirmed, the notice still asks once
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (file, path) = file_in(&dir);
+    fs::create_dir_all(path.parent().expect("a directory")).expect("made");
+    fs::write(&path, "first_run = \"confirmed\"\n").expect("written");
+    let upgraded = cx.new(|_| SettingsModel::load(file.clone()).requiring_first_run());
+    cx.read(|cx| assert!(upgraded.read(cx).awaiting_ai_notice()));
+    upgraded.update(cx, |model, cx| model.set_ai_features(false, cx));
+    let again = SettingsModel::load(file.clone()).requiring_first_run();
+    assert!(!again.awaiting_ai_notice(), "answered once, kept in the file");
+    assert!(!again.uses_ai());
+    // the read-only mode never asks, and runs no AI feature before an answer
+    let read_only = SettingsModel::in_memory(Settings {
+        first_run: FirstRunState::Confirmed,
+        ..Settings::default()
+    })
+    .requiring_first_run()
+    .read_only();
+    assert!(!read_only.awaiting_ai_notice() && !read_only.uses_ai());
+}
+
+#[test]
 fn the_calls_devices_follow_the_system_by_default_and_a_chosen_one_is_kept_by_name() {
     let defaults = Settings::default();
     for kind in DeviceKind::ALL {
@@ -784,10 +861,20 @@ fn ai_choices() -> Vec<AiChoice> {
         Model::Named("claude-opus-5-5".to_owned()),
         Model::Named("sonnet[1m]".to_owned()),
     ];
-    TranslatorChoice::ALL
-        .into_iter()
-        .flat_map(|tool| models.clone().map(|model| AiChoice { tool, model }))
-        .collect()
+    [
+        TranslatorChoice::Automatic,
+        TranslatorChoice::cli(Backend::Claude),
+        TranslatorChoice::cli(Backend::Codex),
+        TranslatorChoice::Only("api-1".to_owned()),
+    ]
+    .into_iter()
+    .flat_map(|tool| {
+        models.clone().map(|model| AiChoice {
+            tool: tool.clone(),
+            model,
+        })
+    })
+    .collect()
 }
 
 #[test]
@@ -902,9 +989,9 @@ fn caption_translation_is_off_by_default_and_its_language_and_tool_go_through_th
     for (bad, key) in [
         ("caption_translate_to = \"klingon\"", "caption_translate_to"),
         ("caption_translate_to = 3", "caption_translate_to"),
-        ("caption_translator = \"luna\"", "caption_translator"),
+        ("caption_translator = \"two words\"", "caption_translator"),
         ("caption_translator = 3", "caption_translator"),
-        ("caption_translator = { tool = \"gemini\" }", "caption_translator"),
+        ("caption_translator = { tool = \"gem ini\" }", "caption_translator"),
         ("caption_translator = { tool = 1 }", "caption_translator"),
         (
             "caption_translator = { tool = \"claude\", model = 3 }",
@@ -948,7 +1035,7 @@ fn the_recap_summarizer_is_automatic_by_default_and_goes_through_the_file() {
         assert_eq!(read, settings);
         assert!(problems.is_empty(), "{problems:?}");
     }
-    let (read, problems) = parse("recap_summarizer = \"opus\"").expect("TOML");
+    let (read, problems) = parse("recap_summarizer = \"no such tool\"").expect("TOML");
     assert_eq!(read, Settings::default());
     assert!(
         matches!(
@@ -964,15 +1051,19 @@ fn the_recap_summarizer_is_automatic_by_default_and_goes_through_the_file() {
 
 #[test]
 fn an_earlier_builds_tool_alone_keeps_its_tool_with_the_recommended_model_and_is_written_anew() {
-    for tool in TranslatorChoice::ALL {
+    for tool in [
+        TranslatorChoice::Automatic,
+        TranslatorChoice::cli(Backend::Claude),
+        TranslatorChoice::cli(Backend::Codex),
+    ] {
         let earlier = format!(
             "caption_translator = \"{key}\"\nrecap_summarizer = \"{key}\"\n",
             key = tool.key()
         );
         let (read, problems) = parse(&earlier).expect("TOML");
         assert!(problems.is_empty(), "{problems:?}");
-        assert_eq!(read.caption_translator, AiChoice::of(tool));
-        assert_eq!(read.recap_summarizer, AiChoice::of(tool));
+        assert_eq!(read.caption_translator, AiChoice::of(tool.clone()));
+        assert_eq!(read.recap_summarizer, AiChoice::of(tool.clone()));
         let text = render(&read);
         assert!(
             text.contains(&format!(
@@ -989,7 +1080,7 @@ fn an_earlier_builds_tool_alone_keeps_its_tool_with_the_recommended_model_and_is
     assert!(problems.is_empty(), "{problems:?}");
     assert_eq!(
         read.caption_translator,
-        AiChoice::of(TranslatorChoice::Only(Backend::Codex))
+        AiChoice::of(TranslatorChoice::cli(Backend::Codex))
     );
     assert_eq!(
         read.recap_summarizer,
@@ -1066,7 +1157,7 @@ fn a_chat_s_language_is_kept_per_account_and_chat_and_a_bad_one_left_out() {
     assert_eq!(problems.len(), 1, "{problems:?}");
     assert_eq!(
         read.chat_translator,
-        AiChoice::of(TranslatorChoice::Only(Backend::Claude))
+        AiChoice::of(TranslatorChoice::cli(Backend::Claude))
     );
     assert_eq!(read.chat_language_of("8:orgid:a", "19:one@thread.v2"), Some("de"));
     assert_eq!(read.chat_language_of("8:orgid:a", "19:two@thread.v2"), None);
@@ -1094,7 +1185,7 @@ fn a_chat_s_language_is_changed_turned_off_and_forgotten_with_its_account() {
     // off by default; a bad tool or list is reported
     assert!(Settings::default().chat_languages.is_empty());
     assert_eq!(Settings::default().chat_translator, AiChoice::default());
-    assert_eq!(parse("chat_translator = \"luna\"").unwrap().1.len(), 1);
+    assert_eq!(parse("chat_translator = \"no such tool\"").unwrap().1.len(), 1);
     assert_eq!(parse("chat_languages = 3").unwrap().1.len(), 1);
 }
 
@@ -1156,4 +1247,125 @@ fn settings_follow_media_preparation_and_failure_even_when_the_list_stays_empty(
         model.read_with(cx, |model, _| model.media_status()),
         DeviceStatus::Ready
     );
+}
+
+/// A settings file of a build before the AI providers: its choices name the same command-line tools, it has no list
+/// (the tools found fill it in), and it is written back the same.
+#[test]
+fn a_file_of_an_earlier_build_keeps_its_tools_and_gets_no_list() {
+    let earlier = "caption_translator = \"codex\"\n\
+                   [recap_summarizer]\ntool = \"claude\"\nmodel = \"opus\"\n\
+                   [message_corrector]\ntool = \"automatic\"\nmodel = \"recommended\"\n";
+    let (read, problems) = parse(earlier).expect("TOML");
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(
+        read.caption_translator,
+        AiChoice::of(TranslatorChoice::cli(Backend::Codex))
+    );
+    assert_eq!(
+        read.recap_summarizer,
+        AiChoice {
+            tool: TranslatorChoice::cli(Backend::Claude),
+            model: Model::Named("opus".to_owned()),
+        }
+    );
+    assert_eq!(read.message_corrector, AiChoice::default());
+    assert!(read.ai_providers.is_empty());
+    let text = render(&read);
+    assert!(!text.contains("ai_providers"), "{text}");
+    assert!(text.contains("tool = \"codex\""), "{text}");
+    assert_eq!(parse(&text).expect("TOML").0, read);
+}
+
+/// The providers go through the file in their order, and a key never does: only that the keyring has one.
+#[test]
+fn the_ai_providers_go_through_the_file_without_their_keys() {
+    use teams_ui::local_ai::Provider;
+    let mut codex = Provider::cli(Backend::Codex);
+    codex.enabled = false;
+    let mut openai = Provider::new_api(Backend::OpenAi, &[]);
+    openai.has_key = true;
+    let mut local = Provider::new_api(Backend::Compatible, std::slice::from_ref(&openai));
+    local.name = "Ollama".to_owned();
+    local.base_url = Some("http://localhost:11434/v1".to_owned());
+    local.model = Some("llama-synthetic".to_owned());
+    let settings = Settings {
+        ai_providers: vec![openai, codex, local],
+        chat_translator: AiChoice::of(TranslatorChoice::Only("api-2".to_owned())),
+        ..Settings::default()
+    };
+    let text = render(&settings);
+    assert!(text.contains("[[ai_providers]]"), "{text}");
+    assert!(text.contains("key = \"keyring\""), "{text}");
+    assert!(!text.contains("sk-"), "{text}");
+    let (read, problems) = parse(&text).expect("TOML");
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(read, settings);
+    let (read, problems) =
+        parse("[[ai_providers]]\nid = \"api-1\"\nkind = \"openai\"\nname = \"x\"\nkey = \"sk-synthetic\"\n")
+            .expect("TOML");
+    assert!(read.ai_providers.is_empty(), "a key in the file is not taken");
+    assert!(
+        problems
+            .iter()
+            .any(|problem| problem.to_string().contains("ai_providers")),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn every_toolbar_button_shows_by_default_and_the_hidden_ones_go_through_the_file() {
+    assert!(Settings::default().compose_hidden.is_empty());
+    assert!(!render(&Settings::default()).contains("compose_hidden_tools"));
+    let mut settings = Settings::default();
+    settings.show_compose_tool(ComposeTool::Ai, false);
+    settings.show_compose_tool(ComposeTool::Format, false);
+    settings.show_compose_tool(ComposeTool::Format, false);
+    assert_eq!(
+        settings.compose_hidden,
+        [ComposeTool::Format, ComposeTool::Ai],
+        "each once, in the bar's order"
+    );
+    assert!(!settings.shows_compose_tool(ComposeTool::Format) && settings.shows_compose_tool(ComposeTool::Emoji));
+    let text = render(&settings);
+    assert!(text.contains(r#"compose_hidden_tools = ["format", "ai"]"#), "{text}");
+    let (read, problems) = parse(&text).expect("TOML");
+    assert_eq!(read, settings);
+    assert!(problems.is_empty(), "{problems:?}");
+    settings.show_compose_tool(ComposeTool::Format, true);
+    assert_eq!(settings.compose_hidden, [ComposeTool::Ai]);
+
+    // a name of a newer build is passed over; a value that is not a list of names is reported, the default kept
+    let (read, problems) = parse(r#"compose_hidden_tools = ["loop", "stickers", "loop"]"#).expect("TOML");
+    assert_eq!(read.compose_hidden, [ComposeTool::Loop]);
+    assert!(problems.is_empty(), "{problems:?}");
+    for bad in [
+        "compose_hidden_tools = \"emoji\"",
+        "compose_hidden_tools = [\"emoji\", 3]",
+    ] {
+        let (read, problems) = parse(bad).expect("TOML");
+        assert!(read.compose_hidden.is_empty(), "{bad}");
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.to_string().contains("compose_hidden_tools")),
+            "{bad}: {problems:?}"
+        );
+    }
+}
+
+#[gpui::test]
+fn a_hidden_toolbar_button_is_still_hidden_after_a_restart(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (file, _) = file_in(&dir);
+    let model = cx.update(|cx| cx.new(|_| SettingsModel::load(file)));
+    cx.update(|cx| {
+        model.update(cx, |model, cx| {
+            model.change(|settings| settings.show_compose_tool(ComposeTool::Attach, false), cx);
+        });
+    });
+    let (file, _) = file_in(&dir);
+    let restarted = SettingsModel::load(file);
+    assert_eq!(restarted.settings().compose_hidden, [ComposeTool::Attach]);
+    assert!(!restarted.settings().shows_compose_tool(ComposeTool::Attach));
 }

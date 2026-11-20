@@ -362,6 +362,7 @@ async fn one_node_on_sqlite_chats_both_ways_with_reactions_and_edits() {
     eprintln!("{}", times("one node", taken.clone()));
     assert!(taken.iter().all(|taken| *taken < PUSH), "{taken:?}");
     let id = send(&a, &chat, "one node: react and edit").await;
+    stored_text(&b, &chat, &id).await;
     let mark = a.mark();
     support::write(
         &b,

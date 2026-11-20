@@ -150,6 +150,16 @@ pub trait Core: Send + Sync + 'static {
     /// The size of a file a message carries, by its sharing link: asked for when a video's card is drawn, so the
     /// engine knows its download link before Play is pressed.
     fn file_size(&self, share_url: String) -> Reply<u64>;
+    /// What the sharing link `share_url` of the file at `object_url` lets people do, read on the file's site as
+    /// Teams' "Share this file" reads it; `None` when its answer names no link. A fake answers none.
+    fn link_permission(
+        &self,
+        object_url: String,
+        share_url: String,
+    ) -> Reply<Option<teams_proto::chat::LinkPermission>> {
+        let _ = (object_url, share_url);
+        Reply::ready(Ok(None))
+    }
     /// What the meeting whose chat is `thread` left (its recordings and transcripts), as its recap lists it. A fake
     /// without recaps answers that it can't be read.
     fn meeting_contents(&self, thread: String) -> Reply<Vec<teams_proto::MeetingContent>> {
@@ -200,6 +210,12 @@ pub trait Core: Send + Sync + 'static {
     }
     /// The account's own read horizon in a conversation.
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>>;
+    /// Where the account marked a conversation unread ("Mark as unread"): 1 ms before the arrival of the first unread
+    /// message; `None` when it isn't marked. A fake marks none.
+    fn unread_mark(&self, conversation: String) -> Reply<Option<i64>> {
+        let _ = conversation;
+        Reply::ready(Ok(None))
+    }
     /// The account's activity feed as stored ([`teams_core::activity`]); an empty one where the engine has none.
     fn activity(&self) -> Reply<teams_core::activity::ActivityFeed> {
         Reply::ready(Ok(teams_core::activity::ActivityFeed::default()))
@@ -220,6 +236,18 @@ pub trait Core: Send + Sync + 'static {
     fn sent_originals(&self, conversation: String, keys: Vec<String>) -> Reply<Vec<SentOriginal>> {
         let _ = (conversation, keys);
         Reply::ready(Ok(Vec::new()))
+    }
+    /// Which of the messages `ids` of `conversation` the user translated one at a time ([`crate::chat_translate`]).
+    /// A fake keeps none.
+    fn translated_messages(&self, conversation: String, ids: Vec<String>) -> Reply<Vec<String>> {
+        let _ = (conversation, ids);
+        Reply::ready(Ok(Vec::new()))
+    }
+    /// Keeps that the user translated the message `message` one at a time, or shows it as written again: no service
+    /// write. A fake keeps nothing.
+    fn keep_translated_message(&self, conversation: String, message: String, translated: bool) -> Reply<()> {
+        let _ = (conversation, message, translated);
+        Reply::ready(Ok(()))
     }
     /// Keeps the account's own message as written, sent translated: no service write. A fake keeps nothing.
     fn keep_sent_original(&self, original: SentOriginal) -> Reply<()> {
@@ -492,6 +520,10 @@ pub trait Core: Send + Sync + 'static {
     fn chat_apps(&self, _chat: String) -> Reply<Vec<StoreApp>> {
         Reply::ready(Ok(Vec::new()))
     }
+    /// The account's apps with a message extension, then the store's offers that have one. A fake core has none.
+    fn message_extensions(&self) -> Reply<Vec<teams_proto::ExtensionApp>> {
+        Reply::ready(Ok(Vec::new()))
+    }
     /// The app of a bot (`28:<id>`), as the engine finds it (its bot index). A fake core knows no bot's.
     fn bot_app(&self, _bot: String) -> Reply<Option<StoreApp>> {
         Reply::ready(Ok(None))
@@ -622,6 +654,14 @@ impl Core for EngineRequests {
 
     fn keep_sent_original(&self, original: SentOriginal) -> Reply<()> {
         EngineRequests::keep_sent_original(self, original)
+    }
+
+    fn translated_messages(&self, conversation: String, ids: Vec<String>) -> Reply<Vec<String>> {
+        EngineRequests::translated_messages(self, conversation, ids)
+    }
+
+    fn keep_translated_message(&self, conversation: String, message: String, translated: bool) -> Reply<()> {
+        EngineRequests::keep_translated_message(self, conversation, message, translated)
     }
 
     fn conversation(&self, id: String) -> Reply<Option<Conversation>> {
@@ -793,6 +833,10 @@ impl Core for EngineRequests {
 
     fn chat_apps(&self, chat: String) -> Reply<Vec<StoreApp>> {
         EngineRequests::chat_apps(self, chat)
+    }
+
+    fn message_extensions(&self) -> Reply<Vec<teams_proto::ExtensionApp>> {
+        EngineRequests::message_extensions(self)
     }
 
     fn bot_app(&self, bot: String) -> Reply<Option<StoreApp>> {
@@ -972,6 +1016,14 @@ impl Core for EngineRequests {
         EngineRequests::file_size(self, share_url)
     }
 
+    fn link_permission(
+        &self,
+        object_url: String,
+        share_url: String,
+    ) -> Reply<Option<teams_proto::chat::LinkPermission>> {
+        EngineRequests::link_permission(self, object_url, share_url)
+    }
+
     fn meeting_contents(&self, thread: String) -> Reply<Vec<teams_proto::MeetingContent>> {
         EngineRequests::meeting_contents(self, thread)
     }
@@ -1019,6 +1071,10 @@ impl Core for EngineRequests {
 
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>> {
         EngineRequests::read_horizon(self, conversation)
+    }
+
+    fn unread_mark(&self, conversation: String) -> Reply<Option<i64>> {
+        EngineRequests::unread_mark(self, conversation)
     }
 
     fn history_complete(&self, conversation: String) -> Reply<Option<bool>> {

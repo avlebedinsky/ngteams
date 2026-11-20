@@ -365,7 +365,7 @@ fn outcome_with_limits(script: &str, limits: Limits) -> Outcome {
     let program = fake_tool::write(dir.path(), "claude", script);
     let correcting = Correcting::start(Request {
         backend: Backend::Claude,
-        program,
+        target: crate::local_ai::Target::Program(program),
         model: Model::Recommended,
         context: Vec::new(),
         draft: encode(&Doc::new(vec![Block::paragraph("teh")])),
@@ -421,7 +421,7 @@ fn a_tool_that_can_t_start_says_so() {
     let dir = tempfile::tempdir().unwrap();
     let correcting = Correcting::start(Request {
         backend: Backend::Codex,
-        program: dir.path().join("none"),
+        target: crate::local_ai::Target::Program(dir.path().join("none")),
         model: Model::Recommended,
         context: Vec::new(),
         draft: encode(&Doc::new(vec![Block::paragraph("teh")])),
@@ -432,7 +432,7 @@ fn a_tool_that_can_t_start_says_so() {
         done.recv_blocking().unwrap().unwrap_err(),
         Failure::NotInstalled(Some(Backend::Codex))
     );
-    assert!(Tools::default().pick(crate::local_ai::ToolChoice::Automatic).is_err());
+    assert!(Tools::default().installed().next().is_none());
 }
 
 /// What `answer` proposes for `doc`: the text as it would be, `None` when it proposes nothing.

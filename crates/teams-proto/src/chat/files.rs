@@ -7,12 +7,13 @@
 //!   is a JSON string of a list; an entry's `@type` is `http://schema.skype.com/File`, its `fileName` (and `title`)
 //!   the file's name, `fileType` (and `type`) its extension, `fileInfo.shareUrl` the sharing link the web client opens
 //!   it by (`https://<tenant>-my.sharepoint.com/:v:/g/personal/<user>/<id>`), `objectUrl` (and `fileInfo.fileUrl`) the
-//!   file's own address in its library, `state` `active`, `filePreview.previewUrl` empty for a video; for an image,
+//!   file's own address in its library, `state` `active` (null in a file shared on from another chat, as Teams' "Share
+//!   this file" posts it: [`crate::chat::share_entry`]), `filePreview.previewUrl` empty for a video; for an image,
 //!   the view of a picture of it on AMS (`https://<region>-api.asm.skype.com/v1/objects/<id>/views/imgo`) with its
 //!   `previewWidth` and `previewHeight`, which Teams draws in the message in place of the file's card
 //!   ([`SharedFile::preview`]).
 //! - **Read strictly, shown in part**: an entry is a file when its `@type` is a file's (or it has none), it has a
-//!   name, and its `state` (when there is one) is `active`. Only an `https` URL on a SharePoint host
+//!   name, and its `state` (when there is one and it isn't null) is `active`. Only an `https` URL on a SharePoint host
 //!   ([`is_file_link`]) is kept as its link. A file with no such link is drawn by its name and type, never opened or
 //!   fetched (its preview is not kept), and its entry is kept as unread too. `files` is a list, a JSON string of one
 //!   (also encoded twice), or one entry alone. Any other entry, and a `files` of another shape, is kept as it came
@@ -96,6 +97,9 @@ pub struct SharedFile {
     /// Where it is kept, as its card's second line names it: the path of its site (`personal > <owner>`), when the
     /// entry names one ([`location_of`]).
     pub location: Option<String>,
+    /// Its entry as it came (a JSON object), which a share of it to another chat posts again
+    /// ([`crate::chat::share_entry`]); `None` for a file not read from an entry.
+    pub entry: Option<String>,
 }
 
 /// A picture of a file (an image's), as its entry's `filePreview` names it.
@@ -322,7 +326,7 @@ fn mend_lone_surrogates(text: &str) -> Option<String> {
 }
 
 /// The own server an entry's links name: the origin of its sharing link, else of its own address.
-fn own_cloud_of(entry: &Map<String, Value>) -> Option<crate::Cloud> {
+pub(super) fn own_cloud_of(entry: &Map<String, Value>) -> Option<crate::Cloud> {
     let info = entry.get("fileInfo").and_then(Value::as_object);
     let link = info
         .and_then(|info| info.get("shareUrl"))
@@ -374,7 +378,11 @@ fn file_of(cloud: &crate::Cloud, entry: &Map<String, Value>) -> Option<SharedFil
     if !is_file_type(entry.get("@type")) {
         return None;
     }
-    if entry.get("state").is_some_and(|state| state.as_str() != Some("active")) {
+    // a file shared on from another chat comes with `state` null, as Teams posts it
+    if entry
+        .get("state")
+        .is_some_and(|state| !state.is_null() && state.as_str() != Some("active"))
+    {
         return None;
     }
     let name: String = text(entry.get("fileName"))
@@ -411,6 +419,7 @@ fn file_of(cloud: &crate::Cloud, entry: &Map<String, Value>) -> Option<SharedFil
             .and_then(Value::as_object)
             .and_then(|preview| read_preview(cloud, preview)),
         location: location_of(entry),
+        entry: serde_json::to_string(entry).ok(),
     })
 }
 

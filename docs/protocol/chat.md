@@ -195,10 +195,44 @@ client counts messages, and calls a chat unread when the count isn't 0, by the s
   form is the bundle's: no capture shows one, since no lab account marked all read and the personal build hadn't read
   the property. The native client doesn't apply the "joined after it" exception: such a chat's messages from before
   that time count as read, and any newer one still counts.
-- **Mark as unread** isn't read by the native client. Teams keeps it in the conversation's `userConsumptionHorizon` (or
-  `consumptionHorizonBookmark`), and while its arrival time isn't 0 the chat is unread. The 8 chats that carry one in the
-  CSA answer above all have arrival time 0, so none is marked, and clearing one is a write no capture shows.
+- **Mark as unread** is the conversation's `consumptionHorizonBookmark`: while its arrival isn't 0, the chat is unread
+  from the message after that arrival on, whatever its horizon and its newest message say ([Mark as
+  unread](#mark-as-unread)). The 8 chats that carry one in the CSA answer above all have arrival 0, so none is marked.
 - **Notifications** don't follow from any of this: only `Text`, `RichText/Html` and `RichText/Media_Card` notify.
+
+## Mark as unread
+
+Seen in browser Teams (`proto-lab run team-manage`, lab account a, 2026-11-19) in a's 1:1 chat with lab account b and
+in a lab team's General channel. Each write is the account's own property: nobody else is told.
+
+- **A message's "More options"** has "Mark as unread" (glasses with a slash, key U) after a hairline under Forward, Copy
+  link, Save this message, Delete (the account's own) and Pin, before Share to Outlook and Translation. It is on the
+  account's own messages too, and on a channel's post.
+- **The write**: `PUT v1/users/ME/conversations/<conversation>/properties?name=consumptionHorizonBookmark` with
+  `{"consumptionHorizonBookmark": "<message id - 1>;<now>;<clientmessageid>"}`, answered 200. The arrival is the
+  marked message's id minus 1 and the `clientmessageid` is the marked message's own. On a channel's post, the message is
+  the newest of the post's thread (its newest reply), not the post. The read horizon (`consumptionhorizon`) doesn't
+  move.
+- **At once**: the chat list's row is bold with its dot, the rail's count of unread chats goes up by one, and a "Last
+  read" line stands before the marked message, its sender's name and time shown again over it. A channel's post gets
+  the "Last read" line over it and "New" at its header's right end. The chat stays open and stays unread: a click in it
+  sends nothing.
+- **The chat list's row** has "More chat options" ("..." on hover). Its menu starts with "Mark as unread" (glasses with
+  a slash) on a read chat and "Mark as read" (glasses) on an unread one, then Move to section, Mute, Notify when
+  available, Manage apps, Set workflows, Copy link, Remove chat history and Hide. "Mark as unread" there puts the
+  bookmark before the chat's newest message, the account's own too, and the chat is unread with it. "Mark as read" puts
+  the horizon at the newest message (`consumptionhorizon`), then the bookmark `0;<now>;0`.
+- **Opened again** (another pane, then the chat again): the web client put `consumptionHorizonBookmark` `0;<now>;0` and,
+  with the horizon at the newest message already, no `consumptionhorizon`. The line stayed where the mark was.
+- The native client keeps the bookmark's arrival in the store and counts a marked chat's messages from others after it
+  (at least 1) unless it marked all read later. It ends the mark when the chat is shown after it opened marked, or shown
+  again after it was marked there, and sends no read receipt while the chat stays shown after a mark made there. A
+  mark (or its end) that gets no answer (the network down, a 5xx or a throttle, also of the token service) stays queued and goes out once the service answers:
+  set again, the bookmark does no harm. A newer mark of the chat replaces an older one still queued, so only the newest
+  goes out.
+- Not seen: the push delivery of a bookmark to the account's other endpoints (the own server sends a
+  `ConversationUpdate` naming `consumptionHorizonBookmark`; the native client stores a bookmark from any
+  `ConversationUpdate`), and a channel row's or a thread's own mark.
 
 ## The account's own notes
 
@@ -560,8 +594,8 @@ how the web client draws them, from its bundle.
   alone in a message `58px` (`animated-emoticon-58-…`). Teams draws one inside text at the text's height and a message
   of emoticons alone large, animated and without a bubble. The native client draws both from the emoticon's animation
   strip on the CDN ([Reaction pictures](#reaction-pictures)): the first frame inline, the whole animation large.
-- **Stickers**: the bundle knows a sticker `itemtype` (`http://schema.skype.com/Sticker`, its pictures on
-  `static.asm.skype.com`), but none appears in any capture or in the user's chats.
+- **Stickers** are an `<img>` of `itemtype="http://schema.skype.com/Sticker"` on Teams' sticker CDN: see
+  [Stickers](#stickers-team-manage-2026-11-19).
 - **GIFs** picked from Teams' GIF picker are `<img>`s on Giphy's media CDN:
   `https://media<n>.giphy.com/media/v1.<token>/<id>/giphy.gif` (the shard `media0` to `media4`, the token Giphy's
   base64url note of where it was picked). The common form has no `itemtype`, its size as `width` and `height`
@@ -571,6 +605,70 @@ how the web client draws them, from its bundle.
   picture, playing. The native client reads it from `https://media.giphy.com/media/<id>/
   <file>` with no token, leaving Giphy's token, the shard and any query out (Giphy serves the same bytes without them;
   [endpoints.md](endpoints.md#giphy-mediagiphycom-mediangiphycom)), and plays it as a pasted GIF is played.
+
+## Stickers (team-manage, 2026-11-19)
+
+Browser Teams as a, in the a–b 1:1 chat, with nothing held (`team-manage`, its writes let through). Then b's page
+read the same chat. The captures are `team-manage/20261119T163307Z` (a) and `20261119T164448Z` (b) in the lab's data
+dir. The fixture is `tests/fixtures/chatsvc/sticker.json`.
+
+**The picker.** The compose box's "Emoji, GIFs and Stickers" button opens a panel with the tabs All, Emoji, GIFs and
+Stickers and a "Find something fun" search box.
+
+- All has the sections Emoji, GIFs and Stickers, each with "See all".
+- Stickers has "Recent" (8 stickers) and "Sticker Packs" with "See all". "See all" shows each pack as a tile with its
+  name and its header picture, in a scrolled grid of two columns, with a back arrow.
+- A pack shows its stickers in a grid of three columns. A sticker that has a caption shows a pencil mark. Its button's
+  name ends in "Editable." (`High five. Editable.`).
+- The search finds stickers by their words ("hello" gave six, from several packs).
+- No request lists the packs or the stickers. The previews come from
+  `https://teams.public.onecdn.static.microsoft/evergreen-assets/funstuff/stickers/<locale>/assets/<Pack>/Preview/<name>.png?v=5`.
+
+**A plain sticker.** A click on a sticker puts it in the compose box, after the text. It does not send it. The box
+shows it at 180 by 180 in a frame. Send posts it:
+
+- The `content` is `<p>&nbsp;</p>`, then a `readonly` element with `aria-label` and `title` (the sticker's words, for
+  example `Clippy says &quot;Hello there&quot;`), `contenteditable="false"` and
+  `itemtype="http://schema.skype.com/Sticker"`, then `<p>&nbsp;</p>`.
+- In the element is one `<img>`: `src` is the sticker's GIF,
+  `https://teams.public.onecdn.static.microsoft/evergreen-assets/stickerassets/<pack>-250x250/<locale>/<Name>.gif?v=5`,
+  then `height="180"`, `alt` (the words again), `width="180"`, `data-image-type="standard"`,
+  `data-image-mode="single"` and `itemtype="http://schema.skype.com/Sticker"`, in that order.
+- Nothing goes to AMS: `amsreferences` is `[]`. The other fields are a text message's.
+
+**As read back** (b's page, and a's own list), the service removed the `readonly` element and the `data-image-*`
+attributes: `<p>&nbsp;</p>\r\n<img src="…" height="180" alt="…" width="180"
+itemtype="http://schema.skype.com/Sticker">\r\n<p>&nbsp;</p>`. Thus the `img`'s `itemtype` is the mark of a sticker
+that is read, and the `readonly` element is the mark of a sticker that is sent.
+
+**How Teams shows it.** The message has no bubble. The sticker shows at 180 by 180 in a frame with a thin border and
+round corners, under the sender and the time, as a pasted picture alone does. The GIF plays when the message comes,
+then Teams shows its still preview (the `Preview/<name>.png` above) with a round play button over it. A click plays it
+(the button changes to pause). A click does not open the picture viewer.
+
+**A sticker with a caption** ("Edit sticker"). A click on a sticker with a pencil mark opens an editor in the panel:
+the picture large, a "Caption" box with the sticker's own words in it, and Cancel and Done. The picture shows the
+typed words in the place of the old words. Done puts in the compose box a PNG that the page drew (`blob:`, 240 by 180
+for "High five"), in the same `readonly` element, labelled by the caption. Its `<img>` has `itemscope="image/png"`,
+`itemtype="http://schema.skype.com/CachedImage"`, `alt="Sticker image, <caption>"` and `data-cache-key`.
+
+- Send makes an AMS object (`POST /v1/objects/` on the async gateway, `type` `pish/image`, `sharingMode` `Inline`,
+  `filename` `MicrosoftTeams-image.png`, `read` permission for the chat), answered `201`, then
+  `PUT /v1/objects/<id>/content/imgpsh` with the PNG.
+- **The capture did not show the post.** The capture's request interception stalls the browser's upload, as it did
+  for a larger pasted picture ([Pictures sent](#pictures-sent-team-manage-2026-11-06)). The browser cancelled the
+  `PUT` each time and made a new object. Thus the `<img>` that a captioned sticker sends, and its read-back form, are
+  not known.
+
+**The native client** reads a sticker in both forms (`teams_proto::chat::Sticker`): an `<img>` of itemtype Sticker,
+or the `readonly` element of that itemtype around a picture, whose `aria-label` (else `title`, else the picture's
+`alt`) is its label. Another `readonly` element stays unknown markup. It reads the GIF from Teams' sticker CDN with
+no token and no query ([endpoints.md](endpoints.md#teams-sticker-cdn-teamspubliconecdnstaticmicrosoft)). It draws a
+message of a sticker alone without a bubble, at the size the message gives, and the GIF plays. It does not draw the
+still preview and the play button yet. The builder (`Sticker::of_teams`, `sticker_message`) writes the captured
+`content` byte for byte. `Sticker::of_picture` puts a pasted picture's `<img>` (AMSImage, its object in
+`amsreferences`) in the same element. That form is the best guess for a captioned or imported sticker until a capture
+shows the real one.
 
 ## Link previews
 
@@ -635,6 +733,10 @@ and its Trouter delivery (fixture `app-card.json` is written from it, with made-
   only changes the surfaces.
 - **Other sites**: a Vimeo link got no app card. It got an ordinary link preview (`previewenabled: true`, the
   `urlp/v1/url/image/Thumbnail` picture, [Link previews](#link-previews)).
+- **A message extension's card** (behind `NGTEAMS_BOTS=1`): the native client sends a card chosen from an app's
+  search or dialog in the same form (`teams_proto::chat::AppCard`, `MessageText::with_cards`): the span after the
+  text, `\n` before it as the read-back has it, and the entry in `properties.cards`; a message without one sends `[]`
+  as before. Unseen for a message extension: `docs/protocol/bots.md`, "Message extensions".
 - **The native client** reads `properties.cards` with `teams_proto::chat::card::message_cards`: an entry whose card it
   draws is not content it can't show; any other entry still is. The video's picture is YouTube's `hqdefault.jpg` of
   the video, which exists for every video. The client reads it through the async gateway's thumbnail, as a card's
@@ -904,6 +1006,65 @@ The fixture `tests/fixtures/chatsvc/files-grid.json` is written synthetic in the
   with a lone surrogate escape (a browser reads it, `serde_json` refuses it) is mended, a list encoded twice or one
   entry alone is read, an entry with no `@type` or another `…File` type is a file, and a file with no SharePoint
   link is drawn by its name with no link kept (the message still offers Teams on the web for it).
+
+### Files: shared on (lab, 2026-11-18)
+
+Lab account b opened Share on a video card of a's message in the a–b chat, in Teams on the web. b picked c (their 1:1
+chat) as the recipient, typed a message and pressed Share. c read the result in the b–c chat. The fixture
+`tests/fixtures/chatsvc/file-shared-on.json` is written synthetic in the shape of c's read.
+
+- **The dialog**: the title "Share this file", the line "You can share to any chat or channel.", a "More actions"
+  (…) button with "Share outside Teams" (SharePoint's own share page), and Close. "Add recipients" (marked as
+  necessary) is a box with the placeholder "Enter name, email, group or tag". "Message preview" is a box with "Add a
+  message (optional)", the file's card (its icon, its name, and under it what its link lets people do, "Anyone with
+  the link can edit"), then the file's picture, and the formatting and emoji buttons. At the bottom are "Copy link"
+  and Share. Share is off until a recipient is in the box.
+- **The recipient picker** finds people (a round picture, the name, the name again under it, and "(You)" after the
+  account's own), chats by their names (a group chat with its people's pictures), and channels (a square picture of
+  the team, the channel's name over the team's name in bold). Each pick is a chip with the picture, the name and a
+  remove mark. A query with no match shows "We couldn't find any matches." Escape clears what is typed.
+- **The reads**: when the dialog opens, the client reads the link's permission on the file's site,
+  `GET https://<tenant>-my.sharepoint.com/_api/v2.0/shares/u!<the sharing link, base64url>/permission` (the
+  site's SharePoint token). The answer has `roles`, and `link` with `scope` (`anonymous`), `type` (`edit`) and
+  `localizedDescription` ("Anyone with the link can edit"), which the card shows. It also reads the item
+  (`shares/u!<link>/?expand=site,driveItem(…)`) and its thumbnail.
+- **The send**: one `POST v1/users/ME/conversations/<recipient chat>/messages` for each recipient, an ordinary message
+  post (201). `content` is the message as one `<p>`. `properties.files` is a JSON string of a list with the file's
+  entry from the original message, with these changes: `fileInfo.itemId`, `fileChicletState.state`, `state`,
+  `altText`, `progressComplete`, `sharepointIds`, `publication` and `site` are null, `isUploadError` is false, and
+  `permissionScope` is the link's scope (`anonymous`). Nothing else is written: no grant, no new link (the file's
+  link reaches anyone).
+- **After the send** the dialog closes and a toast at the bottom left says "You've shared <file name>" with a check
+  mark and a close button. The page stays in the chat it was in.
+- **Copy link** closes the dialog and opens SharePoint's "Link created" box: the link in a field, Copy, the link's
+  permission words, and Settings.
+- **Share outside Teams** opens SharePoint's share page in a frame: a form `POST` of
+  `<site>/_layouts/15/sharedialog.aspx?clientId=teams&…` whose `context` holds a SharePoint token, the item's address,
+  `uniqueId` and `shareId`. The same page opened by its address with the browser's own sign-in (`listId` and
+  `listItemId`, or `uniqueId`) answers "Unable to share right now" (401, access denied), for the file's owner too.
+  The file's sharing link opens Stream's player with Download only. OneDrive's page of the file
+  (`<site>/_layouts/15/onedrive.aspx?id=<its path>&parent=<its folder>`) gives the owner SharePoint's Share menu
+  (Share, Copy link, Manage access).
+- **The recipient's read** has the entry as it was sent (`state` null) and the message's `atp`. Teams draws the
+  message's text over the file's card.
+- **The native client** offers the same dialog (`crates/teams-ui/src/share_file.rs`) from Share on a file card and
+  from "More options > Share". It reads the permission with `HttpTransport::sharing_link_permission` on the file's
+  personal site (`<site>_api/v2.0/shares/u!<link>/permission`, the same SharePoint token and service), builds the entry
+  with `teams_proto::chat::share_entry`, and sends one `Action::Send` for each recipient with the entry
+  (`MessageText::with_shared`): the outbox's ordinary post. A person with no 1:1 chat yet gets one first
+  (`Action::CreateChat`, as New message does). The message is the compose box's rich-text editor, with its format bar
+  and emoji picker, and is sent as the compose box sends a message. An entry with `state` null reads as a file. Copy
+  link puts the link on the clipboard and shows "Link created" (the link, Copy, the permission words, Settings).
+  "Share outside Teams" and Settings open OneDrive's page of the file in the browser
+  (`teams_proto::chat::onedrive_page`): no token can go to a browser, so the app can't open Teams' framed page.
+- **Restricted Microsoft links**: the capture covers only `anonymous` links. The native dialog refuses other scopes
+  and a permission read that fails. It directs the user to Share outside Teams to set access. It sends no message
+  and shows no success toast in these cases.
+- **The own server** takes the same post. A message that names a file of the server, sent by someone with access to
+  the file, gives each member of the chat access to it (`docs/server.md`). The message and its grants commit in one
+  transaction. A grant error rolls both back. The server checks at most ten file entries per post. It answers the link's permission on the
+  file's site for anyone with access (`scope` `users`). It has no web page for a file, so the dialog offers no "Share
+  outside Teams" and "Link created" no Settings for its files.
 
 ## Messages a policy blocked
 

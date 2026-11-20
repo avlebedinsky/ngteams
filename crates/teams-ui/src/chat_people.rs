@@ -864,14 +864,11 @@ impl ChatPeople {
         let face = div()
             .relative()
             .flex_none()
-            .child(
-                people::avatar(
-                    person.named.then_some(&person.name),
-                    person.picture.as_ref(),
-                    Size::Medium,
-                )
-                .size(px(FACE)),
-            )
+            .child(people::avatar(
+                person.named.then_some(&person.name),
+                person.picture.as_ref(),
+                Size::Size(px(FACE)),
+            ))
             .children(badge);
         // a rest on the face opens their compact card, as Teams' does
         let of = CardOf::new(person.mri.clone(), person.named.then(|| person.name.clone()))
@@ -1022,9 +1019,7 @@ impl ChatPeople {
         let highlighted = self.highlighted == Some(at);
         let (face, detail) = match suggested {
             Picked::Person(person) => (
-                people::avatar(Some(&person.name), person.picture.as_ref(), Size::Medium)
-                    .size(px(FACE))
-                    .into_any_element(),
+                people::avatar(Some(&person.name), person.picture.as_ref(), Size::Size(px(FACE))).into_any_element(),
                 person.detail.clone(),
             ),
             Picked::Chat(row) => (

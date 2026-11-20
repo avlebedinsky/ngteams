@@ -11,16 +11,16 @@
 //!
 //! The child opens views where a user's click on a list row would (a chat, the team's channel, a post's thread) and
 //! answers the parent's questions about the boxes through a file in the sandbox dir; everything else comes from the
-//! sandbox's virtual pointer and keyboard. Buttons are found on the screen: Send's lit disc, the language button left
-//! of it by the pointer resting on it (a ghost button's hover), Translate right against that, the line over the box by
-//! its dark text, a menu's row by the keys' highlight, the settings' rows from their selected segment.
+//! sandbox's virtual pointer and keyboard. Buttons are found on the screen: Send's lit disc, the AI button left of it
+//! by the pointer resting on it (a ghost button's hover), the AI menu's rows over it, the line over the box by its dark
+//! text, a menu's row by the keys' highlight, the settings' rows from their selected segment.
 //!
-//! - **The language menu**: the language button opens it with the language chosen first; typing filters it, Enter or
-//!   a click picks one, any other language can be typed and is offered as "Use …"; Escape closes it.
-//! - **Translate** by the button and by Ctrl+Shift+Y in a chat's box, a reply, an edit, the channel's post box, a
-//!   thread's reply box and New message: the draft replaced in place, only the draft's words and the language sent,
+//! - **The language menu**: the AI menu's language row opens it with the language chosen first; typing filters it,
+//!   Enter or a click picks one, any other language can be typed and is offered as "Use …"; Escape closes it.
+//! - **Translate** by the AI menu's row and by Ctrl+Shift+Y in a chat's box, a reply, an edit, the channel's post box,
+//!   a thread's reply box and New message: the draft replaced in place, only the draft's words and the language sent,
 //!   Ctrl+Z bringing the draft back. Mentions, links, bold, emoji, line breaks and code stay as they were.
-//! - **Progress and cancel**: the line over the box while it runs; Cancel, Escape and the button again stop it, its
+//! - **Progress and cancel**: the line over the box while it runs; Cancel, Escape and the row again stop it, its
 //!   process ends and the draft stays. **Failure** keeps the draft and Try again translates it. An edit while it runs
 //!   drops the result; Translate again translates the new draft. Correct and Translate never run at once. An empty
 //!   draft starts nothing; a draft of only a mention has no words to translate.
@@ -31,8 +31,8 @@
 //!   General → Message translation: the language by its menu, the Model dropdown, Codex and then Claude chosen, a
 //!   model's name typed under "Other model…" and the tool then started with it, and Codex chosen again (not
 //!   installed: said so in the box, "Install it").
-//! - **A narrow box**: the post box beside a thread compacts its toolbar and keeps its placeholder on one line; the
-//!   thread's narrow box shows Translate's and the language caret's tooltips, and the caret opens the menu.
+//! - **A narrow box**: the post box beside a thread keeps its placeholder on one line; the thread's narrow box shows
+//!   the AI button's tooltip, and its menu's language row opens the language menu.
 //!
 //! Screenshots are kept under `target/ui-shots/translate-*.png`, in Teams Light and Dark.
 //!
@@ -69,6 +69,7 @@ use teams_store::Store;
 use teams_trouter::{Options, Trouter, TrouterCredentials};
 use teams_ui::compose::{Compose, Mode};
 use teams_ui::draft_translate::menu::Row;
+use teams_ui::local_ai::{Backend, ToolChoice, Work};
 use teams_ui::shell::{Main, Shell};
 use teams_ui::view::Root;
 use teams_ui::window::KitRoot;
@@ -378,16 +379,27 @@ impl Rect {
 #[derive(Clone, Copy, Debug)]
 struct Toolbar {
     send: Rect,
-    language: Rect,
-    translate: Rect,
+    /// The AI button: its menu holds Correct, Translate and the language.
+    ai: Rect,
 }
 
+/// The rows of the AI button's menu, top down: Correct, Translate, the language.
+const TRANSLATE_ROW: u32 = 1;
+const LANGUAGE_ROW: u32 = 2;
+
 impl Toolbar {
+    /// Where the AI menu's row `row` is: the menu opens over the button, its right edge at the button's, rows 28 px
+    /// high, the last one 33 px over the button's middle (measured on this sandbox's 1280 × 800 screen).
+    fn row(self, row: u32) -> (u32, u32) {
+        let (x, y) = self.ai.center();
+        (x - 150, y - 33 - 28 * (LANGUAGE_ROW - row))
+    }
+
     /// The row the line over the box is drawn on, and the right end of the box.
     fn line_band(self) -> Rect {
         Rect {
             x0: self.send.x1.saturating_sub(420),
-            y0: self.send.y0.saturating_sub(80),
+            y0: self.send.y0.saturating_sub(160),
             x1: self.send.x1 + 12,
             y1: self.send.y0.saturating_sub(16),
         }
@@ -590,8 +602,8 @@ impl<'a> User<'a> {
         }))
     }
 
-    /// The controls of the box in the columns `pane`, found on the screen: Send's lit disc, the language button just
-    /// left of the divider by it, Translate right against it.
+    /// The controls of the box in the columns `pane`, found on the screen: Send's lit disc, and the AI button just
+    /// left of the divider by it.
     fn toolbar(&mut self, pane: Range<u32>) -> SandboxResult<Toolbar> {
         self.park()?;
         thread::sleep(SETTLE);
@@ -604,31 +616,29 @@ impl<'a> User<'a> {
             x1: send.x0,
             y1: row + 15,
         };
-        // the language button ends a divider's width left of Send (its caret alone in a narrow box)
-        let mut language = None;
+        // the AI button ends a divider's width left of Send
+        let mut ai = None;
         for _ in 0..3 {
             let found = self.hovered((send.x0 - 26, row), band)?;
-            language = found.filter(|found| {
-                (14..=130).contains(&found.width()) && (send.x0 - 24..=send.x0 - 10).contains(&found.x1)
+            ai = found.filter(|found| {
+                (14..=TOOL + 4).contains(&found.width()) && (send.x0 - 24..=send.x0 - 10).contains(&found.x1)
             });
-            if language.is_some() {
+            if ai.is_some() {
                 break;
             }
-            say(&format!("note: the language probe left of {send:?} found {found:?}"));
+            say(&format!("note: the AI button probe left of {send:?} found {found:?}"));
         }
-        let language = language.ok_or_else(|| format!("no language button left of Send {send:?}"))?;
-        // Translate is the toolbar's square button right against the language button's left
-        let translate = Rect {
-            x0: language.x0 - TOOL,
-            y0: row - TOOL / 2,
-            x1: language.x0,
-            y1: row + TOOL / 2,
-        };
-        Ok(Toolbar {
-            send,
-            language,
-            translate,
-        })
+        let ai = ai.ok_or_else(|| format!("no AI button left of Send {send:?}"))?;
+        Ok(Toolbar { send, ai })
+    }
+
+    /// Opens the AI button's menu, then clicks its row `row`.
+    fn ai_row(&mut self, bar: Toolbar, row: u32) -> SandboxResult {
+        self.click(bar.ai.center())?;
+        self.park()?;
+        thread::sleep(SETTLE);
+        self.click(bar.row(row))?;
+        self.park()
     }
 
     /// The buttons and words of the line over the box, right to left, as runs of dark pixels: the line's
@@ -639,8 +649,11 @@ impl<'a> User<'a> {
         let screen = self.look("line.png")?;
         let band = bar.line_band();
         let dark = |pixel: &image::Rgb<u8>| pixel.0.iter().all(|&channel| channel < 170);
-        // the line's rows: upwards from the box, the first rows with dark pixels, up to a gap (the messages above)
-        let inked = |y: u32| (band.x0..band.x1).any(|x| dark(screen.get_pixel(x, y)));
+        let right = (band.x0..band.x1)
+            .rev()
+            .find(|&x| (band.y0..band.y1).any(|y| dark(screen.get_pixel(x, y))))
+            .ok_or("no line over the box")?;
+        let inked = |y: u32| (right.saturating_sub(TOOL)..=right).any(|x| dark(screen.get_pixel(x, y)));
         let bottom = (band.y0..band.y1)
             .rev()
             .find(|&y| inked(y))
@@ -913,9 +926,10 @@ fn type_draft(user: &mut User, place: &str, draft: &str) -> SandboxResult {
 fn translates(user: &mut User, place: &str, by: Option<Toolbar>, (draft, translated): (&str, &str)) -> SandboxResult {
     let asked = user.tool.received().len();
     match by {
-        Some(bar) => click_until(
+        Some(bar) => ai_row_until(
             user,
-            bar.translate.center(),
+            bar,
+            TRANSLATE_ROW,
             &format!("Translate in {place} {bar:?}"),
             |state| status(state, place) != "idle" || text(state, place) != draft,
         )?,
@@ -954,9 +968,9 @@ fn first_run(user: &mut User) -> SandboxResult {
     new_message(user)
 }
 
-/// A click on the language button opens its menu.
+/// The AI menu's language row opens the language menu.
 fn open_menu(user: &mut User, bar: Toolbar) -> SandboxResult {
-    click_until(user, bar.language.center(), "the language menu opens", |state| {
+    ai_row_until(user, bar, LANGUAGE_ROW, "the language menu opens", |state| {
         state["menu"]["open"] == true
     })
 }
@@ -997,29 +1011,27 @@ fn tip_shown(user: &mut User, button: Rect, name: &str) -> SandboxResult {
     Ok(())
 }
 
-/// A click at `at` brings a state `wanted` takes, named `what` in the error. A click the app didn't take is clicked
-/// again and said, at most twice.
-fn click_until(user: &mut User, at: (u32, u32), what: &str, wanted: impl Fn(&Value) -> bool) -> SandboxResult {
+/// The AI menu's row `row` taken until `wanted`, at most three times.
+fn ai_row_until(user: &mut User, bar: Toolbar, row: u32, what: &str, wanted: impl Fn(&Value) -> bool) -> SandboxResult {
     for attempt in 0..3 {
-        user.click(at)?;
-        user.park()?;
+        user.ai_row(bar, row)?;
         let start = Instant::now();
         while start.elapsed() < Duration::from_secs(3) {
             if wanted(&user.state()?) {
                 if attempt > 0 {
-                    say(&format!("note: {what}: taken on click {}", attempt + 1));
+                    say(&format!("note: {what}: taken on try {}", attempt + 1));
                 }
                 return Ok(());
             }
             thread::sleep(POLL);
         }
-        user.shot(&format!("translate-missed-click-{}.png", user.asked))?;
+        user.shot(&format!("translate-missed-row-{}.png", user.asked))?;
     }
-    Err(format!("{what}: three clicks at {at:?} didn't").into())
+    Err(format!("{what}: three tries of the AI menu's row {row} didn't").into())
 }
 
-/// The language button opens the menu with the language chosen first; a search picked by Enter; a language typed;
-/// Escape; a row clicked.
+/// The AI menu's language row opens the menu with the language chosen first; a search picked by Enter; a language
+/// typed; Escape; a row clicked.
 fn the_language_menu(user: &mut User) -> SandboxResult {
     let state = user.until("the a–b chat's box has the keys", |state| focused(state, "chat"))?;
     if language(&state) != "English" {
@@ -1158,7 +1170,7 @@ fn translate_in_a_chat(user: &mut User) -> SandboxResult {
 /// A way to stop a translation running.
 type Stop = fn(&mut User, Toolbar) -> SandboxResult;
 
-/// While it runs: the line with Cancel; Cancel, Escape and the button again stop it, the tool's process ends and the
+/// While it runs: the line with Cancel; Cancel, Escape and the row again stop it, the tool's process ends and the
 /// draft stays.
 fn progress_and_cancel(user: &mut User) -> SandboxResult {
     type_draft(user, "chat", DRAFT)?;
@@ -1167,10 +1179,7 @@ fn progress_and_cancel(user: &mut User) -> SandboxResult {
     let stopped_by: [(&str, Stop); 3] = [
         ("Cancel", |user, bar| user.click_line(bar, 0)),
         ("Escape", |user, _| user.key(keys::ESC)),
-        ("the button again", |user, bar| {
-            user.click(bar.translate.center())?;
-            user.park()
-        }),
+        ("the AI menu's row again", |user, bar| user.ai_row(bar, TRANSLATE_ROW)),
     ];
     for (at, (how, stop)) in stopped_by.into_iter().enumerate() {
         let asked = user.tool.received().len();
@@ -1296,7 +1305,9 @@ fn nothing_to_translate(user: &mut User) -> SandboxResult {
     clear_box(user, "chat")?;
     let asked = user.tool.received().len();
     user.press("ctrl+shift+y")?;
-    user.click(bar.translate.center())?;
+    // the row is off: the click takes nothing, and the AI button closes its menu
+    user.ai_row(bar, TRANSLATE_ROW)?;
+    user.click(bar.ai.center())?;
     user.park()?;
     user.stays("an empty box starts nothing", |state| {
         status(state, "chat") == "idle" && text(state, "chat").is_empty()
@@ -1339,8 +1350,7 @@ fn a_reply_and_an_edit(user: &mut User) -> SandboxResult {
     user.type_text(DRAFT)?;
     user.until("the reply typed", |state| text(state, "chat") == DRAFT)?;
     let bar = user.toolbar(CONVERSATION)?;
-    user.click(bar.translate.center())?;
-    user.park()?;
+    user.ai_row(bar, TRANSLATE_ROW)?;
     user.until("the reply translated, still a reply", |state| {
         text(state, "chat") == GERMAN && state["boxes"]["chat"]["mode"] == "reply"
     })?;
@@ -1448,18 +1458,16 @@ fn the_channel_s_boxes(user: &mut User) -> SandboxResult {
     if bar.send.x0 < THREAD.start || bar.send.x0 < POSTS.end {
         return Err(format!("the thread's toolbar isn't in the thread: {bar:?}").into());
     }
-    // the narrow box's Translate and language caret still name themselves, and the caret opens the menu
-    tip_shown(user, bar.translate, "thread-translate-tip")?;
-    tip_shown(user, bar.language, "thread-language-tip")?;
+    // the narrow box's AI button names itself, and its language row opens the menu
+    tip_shown(user, bar.ai, "thread-ai-tip")?;
     open_menu(user, bar)?;
     user.key(keys::ESC)?;
     user.until("the thread's language menu closed", |state| {
         state["menu"]["open"] != true
     })?;
     translates(user, "thread", None, (DRAFT, GERMAN))?;
-    user.click(bar.translate.center())?;
-    user.park()?;
-    user.until("the button translates the thread's reply too", |state| {
+    user.ai_row(bar, TRANSLATE_ROW)?;
+    user.until("the AI menu translates the thread's reply too", |state| {
         status(state, "thread") == "idle" && user.tool.received().len() > 1
     })?;
     user.shots_in_both_themes("thread")?;
@@ -1502,8 +1510,7 @@ fn no_tool_installed(user: &mut User) -> SandboxResult {
     user.type_text(DRAFT)?;
     user.until("typed", |state| text(state, "chat") == DRAFT)?;
     let bar = user.toolbar(CONVERSATION)?;
-    user.click(bar.translate.center())?;
-    user.park()?;
+    user.ai_row(bar, TRANSLATE_ROW)?;
     let state = user.until("no tool said", |state| status(state, "chat").starts_with("failed:"))?;
     if !status(&state, "chat").contains("Settings") || text(&state, "chat") != DRAFT {
         return Err(format!("the failure doesn't point at the settings, the draft kept: {state}").into());
@@ -1531,16 +1538,17 @@ fn no_tool_installed(user: &mut User) -> SandboxResult {
     Ok(())
 }
 
-/// Settings → General → Message translation: the language by its menu; Codex (not installed); Claude and a model.
+/// Settings → General → Message translation: the language by its menu; Claude Code from the provider's dropdown and a
+/// model typed; Codex (chosen by an earlier build, not installed).
 fn the_settings(user: &mut User) -> SandboxResult {
     type_draft(user, "chat", DRAFT)?;
     user.ask("open-settings")?;
     user.until("Settings → General", |state| state["main"] == "settings:General")?;
     user.shots_in_both_themes("settings-general")?;
-    let (x, y) = message_translation_tools(user)?;
+    let [into, _, _] = message_translation_dropdowns(user)?;
     user.shots_in_both_themes("settings-message-translation")?;
 
-    user.click((x + 57, y - 83))?;
+    user.click(into)?;
     user.park()?;
     thread::sleep(SETTLE);
     user.shot("translate-settings-menu-light.png")?;
@@ -1548,24 +1556,26 @@ fn the_settings(user: &mut User) -> SandboxResult {
     user.key(keys::ENTER)?;
     user.until("French set in the settings", |state| language(state) == "French")?;
 
-    // the model's dropdown, the page's last control, where the page ends: its menu shows (the rows found again
+    // the model's dropdown, the page's last control, where the page ends: its menu shows (the dropdowns found again
     // after each change, as the page may move)
-    let (_, y) = lowest_segment_center(user)?;
-    if !dropdown_opens(user, (x + 55, y + 85))? {
+    let [_, _, model] = last_dropdowns(user)?;
+    if !dropdown_opens(user, model)? {
         return Err("a click on the model dropdown (Automatic) shows no menu".into());
     }
     user.shot("translate-settings-model-automatic-light.png")?;
     user.key(keys::ESC)?;
-    let (_, y) = lowest_segment_center(user)?;
-    user.click((x + 135, y))?;
-    user.park()?;
-    user.until("Codex chosen", |state| state["tool"] == "Only(Codex)")?;
-    let (_, y) = lowest_segment_center(user)?;
-    user.click((x + 73, y))?;
-    user.park()?;
-    user.until("Claude chosen", |state| state["tool"] == "Only(Claude)")?;
-    let (_, y) = lowest_segment_center(user)?;
-    if !dropdown_opens(user, (x + 55, y + 85))? {
+    // the provider's dropdown: Automatic, then the one tool found, Claude Code
+    let [_, provider, _] = last_dropdowns(user)?;
+    if !dropdown_opens(user, provider)? {
+        return Err("a click on the provider dropdown shows no menu".into());
+    }
+    user.shot("translate-settings-providers-light.png")?;
+    user.key(keys::DOWN)?;
+    user.key(keys::DOWN)?;
+    user.key(keys::ENTER)?;
+    user.until("Claude chosen", |state| state["tool"] == "Only(\"claude\")")?;
+    let [_, _, model] = last_dropdowns(user)?;
+    if !dropdown_opens(user, model)? {
         return Err("a click on the model dropdown (Claude) shows no menu".into());
     }
     user.shot("translate-settings-model-claude-light.png")?;
@@ -1591,15 +1601,10 @@ fn the_settings(user: &mut User) -> SandboxResult {
     if !calls.last().is_some_and(|call| call.ends_with("model=opus")) {
         return Err(format!("the tool wasn't started with the model typed: {calls:?}").into());
     }
-    // Codex chosen and not installed: said so, with the settings offered
-    user.ask("open-settings")?;
-    user.until("Settings again", |state| state["main"] == "settings:General")?;
-    // scrolled to the end again (Claude now the segment chosen)
-    message_translation_tools(user)?;
-    let (_, y) = lowest_segment_center(user)?;
-    user.click((x + 135, y))?;
-    user.park()?;
-    user.until("Codex chosen", |state| state["tool"] == "Only(Codex)")?;
+    // Codex chosen (as by the settings file of an earlier build: the dropdown offers only the tools found) and not
+    // installed: said so, with the settings offered
+    user.ask("choose-codex")?;
+    user.until("Codex chosen", |state| state["tool"] == "Only(\"codex\")")?;
     user.open("open-ab")?;
     type_draft(user, "chat", DRAFT)?;
     user.press("ctrl+shift+y")?;
@@ -1641,8 +1646,8 @@ fn dropdown_opens(user: &mut User, at: (u32, u32)) -> SandboxResult<bool> {
     Ok(changed > 400)
 }
 
-/// The centre of the lowest selected segment on the settings' page as it is now.
-fn lowest_segment_center(user: &mut User) -> SandboxResult<(u32, u32)> {
+/// The centres of the last three dropdowns on the settings' page as it is now, top to bottom.
+fn last_dropdowns(user: &mut User) -> SandboxResult<[(u32, u32); 3]> {
     let page = Rect {
         x0: 330,
         y0: 50,
@@ -1650,57 +1655,53 @@ fn lowest_segment_center(user: &mut User) -> SandboxResult<(u32, u32)> {
         y1: 790,
     };
     let screen = user.steady(page)?;
-    Ok(bounds_lowest_segment(&screen)
-        .ok_or("no selected segment on the page")?
-        .center())
+    let found = dropdowns_in(&screen, page);
+    match found.as_slice() {
+        [.., first, second, third] => Ok([*first, *second, *third]),
+        _ => Err(format!("fewer than three dropdowns on the page: {found:?}").into()),
+    }
 }
 
-/// The General page scrolled to its end by the wheel: the centre of Message translation's tool segment chosen,
-/// Automatic (the page's last selected segment).
-fn message_translation_tools(user: &mut User) -> SandboxResult<(u32, u32)> {
+/// The General page scrolled to its end by the wheel: Message translation's dropdowns (its language, its provider,
+/// its model), the page's last three.
+fn message_translation_dropdowns(user: &mut User) -> SandboxResult<[(u32, u32); 3]> {
     for _ in 0..6 {
         user.input.scroll(740, 400, 20)?;
     }
     user.park()?;
-    let automatic = lowest_segment_center(user)?;
-    if automatic.1 < 450 {
-        return Err(format!("the page isn't scrolled to Message translation: {automatic:?}").into());
+    let dropdowns = last_dropdowns(user)?;
+    if dropdowns[0].1 < 450 {
+        return Err(format!("the page isn't scrolled to Message translation: {dropdowns:?}").into());
     }
-    Ok(automatic)
+    Ok(dropdowns)
 }
 
-/// The lowest run of rows in the settings' page with a wide stretch of the brand's blues: a selected segment.
-fn bounds_lowest_segment(shot: &image::RgbImage) -> Option<Rect> {
-    let page = 800..shot.width().min(1270);
-    let lit = |y: u32| page.clone().filter(|&x| brandish(*shot.get_pixel(x, y))).count() >= 40;
-    // above the window's frame along the screen's foot, drawn in the brand's blues too
-    let mut bottom = shot.height().saturating_sub(12);
-    loop {
-        let found = (60..bottom).rev().find(|&y| lit(y))?;
-        let top = (60..=found).rev().take_while(|&y| lit(y)).last()?;
-        let band = Rect {
-            x0: page.start,
-            y0: top,
-            x1: page.end,
-            y1: found + 1,
-        };
-        // its filled columns: text's coloured fringes around it count only a few
-        let filled = |x: u32| (band.y0..band.y1).filter(|&y| brandish(*shot.get_pixel(x, y))).count() >= 15;
-        let columns: Vec<u32> = page.clone().filter(|&x| filled(x)).collect();
-        let segment = match (columns.first(), columns.last()) {
-            (Some(&x0), Some(&x1)) => Rect {
-                x0,
-                y0: band.y0,
-                x1: x1 + 1,
-                y1: band.y1,
-            },
-            _ => band,
-        };
-        if (20..=40).contains(&(segment.y1 - segment.y0)) && (44..=120).contains(&segment.width()) {
-            return Some(segment);
+/// The centres of the dropdowns in `shot` within `page`, top to bottom. A dropdown ends at the page's right column
+/// of controls (x 1153): its outline (or its fill) crosses the column just inside that end and not the card's column
+/// beside it, where a row's line or a card's edge crosses both.
+fn dropdowns_in(shot: &image::RgbImage, page: Rect) -> Vec<(u32, u32)> {
+    const INSIDE: u32 = 1146;
+    const BESIDE: u32 = 1160;
+    let differs = |y: u32| {
+        shot.get_pixel(INSIDE, y)
+            .0
+            .iter()
+            .zip(shot.get_pixel(BESIDE, y).0)
+            .any(|(&inside, beside)| inside.abs_diff(beside) > 10)
+    };
+    // the rows where the column differs, joined into spans when they are close (a dropdown's top and bottom edges)
+    let mut spans: Vec<(u32, u32)> = Vec::new();
+    for y in (page.y0..page.y1.min(shot.height())).filter(|&y| differs(y)) {
+        match spans.last_mut() {
+            Some((_, end)) if y - *end <= 36 => *end = y,
+            _ => spans.push((y, y)),
         }
-        bottom = top;
     }
+    spans
+        .into_iter()
+        .filter(|(top, bottom)| (26..=44).contains(&(bottom - top)))
+        .map(|(top, bottom)| (1100, u32::midpoint(top, bottom)))
+        .collect()
 }
 
 // --- the child: the app on the mock, answering the parent ---
@@ -1838,7 +1839,7 @@ fn only_the_made_up_tool() -> SandboxResult {
     let made_up = PathBuf::from(std::env::var_os(TOOLS_ENV).ok_or("no made-up tool's directory")?);
     let found = teams_ui::local_ai::Tools::detect();
     for backend in [teams_ui::local_ai::Backend::Claude, teams_ui::local_ai::Backend::Codex] {
-        if let Ok((_, program)) = found.pick(teams_ui::local_ai::ToolChoice::Only(backend))
+        if let Some(program) = found.program(backend)
             && !program.starts_with(&made_up)
         {
             return Err(format!("a real tool is on the PATH: {}", program.display()).into());
@@ -1989,6 +1990,20 @@ fn on_shell(shell: &Entity<Shell>, verb: &str, window: &mut Window, cx: &mut App
                     |settings| {
                         settings.appearance.follow_system = false;
                         settings.appearance.theme = key;
+                    },
+                    cx,
+                );
+            });
+            "ok".to_owned()
+        }
+        "choose-codex" => {
+            let model = shell.read(cx).settings().clone();
+            model.update(cx, |model, cx| {
+                model.change(
+                    |settings| {
+                        let mut choice = settings.ai(Work::Draft).clone();
+                        choice.tool = ToolChoice::cli(Backend::Codex);
+                        settings.set_ai(Work::Draft, choice);
                     },
                     cx,
                 );

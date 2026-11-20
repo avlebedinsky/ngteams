@@ -746,11 +746,10 @@ impl Walk<'_> {
         self.dark("suggested")?;
         let image = load(&shot)?;
         let card = find_card(&image).ok_or("no card for the suggested actions")?;
-        let below: Vec<Rect> = boxes_in(&image, PANE_X, 1280)
+        // from the card down: the header's border over the pane's fill and the box's grey top make one false box
+        let below: Vec<Rect> = boxes_below(&image, PANE_X, 1280, card.y1)
             .into_iter()
-            .filter(|found| {
-                PANE.holds(found) && found.y0 > card.y1 && (16..36).contains(&found.height()) && found.width() >= 40
-            })
+            .filter(|found| PANE.holds(found) && (16..36).contains(&found.height()) && found.width() >= 40)
             .collect();
         let Some(first) = below.iter().min_by_key(|found| found.x0).copied() else {
             note(format!(
@@ -765,11 +764,9 @@ impl Walk<'_> {
         })?;
         thread::sleep(SETTLE);
         let after = self.shot("qa-bot-cards-suggested-answered-light.png")?;
-        let left = boxes_in(&load(&after)?, PANE_X, 1280)
+        let left = boxes_below(&load(&after)?, PANE_X, 1280, 600)
             .into_iter()
-            .filter(|found| {
-                PANE.holds(found) && (16..36).contains(&found.height()) && found.width() >= 40 && found.y0 > 600
-            })
+            .filter(|found| PANE.holds(found) && (16..36).contains(&found.height()) && found.width() >= 40)
             .count();
         if left > 0 {
             note(format!(
@@ -1127,8 +1124,13 @@ fn edge(pixel: [u8; 3]) -> bool {
 /// [`OFF_FILL`]) inside, in
 /// order down the screen, then across.
 fn boxes_in(shot: &image::RgbImage, from: u32, to: u32) -> Vec<Rect> {
+    boxes_below(shot, from, to, 0)
+}
+
+/// The [`boxes_in`] whose top edge is at row `top` or below it.
+fn boxes_below(shot: &image::RgbImage, from: u32, to: u32, top: u32) -> Vec<Rect> {
     let mut found: Vec<Rect> = Vec::new();
-    for y in 0..shot.height().saturating_sub(3) {
+    for y in top..shot.height().saturating_sub(3) {
         for (x0, x1) in runs(shot, y, from, to, edge) {
             let mid = x0 + (x1 - x0) / 2;
             let inside = at(shot, mid, y + 2);

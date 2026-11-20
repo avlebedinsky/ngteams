@@ -96,7 +96,8 @@ impl Store {
     }
 
     /// Keeps the account's mark-all-read horizon. When it changed, the conversations whose unread count that can
-    /// change: their newest message arrived after the earlier of the two horizons.
+    /// change: their newest message arrived after the earlier of the two horizons, or they were marked unread after
+    /// it (the newer horizon ends such a mark, the older one brings it back).
     ///
     /// # Errors
     ///
@@ -115,7 +116,10 @@ impl Store {
         let changed = {
             let mut statement = tx.prepare(
                 "SELECT id FROM conversations
-                 WHERE last_activity > CASE kind WHEN 'channel' THEN ?2 ELSE ?1 END",
+                 WHERE last_activity > CASE kind WHEN 'channel' THEN ?2 ELSE ?1 END
+                    OR EXISTS (SELECT 1 FROM horizon_bookmarks AS mark
+                        WHERE mark.conversation_id = conversations.id AND mark.arrival > 0
+                          AND mark.time_ms > CASE kind WHEN 'channel' THEN ?2 ELSE ?1 END)",
             )?;
             let rows = statement.query_map(
                 params![before.chat.min(horizon.chat), before.channel.min(horizon.channel)],
@@ -145,14 +149,31 @@ impl Store {
             .unwrap_or_default())
     }
 
-    /// Keeps when the account last marked a whole conversation read (its `consumptionHorizonBookmark`, ms), unless the
-    /// stored time is the same or later: [`Applied::Ignored`] then.
+    /// Keeps when the account last marked a whole conversation read (its `consumptionHorizonBookmark` `0;<ms>;0`, ms),
+    /// which also ends an unread mark, unless the stored time is the same or later: [`Applied::Ignored`] then.
     ///
     /// # Errors
     ///
     /// [`StoreError::UnknownConversation`] when the conversation isn't stored, [`StoreError::Sqlite`] when the write
     /// fails.
     pub fn set_horizon_bookmark(&mut self, conversation_id: &str, time_ms: i64) -> Result<Applied, StoreError> {
+        self.set_unread_bookmark(conversation_id, 0, time_ms)
+    }
+
+    /// Keeps a conversation's bookmark whole (`<arrival>;<ms>;…`), unless the stored one was set at the same time or
+    /// later: [`Applied::Ignored`] then. An `arrival` that isn't 0 marks the conversation unread from the message after
+    /// it on ("Mark as unread"); 0 ends a mark.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::UnknownConversation`] when the conversation isn't stored, [`StoreError::Sqlite`] when the write
+    /// fails.
+    pub fn set_unread_bookmark(
+        &mut self,
+        conversation_id: &str,
+        arrival: i64,
+        time_ms: i64,
+    ) -> Result<Applied, StoreError> {
         let tx = self.conn.transaction()?;
         Self::require_conversation(&tx, conversation_id)?;
         let stored: Option<i64> = tx
@@ -168,16 +189,38 @@ impl Store {
             Some(_) => return Ok(Applied::Ignored),
         };
         tx.execute(
-            "INSERT INTO horizon_bookmarks (conversation_id, time_ms) VALUES (?1, ?2)
-             ON CONFLICT DO UPDATE SET time_ms = excluded.time_ms",
-            params![conversation_id, time_ms],
+            "INSERT INTO horizon_bookmarks (conversation_id, time_ms, arrival) VALUES (?1, ?2, ?3)
+             ON CONFLICT DO UPDATE SET time_ms = excluded.time_ms, arrival = excluded.arrival",
+            params![conversation_id, time_ms, arrival.max(0)],
         )?;
         tx.commit()?;
         Ok(applied)
     }
 
-    /// When the account last marked a whole conversation read (ms); `None` when it never did, as far as the store
-    /// knows.
+    /// Where the account marked a conversation unread: 1 ms before the arrival of the first unread message; `None`
+    /// when it isn't marked, or a later mark-all-read ([`Store::app_read_horizon`]) ended the mark, as
+    /// [`Store::unread_count`] counts it.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] when the read fails.
+    pub fn unread_mark(&self, conversation_id: &str) -> Result<Option<i64>, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT mark.arrival FROM horizon_bookmarks AS mark
+                 JOIN conversations ON conversations.id = mark.conversation_id
+                 WHERE mark.conversation_id = ?1 AND mark.arrival > 0
+                   AND mark.time_ms > COALESCE((SELECT CASE conversations.kind WHEN 'channel' THEN channel ELSE chat END
+                                                FROM app_read_horizon), 0)",
+                params![conversation_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// When the account last set a conversation's bookmark (ms): it marked the whole conversation read, marked it
+    /// unread, or ended a mark; `None` when it never did, as far as the store knows.
     ///
     /// # Errors
     ///

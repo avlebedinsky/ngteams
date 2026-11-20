@@ -139,6 +139,16 @@ fn stopped<T: Send + 'static>(reply: Reply<T>) {
     );
 }
 
+/// The messages translated one at a time: none kept, and one the store doesn't hold kept as nothing.
+fn ask_translated_messages(core: &dyn Core) {
+    assert!(
+        answer(core.translated_messages(AB_CHAT.into(), vec!["1".into()]))
+            .unwrap()
+            .is_empty()
+    );
+    answer(core.keep_translated_message(AB_CHAT.into(), "unknown".into(), true)).unwrap();
+}
+
 #[test]
 fn the_app_s_core_answers_the_views_from_the_engine_s_store() {
     let lab = Lab::start();
@@ -164,6 +174,7 @@ fn the_app_s_core_answers_the_views_from_the_engine_s_store() {
             .unwrap()
             .is_empty()
     );
+    ask_translated_messages(&*core);
     assert!(
         answer(core.translations(AB_CHAT.into(), "de".into(), vec!["1".into()]))
             .unwrap()
@@ -281,6 +292,8 @@ fn ask_chat(core: &dyn Core) {
     stopped(core.translations(chat(), "de".into(), vec!["1".into()]));
     stopped(core.keep_translations(Vec::new()));
     stopped(core.sent_originals(chat(), vec!["key".into()]));
+    stopped(core.translated_messages(chat(), vec!["1".into()]));
+    stopped(core.keep_translated_message(chat(), "1".into(), true));
     stopped(core.glossary(chat(), "de".into()));
     stopped(core.keep_glossary(Vec::new()));
     stopped(core.conversation(chat()));

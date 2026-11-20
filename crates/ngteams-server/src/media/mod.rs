@@ -44,6 +44,59 @@ const LONG: Duration = Duration::from_secs(600);
 /// The chat service's audience, which AMS takes too.
 const IC3: &str = <crate::auth::extract::Ic3 as crate::auth::extract::Audience>::AUDIENCE;
 
+pub(crate) use schema::{drive_grants, drive_items};
+
+/// The maximum number of file entries that one message can share.
+const MAX_SHARED_FILES: usize = 10;
+
+/// Commits file grants with the message, so a failed grant cannot leave a message without access.
+macro_rules! share_on {
+    ($conn:expr, $base:expr, $sharer:expr, $files:expr, $readers:expr) => {{
+        use $crate::media::{drive_grants, drive_items};
+        for (owner, name) in $crate::media::file_targets($base, $files) {
+            let item: Option<String> = drive_items::table
+                .inner_join(drive_grants::table.on(drive_grants::item_id.eq(drive_items::id)))
+                .filter(drive_items::owner_id.eq(&owner))
+                .filter(drive_items::name.eq(&name))
+                .filter(drive_grants::user_id.eq($sharer))
+                .select(drive_items::id)
+                .first($conn)
+                .await
+                .optional()?;
+            if let Some(item) = item {
+                for reader in $readers {
+                    diesel::insert_into(drive_grants::table)
+                        .values((drive_grants::item_id.eq(&item), drive_grants::user_id.eq(reader)))
+                        .on_conflict_do_nothing()
+                        .execute($conn)
+                        .await?;
+                }
+            }
+        }
+    }};
+}
+pub(crate) use share_on;
+
+pub(crate) fn file_targets(base: &str, files: Option<&serde_json::Value>) -> Vec<(String, String)> {
+    let list = match files {
+        Some(serde_json::Value::String(text)) => serde_json::from_str(text).unwrap_or_default(),
+        Some(other) => other.clone(),
+        None => return Vec::new(),
+    };
+    list.as_array()
+        .into_iter()
+        .flatten()
+        .take(MAX_SHARED_FILES)
+        .filter_map(|entry| {
+            let link = entry
+                .pointer("/fileInfo/shareUrl")
+                .or_else(|| entry.get("objectUrl"))?
+                .as_str()?;
+            drive::shared_name(base, link).ok()
+        })
+        .collect()
+}
+
 /// Where a file of `owner`'s drive named `name` opens: its sharing link.
 pub(crate) fn file_url(app: &App, owner: &str, name: &str) -> Option<String> {
     drive::web_url(app, owner, name).ok()

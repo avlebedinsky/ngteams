@@ -86,6 +86,7 @@ mod media;
 mod outcome;
 mod people;
 mod share;
+use share::OldShares;
 
 pub use gallery::{CallParticipant, CallView, HEARING_LEVEL, SPEAKING_HOLD, SPEAKING_LEVEL};
 pub use media::{CLOSED_GRACE, CONNECT_WITHIN, CallMedia, CallVideo, GROUP_SLOTS, RECOVER_WITHIN, Relay, VideoOutput};
@@ -806,6 +807,15 @@ where
                 }
             }
             PushEvent::Call(delivery) => {
+                if let Some(start) = teams_call::meeting_push::read(&delivery.delivery.body) {
+                    log::debug!(
+                        "calling push: a meeting started ({:?}) in {}, call {}",
+                        start.kind,
+                        start.thread,
+                        start.call_id
+                    );
+                    self.emit(Event::MeetingStarted(start));
+                }
                 let key = DeliveryKey {
                     connection: delivery.delivery.connection.clone(),
                     id: delivery.delivery.id,
@@ -1012,6 +1022,7 @@ where
                 self.muted_by_organizer(call, &state);
                 self.emit(Event::CallMeeting { call, state });
             }
+            CallEvent::VideoAsked { call, camera } => self.video_asked(call, camera),
             CallEvent::KeepAliveDue { call, sent } => {
                 log::info!("call {}: its keep-alive fell due (sent: {sent})", call.get());
             }
@@ -1171,12 +1182,7 @@ where
         let sdp = prepared.sdp.clone();
         let muted = self.live.as_ref().is_some_and(|live| live.session.is_muted());
         let camera_on = self.live.as_ref().is_some_and(|live| live.camera == Some(true));
-        // a share switch that waited for the old session's renegotiation goes on the new session
-        let share_waits = self.live.as_mut().and_then(|live| live.share_waits.take());
-        // the new session shares nothing and shows no share yet: a screen the old one shared or showed ends with it
-        let shared = self.live.as_ref().is_some_and(|live| live.shares.own);
-        let told = self.live.as_ref().is_some_and(|live| live.shares.told);
-        let shown = self.live.as_ref().is_some_and(|live| live.shares.theirs);
+        let mut shares = self.live.as_mut().map(OldShares::of).unwrap_or_default();
         // who is in the call stays as the roster told it: the roster tells only changes from here
         let participants = self
             .live
@@ -1185,7 +1191,7 @@ where
             .unwrap_or_default();
         let mut live = LiveMedia::new(call, prepared);
         live.session.set_muted(muted);
-        live.shares.told = told;
+        shares.carry(&mut live);
         live.gallery.set_participants(participants);
         live.applied(now);
         let content = if live.is_group() {
@@ -1194,26 +1200,9 @@ where
             media::content(&sdp)
         };
         if let Some(old) = self.live.replace(live) {
-            let session = old.session;
-            tokio::task::spawn_blocking(move || close(call, session));
+            self.let_go_of(call, old.session, &shares);
         }
-        if shared || shown {
-            self.calls.set_screen(call, None);
-        }
-        if shared {
-            log::info!(
-                "call {}: sharing its screen false: its media was set up again",
-                call.get()
-            );
-        }
-        // the new session's sharing line tells a share it shows again (`show_participants`)
-        if shown {
-            log::info!(
-                "call {}: a shared screen shown false: its media was set up again",
-                call.get()
-            );
-            self.emit(Event::CallRemoteShare { call, on: false });
-        }
+        self.shares_replaced(call, &shares);
         self.open_devices(call);
         if let Err(error) = self.calls.answer_media(call, content) {
             self.media_failed(call, &error.to_string(), now);
@@ -1224,7 +1213,7 @@ where
             self.media_steps
                 .spawn_blocking(media::group_camera(live, Arc::clone(&self.media.devices), true, reply));
         }
-        if let Some(wait) = share_waits {
+        if let Some(wait) = shares.waits.take() {
             self.share_after_rebuild(call, wait);
         }
         self.tell_sharing(call);
@@ -1346,6 +1335,7 @@ where
             MediaDone::Opened { .. }
                 | MediaDone::GroupCamera { .. }
                 | MediaDone::ScreenPicked { .. }
+                | MediaDone::ScreenKept { .. }
                 | MediaDone::GroupShared { .. }
         ) {
             self.sdp_running = false;
@@ -1538,7 +1528,10 @@ where
                 let turned = self.group_camera_turned(call, on, result);
                 let _ = reply.send(turned.map(|()| call).map_err(EngineError::from));
             }
-            done @ (MediaDone::ScreenPicked { .. } | MediaDone::GroupShared { .. } | MediaDone::Shared { .. }) => {
+            done @ (MediaDone::ScreenPicked { .. }
+            | MediaDone::ScreenKept { .. }
+            | MediaDone::GroupShared { .. }
+            | MediaDone::Shared { .. }) => {
                 self.share_step_done(done, now);
             }
         }

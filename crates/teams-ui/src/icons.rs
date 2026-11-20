@@ -49,6 +49,10 @@ impl Glyph {
     pub const ELLIPSIS: Self = Self(include_bytes!("../assets/icons/ellipsis.svg"));
     pub const EYE: Self = Self(include_bytes!("../assets/icons/eye.svg"));
     pub const EYE_OFF: Self = Self(include_bytes!("../assets/icons/eye-off.svg"));
+    /// Teams' "Mark as read".
+    pub const GLASSES: Self = Self(include_bytes!("../assets/icons/glasses.svg"));
+    /// Teams' "Mark as unread": Lucide's glasses with its "-off" icons' slash.
+    pub const GLASSES_OFF: Self = Self(include_bytes!("../assets/icons/glasses-off.svg"));
     pub const GLOBE: Self = Self(include_bytes!("../assets/icons/globe.svg"));
     /// A chat's translation (Teams' "aあ" mark beside a translated message's time).
     pub const LANGUAGES: Self = Self(include_bytes!("../assets/icons/languages.svg"));

@@ -288,6 +288,8 @@ fn cut_and_plain_paste_preserve_text_and_read_only_edits_leave_the_document_inta
             .contains(Marks::BOLD)
     }));
     cx.update(|_, cx| editor.update(cx, |editor, cx| editor.set_read_only(true, cx)));
+    cx.simulate_keystrokes("ctrl-z");
+    assert_eq!(cx.update(|_, cx| editor.read(cx).text()), "Synthetic text");
     cx.simulate_keystrokes("ctrl-a ctrl-x delete backspace ctrl-v ctrl-shift-v ctrl-b");
     assert_eq!(cx.update(|_, cx| editor.read(cx).text()), "Synthetic text");
     assert!(!cx.update(|_, cx| {
@@ -296,6 +298,12 @@ fn cut_and_plain_paste_preserve_text_and_read_only_edits_leave_the_document_inta
             .marks
             .contains(Marks::BOLD)
     }));
+    cx.update(|_, cx| editor.update(cx, |editor, cx| editor.set_read_only(false, cx)));
+    cx.simulate_keystrokes("ctrl-z");
+    assert!(cx.update(|_, cx| editor.read(cx).is_empty()));
+    cx.update(|_, cx| editor.update(cx, |editor, cx| editor.set_read_only(true, cx)));
+    cx.simulate_keystrokes("ctrl-shift-z");
+    assert!(cx.update(|_, cx| editor.read(cx).is_empty()));
 }
 
 #[test]

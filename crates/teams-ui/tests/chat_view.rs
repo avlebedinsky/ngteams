@@ -30,12 +30,17 @@ mod bot_cards;
 mod cards;
 #[path = "chat_view/files.rs"]
 mod files;
+#[path = "chat_view/message_extensions.rs"]
+mod message_extensions;
 // forwarded messages, in their card
 #[path = "chat_view/forward.rs"]
 mod forward;
 // a link's preview card
 #[path = "chat_view/links.rs"]
 mod links;
+// "Mark as unread" from a message's menu
+#[path = "chat_view/mark_unread.rs"]
+mod mark_unread;
 #[path = "chat_view/meeting.rs"]
 mod meeting;
 // names and pictures in the chat list and the chat view (M2 Task 12)
@@ -388,6 +393,7 @@ fn row(id: &str, sender: &str, at: i64) -> MessageItem {
         thread: teams_ui::chat_view::Threaded::No,
         replies: None,
         translation: None,
+        translate: None,
     }
 }
 
@@ -640,6 +646,8 @@ fn the_new_messages_divider_sits_at_the_read_horizon_as_the_chat_opened() {
     };
     assert_eq!(divider_before(cx).as_deref(), Some("3"));
     assert!(cx.debug_bounds("new-messages").is_some());
+    assert!(cx.debug_bounds("new-messages-label New messages").is_some());
+    assert!(cx.debug_bounds("new-messages-label Last read").is_none());
     // the horizon moves on (the account read the chat); the divider stays where it was while the chat is open
     rig.core.horizons.lock().unwrap().get_mut(AB).unwrap().last_read_arrival = NOON + 2 * MINUTE;
     arrive(&rig, cx, &message("4", LAB_B, "<p>newer</p>", NOON + 3 * MINUTE));
@@ -1465,6 +1473,46 @@ fn the_hover_bar_holds_the_quick_reactions_react_reply_and_more_options_in_teams
     cx.update(|window, cx| view.read(cx).focus_handle().clone().focus(window, cx));
     cx.simulate_keystrokes("escape");
     assert_eq!(cx.update(|_, cx| view.read(cx).options().map(str::to_owned)), None);
+}
+
+/// A made-up sticker of Teams' alone in a message, as the chat service reads it back.
+const STICKER_ALONE: &str = "<p>&nbsp;</p>\r\n<img src=\"https://teams.public.onecdn.static.microsoft/evergreen-assets/\
+     stickerassets/madeup-250x250/en-us/MadeUp_Hi.gif?v=5\" height=\"180\" alt=\"A made-up sticker\" width=\"180\" \
+     itemtype=\"http://schema.skype.com/Sticker\">\r\n<p>&nbsp;</p>";
+
+#[test]
+fn a_sticker_alone_offers_no_edit_and_copy_text_copies_its_label() {
+    let rig = rig_with(vec![
+        message("1", LAB_B, STICKER_ALONE, NOON),
+        message("2", LAB_A, STICKER_ALONE, NOON + MINUTE),
+    ]);
+    let (view, cx) = chat_window(&rig, Arc::new(ViewTrace::off()));
+    let actions = |cx: &mut VisualTestContext, id: &str| {
+        cx.update(|_, cx| {
+            view.read(cx)
+                .message_items()
+                .find(|item| item.id == id)
+                .map(MessageItem::actions)
+                .unwrap_or_default()
+        })
+    };
+    // the account's own: no edit (on the bar or by a key), still a delete
+    let mine = actions(cx, "2");
+    assert!(
+        !mine.contains(&MessageAction::Edit) && mine.contains(&MessageAction::Delete),
+        "{mine:?}"
+    );
+    let own = cx.debug_bounds("message-2").unwrap();
+    cx.simulate_mouse_move(own.center(), None, Modifiers::none());
+    draw(cx);
+    assert!(cx.debug_bounds("action-reply").is_some() && cx.debug_bounds("action-edit").is_none());
+    // someone else's: copy text puts its label on the clipboard
+    assert!(actions(cx, "1").contains(&MessageAction::Copy));
+    from_menu(cx, "message-1", "action-copy");
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()).as_deref(),
+        Some("A made-up sticker")
+    );
 }
 
 #[test]

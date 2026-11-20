@@ -47,6 +47,7 @@ use crate::chat_list::{self, ChatList};
 use crate::icons::{Glyph, icon_button, icon_button_with_key, selected_by};
 use crate::notify::SOMEONE;
 use crate::people::Shown;
+use crate::settings::SettingsModel;
 use crate::shell::{AnswerCall, DeclineCall, HangUpCall, ToggleCameraCall, ToggleMuteCall};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
@@ -268,6 +269,8 @@ pub struct CallBar {
     core: Arc<dyn Core>,
     calls: Entity<Calls>,
     list: Entity<ChatList>,
+    /// Whether the AI notice waits: the banner shows over it then.
+    settings: Entity<SettingsModel>,
     /// The last test call whose results were traced.
     results_traced: Option<CallId>,
     trace: Arc<ViewTrace>,
@@ -279,15 +282,15 @@ pub struct CallBar {
     registered_traced: bool,
     people: CallPeople,
     ticking: Option<Task<()>>,
-    _observing: [Subscription; 2],
+    _observing: [Subscription; 3],
 }
 
 impl CallBar {
-    /// The strip over `calls`, a chat named as `list` names it.
+    /// The strip over `calls`, a chat named as `list` names it, its banner over the AI notice while `settings` wait
+    /// for it.
     pub fn new(
         core: Arc<dyn Core>,
-        calls: Entity<Calls>,
-        list: Entity<ChatList>,
+        (calls, list, settings): (Entity<Calls>, Entity<ChatList>, Entity<SettingsModel>),
         trace: Arc<ViewTrace>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -295,11 +298,13 @@ impl CallBar {
             cx.observe(&calls, |this: &mut Self, _, cx| this.changed(cx)),
             // a chat's name read again: the banner and the strip name it as its row does
             cx.observe(&list, |_, _, cx| cx.notify()),
+            cx.observe(&settings, |_, _, cx| cx.notify()),
         ];
         let mut bar = Self {
             core,
             calls,
             list,
+            settings,
             results_traced: None,
             trace,
             banner_traced: None,
@@ -579,6 +584,16 @@ impl CallBar {
                 cx,
                 |this, cx| this.ask(Ask::Decline, cx),
             ));
+        // the sheet's rounding: over the AI notice, the banner is drawn above the sheet's corner caps
+        let banner = if palette.depth {
+            banner.rounded_t(px(theme::SHEET_RADIUS))
+        } else {
+            banner
+        };
+        // over the AI notice's backdrop, as Teams' incoming call shows over everything; the strip under it stays behind
+        if self.settings.read(cx).awaiting_ai_notice() {
+            return gpui::deferred(banner).into_any_element();
+        }
         // drawn whole at once: faded in, it is an empty band over the panes while the ring's start holds the thread
         banner.into_any_element()
     }

@@ -151,7 +151,9 @@ use crate::calling::{
 };
 use crate::emoticons::{Animations, Strip};
 use crate::file_content::{FileContents, FileStream};
-use crate::outbox::{Command, Outbox, OutboxError, Sent, Transient, TransientSent, create_chat, enqueue, now_ms};
+use crate::outbox::{
+    Command, Outbox, OutboxError, Sent, Transient, TransientSent, create_chat, enqueue, now_ms, replace_older_marks,
+};
 use crate::pictures::{Disk, PictureBytes, Pictures};
 use crate::presence::{Availability, PRESENCE_POLL, PRESENCE_POLL_SUBSCRIBED, PresenceDone, Presences};
 use crate::profiles::{PROFILE_RETRY, Person, Profiles};
@@ -278,6 +280,18 @@ pub enum Action {
     },
     /// The account's read horizon moved to a message (a read receipt others may see).
     Read { conversation: String, message_id: String },
+    /// Teams' "Mark as unread": the conversation unread from `message_id` on (a message's menu), or from its newest
+    /// message when none is given (the chat list's menu). Only the account sees it; it stays until the conversation is
+    /// opened again ([`Action::EndUnreadMark`]) or marked read ([`Action::MarkRead`]).
+    MarkUnread {
+        conversation: String,
+        message_id: Option<String>,
+    },
+    /// The chat list's "Mark as read": the read horizon moves to the newest message when it is behind it, and a mark
+    /// the conversation has ends.
+    MarkRead { conversation: String },
+    /// The conversation opened again while marked unread: the mark ends, as Teams ends it.
+    EndUnreadMark { conversation: String },
     /// A chat of the account and `others`: their 1:1 chat for one, a new group chat for two or more, named `topic`
     /// when one is given (New message's "Add group name"; a 1:1 chat takes no name).
     CreateChat { others: Vec<Mri>, topic: Option<String> },
@@ -450,6 +464,9 @@ pub enum Event {
     /// An invitation rings here (the call tracker offered it): answer it or decline it ([`CallAction::Answer`],
     /// [`CallAction::Decline`]); nothing does otherwise. One call at a time: none rings while a call is up.
     IncomingCall(IncomingCall),
+    /// The calling service pushed a meeting's start ([`teams_call::meeting_push`]): who started which meeting, for its
+    /// banner. Nothing is answered or joined for it.
+    MeetingStarted(teams_call::meeting_push::MeetingStartPush),
     /// An offered invitation's ring ended before the account answered or declined it (as delivered: the caller
     /// cancelled, it was answered elsewhere, it timed out), or the engine let it go.
     RingEnded { call: CallId, end: RemoteEnd },
@@ -554,6 +571,8 @@ pub enum EngineError {
     UnknownMessage { conversation: String, message: String },
     #[error("the activity feed holds nothing newer than what was seen")]
     NothingNewInActivity,
+    #[error("conversation {conversation} is read already and has no unread mark")]
+    AlreadyRead { conversation: String },
     #[error("the activity app definition could not be read; try again")]
     ActivityAppUnavailable,
     #[error("message {message} isn't the account's own, so it can't be {action}")]
@@ -651,6 +670,7 @@ impl EngineError {
             Self::UnknownMessage { .. } => "unknown message",
             Self::ActivityAppUnavailable => "activity app unavailable",
             Self::NothingNewInActivity => "nothing new in activity",
+            Self::AlreadyRead { .. } => "already read",
             Self::NotOwn { .. } => "not the account's own",
             Self::Deleted { .. } => "deleted",
             Self::Unknown { .. } => "unknown field",
@@ -768,7 +788,8 @@ enum Request {
     RecordingSegment(teams_proto::MediaSegmentLink, Responder<Vec<u8>>),
     /// What a meeting recording's file is to the account, by its item ([`crate::recap`]).
     RecordingFile(teams_proto::RecordingFile, Responder<teams_proto::RecordingAccess>),
-    Write(Action, Responder<OutboxEntry>),
+    /// Boxed: an action (a message's text) is many times the size of any other request.
+    Write(Box<Action>, Responder<OutboxEntry>),
     /// A read receipt already queued while the engine waited on the service.
     SendQueued(i64, Responder<OutboxEntry>),
     Resend(i64, Responder<OutboxEntry>),
@@ -787,6 +808,13 @@ enum Request {
     KeepTranslations(Vec<StoredTranslation>, Responder<()>),
     /// The account's own message as written, kept when it was sent translated: no service write.
     KeepSentOriginal(SentOriginal, Responder<()>),
+    /// A message the user translated one at a time (`true`), or shows as written again: no service write.
+    KeepTranslatedMessage {
+        conversation: String,
+        message: String,
+        translated: bool,
+        reply: Responder<()>,
+    },
     /// A translated chat's glossary, kept in the store: no service write.
     KeepGlossary(Vec<GlossaryTerm>, Responder<()>),
     /// A call's saved captions ([`TranscriptWrite`]), kept in the store: no service write.
@@ -811,6 +839,11 @@ enum Request {
         reply: Responder<FileStream>,
     },
     FileSize(String, Responder<u64>),
+    LinkPermission {
+        object_url: String,
+        share_url: String,
+        reply: Responder<Option<teams_proto::chat::LinkPermission>>,
+    },
     Teams(Responder<Option<Vec<Team>>>),
     ChatListing(Responder<ChatListing>),
     Calendar {
@@ -940,6 +973,7 @@ enum Query {
     UnreadCount(String, Responder<u64>),
     DisplayName(String, Responder<Option<String>>),
     ReadHorizon(String, Responder<Option<ReadHorizon>>),
+    UnreadMark(String, Responder<Option<i64>>),
     HistoryComplete(String, Responder<Option<bool>>),
     OutboxEntry(i64, Responder<Option<OutboxEntry>>),
     OutboxUnsettled(String, Responder<Vec<OutboxEntry>>),
@@ -959,6 +993,12 @@ enum Query {
         conversation: String,
         language: String,
         reply: Responder<Vec<GlossaryTerm>>,
+    },
+    /// Which of a conversation's messages the user translated one at a time.
+    TranslatedMessages {
+        conversation: String,
+        ids: Vec<String>,
+        reply: Responder<Vec<String>>,
     },
     /// The account's own messages of a conversation as written, by their keys.
     SentOriginals {
@@ -1086,7 +1126,7 @@ impl EngineRequests {
     /// A read receipt advances the shared local horizon when queued, before the service answers; only the exact
     /// stored target is read, and the service reconciles it by the horizon timestamp as usual.
     pub fn write(&self, action: Action) -> Reply<OutboxEntry> {
-        self.ask(|reply| Request::Write(action, reply))
+        self.ask(|reply| Request::Write(Box::new(action), reply))
     }
 
     /// Sends an outbox row again, by its id: the explicit resend ([`Store::resend`]) of a row an earlier run left
@@ -1368,6 +1408,27 @@ impl EngineRequests {
         self.ask(|reply| Request::KeepSentOriginal(original, reply))
     }
 
+    /// Which of the messages `ids` of `conversation` the user translated one at a time
+    /// ([`Store::translated_messages`]). Answered meanwhile too.
+    pub fn translated_messages(&self, conversation: String, ids: Vec<String>) -> Reply<Vec<String>> {
+        self.query(|reply| Query::TranslatedMessages {
+            conversation,
+            ids,
+            reply,
+        })
+    }
+
+    /// Keeps that the user translated the message `message` of `conversation` one at a time, or shows it as written
+    /// again ([`Store::set_translated_message`]): only the store changes.
+    pub fn keep_translated_message(&self, conversation: String, message: String, translated: bool) -> Reply<()> {
+        self.ask(|reply| Request::KeepTranslatedMessage {
+            conversation,
+            message,
+            translated,
+            reply,
+        })
+    }
+
     /// The glossary of `conversation` translated into `language` (the app's code), the newest named first
     /// ([`Store::glossary`]). Answered meanwhile too.
     pub fn glossary(&self, conversation: String, language: String) -> Reply<Vec<GlossaryTerm>> {
@@ -1629,6 +1690,12 @@ impl EngineRequests {
     /// The apps the account added for itself, by name, read now.
     pub fn user_apps(&self) -> Reply<Vec<StoreApp>> {
         self.ask(|reply| Request::TeamApps(Box::new(TeamAppsAsk::UserApps { reply })))
+    }
+
+    /// The account's apps with a message extension (the compose box's "Actions and apps", a message's "More actions"),
+    /// then the store's offers that have one, read now.
+    pub fn message_extensions(&self) -> Reply<Vec<teams_proto::ExtensionApp>> {
+        self.ask(|reply| Request::TeamApps(Box::new(TeamAppsAsk::MessageExtensions { reply })))
     }
 
     /// The apps added to `chat`, by name, read now.
@@ -1906,6 +1973,23 @@ impl EngineRequests {
         self.ask(|reply| Request::FileSize(share_url, reply))
     }
 
+    /// What the sharing link `share_url` of the file at `object_url` (its own address on a personal site) lets people
+    /// do, read on the file's site as Teams' "Share this file" reads it ([`teams_proto::chat::LinkPermission`]);
+    /// `None` when the answer names no link of a known scope. [`EngineError::FileUnavailable`] when it can't be read
+    /// here (another service, a refusal), [`EngineError::FileUnread`] when the read failed on the way.
+    pub fn link_permission(
+        &self,
+        object_url: impl Into<String>,
+        share_url: impl Into<String>,
+    ) -> Reply<Option<teams_proto::chat::LinkPermission>> {
+        let (object_url, share_url) = (object_url.into(), share_url.into());
+        self.ask(|reply| Request::LinkPermission {
+            object_url,
+            share_url,
+            reply,
+        })
+    }
+
     /// The account's activity feed as stored: its newest items, their read state, and what is new since the Activity
     /// pane was last opened ([`crate::activity`]).
     pub fn activity(&self) -> Reply<ActivityFeed> {
@@ -1916,6 +2000,13 @@ impl EngineRequests {
     pub fn read_horizon(&self, conversation: impl Into<String>) -> Reply<Option<ReadHorizon>> {
         let conversation = conversation.into();
         self.query(|reply| Query::ReadHorizon(conversation, reply))
+    }
+
+    /// Where the account marked a conversation unread ([`Store::unread_mark`]): 1 ms before the arrival of the first
+    /// unread message; `None` when it isn't marked.
+    pub fn unread_mark(&self, conversation: impl Into<String>) -> Reply<Option<i64>> {
+        let conversation = conversation.into();
+        self.query(|reply| Query::UnreadMark(conversation, reply))
     }
 
     /// Whether the store holds a conversation's whole history (its kept sync state says so); `None` when the
@@ -2120,6 +2211,29 @@ where
         ended,
         runtime: handle,
     })
+}
+
+/// Whether `action` moves the account's own read state in a conversation: a read receipt or an unread mark's write.
+fn is_read_state(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::Read { .. } | Action::MarkUnread { .. } | Action::MarkRead { .. } | Action::EndUnreadMark { .. }
+    )
+}
+
+/// The error of an action [`EngineRequests::write`] handles on its own path, should it reach the generic command.
+fn not_generic(action: &Action) -> EngineError {
+    let message = match action {
+        Action::MarkUnread { conversation, .. }
+        | Action::MarkRead { conversation }
+        | Action::EndUnreadMark { conversation } => conversation.clone(),
+        _ => activity::FEED.to_owned(),
+    };
+    EngineError::Unknown {
+        message,
+        missing: "its own write handling",
+        action: "converted to a generic command",
+    }
 }
 
 /// The future `make` makes, on the heap. In a debug build a poll frame holds every future made in it by value and
@@ -2425,7 +2539,7 @@ where
             Request::RecordingSegment(part, reply) => self.recaps.segment(part, reply),
             Request::RecordingFile(file, reply) => self.recaps.file(file, reply),
             Request::Write(action, reply) => {
-                let _ = reply.send(on_heap(|| self.logged_write(action)).await);
+                let _ = reply.send(on_heap(|| self.logged_write(*action)).await);
             }
             Request::SendQueued(id, reply) => {
                 let _ = reply.send(on_heap(|| self.send_row(id)).await);
@@ -2462,6 +2576,15 @@ where
             }
             Request::KeepSentOriginal(original, reply) => {
                 let _ = reply.send(self.store.put_sent_original(&original).map_err(EngineError::from));
+            }
+            Request::KeepTranslatedMessage {
+                conversation,
+                message,
+                translated,
+                reply,
+            } => {
+                let kept = self.store.set_translated_message(&conversation, &message, translated);
+                let _ = reply.send(kept.map_err(EngineError::from));
             }
             Request::KeepGlossary(terms, reply) => {
                 let _ = reply.send(self.store.put_glossary(&terms).map_err(EngineError::from));
@@ -2569,6 +2692,28 @@ where
                     let _ = reply.send(Err(EngineError::Store(error)));
                 }
             },
+            request @ (Request::FileRange { .. }
+            | Request::FileStream { .. }
+            | Request::FileSize(..)
+            | Request::LinkPermission { .. }) => self.on_file(request),
+            Request::Presence(mri, reply) => self.presence_asked(&mri, reply),
+            Request::Teams(reply) => {
+                let teams = self.inbox.teams().teams(&self.store);
+                let _ = reply.send(teams.map_err(EngineError::from));
+            }
+            Request::ChatListing(reply) => {
+                let listing = self.inbox.teams().chat_listing(&self.store);
+                let _ = reply.send(listing.map_err(EngineError::from));
+            }
+            // the engine's own: `on_request` takes them
+            _ => {}
+        }
+    }
+
+    /// A request about a file a message carries (its bytes, its size, its link's permission): handed to the file
+    /// reads.
+    fn on_file(&self, request: Request) {
+        match request {
             Request::FileRange {
                 share_url,
                 offset,
@@ -2582,16 +2727,13 @@ where
                 reply,
             } => self.files.stream(&share_url, offset, len, reply),
             Request::FileSize(share_url, reply) => self.files.size(&share_url, reply),
-            Request::Presence(mri, reply) => self.presence_asked(&mri, reply),
-            Request::Teams(reply) => {
-                let teams = self.inbox.teams().teams(&self.store);
-                let _ = reply.send(teams.map_err(EngineError::from));
+            Request::LinkPermission {
+                object_url,
+                share_url,
+                reply,
+            } => {
+                self.files.link_permission(object_url, share_url, reply);
             }
-            Request::ChatListing(reply) => {
-                let listing = self.inbox.teams().chat_listing(&self.store);
-                let _ = reply.send(listing.map_err(EngineError::from));
-            }
-            // the engine's own: `on_request` takes them
             _ => {}
         }
     }
@@ -2773,13 +2915,8 @@ where
         if matches!(action, Action::ActivitySeen | Action::ActivityAllRead) {
             return on_heap(|| self.activity_write(&action)).await;
         }
-        if let Action::Read {
-            conversation,
-            message_id,
-        } = action
-        {
-            let row = self.inbox.queue_read(&mut self.store, conversation, message_id)?;
-            return on_heap(|| self.send_row(row.id)).await;
+        if is_read_state(&action) {
+            return on_heap(|| self.read_write(action)).await;
         }
         let command = if let Action::ActivityTurnOffApp { item } = action {
             on_heap(|| self.activity_app_command(&item)).await?
@@ -2945,13 +3082,12 @@ where
                 self.standing(activity::FEED, &item)?;
                 Command::ActivityRead { item, read }
             }
-            Action::ActivitySeen | Action::ActivityAllRead | Action::ActivityTurnOffApp { .. } => {
-                return Err(EngineError::Unknown {
-                    message: activity::FEED.to_owned(),
-                    missing: "activity write handling",
-                    action: "converted to a generic command",
-                });
-            }
+            other @ (Action::ActivitySeen
+            | Action::ActivityAllRead
+            | Action::ActivityTurnOffApp { .. }
+            | Action::MarkUnread { .. }
+            | Action::MarkRead { .. }
+            | Action::EndUnreadMark { .. }) => return Err(not_generic(&other)),
         })
     }
 
@@ -3014,6 +3150,112 @@ where
         let row = enqueue(&mut self.store, &command)?;
         self.emit(Event::Queued(row.clone()));
         self.send_row(row.id).await
+    }
+
+    /// A read receipt (its local horizon moved when it is queued), or an unread mark's write ([`Self::unread_write`]).
+    async fn read_write(&mut self, action: Action) -> Result<OutboxEntry, EngineError> {
+        if let Action::Read {
+            conversation,
+            message_id,
+        } = action
+        {
+            let row = self.inbox.queue_read(&mut self.store, conversation, message_id)?;
+            return self.send_row(row.id).await;
+        }
+        self.unread_write(action).await
+    }
+
+    /// "Mark as unread", "Mark as read" and the end of a mark: the rows queued in order on the conversation's read
+    /// horizon, the store's mark moved at once (as a receipt moves the horizon) and told, then the rows sent. The
+    /// service's bookmark reconciles it by its time, as the horizon is.
+    async fn unread_write(&mut self, action: Action) -> Result<OutboxEntry, EngineError> {
+        let mut rows = Vec::new();
+        match action {
+            Action::MarkUnread {
+                conversation,
+                message_id,
+            } => {
+                let message = match message_id {
+                    Some(id) => self.standing(&conversation, &id)?,
+                    None => self
+                        .store
+                        .newest_countable(&conversation)?
+                        .ok_or_else(|| EngineError::AlreadyRead {
+                            conversation: conversation.clone(),
+                        })?,
+                };
+                let client_message_id = message.client_message_id.clone().ok_or_else(|| EngineError::Unknown {
+                    message: message.id.clone(),
+                    missing: "clientmessageid",
+                    action: "marked unread from",
+                })?;
+                let command = Command::UnreadMark {
+                    conversation,
+                    message_id: Some(message.id.clone()),
+                    client_message_id: Some(client_message_id),
+                };
+                rows.push(self.queue_mark(&command, message.arrival_time.saturating_sub(1))?);
+            }
+            Action::MarkRead { conversation } => {
+                let me = self.outbox.me().mri().as_str().to_owned();
+                let behind = self.store.newest_countable(&conversation)?.filter(|newest| {
+                    self.store
+                        .read_horizon(&conversation, &me)
+                        .ok()
+                        .flatten()
+                        .is_none_or(|horizon| horizon.last_read_arrival < newest.arrival_time)
+                });
+                if let Some(newest) = behind {
+                    rows.push(
+                        self.inbox
+                            .queue_read(&mut self.store, conversation.clone(), newest.id)?,
+                    );
+                }
+                if self.store.unread_mark(&conversation)?.is_some() {
+                    rows.push(self.end_mark(conversation.clone())?);
+                }
+                if rows.is_empty() {
+                    return Err(EngineError::AlreadyRead { conversation });
+                }
+            }
+            Action::EndUnreadMark { conversation } => rows.push(self.end_mark(conversation)?),
+            _ => {}
+        }
+        let mut last = None;
+        for row in rows {
+            last = Some(self.send_row(row.id).await?);
+        }
+        last.ok_or(EngineError::NotAChat)
+    }
+
+    fn end_mark(&mut self, conversation: String) -> Result<OutboxEntry, EngineError> {
+        let command = Command::UnreadMark {
+            conversation,
+            message_id: None,
+            client_message_id: None,
+        };
+        self.queue_mark(&command, 0)
+    }
+
+    /// Queues a mark's row in place of the chat's older pending marks and keeps its `arrival` (0: no mark) in the
+    /// store as of the row's time; a read-only engine keeps nothing, as its row is refused.
+    fn queue_mark(&mut self, command: &Command, arrival: i64) -> Result<OutboxEntry, EngineError> {
+        let row = enqueue(&mut self.store, command)?;
+        self.emit(Event::Queued(row.clone()));
+        for replaced in replace_older_marks(&mut self.store, &row)? {
+            self.emit(Event::Outbox(replaced));
+        }
+        if !self.outbox.is_read_only()
+            && let Some(conversation) = command.conversation()
+        {
+            let applied = self.store.set_unread_bookmark(conversation, arrival, row.created_at)?;
+            if applied != Applied::Ignored {
+                self.emit(Event::ReadHorizon {
+                    conversation: conversation.to_owned(),
+                });
+            }
+        }
+        Ok(row)
     }
 
     /// Apply confirmed feed horizons from the durable command, including sends retried by the tick or a resend.
@@ -3136,7 +3378,7 @@ where
         }
         let conversation = match row.kind {
             _ if row.state != OutboxState::Sent => None,
-            OutboxKind::ReadReceipt | OutboxKind::FeedRead => None,
+            OutboxKind::ReadReceipt | OutboxKind::FeedRead | OutboxKind::UnreadMark => None,
             OutboxKind::CreateChat => row.message_id.clone(),
             // a reply posted to a post's chain is stored with its channel's messages
             _ => row

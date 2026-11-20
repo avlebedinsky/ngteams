@@ -18,7 +18,7 @@ use super::codec::{decode, encode, one_line};
 use super::prompt::{self, Brief, Item, Term};
 use super::session::{Given, Job, Limits, Outcome, Session, Spec};
 use super::{CONTEXT_CHARS, CONTEXT_LINE, CONTEXT_LINES, Source, key_of, window};
-use crate::local_ai::{Model, ToolChoice, Tools};
+use crate::local_ai::{Model, Tools};
 
 /// A batch's context window: the chat view's.
 const WINDOW: (usize, usize) = (CONTEXT_LINES, CONTEXT_CHARS);
@@ -395,14 +395,14 @@ fn brief_of(chat: &Chat, terms: Vec<Term>) -> Arc<Brief> {
 }
 
 fn start(language: &'static str) -> Session {
-    let (backend, program) = Tools::detect()
-        .pick(ToolChoice::Automatic)
-        .expect("no claude or codex on the PATH");
+    let tools = Tools::detect();
+    let backend = tools.installed().next().expect("no claude or codex on the PATH");
+    let program = tools.program(backend).expect("no claude or codex on the PATH");
     Session::start(Spec {
         backend,
-        program,
+        target: crate::local_ai::Target::Program(program),
         model: Model::Recommended,
-        language,
+        language: language.into(),
         limits: Limits::default(),
     })
 }

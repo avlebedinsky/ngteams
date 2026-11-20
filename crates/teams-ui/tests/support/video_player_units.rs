@@ -301,6 +301,7 @@ fn movie_file() -> SharedFile {
         object_url: Some("https://files.example.test/synthetic.mp4".to_owned()),
         preview: None,
         location: None,
+        entry: None,
     }
 }
 
@@ -602,6 +603,7 @@ fn player_statuses_render_their_loading_and_failure_states_and_fullscreen_is_rev
         object_url: None,
         preview: None,
         location: None,
+        entry: None,
     };
     let (view, cx) = app.add_window_view(|_, cx| VideoPlayer::new("status".to_owned(), file, source, cx));
     let output = cx.update(|_, cx| view.read(cx).screen.clone());

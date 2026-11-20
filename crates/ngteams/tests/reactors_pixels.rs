@@ -110,3 +110,24 @@ fn the_pill_and_changes_outside_its_reach_do_not_make_a_card() {
     after.save(&after_path).unwrap();
     assert!(pixels::card_drawn(&before_path, &after_path, pill).is_err());
 }
+
+#[test]
+fn a_pixel_of_the_selection_colour_in_the_card_is_not_the_pill() {
+    let pill = Rect {
+        x0: 300,
+        y0: 350,
+        x1: 400,
+        y1: 376,
+    };
+    let before = RgbImage::from_pixel(800, 600, Rgb([255; 3]));
+    let mut after = before.clone();
+    fill(&mut after, pill, [197, 203, 250]);
+    // a smoothed pixel of a face's initials in the card, under the pill
+    after.put_pixel(326, 496, Rgb([198, 204, 249]));
+    let dir = tempfile::tempdir().unwrap();
+    let before_path = dir.path().join("before.png");
+    let after_path = dir.path().join("after.png");
+    before.save(&before_path).unwrap();
+    after.save(&after_path).unwrap();
+    assert_eq!(pixels::highlighted(&before_path, &after_path).unwrap(), pill);
+}

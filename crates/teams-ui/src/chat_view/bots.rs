@@ -40,6 +40,8 @@ pub(super) struct HeldCards {
     pub(super) states: HashMap<String, CardState>,
     /// Each card message's bot state, made as it is first drawn; none while the bots aren't shown.
     bots: Option<RefCell<HashMap<String, HeldBot>>>,
+    /// The apps' message actions "More actions" lists ([`super::app_actions`]).
+    pub(super) app_actions: super::app_actions::AppActions,
 }
 
 /// A card message's bot state, and the cards it was made for.
@@ -55,6 +57,7 @@ impl HeldCards {
         Self {
             states: HashMap::new(),
             bots: crate::bots_flag::bots_on(cx).then(RefCell::default),
+            app_actions: super::app_actions::AppActions::default(),
         }
     }
 
@@ -72,7 +75,7 @@ impl ChatView {
     }
 
     /// Where a message's bot is asked and its user's answers go: a channel's post's chain, else the view's own place.
-    fn bot_conversation(&self, message: &str) -> String {
+    pub(super) fn bot_conversation(&self, message: &str) -> String {
         match &self.place {
             Place::Channel => teams_proto::reply_chain_id(&self.conversation, self.root_of(message))
                 .unwrap_or_else(|| self.conversation.clone()),
@@ -110,6 +113,8 @@ impl ChatView {
             let id = item.id.clone();
             cx.new(|_| CardBot::new(core, id, target))
         };
+        // a `task/fetch` button's dialog opens over the window
+        self.follow_card_dialogs(&bot, &item.id, item.sender_name.to_string(), cx);
         // what its bot answered shows at once
         cx.observe(&bot, |_, _, cx| cx.notify()).detach();
         bots.borrow_mut().insert(
@@ -163,7 +168,7 @@ impl ChatView {
 
     /// What a click on button `action` of card `card` of `message` does (a button of the card itself, not of a card a
     /// `ShowCard` opened), when it asks the bot: the card shown (the bot's, when it put one in the place), its answers
-    /// checked, then the bot asked. A button that doesn't ask the bot (read-only mode, a dialog) does nothing here.
+    /// checked, then the bot asked. A button that doesn't ask the bot (read-only mode) does nothing here.
     pub fn press_card_action(&mut self, message: &str, card: usize, action: usize, cx: &mut Context<Self>) {
         let Some(item) = self.message_items().find(|item| item.id == message).cloned() else {
             return;
@@ -178,7 +183,7 @@ impl ChatView {
             return;
         };
         let reaches = bot.read(cx).target().is_some();
-        if !crate::bot_card::asks(reaches, self.core.read_only(), pressed) {
+        if !crate::bot_card::asks(reaches, self.core.read_only()) {
             return;
         }
         let mut inputs = Vec::new();
@@ -205,26 +210,24 @@ impl ChatView {
             return None;
         }
         let message = message.to_owned();
-        Some(
-            div()
-                .id("action-refresh-card")
-                .debug_selector(|| "action-refresh-card".to_owned())
-                .w_full()
-                .h(px(32.0))
-                .px_2()
-                .flex()
-                .items_center()
-                .gap_2()
-                .rounded_md()
-                .cursor_pointer()
-                .text_sm()
-                .text_color(rgb(palette.foreground))
-                .hover(move |row| row.bg(rgb(palette.hover)))
-                .on_click(cx.listener(move |this, _, _, cx| this.refresh_card(&message, cx)))
-                .child(Glyph::REFRESH.icon().size(px(14.0)))
-                .child(div().flex_1().child(REFRESH_CARD))
-                .into_any_element(),
-        )
+        let row = div()
+            .id("action-refresh-card")
+            .debug_selector(|| "action-refresh-card".to_owned())
+            .w_full()
+            .h(px(32.0))
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded_md()
+            .cursor_pointer()
+            .text_sm()
+            .text_color(rgb(palette.foreground))
+            .hover(move |row| row.bg(rgb(palette.hover)))
+            .on_click(cx.listener(move |this, _, _, cx| this.refresh_card(&message, cx)))
+            .child(Glyph::REFRESH.icon().size(px(14.0)))
+            .child(div().flex_1().child(REFRESH_CARD));
+        Some(crate::keyboard::stop("action-refresh-card", row, palette).into_any_element())
     }
 
     /// The newest message's suggested actions over the compose box (see the module docs).

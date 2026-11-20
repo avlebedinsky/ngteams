@@ -131,10 +131,11 @@ fn what_the_view_shows_follows_the_entries() {
     let mut entries = HashMap::new();
     let mut shown = Shown {
         language: Some("de"),
+        reading: Some("German".into()),
         ..Shown::default()
     };
     assert_eq!(shown.mark_of(&message), Some(Mark::Waiting));
-    shown.failed = true;
+    shown.failed = Some(Failure::TimedOut(Backend::Claude));
     assert_eq!(
         shown.mark_of(&message),
         None,
@@ -185,8 +186,191 @@ fn what_the_view_shows_follows_the_entries() {
     );
     assert_eq!(shown.text_of(&message), None);
     shown.language = None;
+    shown.reading = None;
     assert_eq!(shown.mark_of(&message), None);
     assert_eq!(shown.original_of_sent(&RichText::plain("x")), None);
+}
+
+fn text_message(id: &str, content: &str) -> Message {
+    Message {
+        conversation_id: "19:synthetic@thread.v2".to_owned(),
+        id: id.to_owned(),
+        version: 3,
+        client_message_id: None,
+        sender: None,
+        sender_name: None,
+        message_type: "Text".to_owned(),
+        content: content.to_owned(),
+        properties: None,
+        arrival_time: 0,
+        compose_time: None,
+        edit_time: None,
+        delete_time: None,
+    }
+}
+
+/// `message` asked for alone, read in English.
+fn asked_alone(message: &Message) -> Shown {
+    Shown {
+        reading: Some("English".into()),
+        picked: Some(Arc::new([message.id.clone()].into())),
+        ..Shown::default()
+    }
+}
+
+fn entries_of(id: &str, entry: Entry) -> Arc<HashMap<String, Entry>> {
+    Arc::new([(id.to_owned(), entry)].into())
+}
+
+#[test]
+fn one_message_asked_for_alone_waits_while_the_others_offer_translate() {
+    let (asked, other) = (text_message("1", "Hallo"), text_message("2", "Tschüss"));
+    // nothing asked yet: every text message offers Translate, none is marked
+    let shown = Shown::default();
+    assert_eq!(shown.offer_of(&asked), Some(Offer::Translate));
+    assert_eq!(shown.mark_of(&asked), None);
+    assert_eq!(
+        shown.offer_of(&text_message("3", "  ")),
+        None,
+        "an empty one offers nothing"
+    );
+    // asked: it waits, alone; the menu offers nothing meanwhile
+    let shown = asked_alone(&asked);
+    assert_eq!(shown.mark_of(&asked), Some(Mark::Waiting));
+    assert_eq!(shown.offer_of(&asked), None);
+    assert_eq!(shown.mark_of(&other), None, "a message not asked for stays as written");
+    assert_eq!(shown.offer_of(&other), Some(Offer::Translate));
+    assert_eq!(shown.text_of(&other), None);
+}
+
+#[test]
+fn one_message_translated_alone_shows_its_translation_and_switches() {
+    let asked = text_message("1", "Hallo");
+    let mut shown = asked_alone(&asked);
+    shown.entries = entries_of(
+        "1",
+        Entry::Translated {
+            version: 3,
+            text: Arc::new(RichText::plain("Hello")),
+            source: Some("de".to_owned()),
+        },
+    );
+    assert_eq!(
+        shown.text_of(&asked).map(|text| text.plain_text()),
+        Some("Hello".to_owned())
+    );
+    assert_eq!(
+        shown.mark_of(&asked),
+        Some(Mark::Translated {
+            tip: "See original message (German)".into()
+        })
+    );
+    assert_eq!(shown.offer_of(&asked), Some(Offer::SeeOriginal(Some("German"))));
+    assert_eq!(
+        Offer::SeeOriginal(Some("German")).label(),
+        "See original message (German)"
+    );
+    // the original shown: See translation brings it back
+    shown.originals = Arc::new(["1".to_owned()].into());
+    assert_eq!(shown.text_of(&asked), None);
+    assert_eq!(
+        shown.mark_of(&asked),
+        Some(Mark::Original {
+            tip: "See translation (English)".into()
+        })
+    );
+    assert_eq!(shown.offer_of(&asked), Some(Offer::SeeTranslation));
+    // an edit is asked anew: the older version's translation isn't shown
+    shown.originals = Arc::default();
+    let edited = Message { version: 4, ..asked };
+    assert_eq!(shown.text_of(&edited), None);
+    assert_eq!(shown.mark_of(&edited), Some(Mark::Waiting));
+}
+
+#[test]
+fn one_message_alone_in_the_language_already_or_failed() {
+    let asked = text_message("1", "Hello");
+    let mut shown = asked_alone(&asked);
+    // in the language already: shown as it is, marked as Teams marks it
+    shown.entries = entries_of(
+        "1",
+        Entry::Same {
+            version: 3,
+            source: Some("en".to_owned()),
+        },
+    );
+    assert_eq!(shown.text_of(&asked), None);
+    assert_eq!(
+        shown.mark_of(&asked),
+        Some(Mark::Translated {
+            tip: "See original message (English)".into()
+        })
+    );
+    assert_eq!(shown.offer_of(&asked), Some(Offer::SeeOriginal(Some("English"))));
+    // the tool failed: the message says why, and Translate tries again
+    shown.entries = Arc::default();
+    shown.failed = Some(Failure::TimedOut(Backend::Claude));
+    let Some(Mark::Stopped { why }) = shown.mark_of(&asked) else {
+        panic!("a failure is marked at the message");
+    };
+    assert_eq!(why, Failure::TimedOut(Backend::Claude).message());
+    assert_eq!(shown.offer_of(&asked), Some(Offer::Translate));
+    // the tool's answers left it out: marked so, and Translate asks again
+    shown.failed = None;
+    shown.entries = entries_of("1", Entry::Failed { version: 3 });
+    assert_eq!(shown.mark_of(&asked), Some(Mark::Failed));
+    assert_eq!(shown.offer_of(&asked), Some(Offer::Translate));
+}
+
+#[test]
+fn a_translated_chat_s_menu_only_switches_a_translation() {
+    let message = text_message("1", "Hallo");
+    let mut shown = Shown {
+        language: Some("en"),
+        reading: Some("English".into()),
+        ..Shown::default()
+    };
+    assert_eq!(shown.offer_of(&message), None, "on its way: nothing");
+    let mut entries = HashMap::new();
+    entries.insert(
+        "1".to_owned(),
+        Entry::Translated {
+            version: 3,
+            text: Arc::new(RichText::plain("Hello")),
+            source: None,
+        },
+    );
+    shown.entries = Arc::new(entries);
+    assert_eq!(shown.offer_of(&message), Some(Offer::SeeOriginal(None)));
+    assert_eq!(Offer::SeeTranslation.label(), "See translation");
+    assert_eq!(Offer::Translate.label(), "Translate");
+    shown.originals = Arc::new(["1".to_owned()].into());
+    assert_eq!(shown.offer_of(&message), Some(Offer::SeeTranslation));
+    shown.failed = Some(Failure::TimedOut(Backend::Claude));
+    assert_eq!(
+        shown.mark_of(&text_message("2", "x")),
+        None,
+        "the chat's notice says why"
+    );
+}
+
+#[test]
+fn the_translate_to_language_is_kept_by_its_code_when_it_has_one() {
+    assert_eq!(
+        Reading::of_name("german"),
+        Reading {
+            key: "de".into(),
+            name: "German".into()
+        }
+    );
+    assert_eq!(
+        Reading::of_name(" Klingon "),
+        Reading {
+            key: "klingon".into(),
+            name: "Klingon".into()
+        }
+    );
+    assert_eq!(Reading::of_code("pt-br").name, "Portuguese (Brazil)");
 }
 
 /// A source replying to `to` (its id), with the preview Teams quotes.

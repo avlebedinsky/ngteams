@@ -72,11 +72,33 @@ pub const REQUIRE_ENV: &str = "GPUI_SMOKE_REQUIRE";
 /// How long a compositor or the bus gets to create its sockets, and niri to write a screenshot.
 pub const SOCKET_WAIT: Duration = Duration::from_secs(15);
 
+/// Where weston's fake seat keeps its pointer (libweston's `weston_pointer_create`), in output pixels.
+const HOST_POINTER: (u32, u32) = (100, 100);
+/// How far from a point a cursor's drawn top-left may be and still stand at it: the arrow's tip is a few pixels from
+/// its hotspot.
+const CURSOR_SLACK: u32 = 8;
+
+/// Whether the only thing drawn on `shot` (an empty screen: anything that differs from its corner pixel) is a cursor
+/// standing at `point`.
+fn cursor_at(shot: &image::RgbImage, point: (u32, u32)) -> bool {
+    let (width, height) = shot.dimensions();
+    let Some(&background) = shot.get_pixel_checked(width.saturating_sub(1), height.saturating_sub(1)) else {
+        return false;
+    };
+    let top_left = shot
+        .enumerate_pixels()
+        .filter(|(_, _, pixel)| **pixel != background)
+        .fold(None, |found: Option<(u32, u32)>, (x, y, _)| {
+            Some(found.map_or((x, y), |(left, top)| (left.min(x), top.min(y))))
+        });
+    top_left.is_some_and(|(x, y)| x.abs_diff(point.0) <= CURSOR_SLACK && y.abs_diff(point.1) <= CURSOR_SLACK)
+}
+
 const WESTON_CONFIG: &str =
     "[core]\nidle-time=0\n\n[shell]\npanel-position=none\nlocking=false\n\n[input-method]\npath=\n";
 /// A private niri: no Xwayland, no hotkey overlay, no animations.
 const NIRI_CONFIG: &str = "hotkey-overlay {\n    skip-at-startup\n}\nxwayland-satellite {\n    off\n}\n\
-animations {\n    off\n}\nprefer-no-csd\n";
+animations {\n    off\n}\nprefer-no-csd\ndebug {\n    dbus-interfaces-in-non-session-instances\n}\n";
 /// A niri layout where a window takes the whole output: no gaps, no focus ring, no border, full-width column.
 pub const NIRI_FULL_WINDOW: &str = "layout {\n    gaps 0\n    default-column-width { proportion 1.0; }\n\
     focus-ring {\n        off\n    }\n    border {\n        off\n    }\n}\n";
@@ -341,6 +363,11 @@ impl Sandbox {
     /// Starts weston, then niri nested in it, then the bus and its fakes, and installs the opener; then the private
     /// PipeWire, its session manager and its camera and recording when [`SandboxOptions::pipewire`] asks.
     ///
+    /// For desktop-shell outputs larger than 1280×800 on either axis, startup does not wait for weston's pointer.
+    /// weston can still send a late enter when both window offsets are at most 100 pixels.
+    /// This can move an immediate virtual click to that enter point.
+    /// Set [`SandboxOptions::fill_output`] to `true` for reliable clicks immediately after start.
+    ///
     /// # Errors
     /// A compositor or the bus fails to start or make its sockets in time, or (when asked for) the PipeWire tools
     /// aren't here or the private PipeWire fails to start (see [`PrivatePipeWire::start`]).
@@ -364,6 +391,7 @@ impl Sandbox {
         };
         let parent = sandbox.start_weston(&tools.weston)?;
         sandbox.start_niri(&tools.niri, &parent)?;
+        sandbox.wait_for_host_pointer()?;
         if let Some(pipewire) = &options.pipewire {
             let tools = PipeWireTools::find()?;
             let started = PrivatePipeWire::start(&tools, sandbox.dir.path(), pipewire)?;
@@ -506,7 +534,14 @@ impl Sandbox {
 
     fn start_niri(&mut self, niri: &Path, parent: &Path) -> SandboxResult {
         let config = self.path("niri.kdl");
-        fs::write(&config, format!("{NIRI_CONFIG}{}", self.options.niri_extra))?;
+        fs::write(
+            &config,
+            format!(
+                "{NIRI_CONFIG}{}\nscreenshot-path {:?}\n",
+                self.options.niri_extra,
+                self.path("host-pointer.png").to_string_lossy()
+            ),
+        )?;
         let mut command = clean_command(niri);
         command
             .arg("-c")
@@ -531,6 +566,49 @@ impl Sandbox {
         self.wayland = wayland;
         self.niri_socket = ipc;
         Ok(())
+    }
+
+    /// If niri starts at the output's corner, waits until weston's own pointer enters its window.
+    /// weston sends that enter, at [`HOST_POINTER`], after niri's first frame reaches its output.
+    /// niri moves its cursor there, so a virtual click sent before the enter lands there instead.
+    /// Larger desktop-shell outputs skip this wait and retain the click risk (see [`Self::start`]).
+    ///
+    /// # Errors
+    /// niri's cursor isn't there in time.
+    fn wait_for_host_pointer(&self) -> SandboxResult {
+        let default = SandboxOptions::default();
+        if !self.options.fill_output && (self.options.width > default.width || self.options.height > default.height) {
+            // A larger output can miss the pointer or get a late enter that moves a click (see `Self::start`).
+            return Ok(());
+        }
+        let png = self.path("host-pointer.png");
+        let png_arg = png.to_string_lossy().into_owned();
+        let connection = self.bus.connect()?;
+        // Niri's IPC screenshots change the clipboard and send notifications.
+        let proxy = zbus::blocking::Proxy::new(
+            &connection,
+            "org.gnome.Shell.Screenshot",
+            "/org/gnome/Shell/Screenshot",
+            "org.gnome.Shell.Screenshot",
+        )?;
+        let entered = wait_until(SOCKET_WAIT, || {
+            let _ = fs::remove_file(&png);
+            let (saved, path): (bool, String) = proxy.call("Screenshot", &(true, false, &png_arg)).ok()?;
+            if !saved || Path::new(&path) != png {
+                return None;
+            }
+            let shot = wait_until(SOCKET_WAIT, || image::open(&png).ok())?.to_rgb8();
+            cursor_at(&shot, HOST_POINTER).then_some(())
+        });
+        let _ = fs::remove_file(&png);
+        if entered.is_some() {
+            return Ok(());
+        }
+        Err(format!(
+            "niri's cursor never came to weston's pointer at {HOST_POINTER:?}: {}",
+            self.logs()
+        )
+        .into())
     }
 
     /// The compositors' and the bus's logs, for a failure message.
@@ -567,12 +645,17 @@ impl Sandbox {
     }
 
     /// Screenshots the focused window (`window: true`) or the whole screen through the nested niri into `name` in
-    /// the sandbox dir, and returns its path once the file is readable.
+    /// the sandbox dir, and returns its path once the file is readable. An earlier shot of the same name goes first.
     ///
     /// # Errors
-    /// niri refuses, or no image appears in time.
+    /// The earlier shot can't be removed, niri refuses, or no image appears in time.
     pub fn screenshot(&self, name: &str, window: bool) -> SandboxResult<PathBuf> {
         let png = self.path(name);
+        // else the earlier shot passes the wait below while niri still writes the new one over it
+        match fs::remove_file(&png) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+            _ => {}
+        }
         let png_arg = png.to_string_lossy().into_owned();
         let action = if window {
             "screenshot-window"
@@ -754,6 +837,19 @@ impl Running {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cursor_stands_at_a_point_only_with_its_top_left_near_it() {
+        let background = image::Rgb([40, 40, 40]);
+        let mut shot = image::RgbImage::from_pixel(64, 48, background);
+        assert!(!cursor_at(&shot, (20, 20)), "an empty screen");
+        for (x, y) in [(18, 20), (19, 21), (18, 22)] {
+            shot.put_pixel(x, y, image::Rgb([255, 255, 255]));
+        }
+        assert!(cursor_at(&shot, (20, 20)));
+        assert!(!cursor_at(&shot, (40, 20)), "too far right");
+        assert!(!cursor_at(&shot, (20, 40)), "too far down");
+    }
 
     #[test]
     fn only_a_non_empty_wayland_display_counts() {

@@ -86,6 +86,9 @@ use crate::system_message::{self, Preview};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 
+mod row_menu;
+pub use row_menu::{MARK_READ, MARK_UNREAD, MORE_CHAT_OPTIONS};
+
 /// The most chats the tray counts and the notifications look through.
 pub const LIST_LIMIT: usize = 500;
 /// The most chats the list holds: See more reaches them all, as do the switcher and the search.
@@ -824,6 +827,9 @@ pub struct ChatList {
     traced: Option<Vec<(String, RowKind, u64)>>,
     /// The account's translations: a translated chat's preview shows in its language ([`ChatList::set_previews`]).
     previews: Option<(Entity<Previews>, Subscription)>,
+    /// The row menu open ([`row_menu`]): its chat, its row's test selector, and the menu.
+    row_menu: Option<(String, String, Entity<gpui_component::menu::PopupMenu>)>,
+    row_menu_dismiss: Option<Subscription>,
     _observing: [Subscription; 3],
 }
 
@@ -873,6 +879,8 @@ impl ChatList {
             catch_ups,
             traced: None,
             previews: None,
+            row_menu: None,
+            row_menu_dismiss: None,
             _observing: [chats, status, presence],
         };
         list.reload(cx);
@@ -945,6 +953,15 @@ impl ChatList {
     /// Every row, shown or kept below See more: the favourites, then the other chats.
     pub fn all_rows(&self) -> impl Iterator<Item = &ChatRow> {
         self.favorites.iter().chain(&self.rows)
+    }
+
+    /// How many chats hold anything unread, as Teams' Chat in its rail counts them: each listed chat once, however
+    /// many of its messages are unread, a favourite channel not.
+    #[must_use]
+    pub fn unread_chats(&self) -> usize {
+        self.all_rows()
+            .filter(|row| row.unread > 0 && row.kind != RowKind::Channel)
+            .count()
     }
 
     /// Every chat the account can find, listed or not: [`Self::all_rows`], then the empty chats the list leaves out,
@@ -1209,8 +1226,24 @@ impl ChatList {
     ) -> AnyElement {
         let selected = self.selected.as_deref() == Some(row.id.as_str());
         let id = row.id.clone();
-        let background = if selected { palette.selected } else { palette.surface };
+        // the row stays hovered while its menu is open, as Teams keeps it
+        let menu_open = self
+            .row_menu
+            .as_ref()
+            .is_some_and(|(open, at, _)| *open == row.id && *at == selector);
+        let background = match (selected, menu_open) {
+            (true, _) => palette.selected,
+            (false, true) => palette.hover,
+            (false, false) => palette.surface,
+        };
         let element_id = format!("{selector}-{}", row.id);
+        let group = SharedString::from(format!("{selector}-group"));
+        let cover = if selected { palette.selected } else { palette.hover };
+        let chat_more = if more.is_none() {
+            self.row_more(row, &selector, (group.clone(), cover), cx)
+        } else {
+            None
+        };
         // the chosen row's mark: a bar in the brand gradient at its left edge, growing in as the row is chosen
         let mark = div()
             .absolute()
@@ -1232,6 +1265,7 @@ impl ChatList {
         div()
             .id(ElementId::Name(element_id.into()))
             .debug_selector(move || selector.clone())
+            .group(group)
             .relative()
             .w_full()
             .h(px(ROW_HEIGHT))
@@ -1254,6 +1288,7 @@ impl ChatList {
             .child(self.avatar(row, background, palette, cx))
             .child(row_text(row, &self.preview_shown(row, cx), palette, clock::cycle(cx)))
             .children(more)
+            .children(chat_more)
             .into_any_element()
     }
 

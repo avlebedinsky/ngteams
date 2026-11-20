@@ -40,6 +40,12 @@ type Lines = Arc<Mutex<super::LineMap>>;
 /// How long a counting thread waits for a picture before it checks whether the far end hung up.
 const COUNT_WAIT: Duration = Duration::from_millis(100);
 
+/// How long its SDP waits for gathering to end after the first candidate. Its relay is the loopback TURN server of the
+/// tests, which allocates at once. On a Mac with VPN interfaces, the allocations from those interfaces get no answer,
+/// so gathering does not end. The mock makes a far end's SDP while it holds its state lock, and its Trouter answers no
+/// ping meanwhile: three SDPs of [`super::GATHER_SETTLE`] made the push channels time out and lose a group call's ring.
+const FAR_END_SETTLE: Duration = Duration::from_millis(250);
+
 /// What a counting thread counts with: the lines' names, the count, the far end's hang-up, and the lines a counting
 /// thread runs for with this one's (taken out when it ends).
 struct Counting {
@@ -134,7 +140,7 @@ impl FarEnd {
                 _ => {}
             }
         });
-        let peer = Arc::new(Peer::new(relay, events)?);
+        let peer = Arc::new(Peer::settling(relay, events, FAR_END_SETTLE)?);
         *lines_seen.lock().unwrap_or_else(PoisonError::into_inner) = Some(peer.lines());
         Ok(Self {
             peer,

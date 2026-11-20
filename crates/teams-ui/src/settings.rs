@@ -22,6 +22,10 @@
 //!   first-run screen ([`Settings::first_run`]) none of them is sent, whatever its switch says
 //!   ([`SettingsModel::sends_typing`], [`SettingsModel::sends_read_receipts`], [`SettingsModel::sends_presence`]). The
 //!   lab app doesn't ask: its settings send as their switches say.
+//! - **The AI notice** ([`SettingsModel::awaiting_ai_notice`]): an app that shows the first run's screen also asks
+//!   once if the user wants the AI features ([`Settings::ai_features`]), after that screen, or at the next start after
+//!   an upgrade. No AI feature runs before the answer. The answer and each later change go to the app's switch
+//!   ([`crate::local_ai::AiSwitch`]), which every AI entry point asks.
 //! - **Forgiving to read**: a missing file gives the defaults; a file that can't be read or isn't TOML gives the
 //!   defaults and is reported, and is never written over: changes hold in memory until the app quits, so the file
 //!   is there to mend by hand; a value that is bad (of the wrong type, out of range, a name this build doesn't know)
@@ -51,10 +55,14 @@ use teams_proto::ManualAvailability;
 use toml::{Table, Value};
 
 use crate::effects::CameraPreview;
-use crate::local_ai::{AiChoice, Model, ToolChoice, Work};
+use crate::local_ai::{AiChoice, Model, Provider, ToolChoice, Work, providers};
 use crate::sounds::{self, PackInfo, SoundPlayer, SoundSettings, SoundSource};
 use crate::theme::{self, Appearance};
 use crate::translate;
+
+mod toolbar;
+
+pub use toolbar::ComposeTool;
 
 /// The idle times the settings take, in minutes.
 pub const IDLE_MINUTES: RangeInclusive<u32> = 1..=240;
@@ -335,6 +343,9 @@ pub struct Settings {
     /// A meeting someone else started where the account is invited, or a group chat's meeting, shows a banner with
     /// Join (Teams' "Meeting started notification", on by default; [`crate::meeting_alert`]).
     pub meeting_started: bool,
+    /// A calendar meeting shows a reminder before it starts, at its reminder time, and again as it starts
+    /// ([`crate::meeting_reminder`]); on by default.
+    pub meeting_reminders: bool,
     /// Minutes without use after which the account's availability stops being reported (Task 20,
     /// [`crate::own_presence`]), within [`IDLE_MINUTES`].
     pub idle_minutes: u32,
@@ -386,6 +397,14 @@ pub struct Settings {
     pub message_translate_to: String,
     /// Which tool, and model, translates a draft in its box.
     pub message_translator: AiChoice,
+    /// The AI providers the user set, in the user's order ([`crate::local_ai::providers`]); the command-line tools
+    /// found on this computer that it does not hold come after them.
+    pub ai_providers: Vec<Provider>,
+    /// "Use AI features": `Some(false)` turns every AI feature off ([`crate::local_ai::enabled`]). `None`: the user
+    /// was not asked yet, and the app shows the AI notice first ([`SettingsModel::awaiting_ai_notice`]).
+    pub ai_features: Option<bool>,
+    /// The buttons the user hid from the message box's toolbar, in the toolbar's order ([`toolbar`]).
+    pub compose_hidden: Vec<ComposeTool>,
     /// Which sound plays for each event, how loud, and the pack they come from ([`crate::sounds`]).
     pub sounds: SoundSettings,
 }
@@ -420,6 +439,21 @@ pub struct AccountSettings {
 }
 
 impl Settings {
+    /// Whether the message box's toolbar shows `tool`.
+    #[must_use]
+    pub fn shows_compose_tool(&self, tool: ComposeTool) -> bool {
+        !self.compose_hidden.contains(&tool)
+    }
+
+    /// Shows `tool` on the message box's toolbar, or hides it there.
+    pub fn show_compose_tool(&mut self, tool: ComposeTool, shown: bool) {
+        self.compose_hidden.retain(|hidden| *hidden != tool);
+        if !shown {
+            self.compose_hidden.push(tool);
+            toolbar::tidy(&mut self.compose_hidden);
+        }
+    }
+
     /// Whether `account` is the first account, whose own settings are the top-level ones.
     fn is_first(&self, account: &str) -> bool {
         self.first_account.as_deref().is_none_or(|first| first == account)
@@ -587,6 +621,7 @@ impl Default for Settings {
             first_run: FirstRunState::Waiting,
             notifications: Notifications::default(),
             meeting_started: true,
+            meeting_reminders: true,
             idle_minutes: DEFAULT_IDLE_MINUTES,
             manual_status: ManualStatus::default(),
             log_level: LogLevel::default(),
@@ -609,6 +644,9 @@ impl Default for Settings {
             message_corrector: AiChoice::default(),
             message_translate_to: crate::draft_translate::DEFAULT_LANGUAGE.to_owned(),
             message_translator: AiChoice::default(),
+            ai_providers: Vec::new(),
+            ai_features: None,
+            compose_hidden: Vec::new(),
             sounds: SoundSettings::default(),
         }
     }
@@ -621,8 +659,11 @@ pub mod keys {
     pub const SEND_READ_RECEIPTS: &str = "send_read_receipts";
     pub const SEND_PRESENCE: &str = "send_presence";
     pub const FIRST_RUN: &str = "first_run";
+    /// "Use AI features", `true` or `false`; missing: not asked yet.
+    pub const AI_FEATURES: &str = "ai_features";
     pub const NOTIFICATIONS: &str = "notifications";
     pub const MEETING_STARTED: &str = "meeting_started_notification";
+    pub const MEETING_REMINDERS: &str = "meeting_reminders";
     pub const IDLE_MINUTES: &str = "idle_minutes";
     pub const MANUAL_STATUS: &str = "manual_status";
     pub const LOG_LEVEL: &str = "log_level";
@@ -661,6 +702,8 @@ pub mod keys {
     /// The language a draft is translated into in its box, by its name.
     pub const MESSAGE_TRANSLATE_TO: &str = "message_translate_to";
     pub const MESSAGE_TRANSLATOR: &str = "message_translator";
+    /// The buttons hidden from the message box's toolbar: an array of their names.
+    pub const COMPOSE_HIDDEN: &str = "compose_hidden_tools";
     /// The sound pack chosen as a whole (`builtin/<key>` or `added/<id>`), "Play sounds when I'm busy", every sound's
     /// volume, and each event's sound: a table of tables, by the event's name.
     pub const SOUND_PACK: &str = "sound_pack";
@@ -750,7 +793,7 @@ fn take(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem
                 .and_then(LogLevel::parse)
                 .ok_or(bad(keys::LOG_LEVEL, "not one of error, warn, info, debug"))?;
         }
-        keys::VIDEO_CALLS | keys::SAVE_CALL_CAPTIONS | keys::MEETING_STARTED => take_switch(settings, key, value)?,
+        key if SWITCHES.contains(&key) => take_switch(settings, key, value)?,
         keys::MICROPHONE | keys::SPEAKER | keys::CAMERA => take_device(settings, key, value)?,
         keys::VIDEO_EFFECT => take_video_effect(settings, value)?,
         keys::FOLLOW_SYSTEM_THEME
@@ -764,6 +807,7 @@ fn take(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem
         keys::CAPTION_TRANSLATE_TO | keys::CAPTION_TRANSLATOR | keys::RECAP_SUMMARIZER => {
             take_captions(settings, key, value)?;
         }
+        providers::FILE_KEY => take_providers(settings, value)?,
         keys::SOUND_PACK | keys::SOUNDS_WHILE_BUSY | keys::SOUNDS_VOLUME | keys::SOUNDS => {
             sounds::take(&mut settings.sounds, key, value)?;
         }
@@ -773,6 +817,7 @@ fn take(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem
             take_chat_translation(settings, key, value)?;
         }
         keys::MESSAGE_TRANSLATE_TO | keys::MESSAGE_TRANSLATOR => take_message_translation(settings, key, value)?,
+        keys::COMPOSE_HIDDEN => settings.compose_hidden = toolbar::take(value)?,
         keys::FIRST_ACCOUNT => {
             settings.first_account = Some(chat_id(value).ok_or(bad(keys::FIRST_ACCOUNT, "not an account's MRI"))?);
         }
@@ -966,11 +1011,30 @@ fn take_appearance(appearance: &mut Appearance, key: &str, value: &Value) -> Res
     Ok(())
 }
 
-/// Takes an on/off switch: video in calls, saving every call's captions, or the meeting started notification.
+/// The settings that [`take_switch`] takes.
+const SWITCHES: [&str; 5] = [
+    keys::VIDEO_CALLS,
+    keys::SAVE_CALL_CAPTIONS,
+    keys::MEETING_STARTED,
+    keys::MEETING_REMINDERS,
+    keys::AI_FEATURES,
+];
+
+/// Takes an on/off switch: video in calls, saving every call's captions, the meeting started notification, the meeting
+/// reminders, or "Use AI features".
 fn take_switch(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem> {
+    if key == keys::AI_FEATURES {
+        let on = value.as_bool().ok_or(Problem::BadValue {
+            key: keys::AI_FEATURES,
+            why: "not true or false",
+        })?;
+        settings.ai_features = Some(on);
+        return Ok(());
+    }
     let (key, switch) = match key {
         keys::VIDEO_CALLS => (keys::VIDEO_CALLS, &mut settings.video_calls),
         keys::MEETING_STARTED => (keys::MEETING_STARTED, &mut settings.meeting_started),
+        keys::MEETING_REMINDERS => (keys::MEETING_REMINDERS, &mut settings.meeting_reminders),
         _ => (keys::SAVE_CALL_CAPTIONS, &mut settings.save_call_captions),
     };
     *switch = value.as_bool().ok_or(Problem::BadValue {
@@ -1009,7 +1073,21 @@ fn take_captions(settings: &mut Settings, key: &str, value: &Value) -> Result<()
 }
 
 /// What a local AI choice that can't be read isn't.
-const AI_CHOICE_SHAPE: &str = "not a tool (automatic, claude, codex) or a table of a tool and a model";
+const AI_CHOICE_SHAPE: &str =
+    "not a provider (automatic, claude, codex or an AI provider's id) or a table of a provider and a model";
+
+/// Takes the AI providers: those that can be read (the others are left out, and said).
+fn take_providers(settings: &mut Settings, value: &Value) -> Result<(), Problem> {
+    let (list, bad) = providers::from_value(value);
+    settings.ai_providers = list;
+    if bad {
+        return Err(Problem::BadValue {
+            key: providers::FILE_KEY,
+            why: "an entry is not a provider (id, kind, name, enabled, base_url, model, key) or repeats one",
+        });
+    }
+    Ok(())
+}
 
 /// A local AI choice as the file keeps it: a table of its tool and model, or (a file of an earlier build) the tool's
 /// name alone, its model the recommended one.
@@ -1093,6 +1171,7 @@ pub fn render(settings: &Settings) -> String {
         (keys::VIDEO_CALLS, settings.video_calls),
         (keys::SAVE_CALL_CAPTIONS, settings.save_call_captions),
         (keys::MEETING_STARTED, settings.meeting_started),
+        (keys::MEETING_REMINDERS, settings.meeting_reminders),
     ] {
         table.insert(key.to_owned(), Value::Boolean(on));
     }
@@ -1100,6 +1179,9 @@ pub fn render(settings: &Settings) -> String {
         keys::FIRST_RUN.to_owned(),
         Value::String(settings.first_run.key().to_owned()),
     );
+    if let Some(on) = settings.ai_features {
+        table.insert(keys::AI_FEATURES.to_owned(), Value::Boolean(on));
+    }
     table.insert(
         keys::NOTIFICATIONS.to_owned(),
         Value::String(settings.notifications.key().to_owned()),
@@ -1135,6 +1217,12 @@ pub fn render(settings: &Settings) -> String {
         Value::String(settings.time_format.key().to_owned()),
     );
     render_captions(settings, &mut table);
+    if !settings.ai_providers.is_empty() {
+        table.insert(
+            providers::FILE_KEY.to_owned(),
+            providers::to_value(&settings.ai_providers),
+        );
+    }
     table.insert(
         keys::RECAP_SUMMARIZER.to_owned(),
         ai_choice_value(&settings.recap_summarizer),
@@ -1145,6 +1233,7 @@ pub fn render(settings: &Settings) -> String {
     }
     render_people(settings, &mut table);
     render_chat_translation(settings, &mut table);
+    toolbar::render(&settings.compose_hidden, &mut table);
     sounds::render(&settings.sounds, &mut table);
     table.to_string()
 }
@@ -1481,6 +1570,13 @@ impl SettingsModel {
         }
     }
 
+    /// Makes the settings' AI providers and "Use AI features" the app's ([`crate::local_ai::Providers`],
+    /// [`crate::local_ai::AiSwitch`]): once, when the app starts; each change after that does it by itself.
+    pub fn publish_ai(&self, cx: &mut App) {
+        crate::local_ai::Providers::publish(&self.settings.ai_providers, cx);
+        crate::local_ai::AiSwitch::publish(self.uses_ai(), cx);
+    }
+
     /// Settings kept in memory only: nothing is read or written.
     #[must_use]
     pub fn in_memory(settings: Settings) -> Self {
@@ -1534,6 +1630,14 @@ impl SettingsModel {
     pub fn backgrounds_dir(&self) -> Option<PathBuf> {
         let file = self.file.as_ref()?;
         Some(file.path().parent()?.join(BACKGROUNDS_DIR))
+    }
+
+    /// Where the pictures the user chose for the accounts are kept: [`crate::account_picture::DIR`] beside the settings
+    /// file; `None` for settings kept in memory (no picture can be chosen).
+    #[must_use]
+    pub fn account_pictures_dir(&self) -> Option<PathBuf> {
+        let file = self.file.as_ref()?;
+        Some(file.path().parent()?.join(crate::account_picture::DIR))
     }
 
     /// Where the recaps' AI summaries are kept: [`crate::recap_summary::SUMMARY_DIR`] beside the settings file; `None`
@@ -1634,8 +1738,14 @@ impl SettingsModel {
         self.change(move |settings| settings.make_first(&account), cx);
     }
 
-    /// Forgets `account`'s own settings, `next` the first account when it was ([`Settings::forget_account`]).
+    /// Forgets `account`'s own settings, `next` the first account when it was ([`Settings::forget_account`]), and
+    /// deletes the picture the user chose for it.
     pub fn forget_account(&mut self, account: &str, next: Option<&str>, cx: &mut Context<Self>) {
+        if let Some(dir) = self.account_pictures_dir()
+            && let Err(error) = crate::account_picture::AccountPictures::new(dir).reset(account)
+        {
+            log::warn!("the picture of an account removed can't be deleted: {error}");
+        }
         let (account, next) = (account.to_owned(), next.map(str::to_owned));
         self.change(move |settings| settings.forget_account(&account, next.as_deref()), cx);
     }
@@ -1670,6 +1780,25 @@ impl SettingsModel {
     #[must_use]
     pub fn awaiting_first_run(&self) -> bool {
         self.signals == Signals::AfterFirstRun && self.settings.first_run == FirstRunState::Waiting
+    }
+
+    /// Whether the AI notice waits for the user: the app asks for the first run's screen, that screen is confirmed, and
+    /// the user did not answer "Use AI features" yet (an upgrade from a build without it asks too).
+    #[must_use]
+    pub fn awaiting_ai_notice(&self) -> bool {
+        self.signals == Signals::AfterFirstRun && !self.awaiting_first_run() && self.settings.ai_features.is_none()
+    }
+
+    /// Whether the AI features may run now: as "Use AI features" says. Before the user answers it, they run only where
+    /// the app does not ask (the views of tests); an app that asks, or the read-only mode, keeps them off.
+    #[must_use]
+    pub fn uses_ai(&self) -> bool {
+        self.settings.ai_features.unwrap_or(self.signals == Signals::AsSwitched)
+    }
+
+    /// Turns every AI feature on or off: the AI notice's answer, and the switch in Settings.
+    pub fn set_ai_features(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.change(|settings| settings.ai_features = Some(on), cx);
     }
 
     /// Whether typing is sent now: its switch is on, no first run waits, and the app isn't read-only.
@@ -1778,6 +1907,8 @@ impl SettingsModel {
         if self.settings == before {
             return;
         }
+        // the same value changes nothing; a model that never published (a view test) publishes it now
+        crate::local_ai::AiSwitch::publish(self.uses_ai(), cx);
         if self.settings.log_level != before.log_level {
             // no log installed (a view test): nothing to tell
             let _ = teams_log::apply_setting(self.settings.log_level);
@@ -1794,6 +1925,9 @@ impl SettingsModel {
             preview.set_background(self.background());
         }
         self.apply_sounds();
+        if self.settings.ai_providers != before.ai_providers {
+            crate::local_ai::Providers::publish(&self.settings.ai_providers, cx);
+        }
         self.problems
             .retain(|problem| !matches!(problem, Problem::Unsaved { .. }));
         if let Some(file) = &self.file {

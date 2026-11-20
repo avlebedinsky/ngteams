@@ -48,8 +48,14 @@
 //! The commands are the chat writes of `teams-proto` (M1 Task 12): a message post, an edit, a soft delete, a reaction
 //! and taking it back, a read receipt, a new chat and people added to a group chat; the engine (M1 Task 18) builds them from what the user asks
 //! for. Only a message post can be looked for by its `clientmessageid`, so only its row is checked and tried again
-//! after an attempt whose outcome is unknown; any other such row is failed rather than risk doing it twice. The sync
-//! the check relies on is the [`ConversationSync`] seam, which M1 Task 17's catch-up sync fills.
+//! after an attempt whose outcome is unknown; any other such row is failed rather than risk doing it twice, except an
+//! unread mark ([`Command::UnreadMark`]): it sets the account's own bookmark as of its time, so a second send does no
+//! harm. After a network error, a token request that got no answer or a 5xx, or a throttle (of the service or the
+//! token service) it stays pending with no limit on its attempts and is tried again after [`RESEND_WAIT`], doubled
+//! for each attempt up to [`RESEND_MAX_WAIT`] (or after a longer wait the throttle asks for), however long the network
+//! is down; a 4xx other than throttling (a 401 again after a refreshed token too) still fails it. Only the newest mark of a chat goes out: a newer one fails this run's older
+//! pending ones unsent ([`replace_older_marks`]). The sync the check relies on is the [`ConversationSync`] seam, which
+//! M1 Task 17's catch-up sync fills.
 
 mod call;
 mod transient;
@@ -67,6 +73,7 @@ use std::time::Duration;
 use crate::CallFloor;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use teams_auth::authz::AuthzError;
 use teams_auth::token::TokenError;
 use teams_call::Tracker;
 use teams_proto::Mri;
@@ -74,7 +81,7 @@ use teams_proto::chat::MessageText;
 use teams_proto::{
     ACTIVITY_FEED, AddChatMembers, Author, CreateChat, DEFAULT_RETRY_WAIT, DeleteMessage, EditMessage, HttpError,
     MarkFeedRead, Original, ReadReceipt, RemoveReaction, Request, Response, SendMessage, SetActivityRead, SetReaction,
-    SharedHistory, Transport,
+    SharedHistory, Transport, UnreadMark,
 };
 use teams_store::{
     Applied, AttemptOutcome, CheckFailed, Message, NewOutboxEntry, OutboxEntry, OutboxKind, OutboxState, Reaction,
@@ -82,7 +89,7 @@ use teams_store::{
 };
 
 /// The most attempts a row gets since it was made or last resent ([`Store::resend`]), throttled ones included; after
-/// the last it is failed.
+/// the last it is failed. An unread mark ([`Command::UnreadMark`]) has no limit.
 pub const MAX_ATTEMPTS: u32 = 5;
 
 /// The most checks before a new attempt that can fail to sync since a row was made or last resent; at the last the row
@@ -91,6 +98,16 @@ pub const MAX_FAILED_CHECKS: u32 = 5;
 
 /// How long a row waits after its first check that couldn't sync; each later one doubles it.
 pub const CHECK_RETRY_WAIT: Duration = Duration::from_secs(30);
+
+/// How long an unread mark waits after its first attempt that didn't reach the service; each later one doubles it, up
+/// to [`RESEND_MAX_WAIT`].
+pub const RESEND_WAIT: Duration = Duration::from_secs(5);
+
+/// The longest an unread mark waits between attempts that don't reach the service, unless a throttle asks for longer.
+pub const RESEND_MAX_WAIT: Duration = Duration::from_secs(30);
+
+/// What an unread mark that a newer mark of its chat made out of date says.
+const REPLACED: &str = "replaced by a newer mark of the chat, so it isn't sent";
 
 /// How many fresh `clientmessageid`s a command is tried with when one is taken already.
 const CLIENT_MESSAGE_ID_TRIES: usize = 3;
@@ -173,6 +190,15 @@ pub enum Command {
         app: String,
         preference: teams_proto::AppNotificationPreference,
     },
+    /// Marks the conversation unread from `message_id` (sent with `client_message_id`) on, or ends its mark when both
+    /// are absent ([`UnreadMark`]).
+    UnreadMark {
+        conversation: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_message_id: Option<String>,
+    },
 }
 
 /// What commands go out in the order they were asked for on: a later one of this run waits while an earlier one on
@@ -254,6 +280,7 @@ impl Command {
             Self::FeedRead => OutboxKind::FeedRead,
             Self::ActivityTurnOffApp { .. } => OutboxKind::ActivityTurnOffApp,
             Self::ActivityRestoreApp { .. } => OutboxKind::ActivityRestoreApp,
+            Self::UnreadMark { .. } => OutboxKind::UnreadMark,
         }
     }
 
@@ -266,6 +293,7 @@ impl Command {
             | Self::Delete { conversation, .. }
             | Self::React { conversation, .. }
             | Self::ReadReceipt { conversation, .. }
+            | Self::UnreadMark { conversation, .. }
             | Self::AddMembers { conversation, .. } => Some(conversation),
             Self::ActivityRead { .. } | Self::FeedRead => Some(ACTIVITY_FEED),
             Self::CreateChat { .. } | Self::ActivityTurnOffApp { .. } | Self::ActivityRestoreApp { .. } => None,
@@ -294,7 +322,10 @@ impl Command {
                 conversation,
                 message_id,
             }),
-            Self::ReadReceipt { conversation, .. } => Some(Lane::ReadHorizon { conversation }),
+            // a mark goes in order with the receipts: "Mark as read" moves the horizon, then ends the mark
+            Self::ReadReceipt { conversation, .. } | Self::UnreadMark { conversation, .. } => {
+                Some(Lane::ReadHorizon { conversation })
+            }
             Self::ActivityRead { item, .. } => Some(Lane::Message {
                 conversation: ACTIVITY_FEED,
                 message_id: item,
@@ -321,7 +352,8 @@ impl Command {
             | Self::AddMembers { .. }
             | Self::FeedRead
             | Self::ActivityTurnOffApp { .. }
-            | Self::ActivityRestoreApp { .. } => None,
+            | Self::ActivityRestoreApp { .. }
+            | Self::UnreadMark { .. } => None,
         }
     }
 }
@@ -492,6 +524,31 @@ pub fn enqueue(store: &mut Store, command: &Command) -> Result<OutboxEntry, Outb
     }
 }
 
+/// Fails this run's pending unread marks of `newer`'s chat that are older than `newer`, an unread mark just queued:
+/// only the newest mark of a chat goes out. Returns them as they now stand; none for any other row.
+///
+/// # Errors
+///
+/// [`OutboxError::Store`] when the store fails.
+pub fn replace_older_marks(store: &mut Store, newer: &OutboxEntry) -> Result<Vec<OutboxEntry>, OutboxError> {
+    if newer.kind != OutboxKind::UnreadMark {
+        return Ok(Vec::new());
+    }
+    let older: Vec<i64> = store
+        .outbox_due(i64::MAX)?
+        .into_iter()
+        .filter(|row| {
+            row.id < newer.id && row.kind == OutboxKind::UnreadMark && row.conversation_id == newer.conversation_id
+        })
+        .map(|row| row.id)
+        .collect();
+    let mut replaced = Vec::with_capacity(older.len());
+    for id in older {
+        replaced.push(store.outbox_replaced(id, REPLACED)?);
+    }
+    Ok(replaced)
+}
+
 /// How one attempt went.
 enum Tried {
     /// The service answered.
@@ -499,6 +556,9 @@ enum Tried {
     Denied(String),
     /// Nothing went out, and nothing will: the row is failed.
     NotSent(String),
+    /// Nothing went out: the token request for it got no answer, or a 5xx (not a throttle) from Entra or authz
+    /// ([`token_service_down`]).
+    Offline(String),
     /// Nothing went out yet: try again after `wait`.
     Throttled {
         wait: Duration,
@@ -514,6 +574,7 @@ impl Tried {
             Self::Answered(answer) => format!("admitted, HTTP {}", answer.status()),
             Self::Denied(denied) => format!("call admission refused: {denied}"),
             Self::NotSent(why) => format!("not sent: {why}"),
+            Self::Offline(why) => format!("not sent, no answer: {why}"),
             Self::Throttled { wait, .. } => format!("throttled for {} ms", wait.as_millis()),
             Self::Uncertain(why) => format!("outcome unknown: {why}"),
         }
@@ -1053,6 +1114,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
                 None => Tried::NotSent("the chat's members don't make a chat".to_owned()),
             },
             command @ (Command::AddMembers { .. }
+            | Command::UnreadMark { .. }
             | Command::ActivityRead { .. }
             | Command::FeedRead
             | Command::ActivityTurnOffApp { .. }
@@ -1060,7 +1122,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         }
     }
 
-    /// [`Outbox::attempt`]'s people added to a chat and the activity feed's writes.
+    /// [`Outbox::attempt`]'s people added to a chat, the activity feed's writes and a conversation's unread mark.
     async fn attempt_more(&self, command: Command, at: i64, row: i64) -> Tried {
         match command {
             Command::AddMembers {
@@ -1080,6 +1142,22 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
                 None => Tried::NotSent("the activity item's id can't be read".to_owned()),
             },
             Command::FeedRead => self.deliver(MarkFeedRead::at(at)).await,
+            Command::UnreadMark {
+                conversation,
+                message_id,
+                client_message_id,
+            } => {
+                let request = match (message_id, client_message_id) {
+                    (Some(message_id), Some(client_message_id)) => {
+                        UnreadMark::from_message(conversation, &message_id, client_message_id)
+                    }
+                    _ => Some(UnreadMark::cleared(conversation)),
+                };
+                match request {
+                    Some(request) => self.deliver(request.at(at)).await,
+                    None => Tried::NotSent("the message's id isn't an arrival number".to_owned()),
+                }
+            }
             Command::ActivityTurnOffApp { app, activity_types } => self.turn_off_app(row, &app, &activity_types).await,
             Command::ActivityRestoreApp { app, preference } => {
                 let mut settings = match self.app_settings().await {
@@ -1168,7 +1246,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
             Ok(answer) => Tried::Answered(answer),
             Err(error) => from_transport(error),
         };
-        if matches!(tried, Tried::NotSent(_) | Tried::Throttled { .. }) {
+        if matches!(tried, Tried::NotSent(_) | Tried::Offline(_) | Tried::Throttled { .. }) {
             self.tracker.not_sent(attempt);
         }
         tried
@@ -1195,8 +1273,9 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         match tried {
             Tried::Answered(answer) => self.settle_answer(row, &answer, refreshed),
             Tried::Denied(denied) => (AttemptOutcome::Denied { reason: denied.clone() }, false),
-            Tried::NotSent(error) => (AttemptOutcome::Failed { error }, false),
-            Tried::Throttled { wait, error } => (self.retry(row, wait, error), false),
+            Tried::Offline(error) if resendable(row) => (self.retry_later(row, error), false),
+            Tried::NotSent(error) | Tried::Offline(error) => (AttemptOutcome::Failed { error }, false),
+            Tried::Throttled { wait, error } => (self.retry_throttled(row, wait, error), false),
             Tried::Uncertain(error) => self.again_if_findable(row, &error),
         }
     }
@@ -1217,7 +1296,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
             }
             429 | 503 => {
                 let wait = answer.retry_after().unwrap_or(DEFAULT_RETRY_WAIT);
-                (self.retry(row, wait, format!("HTTP {status}")), false)
+                (self.retry_throttled(row, wait, format!("HTTP {status}")), false)
             }
             500..=599 => self.again_if_findable(row, &format!("HTTP {status}")),
             _ => (
@@ -1230,11 +1309,13 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
     }
 
     /// An attempt whose message may have arrived: another one (after the sync check) for a row that can be looked
-    /// for; any other is failed rather than risk doing it twice.
+    /// for, a later one for a row a second send does no harm to; any other is failed rather than risk doing it twice.
     fn again_if_findable(&self, row: &OutboxEntry, error: &str) -> (AttemptOutcome, bool) {
         let error = format!("{error}; {OUTCOME_UNKNOWN}");
         if findable(row).is_some() {
             (self.retry(row, Duration::ZERO, error), true)
+        } else if resendable(row) {
+            (self.retry_later(row, error), false)
         } else {
             (
                 AttemptOutcome::Failed {
@@ -1245,10 +1326,28 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         }
     }
 
-    /// Another attempt after `wait`, unless the row has had all of its attempts since it was made or last resent.
+    /// Another attempt of a [`resendable`] row after [`RESEND_WAIT`], doubled for each of its attempts since it was made
+    /// or last resent up to [`RESEND_MAX_WAIT`], with no limit on the attempts: the network may be down for long.
+    fn retry_later(&self, row: &OutboxEntry, error: String) -> AttemptOutcome {
+        self.retry(row, resend_wait(row), error)
+    }
+
+    /// Another attempt after a throttle (`wait` from the service, or its default); a [`resendable`] row waits at least
+    /// as long as [`Outbox::retry_later`] gives it.
+    fn retry_throttled(&self, row: &OutboxEntry, wait: Duration, error: String) -> AttemptOutcome {
+        let wait = if resendable(row) {
+            wait.max(resend_wait(row))
+        } else {
+            wait
+        };
+        self.retry(row, wait, error)
+    }
+
+    /// Another attempt after `wait`, unless the row has had all of its attempts since it was made or last resent; a
+    /// [`resendable`] row has no limit on its attempts.
     fn retry(&self, row: &OutboxEntry, wait: Duration, error: String) -> AttemptOutcome {
         let attempts = row.attempts_since_resend();
-        if attempts >= MAX_ATTEMPTS {
+        if attempts >= MAX_ATTEMPTS && !resendable(row) {
             return AttemptOutcome::Failed {
                 error: format!("{error}; given up after {attempts} attempts"),
             };
@@ -1269,6 +1368,18 @@ fn findable(row: &OutboxEntry) -> Option<&str> {
     } else {
         None
     }
+}
+
+/// The wait of a [`resendable`] row before its next attempt: [`RESEND_WAIT`], doubled for each of its attempts since
+/// it was made or last resent, up to [`RESEND_MAX_WAIT`].
+fn resend_wait(row: &OutboxEntry) -> Duration {
+    let doublings = row.attempts_since_resend().saturating_sub(1).min(16);
+    RESEND_WAIT.saturating_mul(1 << doublings).min(RESEND_MAX_WAIT)
+}
+
+/// Whether a second send of `row` does no harm: an unread mark sets the account's own bookmark as of its time.
+fn resendable(row: &OutboxEntry) -> bool {
+    row.kind == OutboxKind::UnreadMark
 }
 
 /// Whether an older pending row of this run is on `row`'s lane ([`Lane`]), so `row` waits for it to settle. A row
@@ -1298,11 +1409,26 @@ fn entry(store: &Store, id: i64) -> Result<OutboxEntry, OutboxError> {
 fn from_transport(error: HttpError) -> Tried {
     match error {
         HttpError::Failed(_) | HttpError::BodyTooLarge => Tried::Uncertain(error.to_string()),
+        HttpError::Credentials(ref token) if token_service_down(token) => Tried::Offline(error.to_string()),
         HttpError::Credentials(TokenError::Throttled { retry_after, .. }) => Tried::Throttled {
             wait: retry_after.unwrap_or(DEFAULT_RETRY_WAIT),
             error: "the token service is throttling".to_owned(),
         },
         other => Tried::NotSent(other.to_string()),
+    }
+}
+
+/// Whether a token request for a write got no answer, or a 5xx other than throttling, from Entra or authz.
+fn token_service_down(error: &TokenError) -> bool {
+    match error {
+        TokenError::Http(_) => true,
+        TokenError::Entra { status, .. } | TokenError::UnexpectedResponse { status } => *status >= 500,
+        TokenError::Authz(authz) => match authz.as_ref() {
+            AuthzError::Http(_) => true,
+            AuthzError::Unavailable { status, .. } | AuthzError::UnexpectedResponse { status } => *status >= 500,
+            _ => false,
+        },
+        _ => false,
     }
 }
 
@@ -1315,7 +1441,8 @@ fn answered_id(row: &OutboxEntry, answer: &Response) -> Option<String> {
         | OutboxKind::AddMembers
         | OutboxKind::FeedRead
         | OutboxKind::ActivityTurnOffApp
-        | OutboxKind::ActivityRestoreApp => None,
+        | OutboxKind::ActivityRestoreApp
+        | OutboxKind::UnreadMark => None,
         OutboxKind::Edit
         | OutboxKind::Delete
         | OutboxKind::AddReaction

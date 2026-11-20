@@ -183,6 +183,34 @@ pub enum ShowAs {
     Other(String),
 }
 
+/// The account's reminder of an event, its `isReminderSet` and `reminderMinutesBeforeStart`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Reminder {
+    /// Set, this many minutes before the start.
+    Before(u32),
+    /// Not set (`isReminderSet` `false`).
+    Off,
+    /// The entry doesn't say.
+    #[default]
+    Unknown,
+}
+
+impl Reminder {
+    /// The reminder `entry` names: `Unknown` without a boolean `isReminderSet`, or when it is set without minutes that
+    /// read.
+    fn of(entry: &Value) -> Self {
+        match entry.get("isReminderSet").and_then(Value::as_bool) {
+            Some(false) => Self::Off,
+            Some(true) => entry
+                .get("reminderMinutesBeforeStart")
+                .and_then(Value::as_u64)
+                .and_then(|minutes| u32::try_from(minutes).ok())
+                .map_or(Self::Unknown, Self::Before),
+            None => Self::Unknown,
+        }
+    }
+}
+
 /// Someone an event invites.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Attendee {
@@ -240,6 +268,8 @@ pub struct CalendarEvent {
     pub series_master_id: Option<String>,
     /// The channel's meeting it is, when it was scheduled in a channel (its `skypeTeamsData` names a team's thread).
     pub channel_meeting: Option<ChannelEventRef>,
+    /// The account's reminder of it.
+    pub reminder: Reminder,
 }
 
 /// A channel's meeting as an event names it (`docs/protocol/calling.md`, "Schedule a meeting"): its `skypeTeamsData`'s
@@ -390,6 +420,7 @@ impl CalendarEvent {
             attendees: attendees(entry.get("attendees")),
             series_master_id: text("seriesMasterId"),
             channel_meeting: ChannelEventRef::of(entry),
+            reminder: Reminder::of(entry),
         })
     }
 }

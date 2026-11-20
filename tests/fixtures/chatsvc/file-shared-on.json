@@ -1,0 +1,63 @@
+{
+  "_synthetic": "Written synthetic-from-a-lab-capture, made-up values: a file shared on with Teams' \"Share this file\" (2026-11-18). Lab account b shared a video of lab account a's message (the second file of files-grid.json) to lab account c with a message; sent is b's post to the b-c chat, read_back is c's read of it. The entry is the original one with fileInfo.itemId, fileChicletState.state, state and sharepointIds null, isUploadError false and permissionScope the link's scope. Every name, link and id here is made up; the keys, their order and their value types are the capture's. <guid:b>, <guid:c> are lab accounts' object ids; tests fill them in. See docs/protocol/chat.md, Files: shared on.",
+  "sent": {
+    "id": "-1",
+    "type": "Message",
+    "conversationid": "19:<guid:c>_<guid:b>@unq.gbl.spaces",
+    "conversationLink": "blah/19:<guid:c>_<guid:b>@unq.gbl.spaces",
+    "from": "8:orgid:<guid:b>",
+    "fromUserId": "8:orgid:<guid:b>",
+    "composetime": "2026-01-01T00:02:00.000Z",
+    "originalarrivaltime": "2026-01-01T00:02:00.000Z",
+    "content": "<p>Made-up share note</p>",
+    "messagetype": "RichText/Html",
+    "contenttype": "Text",
+    "imdisplayname": "Lab B",
+    "clientmessageid": "8888888888888888888",
+    "callId": "",
+    "state": 0,
+    "version": "0",
+    "amsreferences": [],
+    "properties": {
+      "importance": "",
+      "subject": "",
+      "title": "",
+      "cards": "[]",
+      "links": "[]",
+      "mentions": "[]",
+      "onbehalfof": null,
+      "files": "[{\"itemid\":\"<guid:file-2>\",\"fileName\":\"made-up-camera-take-1.mp4\",\"fileType\":\"mp4\",\"fileInfo\":{\"itemId\":null,\"fileUrl\":\"https://contoso-my.sharepoint.com/personal/made_up_user_contoso_test/Documents/Microsoft%20Teams%20Chat%20Files/made-up-camera-take-1.mp4\",\"siteUrl\":\"https://contoso-my.sharepoint.com/personal/made_up_user_contoso_test/\",\"serverRelativeUrl\":\"\",\"shareUrl\":\"https://contoso-my.sharepoint.com/:v:/g/personal/made_up_user_contoso_test/MadeUpShareLinkForGridFile0002\",\"shareId\":\"<guid:share-2>\"},\"fileChicletState\":{\"serviceName\":\"p2p\",\"state\":null},\"@type\":\"http://schema.skype.com/File\",\"version\":2,\"id\":\"<guid:file-2>\",\"baseUrl\":\"https://contoso-my.sharepoint.com/personal/made_up_user_contoso_test/\",\"objectUrl\":\"https://contoso-my.sharepoint.com/personal/made_up_user_contoso_test/Documents/Microsoft%20Teams%20Chat%20Files/made-up-camera-take-1.mp4\",\"openUrl\":null,\"type\":\"mp4\",\"title\":\"made-up-camera-take-1.mp4\",\"state\":null,\"altText\":null,\"chicletBreadcrumbs\":null,\"providerData\":\"\",\"botFileProperties\":{},\"isUploadError\":false,\"progressComplete\":null,\"permissionScope\":\"anonymous\",\"filePreview\":{\"previewUrl\":\"\",\"previewHeight\":0,\"previewWidth\":0},\"sharepointIds\":null,\"publication\":null,\"site\":null}]",
+      "policyViolation": null,
+      "formatVariant": "TEAMS"
+    },
+    "crossPostChannels": []
+  },
+  "read_back": {
+    "sequenceId": 3,
+    "conversationid": "19:<guid:c>_<guid:b>@unq.gbl.spaces",
+    "conversationLink": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/conversations/19:<guid:c>_<guid:b>@unq.gbl.spaces",
+    "contenttype": "Text",
+    "type": "Message",
+    "amsreferences": [],
+    "fromGivenNameInToken": "Lab",
+    "fromDisplayNameInToken": "Lab B",
+    "id": "1760000120000",
+    "clientmessageid": "8888888888888888888",
+    "version": "1760000121000",
+    "messagetype": "RichText/Html",
+    "content": "<p>Made-up share note</p>",
+    "from": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/contacts/8:orgid:<guid:b>",
+    "imdisplayname": "Lab B",
+    "composetime": "2026-01-01T00:02:00.0000000Z",
+    "originalarrivaltime": "2026-01-01T00:02:00.0000000Z",
+    "properties": {
+      "mentions": "[]",
+      "cards": "[]",
+      "links": "[]",
+      "files": "[{\"itemid\":\"<guid:file-2>\",\"fileName\":\"made-up-camera-take-1.mp4\",\"fileType\":\"mp4\",\"fileInfo\":{\"itemId\":null,\"fileUrl\":\"https://contoso-my.sharepoint.com/personal/made_up_user_contoso_test/Documents/Microsoft%20Teams%20Chat%20Files/made-up-camera-take-1.mp4\",\"siteUrl\":\"https://contoso-my.sharepoint.com/personal/made_up_user_contoso_test/\",\"serverRelativeUrl\":\"\",\"shareUrl\":\"https://contoso-my.sharepoint.com/:v:/g/personal/made_up_user_contoso_test/MadeUpShareLinkForGridFile0002\",\"shareId\":\"<guid:share-2>\"},\"fileChicletState\":{\"serviceName\":\"p2p\",\"state\":null},\"@type\":\"http://schema.skype.com/File\",\"version\":2,\"id\":\"<guid:file-2>\",\"baseUrl\":\"https://contoso-my.sharepoint.com/personal/made_up_user_contoso_test/\",\"objectUrl\":\"https://contoso-my.sharepoint.com/personal/made_up_user_contoso_test/Documents/Microsoft%20Teams%20Chat%20Files/made-up-camera-take-1.mp4\",\"openUrl\":null,\"type\":\"mp4\",\"title\":\"made-up-camera-take-1.mp4\",\"state\":null,\"altText\":null,\"chicletBreadcrumbs\":null,\"providerData\":\"\",\"botFileProperties\":{},\"isUploadError\":false,\"progressComplete\":null,\"permissionScope\":\"anonymous\",\"filePreview\":{\"previewUrl\":\"\",\"previewHeight\":0,\"previewWidth\":0},\"sharepointIds\":null,\"publication\":null,\"site\":null}]",
+      "formatVariant": "TEAMS",
+      "languageStamp": "languages=en:100;length=21;",
+      "atp": "<made-up atp entries>"
+    }
+  }
+}

@@ -50,6 +50,11 @@ one, and the account menu offers "Sign out and remove". Every account notifies, 
 one opens its chat in its account), and the tray badge counts all accounts' unread chats. Each account has its own
 engine, store, tokens and region; one engine opens each store.
 
+Each account can show a picture that the user chose in place of its profile picture: in the rail, the title bar, the
+account menu and Settings > Accounts ("Change picture", "Use profile picture"). The app keeps a square PNG copy in
+`account-pictures/` beside `settings.toml`, never sends it, and deletes it with the account. Messages, people cards
+and calls keep the profile picture.
+
 A newly typed account is pending until sign-in succeeds. If sign-in stores nothing, a bare entry containing only its
 UPN is removed; entries with manual identity-provider hosts or a refused provider remain pending for correction.
 An existing provisioned lab identity is different: canceling or failing its first sign-in retains it so the alias
@@ -102,6 +107,16 @@ the account is no administrator any more, the page goes and Settings say why. An
 off is signed out with that said, and no sign-in window opens for it. A Microsoft 365 account has no such page and nothing is
 asked for it; an own server's account that is no administrator has none either. `ngteamsctl open settings users`
 opens it for an account that has it.
+
+**Manage apps** (with `NGTEAMS_BOTS=1`). The same administrator's Settings also have a "Manage apps" page when the
+server serves apps (`GET /api/admin/v1/apps` answers): the server's apps with a search, "Register a bot" (name,
+description, messaging endpoint, Signed or Unsigned), "Upload an app" (a Teams app package, at most 5 MB), and for
+each app "On", its bot's endpoint and mode, "Who can use it" (everyone or chosen people), "Bot settings" (what the
+.NET, Python, JavaScript, Teams and Agents SDKs take to talk to this server), "New secret" and "Delete app", the last
+two after a confirmation that starts on Cancel. A bot's app id and secret are shown once, with Copy, when it is made
+or gets a new secret. The requests carry the account's token to its own server only; the settings' issuer is read
+from the server's `/bot/v1/.well-known/openidconfiguration`, with no token. `ngteamsctl open settings apps` opens it
+for an account that has it.
 
 An own server's account that is signed out is asked for its password again. Each "Sign in" on that screen reads the account's entry again, so a `ca_file` written while
 the screen is open is used at once; the password goes only to the server the screen shows. Settings > General names the account's server, and `ngteamsctl accounts` lists it.

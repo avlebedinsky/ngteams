@@ -9,6 +9,7 @@ mod cluster;
 mod directory;
 mod media;
 mod namespaces;
+mod outgoing;
 mod push;
 mod search;
 mod setup;
@@ -182,6 +183,7 @@ async fn check_region(session: &Session<MemorySecretStore>, origin: &str) {
         ("amsV2", "/ams"),
         ("presenceUPS", "/ups/own"),
         ("workflowsService", "/workflows"),
+        ("outgoingWebhookService", "/api/mt/part/own-01"),
     ];
     for (gtm, path) in bases {
         assert_eq!(session.service_base(gtm), Some(format!("{origin}{path}")), "{gtm}");

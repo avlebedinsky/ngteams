@@ -1,13 +1,14 @@
-//! The pictures messages show, cached across runs: a message's picture on AMS, a GIF on Giphy, a file's thumbnail, as
-//! the engine last read them (`teams-core`'s `pictures.rs` and `thumbnails.rs`), so a later run shows them without
-//! reading them again.
+//! The pictures messages show, cached across runs: a message's picture on AMS, a GIF on Giphy, a sticker on Teams'
+//! sticker CDN, a file's thumbnail, as the engine last read them (`teams-core`'s `pictures.rs` and `thumbnails.rs`), so
+//! a later run shows them without reading them again.
 //!
 //! - **A file of its own** beside the account's store ([`PictureCache::file_beside`]: `<store>-cache/pictures.sqlite`,
 //!   `0600` in a `0700` directory, WAL), never the store itself: its bytes are read and written off the engine's
 //!   thread, and `ngteams snapshot` (which copies the stores, `store/*.sqlite`) leaves it out. Only the account's
 //!   engine opens it, under the account's engine lock.
 //! - **Keyed by a hash**: a picture is found by the SHA-256 of what names it (the core's key: an AMS object and view,
-//!   a Giphy id and file, a file's sharing token), so no link, id or token is written as such.
+//!   a Giphy id and file, a sticker's folder and file, a file's sharing token), so no link, id or token is written as
+//!   such.
 //! - **Bounded**: once the pictures hold more bytes than the cache's limit, the least recently asked for go first.
 //!   An entry older than the age its reader gives is dropped when asked for (a file's thumbnail changes with the file;
 //!   a message's picture never does).

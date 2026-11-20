@@ -32,7 +32,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use gpui::{App, AppContext as _, AsyncApp, Context, Entity, Global, Task};
+use gpui::{App, AppContext as _, AsyncApp, Context, Entity, Global, Subscription, Task};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
@@ -42,7 +42,7 @@ use teams_proto::transcript::Turn;
 
 pub use run::{Limits, Request, Stage, Summarizing, Update};
 
-use crate::local_ai::{AiChoice, Backend, Failure, Model, Tools, Work, cap};
+use crate::local_ai::{AiChoice, Backend, Failure, Model, Work, cap};
 
 /// The folder beside the settings file the summaries are kept in.
 pub const SUMMARY_DIR: &str = "recap-summaries";
@@ -668,6 +668,8 @@ pub struct RecapSummary {
     receiving: Option<Task<()>>,
     ticking: Option<Task<()>>,
     limits: Limits,
+    /// The AI switch: turned off, the summary being made stops, also after its recap closed.
+    _ai_switch: Subscription,
 }
 
 /// The parts' summaries this run, by their key.
@@ -690,7 +692,7 @@ impl RecapSummary {
         }
         let state = cached(key, dir.as_deref(), cx).map_or(State::Idle, State::Done);
         let limits = cx.try_global::<SummaryLimits>().copied().unwrap_or_default().0;
-        let made = cx.new(|_| Self {
+        let made = cx.new(|cx| Self {
             key: key.to_owned(),
             dir,
             state,
@@ -698,6 +700,7 @@ impl RecapSummary {
             receiving: None,
             ticking: None,
             limits,
+            _ai_switch: cx.observe_global::<crate::local_ai::AiSwitch>(Self::follow_ai_switch),
         });
         cx.default_global::<Summaries>().0.insert(key.to_owned(), made.clone());
         made
@@ -710,7 +713,7 @@ impl RecapSummary {
 
     /// Makes a summary of `input` with the tool and model `choice` comes to (anew, when one was made).
     pub fn start(&mut self, choice: AiChoice, input: Input, cx: &mut Context<Self>) {
-        let (backend, program) = match Tools::of(cx).pick(choice.tool) {
+        let picked = match crate::local_ai::pick(&choice.tool, cx) {
             Ok(picked) => picked,
             Err(failure) => {
                 self.state = State::Failed(failure);
@@ -718,10 +721,11 @@ impl RecapSummary {
                 return;
             }
         };
-        let label = backend.label_of(Work::Summary, &choice.model);
+        let label = picked.label(Work::Summary, &choice.model);
+        let crate::local_ai::Picked { backend, target, .. } = picked;
         let job = Summarizing::start(Request {
             backend,
-            program,
+            target,
             model: choice.model,
             input,
             limits: self.limits,
@@ -758,6 +762,12 @@ impl RecapSummary {
         self.stop();
         self.state = cached(&self.key, self.dir.as_deref(), cx).map_or(State::Idle, State::Done);
         cx.notify();
+    }
+
+    fn follow_ai_switch(&mut self, cx: &mut Context<Self>) {
+        if !crate::local_ai::enabled(cx) && matches!(self.state, State::Running { .. }) {
+            self.cancel(cx);
+        }
     }
 
     fn stop(&mut self) {

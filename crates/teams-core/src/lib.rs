@@ -27,6 +27,8 @@
 //!   channel's posts, replies and reactions are the outbox's writes, as a chat's.
 //! - [`calling`]: the account's calls (M3 Task 14): the call session joining the signaling machine (`teams-call`), the
 //!   calling stack's socket, the outbox's call kind and the call's media (`teams-media`).
+//! - [`ai_api`]: the AI APIs that the app asks with a key that the user gives (Anthropic's, OpenAI's and an
+//!   OpenAI-compatible server's); the only place where such a request is made.
 //! - [`account`]: one account's engine, assembled with its session over the selected secret store, transports and
 //!   shared call floor; `ngteams` gives it the account's parts.
 //!
@@ -35,6 +37,7 @@
 
 pub mod account;
 pub mod activity;
+pub mod ai_api;
 mod attachments;
 pub mod blocked;
 pub mod bots;
@@ -80,8 +83,9 @@ pub use engine::{
 pub use file_content::FileStream;
 pub use outbox::{
     Arrival, CHECK_RETRY_WAIT, CallRetries, CallTried, Clock, Command, ConversationSync, DueFailed, Lane, MAX_ATTEMPTS,
-    MAX_FAILED_CHECKS, MAX_TRANSIENT_WAIT, Outbox, OutboxError, Received, Sent, SentDue, SyncError, Transient,
-    TransientSent, UnreadableSeen, Unsynced, create_chat, enqueue, new_client_message_id, outcome_unknown,
+    MAX_FAILED_CHECKS, MAX_TRANSIENT_WAIT, Outbox, OutboxError, RESEND_MAX_WAIT, RESEND_WAIT, Received, Sent, SentDue,
+    SyncError, Transient, TransientSent, UnreadableSeen, Unsynced, create_chat, enqueue, new_client_message_id,
+    outcome_unknown, replace_older_marks,
 };
 pub use own_presence::{AVAILABLE_REFRESH, Choice, OwnPresencePolicy, Reporting};
 pub use pictures::PictureBytes;
@@ -100,13 +104,14 @@ pub use sync::{
 pub use team_admin::{TeamChange, TeamMember, TeamWritten};
 pub use team_apps::AppListing;
 pub use teams::{ChatListing, READING_TEAMS, TEAMS_MAX_AGE, TEAMS_RETRY, TeamsReadError};
+pub use teams_call::meeting_push::{MeetingStartPush, StartKind as MeetingStartKind};
 /// A call, how it ended and how its services ended it, as [`Event::Call`] and [`Event::RingEnded`] tell them.
 pub use teams_call::{CallError, CallId, End, Identity, RemoteEnd};
 pub use teams_call::{MeetingState, Recording, Transcription};
 pub use teams_proto::{
-    Attendee, CalendarEvent, ChannelEventRef, ChannelMeetup, EventAttendee, EventDraft, EventKind, EventResponse,
-    EventShowAs, EventTime, FloatingTime, FullEvent, MeetingChannel, MeetingCode, MeetingDetails, MeetingInfo,
-    Organizer, RsvpAnswer, ScheduledMeeting, ShowAs, ZonedTime, join_url_chat,
+    Attendee, CalendarEvent, ChannelEventRef, ChannelMeetup, EventAttendee, EventDraft, EventKind, EventReminder,
+    EventResponse, EventShowAs, EventTime, FloatingTime, FullEvent, MeetingChannel, MeetingCode, MeetingDetails,
+    MeetingInfo, Organizer, RsvpAnswer, ScheduledMeeting, ShowAs, ZonedTime, join_url_chat,
 };
 /// How a registration of the push channel's endpoint went, as [`Event::Registration`] tells it.
 pub use teams_trouter::RegistrationReport;

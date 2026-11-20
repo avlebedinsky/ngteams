@@ -81,8 +81,14 @@ use support::{Alias, display_name};
 mod meet_now;
 #[path = "call_pixels.rs"]
 mod pixels;
+#[path = "large_call_qa_chat.rs"]
+mod qa_chat;
 #[path = "large_call_qa_hands.rs"]
 mod qa_hands;
+#[path = "large_call_qa_order.rs"]
+mod qa_order;
+#[path = "large_call_qa_reactions.rs"]
+mod qa_reactions;
 use pixels::{Rect, Stage};
 
 const CHILD_ENV: &str = "NGTEAMS_LARGE_CALL_TEST";
@@ -100,9 +106,13 @@ const EVIDENCE_ENV: &str = "LARGE_CALL_EVIDENCE";
 const STEPS_ENV: &str = "LARGE_CALL_STEPS";
 /// The file in the sandbox dir the parent writes to have the child quit.
 const QUIT_TRIGGER: &str = "quit";
-/// The file in the sandbox dir the parent writes a theme's key into to have the settings take it, as the
-/// appearance page's tiles do.
+/// The file in the sandbox dir the parent writes a theme's key or an [`AppearanceChange`] into (animations on or off, a
+/// font size) to have the settings take it, as the appearance page does.
 const THEME_TRIGGER: &str = "theme";
+/// [`THEME_TRIGGER`]'s words for "Play animations" on and off, and the start of a font size's (`font-16`).
+const ANIMATIONS_ON: &str = "animations-on";
+const ANIMATIONS_OFF: &str = "animations-off";
+const FONT_PREFIX: &str = "font-";
 /// From the child's start to its `ready`.
 const STARTUP: Duration = Duration::from_secs(120);
 /// Anything else the parent waits for.
@@ -218,7 +228,7 @@ fn b_picture() -> SandboxResult<Vec<u8>> {
 /// Everything the user does, in order.
 fn scenarios(rig: &mut Rig<'_>) -> SandboxResult {
     type Step = fn(&mut Rig<'_>) -> SandboxResult;
-    let steps: [(&str, Step); 13] = [
+    let steps: [(&str, Step); 17] = [
         ("small", small_calls),
         ("mic-10", |rig| every_size(rig, 10)),
         ("mic-25", |rig| every_size(rig, 25)),
@@ -232,6 +242,10 @@ fn scenarios(rig: &mut Rig<'_>) -> SandboxResult {
         ("leave", share_and_leave),
         ("one-to-one", one_to_one),
         ("qa-hands", qa_hands::qa_hands),
+        ("qa-order", qa_order::qa_order),
+        ("qa-reactions", qa_reactions::qa_reactions),
+        ("qa-chat", qa_chat::qa_chat),
+        ("qa-chat-calls", qa_chat::other_calls),
     ];
     // a run of some steps alone (`LARGE_CALL_STEPS=sizes,strips`), each setting up the call it needs
     let only = std::env::var(STEPS_ENV).ok();
@@ -788,6 +802,7 @@ struct Rig<'a> {
     frame: Option<Rect>,
     /// niri's id of the call window.
     window_id: Option<u64>,
+    previous_windows: Vec<u64>,
     shots: usize,
 }
 
@@ -807,6 +822,7 @@ impl<'a> Rig<'a> {
             sharing: false,
             frame: None,
             window_id: None,
+            previous_windows: Vec::new(),
             shots: 0,
         })
     }
@@ -856,7 +872,7 @@ impl<'a> Rig<'a> {
         let before = opened(self.app.trace.catch_up());
         self.wait_call("ringing", |row| row.ringing)?;
         self.caller_picture(shown)?;
-        self.window_id = None;
+        self.expect_call_window()?;
         self.ctl.request(None, Request::Answer)?;
         self.wait_call("connected", |row| row.state == "connected")?;
         self.app
@@ -971,27 +987,46 @@ impl<'a> Rig<'a> {
         self.frame.ok_or_else(|| "the call window wasn't found".into())
     }
 
-    /// The size niri gives the window with the keyboard (the call window).
+    fn compositor_windows(&self) -> SandboxResult<Vec<serde_json::Value>> {
+        let text = self.sandbox.niri_msg(&["-j", "windows"])?;
+        serde_json::from_str(&text).map_err(Into::into)
+    }
+
+    fn expect_call_window(&mut self) -> SandboxResult {
+        self.previous_windows = self
+            .compositor_windows()?
+            .iter()
+            .filter_map(|window| window["id"].as_u64())
+            .collect();
+        self.window_id = None;
+        self.frame = None;
+        Ok(())
+    }
+
+    /// The size niri gives the call window, after it maps the new window.
     #[expect(
         clippy::cast_possible_truncation,
         reason = "niri's logical px are whole numbers on a scale of 1"
     )]
     fn window_size(&mut self) -> SandboxResult<(i32, i32)> {
-        let text = self.sandbox.niri_msg(&["-j", "windows"])?;
-        let windows: serde_json::Value = serde_json::from_str(&text)?;
-        let list = windows.as_array().ok_or_else(|| format!("no windows: {text}"))?;
+        let windows = self.compositor_windows()?;
         let window = match self.window_id {
-            Some(id) => list.iter().find(|window| window["id"].as_u64() == Some(id)),
-            None => list.iter().find(|window| window["is_focused"] == true),
+            Some(id) => windows.iter().find(|window| window["id"].as_u64() == Some(id)),
+            // The opened trace can precede the map, while the main window still has focus.
+            None => windows.iter().find(|window| {
+                window["id"]
+                    .as_u64()
+                    .is_some_and(|id| !self.previous_windows.contains(&id))
+            }),
         }
-        .ok_or_else(|| format!("no call window: {text}"))?;
+        .ok_or_else(|| format!("no call window: {windows:?}"))?;
         self.window_id = window["id"].as_u64();
         let size = &window["layout"]["window_size"];
         let at = |index: usize| {
             size[index]
                 .as_f64()
                 .map(|value| value.round() as i32)
-                .ok_or_else(|| format!("no window size: {text}"))
+                .ok_or_else(|| format!("no window size: {windows:?}"))
         };
         Ok((at(0)?, at(1)?))
     }
@@ -1089,20 +1124,8 @@ impl<'a> Rig<'a> {
     /// Saves the call window as it is now as `<name>.png` under `target/ui-shots/` and the evidence directory.
     fn save(&mut self, name: &str) -> SandboxResult {
         self.park()?;
-        let window = self.window()?;
         let shot = self.shot()?;
-        let cut = pixels::crop(&shot, window);
-        let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .parent()
-            .map_or_else(|| PathBuf::from("target"), Path::to_owned)
-            .join("ui-shots");
-        let mut dirs = vec![dir];
-        dirs.extend(std::env::var_os(EVIDENCE_ENV).map(PathBuf::from));
-        for dir in dirs {
-            fs::create_dir_all(&dir)?;
-            cut.save(dir.join(format!("{name}.png")))?;
-        }
-        Ok(())
+        save_shot(self, &shot, name)
     }
 
     /// With `LARGE_CALL_DEBUG` set, saves the window as it is now as `debug-<n>-<name>`.
@@ -1714,6 +1737,23 @@ impl Rig<'_> {
     }
 }
 
+/// Saves the call window as `shot` shows it, in `ui-shots` and the evidence directory ([`EVIDENCE_ENV`]).
+fn save_shot(rig: &mut Rig<'_>, shot: &RgbImage, name: &str) -> SandboxResult {
+    let window = rig.window()?;
+    let cut = pixels::crop(shot, window);
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .parent()
+        .map_or_else(|| PathBuf::from("target"), Path::to_owned)
+        .join("ui-shots");
+    let mut dirs = vec![dir];
+    dirs.extend(std::env::var_os(EVIDENCE_ENV).map(PathBuf::from));
+    for dir in dirs {
+        fs::create_dir_all(&dir)?;
+        cut.save(dir.join(format!("{name}.png")))?;
+    }
+    Ok(())
+}
+
 fn made_up_mri(index: usize) -> String {
     format!("8:orgid:00000000-0000-4000-8000-00000000b{index:03}")
 }
@@ -2052,7 +2092,7 @@ fn child() -> SandboxResult {
     Ok(())
 }
 
-/// Each time the parent writes [`THEME_TRIGGER`]: the settings take the theme it names.
+/// Each time the parent writes [`THEME_TRIGGER`]: the settings take the appearance change or the theme it names.
 fn theme_when_asked(desktop: gpui::Entity<teams_ui::Desktop>, cx: &mut App) {
     let Some(dir) = std::env::var_os(ui_sandbox::SANDBOX_ENV) else {
         say("no sandbox dir");
@@ -2066,6 +2106,10 @@ fn theme_when_asked(desktop: gpui::Entity<teams_ui::Desktop>, cx: &mut App) {
                 continue;
             };
             let _ = fs::remove_file(&trigger);
+            if let Some(change) = appearance_change(&key) {
+                cx.update(|cx| appearance(&desktop, change, cx));
+                continue;
+            }
             let theme = if key == teams_ui::theme::DARK_KEY {
                 teams_ui::theme::DARK_KEY
             } else {
@@ -2085,6 +2129,41 @@ fn fixed_theme(desktop: &gpui::Entity<teams_ui::Desktop>, theme: &'static str, c
             |settings| {
                 settings.appearance.follow_system = false;
                 settings.appearance.theme = theme;
+            },
+            cx,
+        );
+    });
+}
+
+/// A change of the appearance's other settings that [`THEME_TRIGGER`] can carry instead of a theme's key.
+#[derive(Clone, Copy)]
+enum AppearanceChange {
+    /// "Play animations" on or off.
+    Animations(bool),
+    /// The base font size, px.
+    FontSize(u16),
+}
+
+/// The change `key` names: `animations-on`, `animations-off` or `font-<px>`.
+fn appearance_change(key: &str) -> Option<AppearanceChange> {
+    match key {
+        ANIMATIONS_ON => Some(AppearanceChange::Animations(true)),
+        ANIMATIONS_OFF => Some(AppearanceChange::Animations(false)),
+        _ => key
+            .strip_prefix(FONT_PREFIX)
+            .and_then(|size| size.parse().ok())
+            .map(AppearanceChange::FontSize),
+    }
+}
+
+/// The settings take `change`, as the appearance page's controls set it.
+fn appearance(desktop: &gpui::Entity<teams_ui::Desktop>, change: AppearanceChange, cx: &mut App) {
+    let settings = desktop.read(cx).settings().clone();
+    settings.update(cx, |model, cx| {
+        model.change(
+            |settings| match change {
+                AppearanceChange::Animations(on) => settings.appearance.animations = on,
+                AppearanceChange::FontSize(size) => settings.appearance.font_size = size,
             },
             cx,
         );

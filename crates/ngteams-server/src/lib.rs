@@ -37,6 +37,7 @@ pub mod fanout;
 mod media;
 pub mod mixer;
 pub mod outbound;
+pub mod outgoing;
 pub mod people;
 pub mod presence;
 pub mod registrar;

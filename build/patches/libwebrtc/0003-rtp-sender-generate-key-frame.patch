@@ -1,0 +1,32 @@
+RtpSender::generate_key_frame: the binding of build/patches/webrtc-sys/0001 exposed on the safe API, so that ngteams
+can force a keyframe of a screen it shares when the far end's request for one went unanswered
+(crates/teams-media/src/session/keyframes.rs).
+
+--- a/src/native/rtp_sender.rs
++++ b/src/native/rtp_sender.rs
+@@ -84,6 +84,10 @@ impl RtpSender {
+     pub fn set_video_encoder_backend(&self, backend: VideoEncoderBackend) {
+         self.sys_handle.set_video_encoder_backend(backend.into());
+     }
++
++    pub fn generate_key_frame(&self) -> bool {
++        self.sys_handle.generate_key_frame()
++    }
+ }
+ 
+ impl From<VideoEncoderBackend> for sys_webrtc::ffi::VideoEncoderBackend {
+--- a/src/rtp_sender.rs
++++ b/src/rtp_sender.rs
+@@ -91,6 +91,12 @@ impl RtpSender {
+     pub fn set_video_encoder_backend(&self, backend: VideoEncoderBackend) {
+         self.handle.set_video_encoder_backend(backend)
+     }
++
++    /// Asks the video encoder for a keyframe of every layer (`RtpSenderInterface::GenerateKeyFrame`); whether the
++    /// sender is a video sender that took the request.
++    pub fn generate_key_frame(&self) -> bool {
++        self.handle.generate_key_frame()
++    }
+ }
+ 
+ impl Debug for RtpSender {

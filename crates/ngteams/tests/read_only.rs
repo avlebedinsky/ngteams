@@ -129,6 +129,16 @@ fn every_write(mine: &str, theirs: &str) -> Vec<Action> {
             conversation: conversation(),
             message_id: theirs.to_owned(),
         },
+        Action::MarkUnread {
+            conversation: conversation(),
+            message_id: Some(theirs.to_owned()),
+        },
+        Action::EndUnreadMark {
+            conversation: conversation(),
+        },
+        Action::MarkRead {
+            conversation: conversation(),
+        },
         Action::CreateChat {
             others: vec![Mri::new(OUTSIDER)],
             topic: None,
@@ -156,6 +166,7 @@ async fn every_write_the_engine_is_asked_for_is_refused_and_never_sent_while_rea
     }
 
     let conversation = || AX_CHAT.to_owned();
+    let horizon = core.read_horizon(AX_CHAT).await.unwrap();
     let writes = every_write(&mine, &theirs);
     let _count = writes.len();
     for action in writes {
@@ -167,6 +178,9 @@ async fn every_write_the_engine_is_asked_for_is_refused_and_never_sent_while_rea
                 .is_some_and(|error| error.contains("read-only")),
             "{action:?}: {row:?}"
         );
+        // the store keeps none of them: no mark, the read horizon where it was
+        assert_eq!(core.unread_mark(AX_CHAT).await.unwrap(), None, "{action:?}");
+        assert_eq!(core.read_horizon(AX_CHAT).await.unwrap(), horizon, "{action:?}");
     }
     // typing: dropped, never sent
     let typing = core

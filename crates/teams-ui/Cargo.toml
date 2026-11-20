@@ -128,10 +128,25 @@ name = "font_styles"
 harness = false
 
 [[test]]
+# the message box's toolbar (its AI button and menu, the customize list, hidden buttons in "+", narrow and with a large
+# font), drawn in the UI sandbox over the fake engine, screenshotted in each theme under
+# `target/ui-shots/compose-toolbar-*.png`: its own `main` (GPUI runs on the main thread), which runs itself again inside
+# the sandbox
+name = "compose_toolbar_window"
+harness = false
+
+[[test]]
 # a draft translated in its box, drawn in the UI sandbox over the fake engine and a fake translator, screenshotted in
 # each theme under `target/ui-shots/compose-translate-*.png`: its own `main` (GPUI runs on the main thread), which runs
 # itself again inside the sandbox
 name = "compose_translate_window"
+harness = false
+
+[[test]]
+# the settings' AI providers box, drawn in the UI sandbox over the fake engine and a mock server on the loopback,
+# screenshotted in each theme under `target/ui-shots/ai-providers-*.png`: its own `main` (GPUI runs on the main
+# thread), which runs itself again inside the sandbox
+name = "ai_providers_window"
 harness = false
 
 [[test]]
@@ -177,6 +192,13 @@ name = "workflow_message_window"
 harness = false
 
 [[test]]
+# two accounts with the same profile picture, one with a picture the user chose, over the fake engine in the UI
+# sandbox: the rail, the account menu and Settings > Accounts, screenshotted in each theme under
+# `target/ui-shots/account-pictures-*.png`
+name = "account_pictures_window"
+harness = false
+
+[[test]]
 # a YouTube link's app card in a chat over the fake engine, in the UI sandbox, screenshotted in each theme under
 # `target/ui-shots/app-card-*.png`
 name = "app_card_window"
@@ -186,6 +208,13 @@ harness = false
 # a bot's cards with the bots shown, over the fake engine, in the UI sandbox, screenshotted in each theme under
 # `target/ui-shots/bot-cards-*.png`
 name = "bot_cards_window"
+harness = false
+
+[[test]]
+# the compose box's Actions and apps, an app's search, an action dialog and its submit, a web-page dialog, a message's
+# "More actions" with apps and a card's task/fetch dialog, with the bots shown, over the fake engine, in the UI sandbox,
+# screenshotted in each theme under `target/ui-shots/message-extensions-*.png`
+name = "message_extensions_window"
 harness = false
 
 [[test]]

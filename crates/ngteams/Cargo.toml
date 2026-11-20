@@ -72,7 +72,7 @@ windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Globali
 
 [dev-dependencies]
 # The retained sandbox window tests read screenshots and serve mock tray items.
-image = { workspace = true, features = ["png", "gif"] }
+image = { workspace = true, features = ["png", "gif", "jpeg", "webp"] }
 zbus.workspace = true
 # a call's id for the call events the personal app's models are shown (`CallId::for_tests`)
 teams-call = { workspace = true, features = ["test-support"] }
@@ -100,6 +100,8 @@ wiremock.workspace = true
 rcgen = { workspace = true, features = ["pem"] }
 # a token request's own error, for what the Manage users page says of it (`tests/support/own_admin_tokens.rs`)
 reqwest.workspace = true
+# a synthetic Teams app package uploaded through Manage apps (`tests/support/own_admin_apps.rs`)
+zip.workspace = true
 
 
 # the own server in-process, for an own-server account's sign-in and start (`tests/own_server.rs`,
@@ -125,11 +127,25 @@ name = "accounts_window"
 harness = false
 
 [[test]]
+name = "apps_admin_window"
+harness = false
+
+[[test]]
 name = "call_window"
 harness = false
 
 [[test]]
 name = "qa_ring_cancel_window"
+harness = false
+
+[[test]]
+# QA of task 664: a meeting's start pushed by the calling service, and the calendar's meeting reminders, in the UI sandbox
+name = "qa_meeting_notice_window"
+harness = false
+
+[[test]]
+# QA of task 577: a still screen shared, shared again and set up again in a 1:1 call on the mock, in the UI sandbox
+name = "qa_share_still_window"
 harness = false
 
 [[test]]
@@ -163,13 +179,28 @@ name = "qa_bot_connector_window"
 harness = false
 
 [[test]]
-# QA of task 429: the message box in a narrow call chat, a narrow window and a thread, in the UI sandbox
+# QA of task 232: Manage apps as an administrator uses it, against the real ngteams-server binary, in the UI sandbox
+name = "qa_apps_admin_window"
+harness = false
+
+[[test]]
+# QA of task 227: message extensions and apps' dialogs in the app's window over the mock, in the UI sandbox
+name = "qa_message_extensions_window"
+harness = false
+
+[[test]]
+# QA of tasks 429 and 581: the message box in a narrow call chat, a narrow window and a thread, and its edge, in the UI sandbox
 name = "qa_narrow_compose_window"
 harness = false
 
 [[test]]
 # QA of task 406: the AI correction keeps a missing final dot missing, in the UI sandbox
 name = "qa_final_dot_window"
+harness = false
+
+[[test]]
+# QA of task 580: the update notice of each Nix install kind in the app's window, in the UI sandbox
+name = "qa_nix_update_window"
 harness = false
 
 [[test]]
@@ -180,6 +211,46 @@ harness = false
 [[test]]
 # QA of task 525: an own server's message with several files, its grid of file cards and their actions, in the UI sandbox
 name = "qa_file_grid_own_window"
+harness = false
+
+[[test]]
+# QA of task 516: the AI providers (Anthropic, OpenAI, OpenAI-compatible APIs beside the CLIs) in the UI sandbox
+name = "qa_ai_providers_window"
+harness = false
+
+[[test]]
+# QA of task 584: the message box's toolbar, its AI button and the buttons that hide, in the app's window over the mock
+name = "qa_compose_toolbar_window"
+harness = false
+
+[[test]]
+# QA of task 649: Teams stickers that people send, in the app's window over the mock
+name = "qa_stickers_window"
+harness = false
+
+[[test]]
+# QA of task 579: the AI notice and the "Use AI features" switch in the app's window over the mock
+name = "qa_ai_notice_window"
+harness = false
+
+[[test]]
+# QA of task 579, round 2: a call rings while the AI notice waits, in the app's window over the mock
+name = "qa_ai_notice_ring_window"
+harness = false
+
+[[test]]
+# QA of task 575: one message translated from its More options menu, over the mock and an own server, in the UI sandbox
+name = "qa_translate_message_window"
+harness = false
+
+[[test]]
+# QA of task 543: "Share this file" on file cards, its recipients, message, keys, Copy link and errors, in the UI sandbox
+name = "qa_share_file_window"
+harness = false
+
+[[test]]
+# QA of task 660: Mark as unread from a message's menu and a chat row's menu in the app's window over the mock
+name = "qa_mark_unread_window"
 harness = false
 
 [[test]]
@@ -250,6 +321,16 @@ harness = false
 
 [[test]]
 name = "own_server_nodes_window"
+harness = false
+
+[[test]]
+# QA of task 577: a still screen shared before a late join, again and by another, on the own server, in the UI sandbox
+name = "qa_share_still_own_window"
+harness = false
+
+[[test]]
+# QA of task 670: a picture of the user's own for each account, in the app's window over the mock
+name = "qa_account_picture_window"
 harness = false
 
 [build-dependencies]

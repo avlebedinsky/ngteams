@@ -188,6 +188,16 @@ fn click(cx: &mut VisualTestContext, selector: &'static str) {
     draw(cx);
 }
 
+/// The AI button's menu opened, then its row of `tool` (`compose-<tool>-row`) clicked.
+fn by_ai_menu(cx: &mut VisualTestContext, row: &'static str) {
+    click(cx, "compose-ai");
+    assert!(
+        cx.debug_bounds("compose-ai-menu").is_some(),
+        "the AI button opens its menu"
+    );
+    click(cx, row);
+}
+
 fn sent(rig: &Rig) -> usize {
     rig.core
         .actions
@@ -204,7 +214,7 @@ fn translate_replaces_the_draft_as_one_edit_and_undo_brings_it_back() {
     let fake = Fake::install(&rig);
     let (compose, cx) = chat(&rig);
     type_in(&compose, cx, "hello there");
-    click(cx, "compose-translate");
+    by_ai_menu(cx, "compose-translate-row");
     until(cx, |cx| value(&compose, cx) == "hallo there");
     assert_eq!(status(&compose, cx), DraftTranslationStatus::Idle);
     assert_eq!(sent(&rig), 0, "translating sends nothing");
@@ -281,9 +291,10 @@ fn the_language_is_one_setting_every_box_shares() {
     let (other_view, other_cx) = open_chat(&rig, OTHER, &model);
     let other = compose_of(&other_view, other_cx);
 
-    // the language button shows the language and opens the menu; any language can be typed
-    assert!(cx.debug_bounds("compose-language").is_some());
-    click(cx, "compose-language");
+    // the AI button's language row shows the language and opens the menu; any language can be typed
+    click(cx, "compose-ai");
+    assert!(cx.debug_bounds("compose-language-row").is_some());
+    click(cx, "compose-language-row");
     let menu = compose.read_with(cx, |compose, _| compose.language_menu().unwrap());
     assert!(menu.read_with(cx, |menu, _| menu.is_open()));
     cx.update(|window, cx| menu.update(cx, |menu, cx| menu.search("Klingon", window, cx)));
@@ -420,11 +431,8 @@ fn with_no_tool_installed_it_says_so_and_offers_the_setting() {
     let DraftTranslationStatus::Failed(why) = status(&compose, cx) else {
         panic!("{:?}", status(&compose, cx))
     };
-    assert!(why.contains("Neither Claude Code"), "{why}");
-    assert!(
-        why.ends_with("Install one, or choose another tool in Settings under General."),
-        "{why}"
-    );
+    assert!(why.contains("No AI provider can do this"), "{why}");
+    assert!(why.ends_with("in Settings under General, AI providers."), "{why}");
     assert!(cx.debug_bounds("compose-draft-translation-settings").is_some());
     assert!(fake.asked().is_empty());
     assert_eq!(value(&compose, cx), "hello");
@@ -438,7 +446,7 @@ fn the_one_tool_chosen_missing_is_named_with_install_it() {
     rig.cx.update(|cx| {
         model.update(cx, |model, cx| {
             model.change(
-                |settings| settings.message_translator = AiChoice::of(ToolChoice::Only(Backend::Codex)),
+                |settings| settings.message_translator = AiChoice::of(ToolChoice::cli(Backend::Codex)),
                 cx,
             );
         });
@@ -459,7 +467,7 @@ fn the_one_tool_chosen_missing_is_named_with_install_it() {
 }
 
 #[test]
-fn a_narrow_box_keeps_its_placeholder_on_one_line_and_its_language_an_icon() {
+fn a_narrow_box_keeps_its_placeholder_on_one_line_and_its_language_in_the_ai_menu() {
     let rig = Rig::start();
     let _fake = Fake::install(&rig);
     let (compose, cx) = chat(&rig);
@@ -467,21 +475,25 @@ fn a_narrow_box_keeps_its_placeholder_on_one_line_and_its_language_an_icon() {
         compose.in_channel(Writes::Channel, "Message in A made-up channel with a long name", cx);
     });
     draw(cx);
-    let wide = cx.debug_bounds("compose-language").unwrap();
     let one_line = cx.debug_bounds("compose-box").unwrap().size.height;
+    assert!(
+        cx.debug_bounds("compose-language").is_none(),
+        "no language button on the bar"
+    );
 
     // as wide as a thread's pane: narrow, with room for the text beside its tools on one line
     cx.simulate_resize(size(px(460.0), px(600.0)));
     draw(cx);
-    let narrow = cx.debug_bounds("compose-language").unwrap();
-    assert!(narrow.size.width < wide.size.width, "{narrow:?} vs {wide:?}");
-    assert!(narrow.size.width <= px(28.0), "{narrow:?}");
+    assert!(cx.debug_bounds("compose-ai").is_some());
     assert_eq!(cx.debug_bounds("compose-box").unwrap().size.height, one_line);
 
-    // the menu still opens from the icon
-    click(cx, "compose-language");
+    // the language menu opens from the AI button's menu, inside the window
+    by_ai_menu(cx, "compose-language-row");
     draw(cx);
-    assert!(cx.debug_bounds("compose-language-menu").is_some());
+    let menu = cx
+        .debug_bounds("compose-language-menu")
+        .expect("the language menu opens");
+    assert!(f32::from(menu.right()) <= 460.0, "{menu:?}");
 }
 
 #[test]
@@ -498,7 +510,7 @@ fn the_tool_chosen_for_translating_messages_is_the_one_started() {
     rig.cx.update(|cx| {
         model.update(cx, |model, cx| {
             model.change(
-                |settings| settings.message_translator = AiChoice::of(ToolChoice::Only(Backend::Codex)),
+                |settings| settings.message_translator = AiChoice::of(ToolChoice::cli(Backend::Codex)),
                 cx,
             );
         });
@@ -551,9 +563,61 @@ fn a_channels_box_translates_too() {
         compose.in_channel(Writes::Channel, "Message in General", cx);
     });
     draw(cx);
-    assert!(cx.debug_bounds("compose-translate").is_some());
-    assert!(cx.debug_bounds("compose-language").is_some());
+    assert!(cx.debug_bounds("compose-ai").is_some());
     type_in(&compose, cx, "hello");
-    click(cx, "compose-translate");
+    by_ai_menu(cx, "compose-translate-row");
     until(cx, |cx| value(&compose, cx) == "hallo");
+}
+
+/// The label of the row `selector` in the open apps' flyout.
+fn flyout_label(compose: &Entity<Compose>, cx: &mut VisualTestContext, selector: &str) -> String {
+    compose.read_with(cx, |compose, cx| {
+        let flyout = compose.apps_flyout().expect("the flyout is open").read(cx);
+        let action = flyout.actions().iter().find(|action| action.selector == selector);
+        action
+            .unwrap_or_else(|| panic!("{selector} is in the flyout"))
+            .label
+            .to_string()
+    })
+}
+
+#[test]
+fn a_hidden_translate_in_the_apps_flyout_follows_the_job_and_gives_the_keyboard_back() {
+    let rig = Rig::start();
+    let fake = Fake::install(&rig);
+    rig.cx.update(|cx| cx.set_global(teams_ui::bots_flag::BotsFlag(true)));
+    *rig.core.extension_apps.lock().unwrap() =
+        teams_proto::extension_apps(teams_mock::extension_apps_answer().to_string().as_bytes());
+    let model = settings(&rig);
+    rig.cx.update(|cx| {
+        model.update(cx, |model, cx| {
+            model.change(
+                |settings| settings.show_compose_tool(teams_ui::settings::ComposeTool::Ai, false),
+                cx,
+            );
+        });
+    });
+    let (compose, cx) = chat_in(&rig, &model);
+    type_in(&compose, cx, "hello");
+    fake.held.store(true, Ordering::Relaxed);
+    click(cx, "compose-apps");
+    assert!(compose.read_with(cx, |compose, _| compose.apps_flyout().is_some()));
+    // the row taken: the flyout closes, the translation runs, and the keyboard is in the text again
+    click(cx, "compose-translate-row");
+    assert!(compose.read_with(cx, |compose, _| compose.apps_flyout().is_none()));
+    assert_eq!(status(&compose, cx), DraftTranslationStatus::Running);
+    assert!(cx.update(|window, cx| compose.read(cx).focused(window, cx)));
+    // the flyout opened while it runs offers to stop it
+    click(cx, "compose-apps");
+    assert_eq!(flyout_label(&compose, cx, "compose-translate-row"), "Stop translating");
+    // the translation ends while the flyout is open: the row offers a new one, and its click starts it
+    fake.held.store(false, Ordering::Relaxed);
+    until(cx, |cx| status(&compose, cx) == DraftTranslationStatus::Idle);
+    assert!(compose.read_with(cx, |compose, _| compose.apps_flyout().is_some()));
+    assert_ne!(flyout_label(&compose, cx, "compose-translate-row"), "Stop translating");
+    fake.held.store(true, Ordering::Relaxed);
+    click(cx, "compose-translate-row");
+    assert_eq!(status(&compose, cx), DraftTranslationStatus::Running);
+    fake.held.store(false, Ordering::Relaxed);
+    until(cx, |cx| status(&compose, cx) == DraftTranslationStatus::Idle);
 }

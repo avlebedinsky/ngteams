@@ -21,6 +21,7 @@ mod code;
 mod compose;
 mod email;
 mod event;
+mod file_share;
 mod files;
 mod html;
 mod links;
@@ -29,12 +30,15 @@ mod policy;
 mod read;
 
 pub use code::{CODE_BLOCK_ITEMTYPE, Code, CodeRun, Token, language_of};
-pub use compose::{ComposeError, MessageText};
+pub use compose::{AppCard, ComposeError, MessageText, sticker_message};
 pub use email::{EmailDetails, EmailUser, SHOWN_RECIPIENTS, is_email_link, subject};
 pub use event::{
     CALL_MEDIA_PREFIX, CallEnd, CallStart, ChatEvent, ChatPolicy, MeetingTimes, Member, Members, Recording,
     RecordingContents, RecordingItem, RecordingStatus, Removed, TopicUpdate, Transcript, chat_event, is_call_media,
     meeting_times,
+};
+pub use file_share::{
+    LinkPermission, is_share_entry_in, onedrive_page, read_link_permission, share_entry, share_entry_any, share_token,
 };
 pub use files::{
     FILE_TYPE, FileKind, FilePreview, SharedFile, SharedFiles, is_file_link, is_file_link_in, is_sharepoint_host,
@@ -42,8 +46,8 @@ pub use files::{
 };
 pub use html::{
     AMS_IMAGE_ITEMTYPE, EMOJI_ITEMTYPE, FORWARD_ITEMTYPE, FontSize, INDENT_STEP, Image, List, MAX_CONTENT, MAX_DEPTH,
-    MAX_INDENT, MAX_LIST_START, MENTION_ITEMTYPE, Marks, Node, Quote, REPLY_ITEMTYPE, Rgb, RichText, SpanStyle, Table,
-    TableCell, ThreadActivity, parse as parse_html, thread_activity,
+    MAX_INDENT, MAX_LIST_START, MENTION_ITEMTYPE, Marks, Node, Quote, REPLY_ITEMTYPE, Rgb, RichText, STICKER_ITEMTYPE,
+    SpanStyle, Sticker, Table, TableCell, ThreadActivity, parse as parse_html, thread_activity,
 };
 pub use links::{HYPERLINK_TYPE, LinkPreview, link_previews};
 pub use model::{

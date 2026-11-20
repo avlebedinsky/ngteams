@@ -128,7 +128,7 @@ pub fn header(
             .flex()
             .items_center()
             .gap_2()
-            .child(origin.face.avatar(&name, Size::Small).size(px(AVATAR)))
+            .child(origin.face.avatar(&name, Size::Size(px(AVATAR))))
             .child(div().child(name))
     });
     let time = origin

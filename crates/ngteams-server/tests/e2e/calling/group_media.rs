@@ -13,7 +13,7 @@ use teams_media::tone::Tone;
 use teams_proto::Mri;
 use teams_store::OutboxState;
 
-use super::engines::{A_TONE, B_TONE, Engine, TALK, WAIT, heard_before, recorded, relayed};
+use super::engines::{A_TONE, B_TONE, Engine, Screen, TALK, WAIT, heard_before, recorded, relayed};
 use crate::support::{Backend, TestServer, backends, redis_url};
 use crate::trouter::{Account, ORIGIN};
 
@@ -107,6 +107,16 @@ impl Mixed {
         let account = Account::sign_in(&self.server, &upn, &id).await;
         let nodes = (&self.server, &self.server);
         Engine::start_filmed(&account, name, nodes, (tone, self.dir.path(), camera)).await
+    }
+
+    /// [`Mixed::engine`] that shares `screen`.
+    pub(super) async fn engine_sharing(&self, name: &str, tone: Tone, screen: Screen) -> Engine {
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let upn = format!("{}-{tag}@own.test", name.to_lowercase());
+        let id = self.server.add_user(&upn, name).await;
+        let account = Account::sign_in(&self.server, &upn, &id).await;
+        let nodes = (&self.server, &self.server);
+        Engine::start_sharing(&account, name, nodes, (tone, self.dir.path(), screen)).await
     }
 
     /// A member with no client.

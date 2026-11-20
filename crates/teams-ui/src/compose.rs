@@ -31,12 +31,17 @@
 //!   doesn't start it over), never while editing, and only with the "send typing" setting on. Nothing is sent when
 //!   typing stops: the web client never sent `Control/ClearTyping`.
 //!
-//! - **The box** is drawn as Teams' compose box: the editor on a raised, rounded surface with a hairline border
+//! - **The box** is drawn as Teams' compose box: the editor on a rounded surface with a hairline border and no shadow
 //!   ([`BOX_HEIGHT`] at least), Teams' accent line in the brand colour along its foot while it has the focus, and its
-//!   controls inside it on the right: Format, Emoji, Attach, Loop and Actions and apps (the last two shown disabled,
-//!   saying the app doesn't have them yet), Correct, Translate and its language, a thin divider, then Send. Its
-//!   placeholder stays on one line, cut short with an ellipsis; a narrow box (a thread's pane) shows the language as
-//!   a caret alone, naming it in its tooltip. A box too narrow for its text beside its tools (a call's Chat pane) is
+//!   controls inside it on the right: Format, Emoji, Attach, Loop (shown disabled, saying the app doesn't have it yet),
+//!   Actions and apps (the "+": a menu of the hidden tools' actions and "Customize toolbar"; with `NGTEAMS_BOTS=1`, an
+//!   account whose cloud serves apps, and a box that writes a chat's new message outside read-only mode, it opens the
+//!   apps' flyout with those rows over the apps, [`apps`]), the AI button (one menu of Correct, Translate and the
+//!   translation language, [`menus`]), a thin divider, then Send. The user hides the buttons they do not use, by a
+//!   right click on the toolbar, "Customize toolbar" or Settings ([`crate::settings::ComposeTool`]); a hidden one's
+//!   action stays in "+", with its key. Send and "+" never hide. The box can hold apps' cards (a message extension's
+//!   result), drawn over the tools, each with a close mark, and sent with the message. Its placeholder stays on one
+//!   line, cut short with an ellipsis. A box too narrow for its text beside its tools (a call's Chat pane) is
 //!   stacked, as Teams' is: the text on top, the tools and Send on a row under it, and the tools that do not fit in
 //!   "More options" ([`fit`]). Expanded, the format bar ([`crate::editor::toolbar::FormatBar`]) runs
 //!   along its top, the editor is taller, and the controls sit along its foot; Discard on the bar empties the box (and
@@ -47,7 +52,7 @@
 //!
 //! - **A channel's box** ([`Compose::in_channel`]): "Message in <channel>" posting to the channel, or a post's
 //!   thread's "Reply in thread" posting to the post's chain, with Teams' "Send to: thread only" over its text. It
-//!   offers Format, Emoji, Correct, Translate and Send, no more: it sends no typing (no capture showed a channel's)
+//!   offers Format, Emoji, "+", the AI button and Send, no more: it sends no typing (no capture showed a channel's)
 //!   and takes no file (a channel's files go to its team's site, which this app doesn't upload to).
 //! - **New message's box** ([`Compose::for_new_chat`]): a chat's box for a chat not made yet. It sends no typing and
 //!   takes no pasted picture; its first message is handed to New message ([`ComposeEvent::Start`]), which makes the
@@ -57,19 +62,22 @@
 //!   this app (no write type is mapped to a `48:` stream), so their box shows [`READ_ONLY_NOTES`] in place of the text
 //!   area and its send: nothing can be typed, sent, replied to or edited there, and no typing goes out.
 //!
-//! - **Correct** ([`correction`], the button or Ctrl+Shift+G): the draft's spelling, grammar and style checked by the AI
+//! - **Correct** ([`correction`], the AI button's row or Ctrl+Shift+G): the draft's spelling, grammar and style checked by the AI
 //!   tool the settings name, the proposal shown over the box word by word; nothing changes or goes out until the user
 //!   takes it.
-//! - **Translate** ([`draft_translation`], the button or Ctrl+Shift+Y): the draft translated by the AI tool the settings
-//!   name into the language every box shares (the button beside it), in place, as one edit Ctrl+Z takes back.
+//! - **Translate** ([`draft_translation`], the AI button's row or Ctrl+Shift+Y): the draft translated by the AI tool the
+//!   settings name into the language every box shares (the row under it), in place, as one edit Ctrl+Z takes back.
 //!
 //! What the box does is traced (`compose opened` when the box is made, `sent`, `replying`, `editing`, `cancelled`, and
 //! `changed` each time what it holds changes), never its text.
 
+mod apps;
 pub mod attachments;
 mod correction;
+mod customize;
 mod draft_translation;
 mod fit;
+mod menus;
 mod pictures;
 mod translated;
 
@@ -96,7 +104,9 @@ use teams_proto::{Mri, is_group_chat_id};
 use teams_store::Message;
 
 pub use correction::{CorrectDraft, CorrectionStatus, KeepOriginal, SendCorrection, UseCorrection};
+pub use customize::{CustomizeClose, CustomizeDown, CustomizeToggle, CustomizeUp, SHOW_IN_TOOLBAR};
 pub use draft_translation::{DraftTranslationStatus, OpenTranslationSettings, TranslateDraft};
+pub use menus::{AI_TOOLS, CUSTOMIZE, MenuKind};
 
 pub use crate::editor::Editor;
 use crate::editor::convert::{self, CantLoad};
@@ -123,8 +133,8 @@ pub const BOX_HEIGHT: f32 = 56.0;
 const BOX_PADDING: f32 = 6.0;
 /// A toolbar button in the box, px (its icon three quarters of it).
 const TOOL: f32 = 28.0;
-/// Below this width, px, the box's toolbar is compacted (the translation language an icon alone), as in a thread's pane,
-/// and the box is stacked when its text has no room beside its tools ([`fit`]).
+/// Below this width, px, the box is stacked when its text has no room beside its tools ([`fit`]), as in a thread's
+/// pane.
 const NARROW_BOX: f32 = 560.0;
 /// The editor's least height expanded, px: Teams' expanded box's writing area.
 const EXPANDED_MIN: f32 = 96.0;
@@ -167,6 +177,7 @@ pub fn init(cx: &mut App) {
     }));
     cx.bind_keys([KeyBinding::new("secondary-shift-u", AttachFiles, Some(CONTEXT))]);
     correction::bind_keys(cx);
+    customize::bind_keys(cx);
     draft_translation::bind_keys(cx);
 }
 
@@ -560,9 +571,6 @@ pub const READ_ONLY_NOTES: &str = "Notes can't be written from this app yet";
 /// What Loop says: Loop components aren't in this app.
 pub const NO_LOOP: &str = "Loop components aren't available in this app";
 
-/// What Actions and apps says: apps aren't in this app.
-pub const NO_APPS: &str = "Actions and apps aren't available in this app";
-
 /// What every box says in the app's read-only mode ([`crate::Core::read_only`]): nothing is sent from it.
 pub const READ_ONLY_APP: &str = "Read-only: this window sends nothing";
 /// What the box says when a reply or an edit is started while the message sent is translated.
@@ -605,6 +613,10 @@ pub enum Writes {
 /// What the box tells its chat view.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ComposeEvent {
+    /// Actions and apps' action command chosen: its dialog opens over the window ([`crate::app_dialog`]).
+    AppDialog(Box<crate::app_dialog::DialogSeed>),
+    /// Actions and apps' "Get more apps": the store opens.
+    ShowStore,
     /// Up in an empty box: the account's last message is to be edited.
     EditLast,
     /// A message went to the outbox (a post, a reply or an edit).
@@ -630,6 +642,7 @@ struct Draft {
     doc: Doc,
     mode: Mode,
     attachments: Vec<attachments::Attachment>,
+    cards: Vec<teams_proto::chat::AppCard>,
 }
 
 /// Where the answer of a request on its way goes: the box that holds what it is for now, and what the answer needs
@@ -674,6 +687,8 @@ pub struct Compose {
     expanded: bool,
     mode: Mode,
     attachments: Vec<attachments::Attachment>,
+    /// Actions and apps and the apps' cards the message carries ([`apps`]).
+    apps: apps::Apps,
     next_attachment: u64,
     /// Kept across navigation until the engine has queued or refused the file send.
     sending_files: usize,
@@ -706,17 +721,23 @@ pub struct Compose {
     emoji: Option<(Entity<ReactionPicker>, Subscription)>,
     /// Where the emoji button was last drawn, for the picker to open by.
     emoji_at: Rc<Cell<Option<Bounds<Pixels>>>>,
-    /// Where the box was last drawn: a narrow one compacts its toolbar.
+    /// Where the box was last drawn: a narrow one can stack ([`fit`]).
     box_at: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The window's rem size as the box was last drawn: its gaps and padding follow it ([`fit`]).
     rem: Pixels,
-    /// "More options" while it is open ([`fit`]).
-    more: Option<fit::More>,
+    /// The menu of tools that is open: More options, the AI button's or "+" ([`menus`]).
+    menu: Option<menus::ToolMenu>,
+    /// The customize list, while it is open ([`customize`]).
+    customize: Option<customize::Customize>,
+    /// Where the button that holds "Customize toolbar" was last drawn, for the list to open by.
+    customize_at: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// Whether the picker was open as the emoji button was pressed: its click then closes it.
     emoji_on_press: bool,
     _editor_events: Subscription,
     _bar_events: Subscription,
     _presence: Subscription,
+    /// The AI switch: turned off, a correction or a draft's translation stops at once.
+    _ai_switch: Subscription,
 }
 
 impl EventEmitter<ComposeEvent> for Compose {}
@@ -799,20 +820,7 @@ impl Compose {
             EditorEvent::Focus | EditorEvent::Blur => cx.notify(),
             // moving the cursor changes no text: an `@` the cursor left closes the picker
             EditorEvent::Moved => this.revalidate_picker(cx),
-            EditorEvent::Changed => {
-                // what the box holds changed: traced without the text, so a test driving the keyboard can tell
-                // when the app has taken in what it typed
-                this.trace
-                    .record(&TraceLine::new("compose", "changed").conversation(&this.conversation));
-                this.correction_follows_draft(cx);
-                this.draft_translation_follows_draft(cx);
-                this.learn_bots(cx);
-                this.refresh_picker(cx);
-                this.fit_pictures(cx);
-                this.typed(window, cx);
-                // the send button follows whether there is anything to send
-                cx.notify();
-            }
+            EditorEvent::Changed => this.changed(window, cx),
             EditorEvent::Submit => this.send(window, cx),
             EditorEvent::Picture(id) => this.send_picture(*id, cx),
             EditorEvent::Files(paths) => this.pasted_files(paths, window, cx),
@@ -853,6 +861,7 @@ impl Compose {
             expanded: false,
             mode: Mode::New,
             attachments: Vec::new(),
+            apps: apps::Apps::default(),
             next_attachment: 0,
             sending_files: 0,
             routes: Routes::default(),
@@ -871,11 +880,14 @@ impl Compose {
             emoji_at: Rc::default(),
             box_at: Rc::default(),
             rem: px(f32::from(theme::FONT_SIZE)),
-            more: None,
+            menu: None,
+            customize: None,
+            customize_at: Rc::default(),
             emoji_on_press: false,
             _editor_events: editor_events,
             _bar_events: bar_events,
             _presence: presence,
+            _ai_switch: cx.observe_global::<crate::local_ai::AiSwitch>(Self::follow_ai_switch),
         }
     }
 
@@ -1051,6 +1063,7 @@ impl Compose {
     fn holds_draft(&self, cx: &App) -> bool {
         !self.editor.read(cx).is_empty()
             || !self.attachments.is_empty()
+            || !self.apps.cards.is_empty()
             || self.sending_files > 0
             || matches!(self.mode, Mode::Reply(_))
     }
@@ -1060,6 +1073,7 @@ impl Compose {
         !self.editor.read(cx).is_empty()
             || self.mode != Mode::New
             || !self.attachments.is_empty()
+            || !self.apps.cards.is_empty()
             || self.sending_files > 0
     }
 
@@ -1067,6 +1081,12 @@ impl Compose {
     #[must_use]
     pub fn editor(&self) -> &Entity<Editor> {
         &self.editor
+    }
+
+    /// The settings the box reads: its hidden buttons, the translation language.
+    #[must_use]
+    pub fn settings(&self) -> &Entity<SettingsModel> {
+        &self.settings
     }
 
     /// The format bar shown while the box is expanded.
@@ -1130,6 +1150,7 @@ impl Compose {
             directories: false,
             multiple: true,
             prompt: Some("Attach".into()),
+            ..PathPromptOptions::default()
         });
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(paths))) = picked.await {
@@ -1239,6 +1260,9 @@ impl Compose {
         if !self.attachments.is_empty() {
             return self.show_problem("Send or remove your attachments before editing a message.", cx);
         }
+        if !self.apps.cards.is_empty() {
+            return self.show_problem("Send or remove your cards before editing a message.", cx);
+        }
         self.trace.record(
             &TraceLine::new("compose", "editing")
                 .conversation(&self.conversation)
@@ -1318,26 +1342,38 @@ impl Compose {
         let editor = self.editor.read(cx);
         let built = match message_of_with(&doc, &quotes, &|id| editor.picture_node(id), &self.bots) {
             Ok(Some(built)) => built,
-            Ok(None) if !self.attachments.is_empty() => match empty_file_text() {
-                Ok(text) => text,
-                Err(error) => return self.show_problem(format!("This message can't be sent: {error}"), cx),
-            },
+            // an edit carries no files and no cards: with no text, there is nothing to save
+            Ok(None) if !self.editing() && (!self.attachments.is_empty() || !self.apps.cards.is_empty()) => {
+                match empty_file_text() {
+                    Ok(text) => text,
+                    Err(error) => return self.show_problem(format!("This message can't be sent: {error}"), cx),
+                }
+            }
             Ok(None) => return,
             Err(error) => return self.show_problem(format!("This message can't be sent: {error}"), cx),
         };
-        let built = built.with_files(
-            self.attachments
-                .iter()
-                .filter_map(|file| match &file.state {
-                    attachments::AttachmentState::Ready(uploaded) => Some(uploaded.clone()),
-                    _ => None,
-                })
-                .collect(),
-        );
+        // an edit carries no files and no cards: they wait in the box for the next message
+        let cards = if matches!(self.mode, Mode::Edit { .. }) {
+            Vec::new()
+        } else {
+            self.apps.cards.clone()
+        };
+        let built = built
+            .with_files(
+                self.attachments
+                    .iter()
+                    .filter_map(|file| match &file.state {
+                        attachments::AttachmentState::Ready(uploaded) => Some(uploaded.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+            )
+            .with_cards(cards.clone());
         let from = Draft {
             doc,
             mode: self.mode.clone(),
             attachments: self.attachments.clone(),
+            cards,
         };
         // what is sent is what the box holds: a correction or translation of it is over
         self.forget_correction();
@@ -1441,9 +1477,10 @@ impl Compose {
             }
             let sent_files = paths(&from.attachments);
             self.attachments.retain(|file| !sent_files.contains(&file.path));
+            self.apps.cards.retain(|card| !from.cards.contains(card));
             cx.notify();
         } else {
-            self.clear(window, cx);
+            self.clear_sent(&from.cards, window, cx);
         }
         // a post's original is kept by the row it went out as
         let post = sent.filter(|_| edit_of.is_none());
@@ -1497,10 +1534,15 @@ impl Compose {
         // files attached since stay beside the text given back (a translated send's text left the box once it went),
         // but never beside an edit, which carries no files
         let edit_beside_files = matches!(draft.mode, Mode::Edit { .. }) && !self.attachments.is_empty();
+        // the cards of the refused send come back before the cards that came into the box meanwhile
+        let mut cards = std::mem::take(&mut draft.cards);
+        cards.retain(|card| !self.apps.cards.contains(card));
+        cards.append(&mut self.apps.cards);
+        self.apps.cards = cards;
         if draft.attachments.is_empty()
             && (!self.editor.read(cx).is_empty() || self.mode != Mode::New || edit_beside_files)
         {
-            return;
+            return cx.notify();
         }
         let held = !self.editor.read(cx).is_empty();
         if let Some(pictures) = moved {
@@ -1544,11 +1586,36 @@ impl Compose {
         self.forget_untranslated();
         self.mode = Mode::New;
         self.attachments.clear();
+        self.apps.cards.clear();
         self.picker = None;
         self.problem = None;
         if self.expanded {
             self.set_expanded(false, cx);
         }
+        cx.notify();
+    }
+
+    /// Empties the box after a send of `sent`, its cards; a card that the send did not take (one that came into the box
+    /// during an edit, which takes no cards, or during a send held for its translation) stays for the next message.
+    fn clear_sent(&mut self, sent: &[teams_proto::chat::AppCard], window: &mut Window, cx: &mut Context<Self>) {
+        let mut kept = std::mem::take(&mut self.apps.cards);
+        kept.retain(|card| !sent.contains(card));
+        self.clear(window, cx);
+        self.apps.cards = kept;
+    }
+
+    /// What the box holds changed: traced without the text, so a test driving the keyboard can tell when the app has
+    /// taken in what it typed; what follows the draft follows it, and the send button whether there is anything to
+    /// send.
+    fn changed(&mut self, window: &Window, cx: &mut Context<Self>) {
+        self.trace
+            .record(&TraceLine::new("compose", "changed").conversation(&self.conversation));
+        self.correction_follows_draft(cx);
+        self.draft_translation_follows_draft(cx);
+        self.learn_bots(cx);
+        self.refresh_picker(cx);
+        self.fit_pictures(cx);
+        self.typed(window, cx);
         cx.notify();
     }
 
@@ -1800,7 +1867,11 @@ impl Compose {
         if self.picker.is_some() {
             self.step_picker(-1, cx);
             cx.stop_propagation();
-        } else if self.mode == Mode::New && self.editor.read(cx).is_empty() && self.attachments.is_empty() {
+        } else if self.mode == Mode::New
+            && self.editor.read(cx).is_empty()
+            && self.attachments.is_empty()
+            && self.apps.cards.is_empty()
+        {
             cx.emit(ComposeEvent::EditLast);
             cx.stop_propagation();
         }
@@ -1895,7 +1966,9 @@ impl Compose {
     /// send; once it holds something, a round button lit in the brand gradient that pops in, a button to the keyboard
     /// and to assistive tools as the kit's is.
     fn send_button(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let empty = (self.editor.read(cx).is_blank() && self.attachments.is_empty())
+        // an edit carries no files and no cards: they do not make it worth saving
+        let empty = (self.editor.read(cx).is_blank()
+            && (self.editing() || (self.attachments.is_empty() && self.apps.cards.is_empty())))
             || !self.files_ready()
             || !self.editor.read(cx).pictures_ready();
         let tip = match (matches!(self.mode, Mode::Edit { .. }), self.expanded) {
@@ -1905,11 +1978,15 @@ impl Compose {
             (false, true) => concat!("Send (", ctrl!(), "+Enter)"),
         };
         if empty {
+            // `compose-send-greyed` lets a test tell the greyed button from the lit one
             return selected_by(
                 "compose-send",
-                icon_button("compose-send", Glyph::SEND, tip)
-                    .with_size(Size::Size(px(TOOL)))
-                    .disabled(true),
+                selected_by(
+                    "compose-send-greyed",
+                    icon_button("compose-send", Glyph::SEND, tip)
+                        .with_size(Size::Size(px(TOOL)))
+                        .disabled(true),
+                ),
             )
             .into_any_element();
         }
@@ -1980,19 +2057,25 @@ impl Compose {
         selected_by("compose-format", button).into_any_element()
     }
 
-    /// The box's controls, inside it on the right as Teams has them: Format, Emoji, Attach, Loop and Actions and
-    /// apps (the last two not in this app yet: shown disabled, saying so), then this app's Correct, Translate and its
-    /// language, a thin divider, then Send. The tools that `fit` puts in the menu go into "More options"; a stacked
-    /// box's row has its tools on the left and Send on the right.
+    /// The box's controls, inside it on the right as Teams has them: Format, Emoji, Attach, Loop (not in this app yet:
+    /// shown disabled, saying so) and Actions and apps, then this app's AI button, a thin divider, then Send. The
+    /// tools that `fit` puts in the menu go into "More options"; a stacked box's row has its tools on the left and Send
+    /// on the right. A right click on it lists the buttons to show or hide.
     fn toolbar(&self, palette: Palette, fit: &fit::Fit, cx: &mut Context<Self>) -> AnyElement {
-        let narrow = self.is_narrow();
         let tools: Vec<AnyElement> = fit
             .row
             .iter()
-            .filter_map(|tool| self.tool_button(*tool, narrow, palette, cx))
+            .map(|tool| self.tool_button(*tool, fit, palette, cx))
             .collect();
         div()
             .debug_selector(|| "compose-toolbar".to_owned())
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.open_customize(event.position, window, cx);
+                }),
+            )
             .flex_none()
             .flex()
             .items_center()
@@ -2001,22 +2084,16 @@ impl Compose {
             // the box's inside, its padding and border taken off: centred on one line, at the foot of more
             .h(px(BOX_HEIGHT - 2.0 * BOX_PADDING - 2.0))
             .children(tools)
-            .children((!fit.more.is_empty()).then(|| self.more_button(&fit.more, cx)))
+            .children((!fit.more.is_empty()).then(|| self.menu_button(MenuKind::More, fit, cx)))
             .when(fit.stacked, |row| row.child(div().flex_1()))
             .child(div().w(px(1.0)).h(px(20.0)).mx_1().bg(rgb(palette.border)))
             .child(self.send_button(palette, cx))
             .into_any_element()
     }
 
-    /// A tool's button on the box's row; Translate draws its language button too, beside it.
-    fn tool_button(
-        &self,
-        tool: fit::Tool,
-        narrow: bool,
-        palette: Palette,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        Some(match tool {
+    /// A tool's button on the box's row.
+    fn tool_button(&self, tool: fit::Tool, fit: &fit::Fit, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        match tool {
             fit::Tool::Format => self.format_button(palette, cx),
             fit::Tool::Emoji => self.emoji_button(cx),
             fit::Tool::Attach => selected_by(
@@ -2028,11 +2105,10 @@ impl Compose {
             )
             .into_any_element(),
             fit::Tool::Loop => unavailable("compose-loop", Glyph::REPEAT, NO_LOOP),
-            fit::Tool::Apps => unavailable("compose-apps", Glyph::PLUS, NO_APPS),
-            fit::Tool::Correct => self.correct_button(cx),
-            fit::Tool::Translate => self.translate_buttons(narrow, cx),
-            fit::Tool::Language => return None,
-        })
+            fit::Tool::Apps if self.offers_apps(cx) => self.apps_button(fit, cx),
+            fit::Tool::Apps => self.menu_button(MenuKind::Plus, fit, cx),
+            fit::Tool::Ai => self.menu_button(MenuKind::Ai, fit, cx),
+        }
     }
 
     /// The emoji picker over the box, by the emoji button as it was last drawn, opening upwards: out of the box's key
@@ -2059,7 +2135,7 @@ impl Compose {
         )
     }
 
-    /// Whether the box was last drawn narrower than [`NARROW_BOX`], its toolbar compacted.
+    /// Whether the box was last drawn narrower than [`NARROW_BOX`].
     #[must_use]
     pub fn is_narrow(&self) -> bool {
         self.box_at
@@ -2067,10 +2143,18 @@ impl Compose {
             .is_some_and(|bounds| bounds.size.width < px(NARROW_BOX))
     }
 
-    /// The box itself: the editor and its controls on a raised, rounded surface with a hairline border, and Teams'
-    /// accent line along its foot while it has the focus; expanded, the format bar along its top and the controls
-    /// along its foot.
+    /// Where the box was last drawn in its window, inside its border.
+    #[must_use]
+    pub fn box_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.box_at.get()
+    }
+
+    /// The box itself: the editor and its controls on a rounded surface with a hairline border and no shadow, and
+    /// Teams' accent line along its foot while it has the focus; expanded, the format bar along its top and the
+    /// controls along its foot.
     fn input_box(&self, palette: Palette, focused: bool, cx: &mut Context<Self>) -> AnyElement {
+        // as round as the box's inside so it bends with the corners, and twice that tall, or GPUI halves the radius
+        let inner_radius = self.rem * 0.5 - px(1.0);
         let accent = focused.then(|| {
             div()
                 .debug_selector(|| "compose-accent".to_owned())
@@ -2078,9 +2162,10 @@ impl Compose {
                 .left_0()
                 .right_0()
                 .bottom_0()
-                .h(px(2.0))
-                .rounded_b_md()
-                .bg(theme::brand_gradient(palette, 90.0))
+                .h(inner_radius * 2.0)
+                .rounded_b(inner_radius)
+                .border_b_2()
+                .border_color(rgb(palette.brand))
         });
         // the accent line grows out from the middle as the box takes the focus
         let accent = accent.map(|accent| {
@@ -2095,23 +2180,14 @@ impl Compose {
             .min_h(px(BOX_HEIGHT))
             .rounded_lg()
             .border_1()
-            .border_color(rgb(if focused {
-                theme::mix(palette.border, palette.brand, 0.45)
-            } else {
-                palette.border
-            }))
+            .border_color(rgb(palette.border))
             .bg(rgb(palette.surface))
-            .shadow(if focused {
-                theme::glow(palette, palette.brand, 0.22, 18.0, 4.0)
-            } else {
-                theme::glow(palette, 0x0000_0000, 0.06, 8.0, 2.0)
-            })
             .text_color(rgb(palette.foreground));
         // an edit stays where its reply is: nothing is sent anywhere new
         let send_to =
             (self.writes == Writes::Thread && !matches!(self.mode, Mode::Edit { .. })).then(|| send_to_line(palette));
-        let fit = self.fit();
-        if self.expanded || !self.attachments.is_empty() || fit.stacked {
+        let fit = self.fit(cx);
+        if self.expanded || !self.attachments.is_empty() || !self.apps.cards.is_empty() || fit.stacked {
             return surface
                 .flex()
                 .flex_col()
@@ -2119,10 +2195,12 @@ impl Compose {
                 .px_3()
                 .pt_2()
                 .pb(px(BOX_PADDING))
+                // as the one-line box: nothing inside, Send's glow too, draws past the frame
+                .overflow_hidden()
                 .children(send_to)
                 .children(self.expanded.then(|| self.format_bar.clone()))
                 .child(div().px_1().pt_1().child(self.editor.clone()))
-                .children(self.attachment_cards(palette, cx))
+                .children(self.box_cards(palette, cx))
                 .child(div().flex().justify_end().child(self.toolbar(palette, &fit, cx)))
                 .child(measured(&self.box_at))
                 .children(accent)
@@ -2334,7 +2412,8 @@ impl Render for Compose {
         self.draft_translation_follows_draft(cx);
         self.prepare_language_menu(window, cx);
         self.rem = window.rem_size();
-        self.more_follows_tools(window, cx);
+        self.menus_follow_tools(window, cx);
+        self.flyout_follows_tools(window, cx);
         let focused = self.focused(window, cx);
         let keyed = div()
             .key_context(CONTEXT)
@@ -2346,8 +2425,11 @@ impl Render for Compose {
             .on_action(cx.listener(|this, _: &editor::ToggleExpanded, window, cx| this.toggle_expanded(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleEmoji, window, cx| this.toggle_emoji(window, cx)))
             .on_action(cx.listener(|this, _: &AttachFiles, window, cx| this.choose_files(window, cx)))
-            .on_action(cx.listener(|this, _: &CorrectDraft, window, cx| this.correct_draft(window, cx)))
-            .on_action(cx.listener(|this, _: &TranslateDraft, window, cx| this.translate_draft(window, cx)))
+            .when(crate::local_ai::enabled(cx), |keyed| {
+                keyed
+                    .on_action(cx.listener(|this, _: &CorrectDraft, window, cx| this.correct_draft(window, cx)))
+                    .on_action(cx.listener(|this, _: &TranslateDraft, window, cx| this.translate_draft(window, cx)))
+            })
             .flex()
             .flex_col()
             .gap_1()
@@ -2366,6 +2448,8 @@ impl Render for Compose {
             .pb_4()
             .child(keyed)
             .children(self.emoji_overlay(cx))
+            .children(self.apps_overlay())
+            .children(self.customize_overlay(cx))
             .into_any_element()
     }
 }

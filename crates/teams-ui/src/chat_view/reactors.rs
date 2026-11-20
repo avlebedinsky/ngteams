@@ -468,7 +468,7 @@ impl ChatView {
             .gap_2()
             .px_4()
             .py_1p5()
-            .child(face.avatar(&name, Size::Small).size(px(FACE)))
+            .child(face.avatar(&name, Size::Size(px(FACE))))
             .child(div().min_w_0().truncate().child(name))
             .into_any_element()
     }

@@ -9,8 +9,11 @@
 //!   `Action.Execute` ask the bot through the engine (`Core::bot_invoke`), its data merged with the answers by input id;
 //!   `imBack` and `messageBack`'s `displayText` post a message as the user, through the ordinary write; `messageBack`'s
 //!   `text` goes to the bot with its value. While one goes, the buttons and inputs of its card wait; the other cards of
-//!   the message don't. `signin` opens its page in the browser. `task/fetch` (a dialog) opens the message in Teams
-//!   on the web until the app's dialogs are built.
+//!   the message don't. `signin` opens its page in the browser. `task/fetch` asks the bot for its dialog, which the
+//!   view opens ([`CardBotEvent::Dialog`], [`crate::app_dialog`]).
+//! - **A card in an app's dialog** ([`CardBot::in_dialog`]): its plain submit goes to the dialog's command
+//!   (`composeExtension/submitAction`) or its button (`task/submit`), and the answer goes to the dialog
+//!   ([`CardBotEvent::Answered`]), never under the card.
 //! - **The answer**: a card takes the pressed card's place; a message, an error or a sign-in request shows as a line
 //!   under the card; a bot that wasn't reached is said there too, and nothing is sent again.
 //! - **Refresh**: a card's `refresh` runs by itself, once for each version of its cards while the view lives, for a
@@ -27,15 +30,16 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::NaiveDate;
-use gpui::{AppContext as _, Context, Entity, Subscription, Window};
+use gpui::{AppContext as _, Context, Entity, EventEmitter, Subscription, Window};
 use gpui_component::date_picker::{DatePickerEvent, DatePickerState};
 use gpui_component::input::{InputEvent, InputState, TextareaState};
 use serde_json::{Map, Value};
 use teams_core::Action;
 use teams_core::bots::BotAsk;
+use teams_proto::bot::MessagePayload;
 use teams_proto::chat::MessageText;
 use teams_proto::chat::card::{ActionKind, BotAction, Card, Element, Input, InputKind, Kind, Refresh, Via};
-use teams_proto::{CardInvoke, InvokeAnswer, InvokeKind, Mri};
+use teams_proto::{CardInvoke, CommandContext, InvokeAnswer, InvokeKind, Mri, TaskDialog};
 
 use crate::bridge::Core;
 
@@ -95,6 +99,32 @@ pub enum Line {
     Dialog,
 }
 
+/// Where a card's plain submit goes (see the module docs).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum SubmitTo {
+    /// The bot, as a message carrying the answers: a card in a chat.
+    #[default]
+    Message,
+    /// A message extension's dialog: `composeExtension/submitAction` of `command`, run in `context`, on `message`
+    /// when run from one.
+    Command {
+        command: String,
+        context: CommandContext,
+        message: Option<Box<MessagePayload>>,
+    },
+    /// A card button's dialog: `task/submit`.
+    Task,
+}
+
+/// What a card's bot state tells its view.
+#[derive(Clone, Debug)]
+pub enum CardBotEvent {
+    /// A `task/fetch` button's bot answered with a dialog, to open over the window.
+    Dialog { target: Target, dialog: TaskDialog },
+    /// A dialog's submit was answered (a card [`CardBot::in_dialog`]); `Err` says why the bot wasn't reached.
+    Answered(Result<InvokeAnswer, String>),
+}
+
 /// An input's control.
 #[derive(Clone)]
 pub enum Field {
@@ -120,7 +150,10 @@ pub struct CardBot {
     /// Per card, the key of the button whose ask is on its way.
     busy: HashMap<usize, String>,
     refreshed: HashSet<usize>,
+    submit_to: SubmitTo,
 }
+
+impl EventEmitter<CardBotEvent> for CardBot {}
 
 /// What a card is drawn with from its [`CardBot`], read once a frame.
 #[derive(Clone, Default)]
@@ -149,14 +182,23 @@ impl CardBot {
             lines: HashMap::new(),
             busy: HashMap::new(),
             refreshed: HashSet::new(),
+            submit_to: SubmitTo::Message,
         }
+    }
+
+    /// The same, for a card in an app's dialog: its plain submit goes as `submit_to` says, and the answer to the
+    /// dialog.
+    #[must_use]
+    pub fn in_dialog(mut self, submit_to: SubmitTo) -> Self {
+        self.submit_to = submit_to;
+        self
     }
 
     /// The same message's state started again, for its changed cards: nothing of the old cards stays, so a card that
     /// names the user refreshes by itself again.
     #[must_use]
     pub fn renewed(&self) -> Self {
-        Self::new(Arc::clone(&self.core), self.message.clone(), self.target.clone())
+        Self::new(Arc::clone(&self.core), self.message.clone(), self.target.clone()).in_dialog(self.submit_to.clone())
     }
 
     #[must_use]
@@ -368,7 +410,7 @@ impl CardBot {
             Map::new()
         };
         let card = |data: Option<&Value>, verb: Option<String>| CardInvoke {
-            message: Some(self.message.clone()),
+            message: (!self.message.is_empty()).then(|| self.message.clone()),
             id: action.id.clone(),
             verb,
             data: merged(data, &answers),
@@ -376,6 +418,12 @@ impl CardBot {
         };
         let kind = match &action.via {
             Via::Execute { verb } => InvokeKind::Execute(card(action.data.as_ref(), verb.clone())),
+            Via::TaskFetch => InvokeKind::TaskFetch(card(action.data.as_ref(), None)),
+            Via::Submit | Via::Invoke(_) | Via::PostBack(_) | Via::MessageBack { .. }
+                if self.submit_to != SubmitTo::Message =>
+            {
+                self.dialog_submit(card(action.data.as_ref(), None))
+            }
             Via::ImBack(text) => {
                 self.post(&target, text, cx);
                 return;
@@ -396,9 +444,28 @@ impl CardBot {
                 }
                 return;
             }
-            Via::TaskFetch => return,
         };
         self.ask(at, key, kind, false, cx);
+    }
+
+    /// A dialog's submit of `card`, as [`SubmitTo`] says.
+    fn dialog_submit(&self, card: CardInvoke) -> InvokeKind {
+        match &self.submit_to {
+            SubmitTo::Command {
+                command,
+                context,
+                message,
+            } => InvokeKind::SubmitAction {
+                command: command.clone(),
+                context: *context,
+                data: match card.data {
+                    Value::Object(data) => data,
+                    other => Map::from_iter([("data".to_owned(), other)]),
+                },
+                message: message.as_deref().cloned(),
+            },
+            SubmitTo::Task | SubmitTo::Message => InvokeKind::TaskSubmit(card),
+        }
     }
 
     /// Card `at`'s `refresh` run: by itself (`automatic`, once for each version of its cards while the view lives) or
@@ -435,12 +502,15 @@ impl CardBot {
         let Some(target) = &self.target else {
             return;
         };
+        let fetching = matches!(kind, InvokeKind::TaskFetch(_));
+        let to_dialog = matches!(kind, InvokeKind::SubmitAction { .. } | InvokeKind::TaskSubmit(_));
         let reply = self.core.bot_invoke(BotAsk {
             bot: target.bot.clone(),
             app_id: target.app_id.clone(),
             conversation: Some(target.conversation.clone()),
             kind,
         });
+        let target = target.clone();
         self.busy.insert(at, key.to_owned());
         self.lines.remove(&at);
         cx.notify();
@@ -448,7 +518,11 @@ impl CardBot {
             let answer = reply.await;
             let _ = this.update(cx, |this, cx| {
                 this.busy.remove(&at);
-                this.apply(at, answer, quiet);
+                match answer {
+                    Ok(InvokeAnswer::Dialog(dialog)) if fetching => cx.emit(CardBotEvent::Dialog { target, dialog }),
+                    answer if to_dialog => cx.emit(CardBotEvent::Answered(answer.map_err(|error| error.to_string()))),
+                    answer => this.apply(at, answer, quiet),
+                }
                 cx.notify();
             });
         })
@@ -503,11 +577,11 @@ pub fn post_message<T>(core: &Arc<dyn Core>, conversation: &str, text: &str, cx:
     .detach();
 }
 
-/// Whether a button that sends (`action`) asks the bot: the bot is known (`reaches`), the app isn't `read_only`, and
-/// the button opens no dialog. Else it opens the message in Teams on the web.
+/// Whether a button that sends asks the bot: the bot is known (`reaches`) and the app isn't `read_only` (a
+/// `task/fetch` button asks for its dialog). Else it opens the message in Teams on the web.
 #[must_use]
-pub fn asks(reaches: bool, read_only: bool, action: &BotAction) -> bool {
-    reaches && !read_only && action.via != Via::TaskFetch
+pub fn asks(reaches: bool, read_only: bool) -> bool {
+    reaches && !read_only
 }
 
 /// The key of card `at`'s input `id`.

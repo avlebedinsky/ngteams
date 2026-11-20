@@ -12,6 +12,9 @@ use crate::teams::repo::Team;
 
 pub(super) const EVENT_TYPE: &str = "Microsoft.SkypeSpaces.MiddleTier.Models.CalendarEvent";
 
+/// The reminder an invitee's copy of an event carries, in minutes before its start (Outlook's default).
+const INVITEE_REMINDER_MINUTES: u32 = 15;
+
 /// The longest `bodyPreview`, in characters.
 const PREVIEW: usize = 255;
 
@@ -142,6 +145,11 @@ impl Shown<'_> {
         });
         if let Value::Object(computed) = computed {
             fields.extend(computed);
+        }
+        if !self.organizes() {
+            // an invitee's copy carries the invitee's own reminder, Outlook's default, not the organizer's
+            fields.insert("isReminderSet".into(), json!(true));
+            fields.insert("reminderMinutesBeforeStart".into(), json!(INVITEE_REMINDER_MINUTES));
         }
         if let Some(series) = series {
             fields.insert("seriesMasterId".into(), json!(series));

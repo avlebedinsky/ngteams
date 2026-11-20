@@ -257,6 +257,14 @@ fn kept_things_are_none_and_keeping_them_keeps_nothing() {
             empty(core.sent_originals(CHAT.into(), vec!["key".into()])),
         ),
         (
+            "translated_messages",
+            empty(core.translated_messages(CHAT.into(), vec!["1".into()])),
+        ),
+        (
+            "keep_translated_message",
+            now(core.keep_translated_message(CHAT.into(), "1".into(), true)).is_ok(),
+        ),
+        (
             "a fake keeps no transcript and answers 0",
             now(core.transcript(open)).ok() == Some(0),
         ),

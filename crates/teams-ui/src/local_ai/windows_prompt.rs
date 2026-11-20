@@ -3,11 +3,15 @@
 
 use super::{Backend, Launch};
 use std::io::{self, Write as _};
+use std::path::Path;
 use teams_platform::private::{self, Open};
 
-pub(super) fn prepare(launch: &Launch, mut args: Vec<String>) -> io::Result<(Vec<String>, Option<tempfile::TempDir>)> {
-    let batch = launch
-        .program
+pub(super) fn prepare(
+    launch: &Launch,
+    program: &Path,
+    mut args: Vec<String>,
+) -> io::Result<(Vec<String>, Option<tempfile::TempDir>)> {
+    let batch = program
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat"));
     if launch.backend != Backend::Claude || !batch {

@@ -201,12 +201,25 @@ pub trait UserAdmin: Send + Sync + 'static {
 const SHOWN_NAME: usize = 60;
 
 /// `name`, cut to [`SHOWN_NAME`] characters with an ellipsis.
-fn short(name: &str) -> String {
+pub(crate) fn short(name: &str) -> String {
     if name.chars().count() <= SHOWN_NAME {
         return name.to_owned();
     }
     let cut: String = name.chars().take(SHOWN_NAME - 1).collect();
     format!("{}…", cut.trim_end())
+}
+
+/// A small mark beside a name: an outlined pill in `color`.
+pub(crate) fn badge(words: &'static str, color: u32) -> gpui::Div {
+    div()
+        .px_2()
+        .py_0p5()
+        .rounded_full()
+        .border_1()
+        .border_color(rgb(color))
+        .text_xs()
+        .text_color(rgb(color))
+        .child(words)
 }
 
 /// Whether `text` reads as a user name (`name@domain`, no spaces).
@@ -354,6 +367,12 @@ impl UserDialog {
     #[must_use]
     pub fn kind(&self) -> DialogKind {
         self.kind
+    }
+
+    /// The account it is about; none for a new one.
+    #[must_use]
+    pub fn user(&self) -> Option<&AdminUser> {
+        self.user.as_ref()
     }
 
     /// What the dialog says went wrong, if anything.
@@ -532,7 +551,7 @@ impl UserDialog {
         cx.notify();
     }
 
-    fn key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event.keystroke.key.as_str() {
             "escape" => {
                 cx.stop_propagation();
@@ -547,8 +566,9 @@ impl UserDialog {
                 };
                 cx.emit(closed);
             }
-            // the password given is read, then Enter closes
-            "enter" if self.given.is_some() => {
+            // the password given is read, then Enter on the dialog itself closes; Enter on a focused button (Copy
+            // password) does what that button does
+            "enter" if self.given.is_some() && self.focus.is_focused(window) => {
                 cx.stop_propagation();
                 cx.emit(UserDialogEvent::Changed);
             }
@@ -849,6 +869,21 @@ impl Render for UserDialog {
     }
 }
 
+/// The page after `after`, and the pages after it until it holds `want` accounts or the list ends.
+fn read_until(admin: &dyn UserAdmin, query: &str, after: Option<&str>, want: usize) -> Result<UserPage, AdminProblem> {
+    let mut page = admin.list(query, after)?;
+    while page.users.len() < want
+        && let Some(next) = page.next.take()
+    {
+        let more = admin.list(query, Some(&next))?;
+        // a page with nobody on it ends the reading: a server that keeps naming a next page is not followed forever
+        let ended = more.users.is_empty();
+        page.users.extend(more.users);
+        page.next = if ended { None } else { more.next };
+    }
+    Ok(page)
+}
+
 /// The Manage users page (see the module docs).
 pub struct ManageUsers {
     admin: Arc<dyn UserAdmin>,
@@ -955,27 +990,36 @@ impl ManageUsers {
         &self.search
     }
 
-    /// The page shows: its list is read when it wasn't yet.
+    /// The page shows: its list is read again each time it comes into sight, as Teams' admin pages do, as far as
+    /// it showed before. The list read before stays until the answer replaces it.
     pub fn show(&mut self, cx: &mut Context<Self>) {
         if !std::mem::replace(&mut self.shown, true) {
             self.trace.record(&TraceLine::new("user-admin", "shown"));
-            self.read_from_start(Duration::ZERO, cx);
+            self.read_page(None, Duration::ZERO, self.users.len(), cx);
+        }
+    }
+
+    /// The page went out of sight: it reads its list again when it shows again.
+    pub fn hide(&mut self, cx: &mut Context<Self>) {
+        if std::mem::replace(&mut self.shown, false) {
+            cx.notify();
         }
     }
 
     /// Reads the list again from its first page, after `pause`.
     fn read_from_start(&mut self, pause: Duration, cx: &mut Context<Self>) {
-        self.read_page(None, pause, cx);
+        self.read_page(None, pause, 0, cx);
     }
 
     /// "Show more": the page after those listed.
     pub fn read_more(&mut self, cx: &mut Context<Self>) {
         if let Some(next) = self.next.clone() {
-            self.read_page(Some(next), Duration::ZERO, cx);
+            self.read_page(Some(next), Duration::ZERO, 0, cx);
         }
     }
 
-    fn read_page(&mut self, after: Option<String>, pause: Duration, cx: &mut Context<Self>) {
+    /// Reads the page after `after`, and the pages after it until `want` accounts are read.
+    fn read_page(&mut self, after: Option<String>, pause: Duration, want: usize, cx: &mut Context<Self>) {
         self.read += 1;
         let read = self.read;
         self.loading = true;
@@ -986,7 +1030,7 @@ impl ManageUsers {
             cx.background_executor().timer(pause).await;
             let more = after.is_some();
             let page = cx
-                .background_spawn(async move { admin.list(&query, after.as_deref()) })
+                .background_spawn(async move { read_until(&*admin, &query, after.as_deref(), want) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.read == read {
@@ -1000,6 +1044,7 @@ impl ManageUsers {
         self.loading = false;
         match page {
             Ok(page) => {
+                let cursor = self.users.get(self.at).map(|user| user.id.clone());
                 if more {
                     self.users.extend(page.users);
                 } else {
@@ -1007,7 +1052,10 @@ impl ManageUsers {
                 }
                 self.next = page.next;
                 self.problem = None;
-                self.at = self.at.min(self.users.len().saturating_sub(1));
+                self.at = cursor
+                    .and_then(|id| self.users.iter().position(|user| user.id == id))
+                    .unwrap_or(self.at)
+                    .min(self.users.len().saturating_sub(1));
                 let ids: Vec<String> = self.users.iter().map(|user| format!("8:orgid:{}", user.id)).collect();
                 self.trace
                     .record(&TraceLine::new("user-admin", "listed").people(ids.iter().map(String::as_str)));
@@ -1079,18 +1127,6 @@ impl ManageUsers {
         self.scroll.set_offset(offset);
     }
 
-    fn badge(words: &'static str, color: u32) -> gpui::Div {
-        div()
-            .px_2()
-            .py_0p5()
-            .rounded_full()
-            .border_1()
-            .border_color(rgb(color))
-            .text_xs()
-            .text_color(rgb(color))
-            .child(words)
-    }
-
     fn row(
         &self,
         (at, user): (usize, &AdminUser),
@@ -1113,14 +1149,12 @@ impl ManageUsers {
             .flex()
             .flex_wrap()
             .gap_2()
-            .when(own, |row| row.child(Self::badge("You", palette.muted_foreground)))
-            .when(user.admin, |row| row.child(Self::badge("Administrator", palette.brand)))
+            .when(own, |row| row.child(badge("You", palette.muted_foreground)))
+            .when(user.admin, |row| row.child(badge("Administrator", palette.brand)))
             .when(user.must_change_password, |row| {
-                row.child(Self::badge("New password due", palette.muted_foreground))
+                row.child(badge("New password due", palette.muted_foreground))
             })
-            .when(!user.enabled, |row| {
-                row.child(Self::badge("Can't sign in", theme::DANGER))
-            });
+            .when(!user.enabled, |row| row.child(badge("Can't sign in", theme::DANGER)));
         let marked = own || user.admin || user.must_change_password || !user.enabled;
         let (under, beside) = match (marked, narrow) {
             (false, _) => (None, None),
@@ -1328,7 +1362,77 @@ impl Render for ManageUsers {
 
 #[cfg(test)]
 mod tests {
-    use super::{AdminProblem, SHOWN_NAME, looks_like_upn, short};
+    use teams_auth::admin::{AdminUser, UserChanges, UserPage};
+    use teams_auth::secrets::Secret;
+
+    use super::{AdminProblem, NewAccount, SHOWN_NAME, UserAdmin, looks_like_upn, read_until, short};
+
+    /// A made-up server whose second page is empty but names a third, or whose second page fails.
+    struct Pages {
+        second_fails: bool,
+    }
+
+    impl UserAdmin for Pages {
+        fn list(&self, _: &str, after: Option<&str>) -> Result<UserPage, AdminProblem> {
+            match after {
+                None => Ok(UserPage {
+                    users: vec![AdminUser {
+                        id: "00000000-0000-4000-8000-0000000000a1".to_owned(),
+                        upn: "ada@example.test".to_owned(),
+                        display_name: "Ada Admin".to_owned(),
+                        enabled: true,
+                        admin: true,
+                        must_change_password: false,
+                    }],
+                    next: Some("ada@example.test".to_owned()),
+                }),
+                Some(_) if self.second_fails => Err(AdminProblem::Unreachable),
+                Some(_) => Ok(UserPage {
+                    users: Vec::new(),
+                    next: Some("again".to_owned()),
+                }),
+            }
+        }
+
+        fn add(&self, _: &NewAccount) -> Result<AdminUser, AdminProblem> {
+            Err(AdminProblem::Wait)
+        }
+
+        fn change(&self, _: &str, _: &UserChanges) -> Result<AdminUser, AdminProblem> {
+            Err(AdminProblem::Wait)
+        }
+
+        fn delete(&self, _: &str) -> Result<(), AdminProblem> {
+            Err(AdminProblem::Wait)
+        }
+
+        fn reset_password(&self, _: &str, _: &Secret, _: bool) -> Result<(), AdminProblem> {
+            Err(AdminProblem::Wait)
+        }
+    }
+
+    #[test]
+    fn a_read_again_stops_at_an_empty_page_and_at_a_failure() {
+        let stopped = read_until(&Pages { second_fails: false }, "", None, 5);
+        let page = stopped.unwrap_or_else(|problem| panic!("{problem}"));
+        assert_eq!(page.users.len(), 1);
+        assert_eq!(page.next, None);
+        let failed = read_until(&Pages { second_fails: true }, "", None, 5);
+        assert!(matches!(failed, Err(AdminProblem::Unreachable)), "{failed:?}");
+        // the made-up server changes nothing
+        let new = NewAccount {
+            upn: String::new(),
+            display_name: String::new(),
+            password: Secret::new(String::new()),
+            admin: false,
+            must_change_password: false,
+        };
+        let pages = Pages { second_fails: true };
+        assert!(pages.add(&new).is_err());
+        assert!(pages.change("", &UserChanges::default()).is_err());
+        assert!(pages.delete("").is_err());
+        assert!(pages.reset_password("", &new.password, false).is_err());
+    }
 
     #[test]
     fn a_long_name_is_cut_with_an_ellipsis() {

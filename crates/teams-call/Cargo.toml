@@ -16,6 +16,8 @@ test-support = []
 base64.workspace = true
 # fresh GUIDs (participant ids, the call agent) and callback segments
 getrandom.workspace = true
+# a meeting start's push may carry its payload deflated (`cp`)
+flate2.workspace = true
 serde_json.workspace = true
 serde.workspace = true
 url.workspace = true

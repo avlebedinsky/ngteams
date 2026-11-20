@@ -63,7 +63,7 @@ fn fake(dir: &Path, name: &str, body: &str) -> PathBuf {
 fn spec(backend: Backend, program: PathBuf, limits: Limits) -> Spec {
     Spec {
         backend,
-        program,
+        target: crate::local_ai::Target::Program(program),
         model: Model::Recommended,
         language: "German",
         limits,
@@ -373,7 +373,11 @@ fn a_missing_tool_is_not_installed() {
         Failure::NotInstalled(Some(Backend::Codex)).message(),
         "The Codex CLI (codex) isn't installed."
     );
-    assert!(Failure::NotInstalled(None).message().starts_with("Neither Claude Code"));
+    assert!(
+        Failure::NotInstalled(None)
+            .message()
+            .starts_with("No AI provider can do this")
+    );
     assert_eq!(
         Failure::TimedOut(Backend::Codex).message(),
         "The Codex CLI took too long to answer."
@@ -462,7 +466,7 @@ fn answers_lose_a_repeated_caption_tag_and_are_capped() {
 fn the_installed_tools_translate() {
     let translators = crate::local_ai::Tools::detect();
     for backend in translators.installed() {
-        let (_, program) = translators.pick(crate::local_ai::ToolChoice::Only(backend)).unwrap();
+        let program = translators.program(backend).unwrap();
         let session = Session::start(spec(backend, program, Limits::default()));
         let mut first = caption(
             "Lab Speaker",

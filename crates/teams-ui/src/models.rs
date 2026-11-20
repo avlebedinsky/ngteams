@@ -221,6 +221,8 @@ pub enum FeedEvent {
     /// A report of the account's own availability that waited out a `Retry-After` went as `sent` (or was dropped while
     /// it waited).
     OwnReport { status: OwnStatus, sent: TransientSent },
+    /// The calling service pushed a meeting's start ([`crate::meeting_alert`]).
+    MeetingPushed(teams_core::MeetingStartPush),
 }
 
 /// The engine's events that single things act on, told one by one ([`FeedEvent`]); it holds nothing.
@@ -360,7 +362,8 @@ impl Models {
             }
             // how the push channel's registration went and a waiting transient's send (told on the feed, for the own
             // presence's policy), the search backfill over: nothing a view shows
-            Event::Registration(_) | Event::Transient(..) | Event::Indexed { .. } => {}
+            // a meeting's start the calling service pushed: told on the feed only
+            Event::Registration(_) | Event::Transient(..) | Event::Indexed { .. } | Event::MeetingStarted(_) => {}
         }
     }
 
@@ -389,6 +392,7 @@ impl Models {
             Event::Disconnected { heard, .. } => FeedEvent::Down { heard: *heard },
             Event::Registration(RegistrationReport::Registered) => FeedEvent::Registered,
             Event::PushStopped(_) => FeedEvent::PushStopped,
+            Event::MeetingStarted(start) => FeedEvent::MeetingPushed(start.clone()),
             Event::Transient(transient, sent) => match transient.own_status() {
                 Some(status) => FeedEvent::OwnReport {
                     status,

@@ -1045,6 +1045,30 @@ fn escape_moves_the_focus_from_an_empty_box_to_the_list_and_back_so_r_replies_to
     assert_eq!(trace_changes(&written, "compose"), ["opened", "replying", "cancelled"]);
 }
 
+/// A made-up sticker of Teams' alone in a message, as the chat service reads it back.
+const STICKER_ALONE: &str = "<p>&nbsp;</p>\r\n<img src=\"https://teams.public.onecdn.static.microsoft/evergreen-assets/\
+     stickerassets/madeup-250x250/en-us/MadeUp_Hi.gif?v=5\" height=\"180\" alt=\"A made-up sticker\" width=\"180\" \
+     itemtype=\"http://schema.skype.com/Sticker\">\r\n<p>&nbsp;</p>";
+
+#[test]
+fn up_in_an_empty_box_skips_the_account_s_sticker_and_edits_its_last_text() {
+    let text = message(NOON, LAB_A, "<p>mine</p>");
+    let sticker = message(NOON + 1, LAB_A, STICKER_ALONE);
+    let rig = rig_with(vec![text.clone(), sticker]);
+    let (view, cx, _) = chat_window(&rig, Settings::default());
+    assert_eq!(focused(&view, cx), (false, true));
+    keys(cx, "up");
+    assert!(
+        matches!(mode(&view, cx), Mode::Edit { message_id, .. } if message_id == text.id),
+        "{:?}",
+        mode(&view, cx)
+    );
+    assert_eq!(typed(&view, cx), "mine");
+    let compose = compose(&view, cx);
+    let problem = cx.update(|_, cx| compose.read(cx).problem().cloned());
+    assert_eq!(problem, None, "no note that a message can't be edited");
+}
+
 #[test]
 fn a_click_on_a_message_leaves_the_focus_in_the_box() {
     let theirs = message(NOON, LAB_B, "<p>question?</p>");
@@ -2374,6 +2398,32 @@ fn send_and_emoji_sit_inside_the_box_and_its_accent_line_follows_the_focus() {
     );
     focus_list(&view, cx);
     assert!(cx.debug_bounds("compose-accent").is_none(), "none without it");
+}
+
+#[test]
+fn the_accent_line_lies_inside_the_bottom_border_and_follows_the_round_corners() {
+    let rig = rig_with(vec![message(NOON, LAB_B, "<p>hi a</p>")]);
+    let (view, cx, _) = chat_window(&rig, no_receipts());
+    // the line as it stands once grown
+    let mut still = Settings::default().appearance;
+    still.animations = false;
+    cx.update(|_, cx| teams_ui::theme::set_appearance(&still, cx));
+    draw(cx);
+    let the_box = cx.debug_bounds("compose-box").expect("the box is drawn");
+    let line = cx.debug_bounds("compose-accent").expect("the accent line");
+    let border = px(1.0);
+    assert_eq!(line.left(), the_box.left() + border, "{line:?} in {the_box:?}");
+    assert_eq!(line.right(), the_box.right() - border, "{line:?} in {the_box:?}");
+    assert_eq!(line.bottom(), the_box.bottom() - border, "{line:?} in {the_box:?}");
+    // twice the corners' inner radius, so its round bottom edge keeps that radius and bends up with them
+    let rem = cx.update(|window, _| window.rem_size());
+    assert_eq!(line.size.height, (rem * 0.5 - border) * 2.0, "{line:?}");
+    let compose = compose(&view, cx);
+    let inside = cx
+        .update(|_, cx| compose.read(cx).box_bounds())
+        .expect("the box was measured");
+    assert_eq!(inside.bottom(), line.bottom());
+    assert_eq!((inside.left(), inside.right()), (line.left(), line.right()));
 }
 
 /// A made-up picture, `width` by `height`, as PNG bytes.

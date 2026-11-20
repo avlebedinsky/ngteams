@@ -181,6 +181,7 @@ fn scheduled(chat: Option<&str>, channel: Option<&str>) -> CalendarEvent {
             post: Some("scheduled-post".to_owned()),
             ical_uid: "made-up".to_owned(),
         }),
+        reminder: teams_core::EventReminder::Unknown,
     }
 }
 
@@ -189,11 +190,11 @@ fn a_meeting_shows_its_banner_only_while_the_calendar_holds_it_about_now() {
     let events = [scheduled(Some(MEETING), None), scheduled(None, Some(CHANNEL))];
     assert!(scheduled_now(&events, MEETING, None, local(10, 2)).is_some());
     assert!(scheduled_now(&events, CHANNEL, Some("scheduled-post"), local(10, 2)).is_some());
-    // started early, or running late
+    // started early, or running late (Teams: 15 minutes before its start, 5 after its end)
     assert!(scheduled_now(&events, MEETING, None, local(9, 45)).is_some());
-    assert!(scheduled_now(&events, MEETING, None, local(10, 45)).is_some());
+    assert!(scheduled_now(&events, MEETING, None, local(10, 35)).is_some());
     assert!(scheduled_now(&events, MEETING, None, local(9, 44)).is_none());
-    assert!(scheduled_now(&events, MEETING, None, local(10, 46)).is_none());
+    assert!(scheduled_now(&events, MEETING, None, local(10, 36)).is_none());
     // a meeting not on the calendar (a channel's ad-hoc Meet now), or one cancelled
     assert!(scheduled_now(&events, "19:meeting_Other@thread.v2", None, local(10, 2)).is_none());
     let mut cancelled = scheduled(Some(MEETING), None);

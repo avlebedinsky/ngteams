@@ -41,7 +41,7 @@ use super::{
     key_of, original_row, quote_line, stored_original, translatable,
 };
 use crate::bridge::Core;
-use crate::local_ai::{AiChoice, Failure, Tools};
+use crate::local_ai::{AiChoice, Failure};
 use crate::settings::SettingsModel;
 use crate::translate::language;
 
@@ -168,7 +168,8 @@ pub struct Previews {
     deferred: HashMap<Key, (Message, Instant)>,
     sweeping: Option<Task<()>>,
     queue: VecDeque<(Key, Message)>,
-    preparing: Option<Task<()>>,
+    /// The batch whose context is being read, by its keys.
+    preparing: Option<(Vec<Key>, Task<()>)>,
     running: Option<Running>,
     /// One tool process per language, with what reads its outcomes.
     sessions: HashMap<&'static str, (Session, Task<()>)>,
@@ -252,11 +253,12 @@ impl Previews {
         self.sessions.len()
     }
 
-    /// The language `conversation` is read in, if one was picked.
+    /// The language `conversation` is read in, if one was picked and the AI features are on.
     #[must_use]
     pub fn language_of(&self, conversation: &str, cx: &App) -> Option<&'static str> {
         let chat = teams_proto::stored_conversation(conversation);
-        self.settings.read(cx).settings().chat_language_of(self.core.me(), chat)
+        let language = self.settings.read(cx).settings().chat_language_of(self.core.me(), chat);
+        language.filter(|_| crate::local_ai::enabled(cx))
     }
 
     fn key_of(&self, message: &Message, cx: &App) -> Option<Key> {
@@ -462,21 +464,42 @@ impl Previews {
         self.known.insert(key, known);
     }
 
-    /// The settings changed: another tool or model starts over; a language picked or dropped is drawn again.
+    /// The settings changed: another tool or model, or the AI features turned off, starts over; a language picked or
+    /// dropped is drawn again.
     fn settings_changed(&mut self, cx: &mut Context<Self>) {
         let choice = self.settings.read(cx).settings().chat_translator.clone();
-        if choice != self.choice {
+        let enabled = crate::local_ai::enabled(cx);
+        if choice != self.choice || !enabled {
             self.choice = choice;
             self.stop_tools();
             self.paused_until = None;
         }
+        if !enabled {
+            self.forget_waiting();
+        }
         cx.notify();
+    }
+
+    /// The AI features are off: nothing waits for the tool, so what is shown once they are on again is asked anew.
+    fn forget_waiting(&mut self) {
+        self.gathering = None;
+        self.sweeping = None;
+        let waiting = (self.gathered.drain(..).map(|(key, _)| key))
+            .chain(self.queue.drain(..).map(|(key, _)| key))
+            .chain(self.deferred.drain().map(|(key, _)| key));
+        for key in waiting {
+            self.pending.remove(&key);
+        }
     }
 
     /// Closes the tool processes; the batch they worked on is asked again when it is shown again.
     fn stop_tools(&mut self) {
         self.sessions.clear();
-        self.preparing = None;
+        if let Some((keys, _)) = self.preparing.take() {
+            for key in keys {
+                self.pending.remove(&key);
+            }
+        }
         if let Some(running) = self.running.take() {
             for (_, key, _) in running.items {
                 self.pending.remove(&key);
@@ -594,6 +617,11 @@ impl Previews {
         if self.running.is_some() || self.preparing.is_some() {
             return;
         }
+        // a store read that ends after the AI features went off
+        if !crate::local_ai::enabled(cx) {
+            self.forget_waiting();
+            return;
+        }
         let Some((first, _)) = self.queue.front() else {
             self.rest(cx);
             return;
@@ -637,11 +665,13 @@ impl Previews {
         chosen.reverse();
         let core = Arc::clone(&self.core);
         self.idle = None;
-        self.preparing = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
+        let keys = chosen.iter().map(|(key, ..)| key.clone()).collect();
+        let task = cx.spawn(async move |this, cx: &mut AsyncApp| {
             let prepared = prepare(&*core, &conversation, language, &chosen).await;
             let keys = chosen.into_iter().map(|(key, _, _, shells)| (key, shells)).collect();
             let _ = this.update(cx, |this, cx| this.start(language, prepared, keys, cx));
-        }));
+        });
+        self.preparing = Some((keys, task));
     }
 
     /// Hands a prepared batch (what the tool is told of its chat, its context and its items) to the language's tool,
@@ -682,13 +712,13 @@ impl Previews {
         if self.sessions.contains_key(language) {
             return Ok(());
         }
-        let (backend, program) = Tools::of(cx).pick(self.choice.tool)?;
+        let crate::local_ai::Picked { backend, target, .. } = crate::local_ai::pick(&self.choice.tool, cx)?;
         let name = self::language(language).map_or("English", |(_, name)| name);
         let session = Session::start(Spec {
             backend,
-            program,
+            target,
             model: self.choice.model.clone(),
-            language: name,
+            language: name.into(),
             limits: self.limits,
         });
         let outcomes = session.outcomes();

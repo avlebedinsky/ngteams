@@ -4,7 +4,8 @@
 //! chat opened in a [`ChatView`] under its avatar and name, and a 1:1 chat's other member's presence, M2 Task 17; a
 //! channel opened in a [`ChannelView`] under its team's tile and its name; with nothing open, what to do).
 //! Settings take the place of both the list and the conversation pane, as in Teams (their pages are their own list);
-//! the rail's Chat leaves them for what they hid.
+//! the rail's Chat leaves them for what they hid. The rail's Chat counts the chats with anything unread
+//! ([`ChatList::unread_chats`]) on Teams' red badge, as the tray does.
 //!
 //! The account menu (M2 Task 20): the rail's status button, above Settings, shows what the account's own presence
 //! reports ([`OwnPresence`], handed in by the desktop) and opens a menu of the statuses the user may set (Automatic and
@@ -66,6 +67,7 @@ use teams_proto::ManualAvailability;
 
 use crate::accounts::{AccountTile, Accounts};
 use crate::activity_view::{ActivityParts, ActivityView, ActivityViewEvent};
+use crate::ai_notice::{AiNotice, Answered};
 use crate::bridge::Core;
 use crate::calendar_view::{CalendarView, CalendarViewEvent};
 use crate::call_view::CallBar;
@@ -89,6 +91,7 @@ use crate::presence;
 use crate::search::HitTarget;
 use crate::settings::{ManualStatus, SettingsModel};
 use crate::settings_view::{self, Page, SettingsView, SettingsViewEvent, TestCallOffer, TestCallState};
+use crate::share_file::{ShareFileDialog, ShareFileEvent};
 use crate::sidebar::Sidebar;
 use crate::switcher::{CallCommand, Switcher, SwitcherEvent};
 use crate::team_app_dialogs::{AddAppDialog, TeamPictureDialog};
@@ -102,10 +105,13 @@ use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::view::status_text;
 
+mod account_menu;
 mod apps;
 mod bot_chat;
 mod channel_management;
 mod chat_people;
+mod meeting_cards;
+pub use meeting_cards::{CardsDrawn, MAX_CARDS as MAX_MEETING_CARDS};
 mod meeting_tabs;
 mod new_chat;
 mod profile_card;
@@ -206,6 +212,7 @@ pub fn init(cx: &mut App) {
     global_search::init(cx);
     crate::activity_view::init(cx);
     crate::new_chat::init(cx);
+    crate::share_file::init(cx);
     cx.bind_keys([
         KeyBinding::new("secondary-k", ToggleSwitcher, None),
         // Teams' desktop key for New message
@@ -297,6 +304,15 @@ pub struct ShellParts {
     pub trace: Arc<ViewTrace>,
 }
 
+/// How a toast looks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToastLook {
+    /// Its words alone, at the bottom in the middle.
+    Plain,
+    /// Something was done, as Teams says a share went: its check, the words and a close button, at the bottom left.
+    Done,
+}
+
 /// The shell (see the module docs).
 pub struct Shell {
     core: Arc<dyn Core>,
@@ -310,10 +326,14 @@ pub struct Shell {
     /// The Activity pane, with what it tells; shown in the list pane's place while [`ListPlace::Activity`].
     activity: (Entity<ActivityView>, Subscription),
     list_place: ListPlace,
+    /// The chats with anything unread, as the rail's Chat counts them ([`ChatList::unread_chats`]).
+    unread_chats: usize,
     /// The chat opened in the conversation pane.
     chat: Option<Entity<ChatView>>,
     /// A meeting chat's tabs: the one shown, its Recap and Shared views.
     meeting_tabs: meeting_tabs::MeetingTabs,
+    /// The account's meeting notices the window shows as cards, once the desktop hands them in.
+    meeting_notices: Option<meeting_cards::MeetingNotices>,
     /// Unsaved composers keep their text, reply and in-flight uploads when another chat is opened.
     drafts: std::collections::HashMap<String, Entity<crate::compose::Compose>>,
     /// The channel opened in the conversation pane, with the names its header shows.
@@ -327,9 +347,14 @@ pub struct Shell {
     calendar: Entity<CalendarView>,
     /// The first run's screen, shown over everything while it waits ([`SettingsModel::awaiting_first_run`]).
     first_run: Entity<FirstRun>,
+    /// The AI notice, shown over everything after the first run's screen while it waits
+    /// ([`SettingsModel::awaiting_ai_notice`]).
+    ai_notice: Entity<AiNotice>,
     switcher: Option<(Entity<Switcher>, Subscription)>,
     /// A team's "Create a channel" dialog, while it is open.
     channel_dialog: Option<(Entity<ChannelDialog>, Subscription)>,
+    /// "Share this file", while it is open.
+    share_dialog: Option<(Entity<ShareFileDialog>, Subscription)>,
     /// "Your teams and channels", once it was opened.
     teams_page: Option<(Entity<TeamsPage>, Subscription)>,
     /// Manage team, while it is shown.
@@ -349,6 +374,8 @@ pub struct Shell {
     dialog_return: crate::keyboard::Return,
     /// A toast, while one shows.
     toast: Option<(SharedString, Task<()>)>,
+    /// How the toast looks.
+    toast_look: ToastLook,
     activity_undo: Option<i64>,
     /// The title bar's search: its box, its suggestions and its results.
     search_box: Entity<GlobalSearch>,
@@ -391,7 +418,7 @@ pub struct Shell {
     people: chat_people::State,
     /// The window's profile card, while one is open, and the pointer's way over faces and names.
     cards: profile_card::State,
-    _subscriptions: [Subscription; 13],
+    _subscriptions: [Subscription; 14],
 }
 
 /// What the chat's header shows, as the trace tells it: the chat, its other member's presence (a 1:1 chat's), and
@@ -430,6 +457,12 @@ impl Shell {
         let (sidebar, new_message_asked) = Self::make_sidebar(&list, &teams, &models, &trace, window, cx);
         let (settings_view, test_call_asked) = Self::make_settings_view(&core, &settings, &trace, cx);
         let first_run = cx.new(|cx| FirstRun::new(settings.clone(), cx));
+        let ai_notice = cx.new(|cx| AiNotice::new(settings.clone(), cx));
+        let answered = cx.subscribe_in(&ai_notice, window, |this: &mut Self, _, _: &Answered, window, cx| {
+            this.take_focus(window, cx);
+        });
+        // the app publishes it at start too; a shell made by itself (tests, the tour) follows its own settings
+        crate::local_ai::AiSwitch::publish(settings.read(cx).uses_ai(), cx);
         let (calendar, calendar_events) = Self::calendar(&core, &models, &trace, &settings, window, cx);
         let [settled, presence, renamed] = Self::observe_header(&settings, &models, &list, cx);
         let (call_bar, calling) = Self::calls(&core, &models, &list, &trace, &settings, cx);
@@ -439,6 +472,7 @@ impl Shell {
         Self {
             activity,
             list_place: ListPlace::Chats,
+            unread_chats: 0,
             cards: Self::card_host(&models, (&search_box, previews), window, cx),
             core,
             models,
@@ -450,14 +484,17 @@ impl Shell {
             chat,
             drafts: std::collections::HashMap::new(),
             meeting_tabs: meeting_tabs::MeetingTabs::default(),
+            meeting_notices: None,
             channel: None,
             channel_listed: false,
             channel_meetup: None,
             settings_view,
             calendar,
             first_run,
+            ai_notice,
             switcher: None,
             channel_dialog: None,
+            share_dialog: None,
             teams_page: None,
             manage_team: None,
             join_team: None,
@@ -468,6 +505,7 @@ impl Shell {
             team_dialog: None,
             dialog_return: crate::keyboard::Return::default(),
             toast: None,
+            toast_look: ToastLook::Plain,
             activity_undo: None,
             search_box,
             history: History::default(),
@@ -504,6 +542,7 @@ impl Shell {
                 calendar_events,
                 searched,
                 new_message_asked,
+                answered,
             ],
         }
     }
@@ -858,13 +897,27 @@ impl Shell {
             let (accounts, _) = shell.accounts.as_ref()?;
             accounts.read(cx).tile(shell.core.me())?.admin.clone()
         });
-        let trace = Arc::clone(trace);
+        let shell = cx.weak_entity();
+        let app_admin: crate::settings_view::AccountAppAdmin = Rc::new(move |cx: &App| {
+            let shell = shell.upgrade()?;
+            let shell = shell.read(cx);
+            let (accounts, _) = shell.accounts.as_ref()?;
+            accounts.read(cx).tile(shell.core.me())?.app_admin.clone()
+        });
+        let shell = cx.weak_entity();
+        let accounts: crate::settings_view::AppAccounts = Rc::new(move |cx: &App| {
+            let shell = shell.upgrade()?;
+            let (accounts, _) = shell.read(cx).accounts.as_ref()?;
+            Some(accounts.clone())
+        });
         let view = cx.new(|cx| {
             SettingsView::new(settings.clone(), cx)
                 .for_account(account)
                 .with_test_call(offer)
                 .with_server(server)
-                .with_admin(admin, trace)
+                .with_accounts(accounts)
+                .with_admin(admin, Arc::clone(trace))
+                .with_app_admin(app_admin, Arc::clone(trace))
         });
         let asked = cx.subscribe(&view, |this: &mut Self, _, event, cx| match event {
             SettingsViewEvent::MakeTestCall => this.ask_call(Ask::TestCall, cx),
@@ -884,7 +937,8 @@ impl Shell {
         // the account's calls' captions saved on this computer, as the settings ask
         crate::call_transcript::follow(core, &models.calls, settings, trace, cx);
         let (core, list, trace, calls) = (Arc::clone(core), list.clone(), Arc::clone(trace), models.calls.clone());
-        let call_bar = cx.new(|cx| CallBar::new(core, calls, list, trace, cx));
+        let settings = settings.clone();
+        let call_bar = cx.new(|cx| CallBar::new(core, (calls, list, settings), trace, cx));
         // a call up, rung or ended: the header's call button follows
         let calling = cx.observe(&models.calls, |this: &mut Self, _, cx| {
             this.trace_call_button(cx);
@@ -1129,6 +1183,28 @@ impl Shell {
                 cx,
             ),
             MeetingJoin::Channel { channel, .. } => self.open_channel_id(channel, window, cx),
+            MeetingJoin::Calendar {
+                chat: Some(chat),
+                meeting: Some(meeting),
+                title,
+                ..
+            } => self.open_prejoin(
+                MeetingToJoin::Chat {
+                    chat,
+                    meeting,
+                    title,
+                    post: None,
+                },
+                cx,
+            ),
+            MeetingJoin::Calendar {
+                chat: Some(chat),
+                title,
+                link,
+                ..
+            } => self.join_meeting_chat(chat, Some(title), link, cx),
+            MeetingJoin::Calendar { link: Some(link), .. } => cx.open_url(&link),
+            MeetingJoin::Calendar { .. } => {}
         }
     }
 
@@ -1171,10 +1247,14 @@ impl Shell {
         cx.notify();
     }
 
-    /// Takes the window's keyboard: the chat's compose box when it is drawn ([`Shell::compose_drawn`]), else the shell
-    /// (an account switched to). A focus left on something not drawn reaches no action's handler: GPUI dispatches
+    /// Takes the window's keyboard: the AI notice while it waits, else the chat's compose box when it is drawn
+    /// ([`Shell::compose_drawn`]), else the shell (an account switched to). A focus left on something not drawn reaches no action's handler: GPUI dispatches
     /// from the window's root instead.
     pub fn take_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.read(cx).awaiting_ai_notice() {
+            self.ai_notice.read(cx).focus_handle().clone().focus(window, cx);
+            return;
+        }
         match self.compose_drawn(cx) {
             Some(compose) => compose.update(cx, |compose, cx| compose.focus(window, cx)),
             None => self.focus.focus(window, cx),
@@ -1559,8 +1639,19 @@ impl Shell {
         Some(selected_by(id, button).into_any_element())
     }
 
-    /// The chat list changed: the header and the chat view's title follow it.
+    /// The chats with anything unread, as the rail's Chat shows them (0: no badge).
+    #[must_use]
+    pub fn unread_chats(&self) -> usize {
+        self.unread_chats
+    }
+
+    /// The chat list changed: the rail's count of unread chats, the header and the chat view's title follow it.
     fn list_changed(&mut self, cx: &mut Context<Self>) {
+        let unread_chats = self.list.read(cx).unread_chats();
+        if unread_chats != self.unread_chats {
+            self.unread_chats = unread_chats;
+            cx.notify();
+        }
         self.trace_header(cx);
         self.trace_call_button(cx);
         self.give_title(cx);
@@ -2057,10 +2148,26 @@ impl Shell {
 
     /// A word that shows for a few seconds at the bottom of the window.
     pub fn show_toast(&mut self, words: &'static str, cx: &mut Context<Self>) {
+        self.show_toast_text(words.into(), cx);
+    }
+
+    /// [`Self::show_toast`] of words made at run time.
+    pub fn show_toast_text(&mut self, words: SharedString, cx: &mut Context<Self>) {
         if words.is_empty() {
             return;
         }
+        self.show_toast_words(words, ToastLook::Plain, cx);
+    }
+
+    /// A toast that says something was done (`words`): Teams' check, the words and a close button, at the bottom
+    /// left, for a few seconds.
+    pub fn show_done_toast(&mut self, words: SharedString, cx: &mut Context<Self>) {
+        self.show_toast_words(words, ToastLook::Done, cx);
+    }
+
+    fn show_toast_words(&mut self, words: SharedString, look: ToastLook, cx: &mut Context<Self>) {
         self.activity_undo = None;
+        self.toast_look = look;
         let task = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             cx.background_executor().timer(std::time::Duration::from_secs(4)).await;
             let _ = this.update(cx, |this, cx| {
@@ -2069,7 +2176,7 @@ impl Shell {
                 cx.notify();
             });
         });
-        self.toast = Some((words.into(), task));
+        self.toast = Some((words, task));
         cx.notify();
     }
 
@@ -2134,6 +2241,9 @@ impl Shell {
                     }
                     TeamDialogEvent::OpenChat(chat) => this.open_chat(chat.clone(), window, cx),
                     TeamDialogEvent::ShowStore => this.open_apps(window, cx),
+                    TeamDialogEvent::AppCard { conversation, card } => {
+                        this.app_card_to_compose(conversation, card.as_ref().clone(), window, cx);
+                    }
                     TeamDialogEvent::Gone { team, words } => {
                         this.show_toast(words, cx);
                         if this.main == Main::ManageTeam(team.clone()) {
@@ -2170,8 +2280,8 @@ impl Shell {
     /// The toast, at the bottom of the window.
     fn toast_view(&self, palette: Palette, cx: &mut Context<Self>) -> Option<gpui::Div> {
         self.toast.as_ref().map(|(words, _)| {
-            if self.activity_undo.is_some() {
-                return Self::activity_app_toast(words.clone(), palette, cx);
+            if self.activity_undo.is_some() || self.toast_look == ToastLook::Done {
+                return self.activity_app_toast(words.clone(), palette, cx);
             }
             div()
                 .absolute()
@@ -2196,7 +2306,7 @@ impl Shell {
         })
     }
 
-    fn activity_app_toast(words: SharedString, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
+    fn activity_app_toast(&self, words: SharedString, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
         let close = selected_by(
             "activity-dismiss-app-toast",
             icon_button("activity-dismiss-app-toast", Glyph::X, "Dismiss")
@@ -2252,7 +2362,9 @@ impl Shell {
                     )
                     .child(close),
             )
-            .child(div().ml_6().child(undo))
+            .when(self.activity_undo.is_some(), |toast| {
+                toast.child(div().ml_6().child(undo))
+            })
     }
 
     /// Opens the team's "Create a channel" dialog over everything; it tells when it closes, and on which channel.
@@ -2272,6 +2384,60 @@ impl Shell {
         });
         self.channel_dialog = Some((dialog, closes));
         cx.notify();
+    }
+
+    /// Opens "Share this file" for `file` over everything; it tells when it closes, and whether the file went out.
+    pub fn open_share_file(
+        &mut self,
+        file: teams_proto::chat::SharedFile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.core.read_only() {
+            return;
+        }
+        self.close_switcher(window, cx);
+        self.dialog_return.keep(window, cx);
+        let parts = (Arc::clone(&self.core), Arc::clone(&self.trace));
+        let lists = (self.list.clone(), self.teams.clone());
+        let dialog = cx.new(|cx| ShareFileDialog::new(parts, lists, file, window, cx));
+        dialog.update(cx, |dialog, cx| dialog.focus(window, cx));
+        let events = cx.subscribe_in(&dialog, window, |this: &mut Self, _, event, window, cx| {
+            this.share_dialog = None;
+            this.focus.focus(window, cx);
+            this.dialog_return.give_back(window, cx);
+            match event {
+                ShareFileEvent::Closed => {}
+                ShareFileEvent::Shared(name) => this.show_done_toast(format!("You've shared {name}").into(), cx),
+            }
+            cx.notify();
+        });
+        self.share_dialog = Some((dialog, events));
+        cx.notify();
+    }
+
+    /// "Share this file", while it is open.
+    #[must_use]
+    pub fn share_dialog(&self) -> Option<&Entity<ShareFileDialog>> {
+        self.share_dialog.as_ref().map(|(dialog, _)| dialog)
+    }
+
+    /// "Share this file" over everything, while it is open.
+    fn share_dialog_view(&self) -> Option<gpui::Stateful<gpui::Div>> {
+        self.share_dialog().cloned().map(|dialog| {
+            div()
+                .id("share-file-backdrop")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .occlude()
+                .bg(gpui::rgba(0x0000_0080))
+                .child(dialog)
+        })
     }
 
     /// The team's "Create a channel" dialog, while it is open.
@@ -2603,6 +2769,11 @@ impl Shell {
                 open,
             } => this.open_recap(recording.clone(), transcribed.clone(), *open, window, cx),
             ChatViewEvent::OpenSavedTranscript(id) => this.open_saved_transcript(*id, window, cx),
+            ChatViewEvent::ShareFile(file) => this.open_share_file(file.as_ref().clone(), window, cx),
+            ChatViewEvent::AppDialog(seed) => this.open_app_dialog(seed.as_ref().clone(), window, cx),
+            ChatViewEvent::ShowStore => this.open_apps(window, cx),
+            ChatViewEvent::AppDetails(store) => this.open_app_details(store.as_ref().clone(), window, cx),
+            ChatViewEvent::TranslationSettings => this.open_settings_page(Page::General, window, cx),
             // a chat has no channel's thread or meeting card
             ChatViewEvent::Action { .. }
             | ChatViewEvent::OpenThread { .. }
@@ -2634,6 +2805,10 @@ impl Shell {
                 this.run_workflow(flow.clone(), message.clone(), window, cx);
             }
             ChannelViewEvent::CreateWorkflows(message) => this.open_message_workflows(message.clone(), window, cx),
+            ChannelViewEvent::AppDialog(seed) => this.open_app_dialog(seed.as_ref().clone(), window, cx),
+            ChannelViewEvent::AppDetails(store) => this.open_app_details(store.as_ref().clone(), window, cx),
+            ChannelViewEvent::TranslationSettings => this.open_settings_page(Page::General, window, cx),
+            ChannelViewEvent::ShareFile(file) => this.open_share_file(file.as_ref().clone(), window, cx),
         })
     }
 
@@ -2753,7 +2928,7 @@ impl Shell {
         });
     }
 
-    /// The handlers of the shell's own keys (the switcher, the search, the accounts, the zoom) on its root.
+    /// The handlers of the shell's own keys (the switcher, the search, the accounts, the pages) on its root.
     fn shell_keys(shell: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
         shell
             .on_action(cx.listener(|this, _: &ToggleSwitcher, window, cx| this.toggle_switcher(window, cx)))
@@ -2767,9 +2942,6 @@ impl Shell {
             .on_action(cx.listener(|this, _: &ToggleListPane, _, cx| this.toggle_list_pane(cx)))
             .on_action(cx.listener(|this, _: &NextAccount, _, cx| this.cycle_account(true, cx)))
             .on_action(cx.listener(|this, _: &PreviousAccount, _, cx| this.cycle_account(false, cx)))
-            .on_action(cx.listener(|this, _: &FontLarger, _, cx| this.step_font(Some(1), cx)))
-            .on_action(cx.listener(|this, _: &FontSmaller, _, cx| this.step_font(Some(-1), cx)))
-            .on_action(cx.listener(|this, _: &FontReset, _, cx| this.step_font(None, cx)))
             .on_action(cx.listener(|this, _: &ShowActivity, window, cx| this.show_activity(window, cx)))
             .on_action(cx.listener(|this, _: &ShowChats, window, cx| this.show_chats(window, cx)))
             .on_action(cx.listener(|this, _: &ShowCalendar, window, cx| this.show_calendar(window, cx)))
@@ -2778,6 +2950,14 @@ impl Shell {
                     this.open_settings_page(Page::General, window, cx);
                 }),
             )
+    }
+
+    /// The font size keys, which also work while the AI notice waits.
+    fn font_keys(shell: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
+        shell
+            .on_action(cx.listener(|this, _: &FontLarger, _, cx| this.step_font(Some(1), cx)))
+            .on_action(cx.listener(|this, _: &FontSmaller, _, cx| this.step_font(Some(-1), cx)))
+            .on_action(cx.listener(|this, _: &FontReset, _, cx| this.step_font(None, cx)))
     }
 
     /// Opens the switcher, or closes it when it is open.
@@ -2953,14 +3133,20 @@ impl Shell {
                     ))
                     .children((unseen > 0).then(|| rail_count("rail-activity-count", unseen))),
             )
-            .child(Self::rail_button(
-                "rail-chats",
-                RailItem::CHAT,
-                chats,
-                palette,
-                cx,
-                Self::show_chats,
-            ))
+            .child(
+                div()
+                    .relative()
+                    .w_full()
+                    .child(Self::rail_button(
+                        "rail-chats",
+                        RailItem::CHAT,
+                        chats,
+                        palette,
+                        cx,
+                        Self::show_chats,
+                    ))
+                    .children((self.unread_chats > 0).then(|| rail_count("rail-chats-count", self.unread_chats))),
+            )
             .child(Self::rail_button(
                 "rail-calendar",
                 RailItem::CALENDAR,
@@ -3123,60 +3309,6 @@ impl Shell {
         }
     }
 
-    /// The account menu's account: its name and what tells it apart above the statuses, and its "Sign out and remove"
-    /// below them in an app that permits removal; neither before the accounts were handed in.
-    fn account_menu_parts(&self, palette: Palette, cx: &mut Context<Self>) -> (Option<gpui::Div>, Option<gpui::Div>) {
-        let account = self.accounts.as_ref().and_then(|(accounts, _)| {
-            let accounts = accounts.read(cx);
-            let tile = accounts.tile(self.core.me())?;
-            let told_apart = (tile.name.clone(), tile.detail.clone(), tile.server.clone());
-            Some((told_apart, accounts.can_remove()))
-        });
-        let header = account.as_ref().map(|((name, detail, server), _)| {
-            div()
-                .debug_selector(|| "status-menu-account".to_owned())
-                .px_2()
-                .pt_1()
-                .pb_2()
-                .mb_1()
-                .border_b_1()
-                .border_color(rgb(palette.border))
-                .child(div().font_weight(gpui::FontWeight::BOLD).child(name.clone()))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(palette.muted_foreground))
-                        .child(detail.clone())
-                        .children(server.clone().map(|server| {
-                            div()
-                                .debug_selector(|| "status-menu-account-server".to_owned())
-                                .child(server)
-                        })),
-                )
-        });
-        let remove = account.filter(|(_, can_remove)| *can_remove).map(|_| {
-            div()
-                .w_full()
-                .mt_1()
-                .pt_1()
-                .border_t_1()
-                .border_color(rgb(palette.border))
-                .child(keyboard::stop(
-                    "status-menu-remove-account",
-                    menu_row("status-menu-remove-account", palette)
-                        .text_color(rgb(theme::DANGER))
-                        .child(Glyph::LOG_OUT.icon().size(px(16.0)))
-                        .child("Sign out and remove")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.status_focus.closed(window, cx);
-                            this.ask_remove_account(cx);
-                        })),
-                    palette,
-                ))
-        });
-        (header, remove)
-    }
-
     /// The account menu: the statuses the user may set (the one set marked), what is reported, and the last failed
     /// report.
     fn status_menu_view(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
@@ -3227,7 +3359,7 @@ impl Shell {
                         failure.why
                     )))
             });
-        let (header, remove) = self.account_menu_parts(palette, cx);
+        let parts = self.account_menu_parts(palette, cx);
         let menu = div().debug_selector(|| "status-menu".to_owned()).absolute();
         let menu = match self.status_anchor {
             MenuAnchor::Rail => menu.left(px(RAIL_WIDTH + 4.0)).bottom(px(48.0)),
@@ -3250,11 +3382,12 @@ impl Shell {
                 self.status_opener
                     .outside(cx.listener(|this, _, _, cx| this.close_status_menu(cx))),
             )
-            .children(header)
+            .children(parts.header)
             .children(entries)
             .children(reported)
             .children(failure)
-            .children(remove)
+            .children(parts.pictures)
+            .children(parts.remove)
             .into_any_element()
     }
 
@@ -3287,7 +3420,7 @@ impl Shell {
                     |(_, chosen)| (self.team_face(id, palette, cx), chosen.name.clone()),
                 );
                 let join = self.channel_join_button(id, cx);
-                let translate = shown.map(|(view, _)| {
+                let translate = shown.and_then(|(view, _)| {
                     let model = view.read(cx).posts().read(cx).translation().clone();
                     crate::chat_translate::header_button(&model, window, cx)
                 });
@@ -3344,7 +3477,7 @@ impl Shell {
         let people = self.people_header_button(id, cx);
         let flyout = self.people_layer(id, cx);
         // the chat's language: its messages read in it, and the account's sent in the chat's own
-        let translate = chat.as_ref().map(|chat| {
+        let translate = chat.as_ref().and_then(|chat| {
             let model = chat.read(cx).translation().clone();
             crate::chat_translate::header_button(&model, window, cx)
         });
@@ -3380,7 +3513,8 @@ impl Shell {
 
 impl Shell {
     /// The call bar and the panes on one sheet floating on the frame ([`crate::sheet`]), right of the rail and under
-    /// the title bar.
+    /// the title bar. The banner of a call that rings while the AI notice waits is drawn over the notice
+    /// ([`CallBar`]).
     fn sheet(&self, palette: Palette, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
         let panes = div()
             .relative()
@@ -3510,14 +3644,21 @@ pub(crate) fn pane_header_titled(lead: Option<AnyElement>, title: AnyElement, pa
 }
 
 impl Shell {
-    fn call_keys(shell: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
+    /// The keys of the call that rings or is up: answer, decline, hang up, mute. They also work while the AI notice
+    /// waits, because its backdrop covers the call bar's buttons.
+    fn current_call_keys(shell: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
         shell
-            .on_action(cx.listener(|this, _: &CallChat, _, cx| this.call_chat(cx)))
-            .on_action(cx.listener(|this, _: &JoinCall, _, cx| this.join_call(cx)))
             .on_action(cx.listener(|this, _: &AnswerCall, _, cx| this.ask_call(Ask::Answer, cx)))
             .on_action(cx.listener(|this, _: &DeclineCall, _, cx| this.ask_call(Ask::Decline, cx)))
             .on_action(cx.listener(|this, _: &HangUpCall, _, cx| this.ask_call(Ask::HangUp, cx)))
             .on_action(cx.listener(|this, _: &ToggleMuteCall, _, cx| this.ask_call(Ask::ToggleMute, cx)))
+    }
+
+    /// The other call keys: start or join a call, captions, the camera.
+    fn call_keys(shell: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
+        shell
+            .on_action(cx.listener(|this, _: &CallChat, _, cx| this.call_chat(cx)))
+            .on_action(cx.listener(|this, _: &JoinCall, _, cx| this.join_call(cx)))
             .on_action(cx.listener(|this, _: &ToggleCaptionsCall, _, cx| this.ask_call(Ask::ToggleCaptions, cx)))
             .on_action(cx.listener(|this, _: &ToggleCameraCall, _, cx| {
                 this.ask_call(Ask::ToggleCamera, cx);
@@ -3545,23 +3686,15 @@ impl Render for Shell {
         let switcher = self.switcher().map(|switcher| overlay(switcher.clone().into()));
         let status_menu = self.status_menu.then(|| self.status_menu_view(palette, cx));
         let channel_dialog = self.channel_dialog_view();
+        let share_dialog = self.share_dialog_view();
         let team_dialog = self.team_dialog_view();
         let toast = self.toast_view(palette, cx);
+        let meeting_cards = self.meeting_cards_view(palette, window, cx);
         let more_apps = self.more_apps_view(palette, cx);
         let card = self.card_layer(window, cx);
-        let first_run = self.settings.read(cx).awaiting_first_run().then(|| {
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .occlude()
-                .bg(gpui::rgba(0x0000_0080))
-                .child(self.first_run.clone())
-        });
+        let first_run = self.first_run_layer(window, cx);
+        let modal = self.settings.read(cx).awaiting_ai_notice();
+        let shows_calls = self.models.calls.read(cx).shows();
         div()
             .key_context(CONTEXT)
             .track_focus(&self.focus)
@@ -3569,9 +3702,12 @@ impl Render for Shell {
             .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, _, cx| this.used(cx)))
             .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| this.used(cx)))
             .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _, cx| this.used(cx)))
-            .map(|shell| Self::shell_keys(shell, cx))
+            .map(|shell| Self::font_keys(shell, cx))
+            // the shell's own keys stop while the AI notice waits
+            .when(!modal, |shell| Self::shell_keys(shell, cx))
             // the call keys only in a build that shows calls: elsewhere they reach whatever else takes them
-            .when(self.models.calls.read(cx).shows(), |shell| Self::call_keys(shell, cx))
+            .when(shows_calls, |shell| Self::current_call_keys(shell, cx))
+            .when(!modal && shows_calls, |shell| Self::call_keys(shell, cx))
             .relative()
             .size_full()
             .flex()
@@ -3591,11 +3727,46 @@ impl Render for Shell {
             .children(switcher)
             .children(status_menu)
             .children(channel_dialog)
+            .children(share_dialog)
             .children(team_dialog)
             .children(more_apps)
             .children(card)
             .children(toast)
+            .children(meeting_cards)
             .children(first_run)
+    }
+}
+
+impl Shell {
+    /// The first run's screen, then the AI notice, over everything while one waits for the user, except the banner of a
+    /// call that rings ([`Shell::sheet`]). The notice holds the keyboard while it waits: whatever took it, the next
+    /// frame gives it back.
+    fn first_run_layer(&self, window: &mut Window, cx: &mut App) -> Option<gpui::Div> {
+        let settings = self.settings.read(cx);
+        let view: AnyView = if settings.awaiting_first_run() {
+            self.first_run.clone().into()
+        } else if settings.awaiting_ai_notice() {
+            let focus = self.ai_notice.read(cx).focus_handle().clone();
+            if !focus.is_focused(window) && !focus.contains_focused(window, cx) {
+                focus.focus(window, cx);
+            }
+            self.ai_notice.clone().into()
+        } else {
+            return None;
+        };
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .occlude()
+                .bg(gpui::rgba(0x0000_0080))
+                .child(view),
+        )
     }
 }
 
@@ -3679,7 +3850,7 @@ impl AccountFace {
             index,
             key: tile.key.clone(),
             name: tile.name.clone(),
-            picture: tile.picture.clone(),
+            picture: tile.face().cloned(),
             reporting: tile.own_presence.as_ref().map(|own| own.read(cx).reporting(cx)),
             unread: tile.unread(cx),
             signed_out: tile.signed_out(cx),
@@ -3699,7 +3870,7 @@ impl Shell {
             return self.settings_view.clone().into_any_element();
         }
         // out of sight: the settings' video effects go, and a preview of the camera with them
-        self.settings_view.update(cx, |view, _| view.put_away());
+        self.settings_view.update(cx, |view, cx| view.put_away(cx));
         if self.main == Main::Calendar {
             return self.calendar.clone().into_any_element();
         }

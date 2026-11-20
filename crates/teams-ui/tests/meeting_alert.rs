@@ -16,7 +16,7 @@ mod common;
 #[path = "common/notices.rs"]
 mod notices;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, Waker};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -48,6 +48,8 @@ struct Alerting {
     server: Arc<FakeServer>,
     asked: Arc<Mutex<Vec<MeetingAlertEvent>>>,
     written: Written,
+    /// The server not handed in yet (`start_without_server`).
+    late: Option<Arc<dyn NotificationServer>>,
 }
 
 fn now_ms() -> i64 {
@@ -83,9 +85,14 @@ fn huddle(starter: &str) -> String {
 }
 
 fn start() -> String {
+    start_of("call-1")
+}
+
+/// A meeting's start of call `call`.
+fn start_of(call: &str) -> String {
     format!(
         "<partlist alt =\"\"></partlist><callEventType>callStarted</callEventType>\
-         <conversationUrl>{LINK}</conversationUrl><callId>call-1</callId>"
+         <conversationUrl>{LINK}</conversationUrl><callId>{call}</callId>"
     )
 }
 
@@ -172,6 +179,7 @@ fn running_meeting(chat: Option<&str>, channel: Option<&str>) -> CalendarEvent {
             post: Some("scheduled-post".to_owned()),
             ical_uid: "made-up-uid".to_owned(),
         }),
+        reminder: teams_core::EventReminder::Unknown,
     }
 }
 
@@ -180,8 +188,17 @@ impl Alerting {
         Self::start_over(settings, None, Vec::new())
     }
 
+    /// The alert with no server until [`Self::hand_server`], as the app's desktop hands it in once its bus is up.
+    fn start_without_server(settings: Settings) -> Self {
+        Self::start_on(settings, None, Vec::new(), true)
+    }
+
     /// The alert over a store that holds `stored` already, its banners held back by `gate`.
     fn start_over(settings: Settings, gate: Option<Arc<Gate>>, stored: Vec<Message>) -> Self {
+        Self::start_on(settings, gate, stored, false)
+    }
+
+    fn start_on(settings: Settings, gate: Option<Arc<Gate>>, stored: Vec<Message>, late: bool) -> Self {
         let rig = Rig::start_with(|cx| Models::with_calls(None, cx));
         rig.core.conversations.lock().unwrap().extend([
             chat(AB, ConversationKind::OneToOne, None),
@@ -216,7 +233,9 @@ impl Alerting {
         let alert = rig.cx.update(|cx| {
             let alert = cx.new(|cx| {
                 let mut alert = MeetingAlert::new(core, &models, settings, trace, cx);
-                alert.set_server(given);
+                if !late {
+                    alert.set_server(Arc::clone(&given), cx);
+                }
                 alert
             });
             cx.subscribe(&alert, move |_, event, _| recorded.lock().unwrap().push(event.clone()))
@@ -230,7 +249,17 @@ impl Alerting {
             server,
             asked,
             written,
+            late: late.then_some(given),
         }
+    }
+
+    /// The desktop hands in the server now.
+    fn hand_server(&mut self) {
+        let server = self.late.take().unwrap();
+        self.rig
+            .cx
+            .update(|cx| self.alert.update(cx, |alert, cx| alert.set_server(server, cx)));
+        self.rig.cx.run_until_parked();
     }
 
     fn arrive(&self, message: Message, source: Source) {
@@ -425,7 +454,8 @@ fn a_meeting_s_chat_shows_a_banner_only_while_the_calendar_holds_its_meeting() {
             channel: false,
         }]
     );
-    a.arrive(call_event(MEETING, "3", LAB_B, start()), Source::Delivery);
+    // another call's start (one call shows one banner)
+    a.arrive(call_event(MEETING, "3", LAB_B, start_of("call-2")), Source::Delivery);
     assert!(a.activate(2, JOIN_ACTION));
     assert_eq!(
         a.asked.lock().unwrap()[1],
@@ -607,4 +637,213 @@ fn a_channel_meet_now_does_not_borrow_a_scheduled_meetings_banner() {
     a.arrive(call_event(CHANNEL, "3", LAB_B, start()), Source::Delivery);
     assert_eq!(a.server.shown().len(), 1, "the scheduled post's own call");
     assert_eq!(a.server.shown()[0].summary, "Weekly sync");
+}
+
+/// A meeting's start the calling service pushes, by `starter`, in `thread`, of call `call`.
+fn pushed(kind: teams_core::MeetingStartKind, thread: &str, call: &str, starter: &str) -> teams_core::MeetingStartPush {
+    teams_core::MeetingStartPush {
+        kind,
+        call_id: call.to_owned(),
+        thread: thread.to_owned(),
+        message: None,
+        subject: Some("Weekly sync".to_owned()),
+        starter: Some(starter.to_owned()),
+        starter_name: None,
+        organizer: Some("00000000-0000-4000-8000-00000000000b".to_owned()),
+        tenant: Some("00000000-0000-4000-8000-0000000000d0".to_owned()),
+    }
+}
+
+impl Alerting {
+    fn push(&self, start: teams_core::MeetingStartPush) {
+        self.rig.events.send(Event::MeetingStarted(start)).unwrap();
+        self.rig.cx.run_until_parked();
+    }
+
+    fn cards(&self) -> Vec<teams_ui::meeting_alert::StartedCard> {
+        self.rig.cx.read(|cx| self.alert.read(cx).cards())
+    }
+}
+
+#[test]
+fn a_pushed_start_of_a_meeting_on_the_calendar_shows_a_banner_whose_join_opens_its_prejoin() {
+    let a = Alerting::start(Settings::default());
+    a.calendar(running_meeting(Some(MEETING), None));
+    a.push(pushed(teams_core::MeetingStartKind::Meeting, MEETING, "call-1", LAB_B));
+    assert_eq!(
+        a.server.shown(),
+        [Notice {
+            conversation: MEETING.to_owned(),
+            kind: NoticeKind::Meeting,
+            summary: "Weekly sync".to_owned(),
+            body: "Bee started the meeting".to_owned(),
+            picture: None,
+        }]
+    );
+    // the window shows it as a card too
+    let cards = a.cards();
+    assert_eq!(cards.len(), 1);
+    assert_eq!((cards[0].id, cards[0].title.as_str()), (1, "Weekly sync"));
+    assert!(a.activate(1, JOIN_ACTION));
+    assert_eq!(
+        *a.asked.lock().unwrap(),
+        [MeetingAlertEvent::Join(MeetingJoin::MeetingChat {
+            chat: MEETING.to_owned(),
+            title: "Weekly sync".to_owned(),
+        })]
+    );
+    assert!(a.cards().is_empty());
+    // the chat service's start of the same call shows no second one
+    a.arrive(call_event(MEETING, "1", LAB_B, start()), Source::Delivery);
+    assert_eq!(a.server.shown().len(), 1);
+}
+
+#[test]
+fn a_banner_shown_before_the_server_came_goes_to_the_desktop_once_it_comes() {
+    let mut a = Alerting::start_without_server(Settings::default());
+    a.calendar(running_meeting(Some(MEETING), None));
+    a.push(pushed(teams_core::MeetingStartKind::Meeting, MEETING, "call-1", LAB_B));
+    a.arrive(call_event(TRIO, "1", LAB_B, huddle(LAB_B)), Source::Delivery);
+    let cards = a.cards();
+    assert_eq!(cards.len(), 2, "the window's cards show at once");
+    // the card dismissed before the server came sends nothing
+    let trio = cards.iter().find(|card| card.title == "Lab trio").unwrap().id;
+    a.rig
+        .cx
+        .update(|cx| a.alert.update(cx, |alert, cx| alert.dismiss(trio, cx)));
+    let told = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&told);
+    let _observing = a.rig.cx.update(|cx| {
+        cx.observe(&a.alert, move |_, _| {
+            counted.fetch_add(1, Ordering::SeqCst);
+        })
+    });
+    a.hand_server();
+    assert!(
+        told.load(Ordering::SeqCst) > 0,
+        "the window draws the card again: its actions take the new id"
+    );
+    let shown = a.server.shown();
+    assert_eq!(shown.len(), 1, "{shown:?}");
+    assert_eq!(shown[0].summary, "Weekly sync");
+    // the card takes the server's id
+    let cards = a.cards();
+    assert_eq!((cards.len(), cards[0].id), (1, 1));
+    // the card goes after Teams' banner time as one sent in time does; the desktop's Join still acts on it
+    a.rig.cx.executor().advance_clock(teams_ui::meeting_alert::CARD_TIME);
+    a.rig.cx.run_until_parked();
+    assert!(a.cards().is_empty());
+    assert!(a.activate(1, JOIN_ACTION));
+    assert_eq!(a.server.closed(), [1]);
+}
+
+/// The fake server, its ids set by the banner's chat and not by the order it shows them.
+struct IdByChat(Arc<FakeServer>);
+
+impl NotificationServer for IdByChat {
+    fn show(&self, notice: &Notice, replaces: u32) -> BoxFuture<'static, Result<u32, String>> {
+        let id = if notice.conversation == MEETING { 9 } else { 3 };
+        let shown = self.0.show(notice, replaces);
+        Box::pin(async move { shown.await.map(|_| id) })
+    }
+
+    fn close(&self, id: u32) -> BoxFuture<'static, ()> {
+        self.0.close(id)
+    }
+}
+
+#[test]
+fn late_banners_keep_their_order_and_their_card_time_whatever_ids_the_server_gives() {
+    let mut a = Alerting::start_without_server(Settings::default());
+    a.calendar(running_meeting(Some(MEETING), None));
+    a.push(pushed(teams_core::MeetingStartKind::Meeting, MEETING, "call-1", LAB_B));
+    a.arrive(call_event(TRIO, "1", LAB_B, huddle(LAB_B)), Source::Delivery);
+    // the server gives the older banner the higher id
+    a.late = Some(Arc::new(IdByChat(Arc::clone(&a.server))));
+    a.hand_server();
+    assert_eq!(a.server.shown().len(), 2);
+    let cards: Vec<(u32, String)> = a.cards().into_iter().map(|card| (card.id, card.title)).collect();
+    assert_eq!(
+        cards,
+        [(9, "Weekly sync".to_owned()), (3, "Lab trio".to_owned())],
+        "the oldest first"
+    );
+    a.rig.cx.executor().advance_clock(teams_ui::meeting_alert::CARD_TIME);
+    a.rig.cx.run_until_parked();
+    assert!(a.cards().is_empty(), "the cards go after Teams' banner time");
+}
+
+#[test]
+fn the_chat_s_start_and_the_push_of_one_call_show_one_banner() {
+    let a = Alerting::start(Settings::default());
+    a.calendar(running_meeting(Some(MEETING), None));
+    a.arrive(call_event(MEETING, "1", LAB_B, start()), Source::Delivery);
+    a.push(pushed(teams_core::MeetingStartKind::Meeting, MEETING, "call-1", LAB_B));
+    assert_eq!(a.server.shown().len(), 1);
+}
+
+#[test]
+fn a_pushed_start_shows_none_off_the_calendar_and_one_when_the_calendar_cant_be_read() {
+    let a = Alerting::start(Settings::default());
+    a.push(pushed(teams_core::MeetingStartKind::Meeting, MEETING, "call-1", LAB_B));
+    assert!(a.server.shown().is_empty(), "not on the calendar");
+    a.rig
+        .core
+        .calendar
+        .lock()
+        .unwrap()
+        .answers
+        .push_back(Err(teams_core::EngineError::CalendarUnread));
+    a.push(pushed(teams_core::MeetingStartKind::Meeting, MEETING, "call-2", LAB_B));
+    let shown = a.server.shown();
+    assert_eq!(shown.len(), 1, "the calendar couldn't be read: shown, as Teams does");
+    assert_eq!(shown[0].summary, "Weekly sync");
+}
+
+#[test]
+fn a_pushed_lobby_wait_says_who_waits_and_the_account_s_own_start_shows_none() {
+    let a = Alerting::start(Settings::default());
+    a.calendar(running_meeting(Some(MEETING), None));
+    a.push(pushed(teams_core::MeetingStartKind::Meeting, MEETING, "call-1", LAB_A));
+    assert!(a.server.shown().is_empty(), "the account's own");
+    a.push(pushed(teams_core::MeetingStartKind::Lobby, MEETING, "call-2", LAB_B));
+    assert_eq!(
+        a.server.shown()[0].body,
+        "Bee is waiting in the lobby. Join the meeting to let them in."
+    );
+}
+
+#[test]
+fn a_pushed_start_shows_none_while_the_switch_is_off() {
+    let a = Alerting::start(Settings {
+        meeting_started: false,
+        ..Settings::default()
+    });
+    a.calendar(running_meeting(Some(MEETING), None));
+    a.push(pushed(teams_core::MeetingStartKind::Meeting, MEETING, "call-1", LAB_B));
+    assert!(a.server.shown().is_empty());
+    assert!(a.cards().is_empty());
+}
+
+#[test]
+fn a_meeting_that_ended_more_than_five_minutes_ago_shows_none() {
+    let a = Alerting::start(Settings::default());
+    let mut over = running_meeting(Some(MEETING), None);
+    let now = now_ms();
+    over.start = EventTime::Instant(now - 60 * 60_000);
+    over.end = EventTime::Instant(now - 6 * 60_000);
+    a.calendar(over);
+    a.push(pushed(teams_core::MeetingStartKind::Meeting, MEETING, "call-1", LAB_B));
+    assert!(a.server.shown().is_empty());
+}
+
+#[test]
+fn a_pushed_meet_now_of_a_group_chat_waits_for_the_chat_s_start_whose_join_can_go() {
+    let a = Alerting::start(Settings::default());
+    a.push(pushed(teams_core::MeetingStartKind::Huddle, TRIO, "huddle-1", LAB_B));
+    assert!(a.server.shown().is_empty(), "no Join could go there yet");
+    assert!(a.cards().is_empty());
+    a.arrive(call_event(TRIO, "1", LAB_B, huddle(LAB_B)), Source::Delivery);
+    assert_eq!(a.server.shown().len(), 1);
+    assert!(a.joinable(TRIO));
 }

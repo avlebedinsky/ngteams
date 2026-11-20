@@ -4,7 +4,8 @@
 # (scripts/vendor-gpui.sh) with its external-surfaces patches only, unchanged:
 #   gpui-pre       `ExternalSurface` (a dmabuf or CPU pixels) as the Linux payload of `PaintSurface`, and
 #                  `Window::paint_external_surface` (0001); and, our own, no line break right after opening
-#                  punctuation (UAX #14 LB14), so `[[account]]` wraps whole (0002)
+#                  punctuation (UAX #14 LB14), so `[[account]]` wraps whole (0002); a path prompt's title and file
+#                  filters (0003), so the account picture's chooser shows the picture files
 #   gpui-pre-wgpu  the renderer's side: dmabufs imported through wgpu-hal Vulkan and copied on the GPU, CPU pixels
 #                  uploaded into a texture kept per surface, by damaged rectangle (0001); and, our own, a weight or
 #                  style the family has no face of drawn anyway: a variable face at that weight, else synthesized (0002)
@@ -12,14 +13,19 @@
 #                  item's metadata for the rich-text editor's paste (0001); immediate reads of local clipboard
 #                  writes, source generations, and validated private rich-copy recovery after a manager handoff (0002);
 #                  every form a clipboard offer holds read into one item: text, picture and uri-list files (0003);
-#                  cancel key repeat when its focused window closes or its key is released without focus (0004)
+#                  cancel key repeat when its focused window closes or its key is released without focus (0004);
+#                  the path prompt's title and filters on the file chooser portal (0005)
 #   gpui-pre-windows our own: test-support `contains` on the DirectX atlas so atlas-inspection tests query
-#                  the real atlas (0001)
+#                  the real atlas (0001); the path prompt's title and filters on the file open dialog (0002)
 #   libwebrtc      our own: `RtpTransceiver::set_direction`, which LiveKit's bindings leave out though `webrtc-sys`
 #                  binds it (0001): a group call's screen goes out on the mixer's sharing line, turned to send before
 #                  the answer (crates/teams-media/src/rtc.rs); preserve optional candidate-pair RTT (0002), so
-#                  absent values remain unknown and a measured zero is retained. Keep these patches until upstream
-#                  supports both (0.4.0 still leaves out set_direction).
+#                  absent values remain unknown and a measured zero is retained; `RtpSender::generate_key_frame` on
+#                  the safe API (0003). Keep these patches until upstream supports them (0.4.0 still leaves out
+#                  set_direction).
+#   webrtc-sys     our own: libwebrtc's `RtpSenderInterface::GenerateKeyFrame` bound (0001), so a shared screen can
+#                  answer the Teams mixer's repeated keyframe request that libwebrtc ignores
+#                  (crates/teams-media/src/session/keyframes.rs). Its prebuilt libwebrtc stays the one it downloads.
 #   image-webp    bound cumulative Huffman group, tree and lookup-table allocations to 16 MiB per lossless decoder,
 #                  including compressed alpha, and check VP8 dimensions before allocating frame buffers;
 #                  the image wrapper does not forward its allocation limit.
@@ -42,6 +48,7 @@ declare -A VERSION=(
   [gpui-pre-linux]="0.3.9"
   [gpui-pre-windows]="0.3.9"
   [libwebrtc]="0.3.55"
+  [webrtc-sys]="0.3.52"
 )
 declare -A SHA256=(
   [image-webp]="525e9ff3e1a4be2fbea1fdf0e98686a6d98b4d8f937e1bf7402245af1909e8c3"
@@ -50,8 +57,9 @@ declare -A SHA256=(
   [gpui-pre-linux]="e28213c3fde6f13e91ba0b74b90cbaadec9373e36a031eda98561d31059870f3"
   [gpui-pre-windows]="513d4f0fc7d596d3bdef2a73a524ffb83dabc95bf484f2855a698e7f431290a9"
   [libwebrtc]="c0399e372f69d3bb3ad8d51f6354f3090c57317de4f61521aa2f5a542c06fe1f"
+  [webrtc-sys]="bae66695bde7b250a9e5f7976db6015e30fa06033afc1745e5499d55aa51612a"
 )
-CRATES=(gpui-pre gpui-pre-wgpu gpui-pre-linux gpui-pre-windows libwebrtc image-webp)
+CRATES=(gpui-pre gpui-pre-wgpu gpui-pre-linux gpui-pre-windows libwebrtc webrtc-sys image-webp)
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 

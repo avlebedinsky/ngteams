@@ -125,6 +125,9 @@ Root: HKA; Subkey: "Software\ngteams\Capabilities\URLAssociations"; ValueType: s
 Root: HKA; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueName: "ngteams"; ValueData: "Software\ngteams\Capabilities"
 
 [Run]
+; First: Microsoft Defender checks each new program file on its first use (for an unsigned file, often 10 s or more),
+; and GStreamer lists its plugins. Setup does this work, not the first start of the app (crates/ngteams/src/prepare.rs).
+Filename: "{app}\bin\ngteams.exe"; Parameters: "--prepare"; WorkingDir: "{app}\bin"; StatusMsg: "Preparing ngteams for its first start..."; Flags: runhidden waituntilterminated
 Filename: "{app}\bin\ngteams.exe"; Description: "Open ngteams"; Flags: nowait postinstall skipifsilent
 ; The updater's run: the app it replaced starts again, as on Linux.
 Filename: "{app}\bin\ngteams.exe"; Flags: nowait; Check: Updating

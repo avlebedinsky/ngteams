@@ -105,7 +105,7 @@ pub(super) async fn start(app: &App, caller: &Caller, asked: Start<'_>, body: &V
     from.active = Some(endpoint);
     let mut call = group::new_call(asked.chat, from);
     call.meeting = Some(Meeting {
-        organizer: meeting.organizer_id,
+        organizer: meeting.organizer_id.clone(),
         controls: controls(app, asked.chat).await?,
         ..Meeting::default()
     });
@@ -117,14 +117,49 @@ pub(super) async fn start(app: &App, caller: &Caller, asked: Start<'_>, body: &V
         Opened::Made { out, .. } => out,
         Opened::Running(running) => return enter(app, caller, &running, admitted, body).await,
     };
-    let origin = app.config.origin();
-    let conversation = wire::conversation_url(&origin, &call.conversation, None);
-    super::ops::tell_chat_started(app, caller, &call, Some(&conversation)).await;
+    tell_started(app, caller, &call, meeting.subject.as_deref(), admitted).await;
     carry_out(app, &call, out).await;
     if let (Some(home), Some(leg)) = (call.media.as_ref(), call.party(Seat::CALLER).leg.as_ref()) {
         group::seed_leg(app, home, &call.id, &leg.id, Some(asked.offer)).await;
     }
+    let origin = app.config.origin();
     Ok(Json(wire::conversation(&origin, &app.config.region, &call)).into_response())
+}
+
+/// The meeting's call `call` started: its chat is told, and its members are pushed it.
+async fn tell_started(app: &App, caller: &Caller, call: &Call, subject: Option<&str>, admitted: Admission) {
+    let conversation = wire::conversation_url(&app.config.origin(), &call.conversation, None);
+    super::ops::tell_chat_started(app, caller, call, Some(&conversation)).await;
+    tell_members_started(app, call, subject, admitted).await;
+}
+
+/// Pushes the start of the meeting's call `call` (its first party just came) to the calling endpoints of the meeting's
+/// chat's other members (`evt` 128); a first party that waits in the lobby is told to the organizer only, who lets
+/// people in. A failure is logged: the call runs without it.
+async fn tell_members_started(app: &App, call: &Call, subject: Option<&str>, admitted: Admission) {
+    let (Some(chat), Some(meeting)) = (&call.chat, &call.meeting) else {
+        return;
+    };
+    let starter = &call.party(Seat::CALLER).id;
+    let told = async {
+        let (kind, to) = match admitted {
+            Admission::In => {
+                let members = call_events::members(app, chat).await?.unwrap_or_default();
+                ("MeetingStart", members)
+            }
+            Admission::Lobby => ("MeetingStartFromLobby", vec![meeting.organizer.clone()]),
+        };
+        let tenant = crate::db::meta::tenant(&app.db).await?;
+        let push = wire::meeting_started(kind, call, subject, &meeting.organizer, &tenant);
+        for member in to.iter().filter(|member| *member != starter) {
+            let endpoints = super::calling_endpoints(app, member).await?;
+            super::ops::ring(app, &call.id, &push, endpoints).await;
+        }
+        Ok::<_, DbError>(())
+    };
+    if let Err(error) = told.await {
+        tracing::warn!(%error, "a meeting's start wasn't pushed to its members");
+    }
 }
 
 /// Into the running meeting's call `call`: a join, or a wait in its lobby. A plain group call in the chat is no

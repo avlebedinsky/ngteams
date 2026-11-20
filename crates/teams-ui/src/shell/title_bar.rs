@@ -213,7 +213,9 @@ impl Shell {
     pub(super) fn title_bar(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let left = div()
             .w(px(self.title_left_width(cx)))
-            .flex_none()
+            // a narrow window draws the list pane narrower than its width: the right part must keep its place
+            .flex_shrink(1.0)
+            .min_w_0()
             .h_full()
             .flex()
             .items_center()
@@ -278,8 +280,8 @@ impl Shell {
         crate::update::button(
             palette,
             move |_, _, cx| {
-                if let Some(waiting) = crate::update::press(cx) {
-                    let _ = shell.update(cx, |shell, cx| shell.show_toast(waiting.says(), cx));
+                if let Some(said) = crate::update::press(cx) {
+                    let _ = shell.update(cx, |shell, cx| shell.show_toast_text(said, cx));
                 }
             },
             cx,
@@ -426,7 +428,7 @@ impl Shell {
         let tile = self.accounts.as_ref().and_then(|(accounts, _)| {
             let accounts = accounts.read(cx);
             let tile = accounts.tile(self.core.me())?;
-            Some((tile.name.clone(), tile.detail.clone(), tile.picture.clone()))
+            Some((tile.name.clone(), tile.detail.clone(), tile.face().cloned()))
         });
         let reporting = self.own_reporting(cx);
         let failed = self.own_presence().is_some_and(|own| own.read(cx).failure().is_some());

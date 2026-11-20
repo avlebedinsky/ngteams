@@ -16,6 +16,9 @@
 //!   message's own: where it came from is in `properties.originalMessageContext`); a link
 //!   with an `http`, `https` or `mailto` `href`; an image with an `https` `src`, its `alt`, `itemtype` and `itemid`
 //!   (an emoticon's id, an AMS picture's object) and the size it is shown at (`width`/`height`, else its `style`'s).
+//! - **A sticker** ([`Sticker`]): an `<img>` of itemtype `http://schema.skype.com/Sticker`, as read back, or the
+//!   `readonly` element of that itemtype that the web client sends around its picture, whose `aria-label` (else
+//!   `title`) is its label. Any other `readonly` element stays unknown markup.
 //! - **Whitespace as a browser sets it**: outside a `pre`, a run of spaces, tabs and line feeds in the markup is one
 //!   space, and a space at the start or end of a line (beside a `br` or a paragraph's edge) is none. A line break is a
 //!   `br` or a paragraph, never a line feed in the markup: the web client sends `<br>` followed by a line feed, and a
@@ -59,6 +62,10 @@ pub const EMOJI_ITEMTYPE: &str = "http://schema.skype.com/Emoji";
 
 /// The `itemtype` of a picture pasted into a message (an `<img>` whose `src` is a view of an AMS object).
 pub const AMS_IMAGE_ITEMTYPE: &str = "http://schema.skype.com/AMSImage";
+
+/// The `itemtype` of a sticker: of the `readonly` element the web client sends around its picture, and of that
+/// picture's `<img>` when it is one of Teams' own stickers (its `src` on Teams' sticker CDN).
+pub const STICKER_ITEMTYPE: &str = "http://schema.skype.com/Sticker";
 
 /// The largest number a list's `start` may give; a larger one, or one that isn't digits, is 1.
 pub const MAX_LIST_START: u32 = 1_000_000;
@@ -169,6 +176,8 @@ pub enum Node {
     Rule,
     /// A table (`table`).
     Table(Table),
+    /// A sticker ([`Sticker`]).
+    Sticker(Sticker),
 }
 
 impl Node {
@@ -421,6 +430,14 @@ impl Image {
     }
 }
 
+/// A sticker: its picture and the words that say what it shows (Teams' `Clippy says "Hello there"`, a caption).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sticker {
+    pub image: Image,
+    /// The `readonly` element's `aria-label` (else its `title`), else the picture's `alt`.
+    pub label: Option<String>,
+}
+
 /// A quote. A reply's names the message it quotes; a forwarded message's ([`Self::forward`]) and a plain
 /// `blockquote`'s name nothing.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -659,6 +676,8 @@ enum Container {
     Row,
     /// A table's cell, and whether it is a header's (`th`).
     Cell(bool),
+    /// A sticker's `readonly` element, with its label: its picture is made the sticker when it closes.
+    Sticker(Option<String>),
 }
 
 impl Container {
@@ -846,6 +865,10 @@ impl Builder {
             "img" => {
                 self.after_space = false;
                 match image(element) {
+                    Some(image) if image.item_type.as_deref() == Some(STICKER_ITEMTYPE) => {
+                        let label = image.alt.clone().filter(|alt| !alt.trim().is_empty());
+                        self.children().push(Node::Sticker(Sticker { image, label }));
+                    }
                     Some(image) => self.children().push(Node::Image(image)),
                     None => {
                         if let Some(alt) = element.attr("alt") {
@@ -902,6 +925,11 @@ impl Builder {
                     nodes: children,
                 }]],
             }),
+            Container::Sticker(label) => {
+                let children = with_sticker(children, label);
+                self.children().extend(children);
+                return;
+            }
             Container::Sender(mri) => {
                 let mut name = String::new();
                 plain_text(&children, &mut name);
@@ -985,6 +1013,11 @@ fn container(element: &Element) -> Option<Container> {
                 .unwrap_or(1),
         }),
         "table" => Some(Container::Table),
+        "readonly" if element.attr("itemtype") == Some(STICKER_ITEMTYPE) => {
+            Some(Container::Sticker(["aria-label", "title"].into_iter().find_map(
+                |name| attr(element, name).filter(|label| !label.trim().is_empty()),
+            )))
+        }
         "tr" => Some(Container::Row),
         "td" | "th" => Some(Container::Cell(name == "th")),
         "blockquote" => {
@@ -998,6 +1031,34 @@ fn container(element: &Element) -> Option<Container> {
         }
         _ => None,
     }
+}
+
+/// A sticker's `readonly` content: its first picture made the sticker, labelled `label` when it has one, the rest
+/// as it was (no picture: all of it as it was).
+fn with_sticker(children: Vec<Node>, label: Option<String>) -> Vec<Node> {
+    let mut label = label;
+    let mut made = false;
+    children
+        .into_iter()
+        .map(|child| match child {
+            Node::Sticker(sticker) if !made => {
+                made = true;
+                Node::Sticker(Sticker {
+                    label: label.take().or(sticker.label),
+                    ..sticker
+                })
+            }
+            Node::Image(image) if !made && !image.is_emoji() => {
+                made = true;
+                let alt = image.alt.clone().filter(|alt| !alt.trim().is_empty());
+                Node::Sticker(Sticker {
+                    label: label.take().or(alt),
+                    image,
+                })
+            }
+            other => other,
+        })
+        .collect()
 }
 
 /// An `ol`'s `start`: digits only, 0 to [`MAX_LIST_START`].
@@ -1176,6 +1237,7 @@ fn text_of(nodes: &[Node], out: &mut String, include_quotes: bool) {
                 }
             }
             Node::Image(image) => out.push_str(image.alt.as_deref().unwrap_or_default()),
+            Node::Sticker(sticker) => out.push_str(sticker.label.as_deref().unwrap_or_default()),
             Node::Quote(quote) if include_quotes || quote.forward => text_of(&quote.body, out, include_quotes),
             Node::Quote(_) => {}
             Node::Code(code) => {

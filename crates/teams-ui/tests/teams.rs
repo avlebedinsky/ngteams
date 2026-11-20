@@ -16,7 +16,7 @@ use common::{LAB_A, LAB_B, Rig, Written};
 use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext};
 use teams_core::{Action, EngineError, Event, NameFrom, Person, READING_TEAMS};
 use teams_store::{ChannelKind, Message, Team, TeamChannel};
-use teams_ui::chat_view::{Body, ChatView, MessageAction, MessageItem, Place};
+use teams_ui::chat_view::{Body, ChatView, Item, LAST_READ, MessageAction, MessageItem, NEW_MESSAGES, Place};
 use teams_ui::settings::{Settings, SettingsModel};
 use teams_ui::shell::{Main, Shell, ShellParts};
 use teams_ui::sidebar::Section;
@@ -383,9 +383,11 @@ fn a_channel_clicked_opens_with_its_posts_their_replies_summed_up_and_a_box_post
     }
     // the box writes to the channel, sends no typing and takes no file: a channel's files go to its team's site
     assert!(bounds(cx, "channel-read-only").is_none());
-    for absent in ["compose-attach", "compose-loop", "compose-apps"] {
+    for absent in ["compose-attach", "compose-loop"] {
         assert!(bounds(cx, absent).is_none(), "{absent} is drawn");
     }
+    // its "+" holds the hidden buttons and Customize toolbar, as every box's
+    assert!(bounds(cx, "compose-apps").is_some());
     assert!(bounds(cx, "replies-1760000400000").is_none());
     assert_nothing_written(&rig);
     assert_posts_traced(&written);
@@ -816,6 +818,105 @@ fn a_post_and_a_reply_take_the_accounts_reaction_in_the_channel_as_a_chats_messa
         .map(|(conversation, message, key)| (conversation.to_owned(), message.to_owned(), key.to_owned()));
     assert_eq!(reacted, expected);
     let _ = shell;
+}
+
+#[test]
+fn a_post_marked_unread_gets_last_read_over_it_and_new_beside_it_and_the_later_post() {
+    let rig = rig();
+    let (shell, cx) = opened(&rig, Arc::new(ViewTrace::off()));
+    let view = posts(&shell, cx);
+    assert!(bounds(cx, "new-messages").is_none());
+    hover(cx, POST);
+    click(cx, "message-more");
+    click(cx, "action-mark-unread");
+    let marked = rig.core.actions.lock().unwrap().last().cloned();
+    assert_eq!(
+        marked,
+        Some(Action::MarkUnread {
+            conversation: CHANNEL.to_owned(),
+            message_id: Some("1760000300200".to_owned()),
+        }),
+        "named by the thread's newest reply"
+    );
+    let before = cx.update(|_, cx| {
+        let items = view.read(cx).items();
+        let at = items.iter().position(|item| *item == Item::NewMessages)?;
+        match items.get(at + 1) {
+            Some(Item::Message(message)) => Some(message.id.clone()),
+            _ => None,
+        }
+    });
+    assert_eq!(before.as_deref(), Some(POST), "the divider over the post");
+    assert!(bounds(cx, "new-messages").is_some());
+    assert!(bounds(cx, &format!("new-messages-label {LAST_READ}")).is_some());
+    assert!(bounds(cx, &format!("new-messages-label {NEW_MESSAGES}")).is_none());
+    assert!(bounds(cx, &format!("post-new-{POST}")).is_some());
+    assert!(
+        bounds(cx, "post-new-1760000400000").is_some(),
+        "the later post is new too"
+    );
+    assert_eq!(cx.update(|_, cx| view.read(cx).new_posts()), [POST, "1760000400000"]);
+}
+
+#[test]
+fn a_post_after_last_read_that_continues_the_post_before_it_keeps_its_header_and_new() {
+    const GROUPED: &str = "1760000400050";
+    let rig = rig();
+    *rig.core.teams.lock().unwrap() = Some(teams());
+    let (mut messages, mut roots) = channel_store();
+    // the same sender as the second post, within GROUP_MS of it
+    messages.insert(0, message(GROUPED, LAB_C, "<p>third post</p>"));
+    roots.insert(0, (GROUPED.to_owned(), GROUPED.to_owned()));
+    rig.core.messages.lock().unwrap().insert(CHANNEL.to_owned(), messages);
+    rig.core.roots.lock().unwrap().insert(CHANNEL.to_owned(), roots);
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    click(cx, "channel-row-1");
+    let view = posts(&shell, cx);
+    let header = |id: &str, cx: &mut VisualTestContext| {
+        rows(&view, cx)
+            .into_iter()
+            .find(|item| item.id == id)
+            .map(|item| item.header)
+    };
+    assert_eq!(
+        header(GROUPED, cx),
+        Some(false),
+        "grouped with the second post before the mark"
+    );
+    assert!(bounds(cx, &format!("post-new-{GROUPED}")).is_none());
+
+    hover(cx, POST);
+    click(cx, "message-more");
+    click(cx, "action-mark-unread");
+
+    assert_eq!(header(GROUPED, cx), Some(true));
+    assert!(bounds(cx, &format!("post-new-{GROUPED}")).is_some());
+    assert_eq!(
+        cx.update(|_, cx| view.read(cx).new_posts()),
+        [POST, "1760000400000", GROUPED]
+    );
+}
+
+#[test]
+fn an_email_post_after_last_read_shows_new_in_its_card() {
+    let rig = rig();
+    let (shell, cx) = email_channel(&rig);
+    let view = posts(&shell, cx);
+    assert!(bounds(cx, &format!("post-new-{EMAIL}")).is_none());
+
+    hover(cx, POST);
+    click(cx, "message-more");
+    click(cx, "action-mark-unread");
+
+    assert_eq!(cx.update(|_, cx| view.read(cx).new_posts()), [POST, EMAIL]);
+    let [card, new] = bounds_in_one_frame(cx, [format!("bubble-{EMAIL}"), format!("post-new-{EMAIL}")]);
+    assert!(
+        card.left() <= new.left()
+            && new.right() <= card.right()
+            && card.top() <= new.top()
+            && new.bottom() <= card.bottom(),
+        "New {new:?} is in the email card {card:?}"
+    );
 }
 
 #[test]

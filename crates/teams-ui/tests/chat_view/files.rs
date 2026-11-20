@@ -3,20 +3,23 @@
 //! the card's width however narrow; a video's card holding its player, the video's thumbnail asked of the engine by
 //! its sharing link and shown alone in it until it plays (the controls only while the pointer is on it; the large
 //! video icon without a thumbnail), a document's card the large icon of its type; Teams' type icons and header
-//! buttons; a click on the name opens the sharing link, "More options" offers Teams' items (Share's "Copy link" too);
+//! buttons; a click on the name opens the sharing link, "More options" offers Teams' items; Share (the video card's
+//! button and the item) asks for "Share this file" for its file, and the read-only app offers no Share;
 //! an own server's file names its owner; nothing about the files is said to be unshown; an image with a preview is
 //! drawn as the picture alone, its card when the preview can't be had. The message is the synthetic fixture
 //! `tests/fixtures/chatsvc/files.json`: every name, link and id is made up.
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{Bounds, Entity, Modifiers, Pixels, VisualTestContext, px, size};
 use serde_json::Value;
 use teams_proto::chat::shared_files;
 use teams_store::Message;
-use teams_ui::chat_view::{ChatView, UnshownParts};
+use teams_ui::chat_view::{ChatView, ChatViewEvent, UnshownParts};
 
-use super::common::{LAB_B, Rig};
+use super::common::{LAB_A, LAB_B, Rig};
 use super::{NOON, chat_window, draw, items, message, rig_with, trace};
 
 const FIXTURE: &str = include_str!("../../../../tests/fixtures/chatsvc/files.json");
@@ -195,13 +198,28 @@ fn copied(cx: &mut VisualTestContext) -> Option<String> {
     cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
 }
 
-/// Opens "More options" of card `at` and walks down to its row `row` (counted from 1), then into Share's menu.
-fn into_share_of_more(cx: &mut VisualTestContext, at: usize, row: usize) {
-    click(cx, &format!("file-more-{ID}-{at}"));
-    let keys = vec!["down"; row].join(" ");
-    cx.simulate_keystrokes(&keys);
-    cx.simulate_keystrokes("right");
-    draw(cx);
+/// What `view` tells, from now on.
+fn told(view: &Entity<ChatView>, cx: &mut VisualTestContext) -> Rc<RefCell<Vec<ChatViewEvent>>> {
+    let told: Rc<RefCell<Vec<ChatViewEvent>>> = Rc::default();
+    let kept = Rc::clone(&told);
+    cx.update(|_, cx| {
+        cx.subscribe(view, move |_, event: &ChatViewEvent, _| {
+            kept.borrow_mut().push(event.clone());
+        })
+        .detach();
+    });
+    told
+}
+
+/// The files "Share this file" was asked for, by their sharing links.
+fn shares_asked(told: &Rc<RefCell<Vec<ChatViewEvent>>>) -> Vec<String> {
+    told.borrow()
+        .iter()
+        .filter_map(|event| match event {
+            ChatViewEvent::ShareFile(file) => file.share_url.clone(),
+            _ => None,
+        })
+        .collect()
 }
 
 #[test]
@@ -209,7 +227,8 @@ fn more_options_offer_what_teams_offers_on_a_video_and_on_a_document() {
     let rig = rig();
     let shares = share_urls();
     let (written_trace, _) = trace();
-    let (_view, cx) = chat_window(&rig, written_trace);
+    let (view, cx) = chat_window(&rig, written_trace);
+    let told = told(&view, cx);
     // a video's card: Download, Share, Copy link; no Open in browser, as Teams on the web has it
     click(cx, &format!("file-more-{ID}-0"));
     assert!(
@@ -220,32 +239,59 @@ fn more_options_offer_what_teams_offers_on_a_video_and_on_a_document() {
     assert!(bounds(cx, &format!("file-menu-copy-{ID}-0")).is_some());
     cx.simulate_keystrokes("escape");
     draw(cx);
-    // its second row is Share, whose menu copies the link
-    into_share_of_more(cx, 0, 2);
-    click(cx, &format!("file-menu-share-copy-{ID}-0"));
-    assert_eq!(copied(cx).as_deref(), Some(shares[0].as_str()));
-    // a document's card: Open in browser, Download, Share, Copy link; Share is its third row
-    cx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new()));
+    // its Share asks for "Share this file", not a menu of its own
+    click(cx, &format!("file-more-{ID}-0"));
+    click(cx, &format!("file-menu-share-{ID}-0"));
+    assert_eq!(shares_asked(&told), [shares[0].clone()]);
+    assert!(
+        bounds(cx, &format!("file-menu-share-copy-{ID}-0")).is_none(),
+        "no menu of Share's own"
+    );
+    // a document's card: Open in browser, Download, Share, Copy link
     click(cx, &format!("file-more-{ID}-1"));
-    for row in ["open", "download", "copy"] {
+    for row in ["open", "download", "share", "copy"] {
         assert!(bounds(cx, &format!("file-menu-{row}-{ID}-1")).is_some(), "{row}");
     }
-    cx.simulate_keystrokes("escape");
-    draw(cx);
-    into_share_of_more(cx, 1, 3);
-    click(cx, &format!("file-menu-share-copy-{ID}-1"));
-    assert_eq!(copied(cx).as_deref(), Some(shares[1].as_str()));
+    click(cx, &format!("file-menu-share-{ID}-1"));
+    assert_eq!(shares_asked(&told), [shares[0].clone(), shares[1].clone()]);
 }
 
 #[test]
-fn share_on_a_videos_card_copies_its_link() {
+fn share_on_a_videos_card_asks_for_share_this_file() {
     let rig = rig();
     let shares = share_urls();
     let (written_trace, _) = trace();
-    let (_view, cx) = chat_window(&rig, written_trace);
+    let (view, cx) = chat_window(&rig, written_trace);
+    let told = told(&view, cx);
     click(cx, &format!("file-share-{ID}-0"));
-    click(cx, &format!("file-menu-share-copy-{ID}-0"));
-    assert_eq!(copied(cx).as_deref(), Some(shares[0].as_str()));
+    assert_eq!(shares_asked(&told), [shares[0].clone()]);
+    let asked = told.borrow().clone();
+    let [ChatViewEvent::ShareFile(file)] = &asked[..] else {
+        panic!("Share asked once: {asked:?}");
+    };
+    assert!(file.entry.is_some(), "the file keeps its entry, which the share posts");
+    assert!(
+        bounds(cx, &format!("file-menu-share-copy-{ID}-0")).is_none(),
+        "Share opens no menu of its own"
+    );
+}
+
+#[test]
+fn the_read_only_app_offers_no_share_on_a_file() {
+    let rig = rig();
+    *rig.core.read_only.lock().unwrap() = true;
+    let (written_trace, _) = trace();
+    let (_view, cx) = chat_window(&rig, written_trace);
+    assert!(bounds(cx, &format!("file-share-{ID}-0")).is_none(), "no Share button");
+    click(cx, &format!("file-more-{ID}-0"));
+    assert!(
+        bounds(cx, &format!("file-menu-copy-{ID}-0")).is_some(),
+        "Copy link stays"
+    );
+    assert!(
+        bounds(cx, &format!("file-menu-share-{ID}-0")).is_none(),
+        "no Share item"
+    );
 }
 
 #[test]
@@ -320,14 +366,26 @@ const OWN_SITE: &str = "https://chat.example:8443/sp/personal/000000000000400080
 
 /// A message from b of one document in an own server's drive: `owner` the id of the drive's account (in its path).
 fn own_drive_message(owner: &str) -> Message {
+    own_drive_message_from(LAB_B, owner)
+}
+
+/// A message from `sender` of one document in an own server's drive: `owner` as [`own_drive_message`] takes it.
+fn own_drive_message_from(sender: &str, owner: &str) -> Message {
     let site = OWN_SITE.replace("0000000000004000800000000000000b", owner);
     let share = format!("{site}Documents/Microsoft%20Teams%20Chat%20Files/made-up%20plan.pdf");
     let entry = serde_json::json!({"@type": teams_proto::chat::FILE_TYPE, "fileName": "made-up plan.pdf",
         "fileType": "pdf", "state": "active", "objectUrl": share,
         "fileInfo": {"shareUrl": share, "fileUrl": share, "siteUrl": site}, "baseUrl": site});
-    let mut stored = message(ID, LAB_B, "", NOON);
+    let mut stored = message(ID, sender, "", NOON);
     stored.properties = Some(serde_json::json!({"files": Value::Array(vec![entry]).to_string()}).to_string());
     stored
+}
+
+#[test]
+fn an_own_servers_file_shared_on_names_its_owner_who_sent_nothing_in_the_chat() {
+    let (view, cx) = grid_chat(own_drive_message_from(LAB_A, "0000000000004000800000000000000b"));
+    let item = items(&view, cx).remove(0);
+    assert_eq!(item.files[0].location.as_deref(), Some("personal > Lab Bee"));
 }
 
 #[test]

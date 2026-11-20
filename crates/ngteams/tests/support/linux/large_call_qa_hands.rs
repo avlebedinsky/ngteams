@@ -295,12 +295,21 @@ fn meeting(rig: &mut Rig<'_>) -> SandboxResult {
             .count()
     };
     let before = opened(rig.app.trace.catch_up());
-    rig.window_id = None;
+    let main_window = rig
+        .compositor_windows()?
+        .iter()
+        .find(|window| window["title"] == "ngteams")
+        .and_then(|window| window["id"].as_u64())
+        .ok_or("the main window is not mapped before the meeting")?;
+    rig.expect_call_window()?;
     rig.sandbox.bus().invoke_action(banner.id, "join")?;
     rig.wait_call("connected in the Meet now", |row| row.state == "connected")?;
     rig.app
         .trace
         .wait_until("the call window opened", |seen| opened(seen) > before)?;
+    // The main window can still have focus when the opened trace arrives.
+    rig.sandbox
+        .niri_msg(&["action", "focus-window", "--id", &main_window.to_string()])?;
     rig.wait_window(|size| size.0 == i32_of(SCREEN.0))?;
     rig.call.clone_from(&call);
     rig.people.clear();

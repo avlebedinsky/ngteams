@@ -117,7 +117,17 @@ impl Node {
 
     pub fn cli(&self, args: &[&str], input: &str) -> String {
         let output = self.cli_output(args, input);
-        assert!(output.status.success(), "CLI {args:?} failed (output withheld)");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let shown = if stderr.contains("PRIVATE KEY") {
+            "(withheld: it names a private key)"
+        } else {
+            stderr.trim()
+        };
+        assert!(
+            output.status.success(),
+            "CLI {args:?} failed with {}; its error output (its standard output withheld): {shown}",
+            output.status
+        );
         let stdout = String::from_utf8(output.stdout).unwrap();
         assert!(!stdout.contains("PRIVATE KEY"));
         stdout

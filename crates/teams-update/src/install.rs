@@ -104,6 +104,7 @@ impl Prepared {
                 ))
             })?,
             Format::Deb | Format::Rpm | Format::Pacman => self.install_package()?,
+            Format::Nix(_) => return Err(crate::error(crate::NIX_UPDATES)),
             Format::WindowsSetup => {
                 restart = Restart {
                     program: self.candidate.clone(),

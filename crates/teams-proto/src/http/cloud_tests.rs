@@ -162,7 +162,13 @@ fn calling_links_are_bound_to_cloud_and_prefix() {
 fn only_public_cdns_may_leave_own_origin_without_credentials() {
     let transport = transport();
     let token = Secret::new("synthetic-token");
-    for host in [EMOTICONS_HOST, GIPHY_HOST, APP_PICTURES_HOST, STATIC_APP_PICTURES_HOST] {
+    for host in [
+        EMOTICONS_HOST,
+        GIPHY_HOST,
+        STICKERS_HOST,
+        APP_PICTURES_HOST,
+        STATIC_APP_PICTURES_HOST,
+    ] {
         let url = Url::parse(&format!("https://{host}/picture")).unwrap();
         assert!(transport.destination_allowed(&url, Auth::None));
         assert!(!transport.destination_allowed(&url, Auth::Bearer(&token)));

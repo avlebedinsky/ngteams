@@ -30,16 +30,8 @@ impl UserApps {
             return Vec::new();
         };
         let value = answer.get("value").unwrap_or(&answer);
-        let entitlements: Vec<&Value> = value
-            .get("userEntitlements")
-            .and_then(Value::as_object)
-            .into_iter()
-            .flat_map(serde_json::Map::values)
-            .filter_map(Value::as_array)
-            .flatten()
-            .collect();
         let definitions = value.get("definitions");
-        listed(entitlements, &["Installed", "PreConsented"], |id| {
+        listed(entitlement_values(value), &["Installed", "PreConsented"], |id| {
             definitions.and_then(|definitions| definitions.get(id))
         })
     }
@@ -125,6 +117,26 @@ impl Read for ChatApps {
     fn endpoint(&self) -> Endpoint {
         Endpoint::new(["beta", "chats", self.chat.as_str(), "apps", "chatentitlements"])
     }
+}
+
+/// The account's entitlements in an answer's `value` (`userEntitlements`), each as it is, in order.
+fn entitlement_values(value: &Value) -> Vec<&Value> {
+    value
+        .get("userEntitlements")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(serde_json::Map::values)
+        .filter_map(Value::as_array)
+        .flatten()
+        .collect()
+}
+
+/// The account's entitlements in an answer's `value` (`userEntitlements`), each its state and app id, in order.
+pub(crate) fn entitlements_in(value: &Value) -> Vec<(&str, &str)> {
+    entitlement_values(value)
+        .into_iter()
+        .filter_map(|entitlement| Some((entitlement.get("state")?.as_str()?, entitlement.get("id")?.as_str()?)))
+        .collect()
 }
 
 /// The apps among `entitlements` in one of `states`, each with the definition `definition` finds for its id, by name;
@@ -289,7 +301,7 @@ impl AppDefinition {
         self.field(key).and_then(Value::as_str).filter(|text| !text.is_empty())
     }
 
-    fn listed(&self, key: &str) -> impl Iterator<Item = &Value> {
+    pub(crate) fn listed(&self, key: &str) -> impl Iterator<Item = &Value> {
         self.field(key).and_then(Value::as_array).into_iter().flatten()
     }
 

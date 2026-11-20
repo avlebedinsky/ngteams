@@ -32,6 +32,9 @@ impl Source {
         release: &Release,
         mut progress: impl FnMut(u64, u64),
     ) -> Result<Prepared, Error> {
+        if installation.format.nix().is_some() {
+            return Err(error(crate::NIX_UPDATES));
+        }
         installation.validate()?;
         if let Some(installed) = installation.installed_version()
             && installed >= release.version
@@ -163,6 +166,7 @@ pub(crate) fn ready(format: Format, asset: &Path, work: &Path, version: Version)
         )),
         // kept as it is: its checksum was verified, and the installer checks the files it holds as it writes them
         Format::Deb | Format::Rpm | Format::Pacman | Format::WindowsSetup => Ok(asset.to_path_buf()),
+        Format::Nix(_) => Err(error(crate::NIX_UPDATES)),
     }
 }
 

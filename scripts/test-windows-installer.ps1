@@ -2,8 +2,8 @@
 # the files, the Start menu shortcut, the Add/Remove programs entry, the msteams: handler offered under Default apps,
 # and that an uninstall keeps the user's data. Also: Setup refuses a folder holding a previous-version it didn't make,
 # and recovers an upgrade cut short at each stage, or a removal of the previous version that failed on a held file
-# (set up by hand), without losing the previous version or the new one. Never starts ngteams (only -UpdateRelaunch
-# does, see below).
+# (set up by hand), without losing the previous version or the new one. Starts ngteams only as Setup's --prepare run,
+# which opens no window or account and sends nothing (only -UpdateRelaunch starts the app, see below).
 #
 # CI: scripts/test-windows-installer.ps1 -Installer dist/ngteams-<v>-windows-x86_64-setup.exe -Package <unzipped>
 # Agents: the same in win11, on installers packaged from normal lab binaries, under a throwaway Windows user.
@@ -100,9 +100,10 @@ function Get-LogTime([string]$Log, [string]$Pattern) {
 }
 
 # Whether Setup's log shows it starting the installed ngteams.exe: a [Run] entry, or the fallback after a failure.
+# The entry that runs it with --prepare (and exits) is not a start.
 function Test-Restarted([string]$Log) {
     $text = Get-Content -Raw -LiteralPath $Log
-    $run = "-- Run entry --(\r?\n.*){1,3}\r?\n.*Filename: $([regex]::Escape($exe))\r?\n"
+    $run = "-- Run entry --(\r?\n.*){1,3}\r?\n.*Filename: $([regex]::Escape($exe))\r?\n(?!.*Parameters: --prepare)"
     return ($text -match $run) -or ($text -match "Starting ngteams again: $([regex]::Escape($exe))")
 }
 

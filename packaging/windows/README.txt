@@ -16,7 +16,9 @@ Install or update (ordinary user, no administrator rights):
 Setup validates the shipped files and installs into
 %LOCALAPPDATA%\Programs\ngteams\<version>. It creates a Start shortcut and offers
 ngteams as a handler for MSTeams links in Settings > Apps > Default apps. Windows
-keeps your current default until you change it. Setup never starts the app.
+keeps your current default until you change it. Setup runs the app once
+with --prepare: with no window or account, it lets Windows check the new files
+and lists the media plugins, so that the first start is fast.
 On first normal launch the app completes its notification/COM shell registration.
 If Microsoft WebView2 Runtime is missing, setup downloads Microsoft's Evergreen
 bootstrapper, verifies its Microsoft signature, and installs it for your user.

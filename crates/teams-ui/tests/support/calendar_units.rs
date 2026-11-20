@@ -44,6 +44,7 @@ fn event(id: &str, start: EventTime, end: EventTime) -> Shown {
         attendees: Vec::new(),
         series_master_id: None,
         channel_meeting: None,
+        reminder: teams_core::EventReminder::Unknown,
     }))
     .unwrap()
 }

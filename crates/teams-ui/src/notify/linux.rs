@@ -83,6 +83,7 @@ impl NotificationServer for BusNotifications {
         };
         let call_notice = notice.kind == NoticeKind::Call;
         let meeting_notice = notice.kind == NoticeKind::Meeting;
+        let reminder_notice = notice.kind == NoticeKind::Reminder;
         let channel = teams_proto::is_team_thread_id(&notice.conversation);
         let image = notice.picture.as_ref().and_then(image_data);
         Box::pin(async move {
@@ -103,6 +104,9 @@ impl NotificationServer for BusNotifications {
                 (actions, hints, 0_i32)
             } else if meeting_notice {
                 (meeting_actions(channel), meeting_hints(&desktop_entry), -1_i32)
+            } else if reminder_notice {
+                // shown until it is acted on or closed (the meeting moved, ended or was joined)
+                (reminder_actions(), meeting_hints(&desktop_entry), 0_i32)
             } else {
                 let hints: HashMap<&str, Value<'_>> = HashMap::from([
                     ("category", Value::from("im.received")),
@@ -140,13 +144,28 @@ impl NotificationServer for BusNotifications {
     }
 }
 
-/// A channel's meeting offers only Join; the unlabeled default keeps its body opening the channel.
+/// Join and Message (the chat, as Teams labels it); a channel's meeting offers only Join, the unlabeled default keeping
+/// its body opening the channel.
 fn meeting_actions(channel: bool) -> Vec<&'static str> {
     vec![
         DEFAULT_ACTION,
-        if channel { "" } else { "Open chat" },
+        if channel { "" } else { "Message" },
         JOIN_ACTION,
         "Join",
+    ]
+}
+
+/// A meeting reminder's: Join, Snooze (for five minutes) and Dismiss; its body opens the meeting's chat.
+fn reminder_actions() -> Vec<&'static str> {
+    vec![
+        DEFAULT_ACTION,
+        "",
+        JOIN_ACTION,
+        "Join",
+        SNOOZE_ACTION,
+        "Snooze",
+        DISMISS_ACTION,
+        "Dismiss",
     ]
 }
 

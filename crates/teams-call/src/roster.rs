@@ -97,6 +97,14 @@ impl Roster {
             .unwrap_or_default()
     }
 
+    /// The source id of the account's own main video, as the entries kept say now; `me` is the account.
+    pub(crate) fn own_video_source(&self, me: &Mri) -> Option<i64> {
+        self.entries
+            .iter()
+            .find(|entry| &entry.mri == me && entry.active)
+            .and_then(|entry| entry.video_source)
+    }
+
     /// Who was last told waiting in the lobby, the account aside.
     pub(crate) fn waiting(&self) -> &[Participant] {
         &self.told_waiting
