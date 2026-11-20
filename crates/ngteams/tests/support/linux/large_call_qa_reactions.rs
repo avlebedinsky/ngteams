@@ -238,12 +238,12 @@ fn on_tile(looks: &[Look], playing: bool, case: &str) -> SandboxResult {
 }
 
 /// The pairs of looks one after the other that both showed a reaction on a tile at its full opacity, not fading in
-/// or out: the app's fade-in ends at about 1.34 s and its fade-out starts at about 3.46 s. A shot is taken soon after
-/// its look starts, so the first look starts at 1.4 s or later and the second at 3.3 s or earlier.
+/// or out: the app's fade-in ends at about 1.34 s and its fade-out starts at about 3.46 s. The first look starts at
+/// 1.4 s or later, and the shot of the second look ends at 3.4 s or earlier (a busy machine's shot can take long).
 fn steady_pairs(looks: &[Look]) -> impl Iterator<Item = &[Look]> {
     looks.windows(2).filter(|pair| {
         pair[0].at >= Duration::from_millis(1_400)
-            && pair[1].at <= Duration::from_millis(3_300)
+            && pair[1].until <= Duration::from_millis(3_400)
             && pair[0].from_start >= 400
             && pair[1].from_start >= 400
     })
@@ -351,24 +351,29 @@ impl Float {
     }
 }
 
+/// The pixel of `shot` at `x`, `y` (`None` out of the shot), and whether it is a colour: its channels differ by more
+/// than 80 (black, white and grey never do).
+fn colourful(shot: &RgbImage, x: i32, y: i32) -> Option<([u8; 3], bool)> {
+    let (x, y) = (u32::try_from(x).ok()?, u32::try_from(y).ok()?);
+    (x < shot.width() && y < shot.height()).then(|| {
+        let p = shot.get_pixel(x, y).0;
+        (p, p.iter().max().unwrap_or(&0) - p.iter().min().unwrap_or(&0) > 80)
+    })
+}
+
 /// Counts in `looks` only the changes from `before` to a colour, as the float's frames are and the mock's share
 /// (black, white and grey) never is: its moves under the float don't count.
 fn coloured_changes(before: &RgbImage, looks: &mut [Look], area: Rect) {
-    let coloured = |shot: &RgbImage, x: i32, y: i32| {
-        let (Ok(x), Ok(y)) = (u32::try_from(x), u32::try_from(y)) else {
-            return None;
-        };
-        (x < shot.width() && y < shot.height()).then(|| {
-            let p = shot.get_pixel(x, y).0;
-            (p, p.iter().max().unwrap_or(&0) - p.iter().min().unwrap_or(&0) > 80)
-        })
-    };
     let mut last = before.clone();
     for look in looks.iter_mut() {
         let changes = |from: &RgbImage| {
-            pixels::blobs(area, |x, y| match (coloured(from, x, y), coloured(&look.shot, x, y)) {
-                (Some((a, _)), Some((b, true))) => a.iter().zip(b).map(|(a, b)| a.abs_diff(b)).max().unwrap_or(0) > 48,
-                _ => false,
+            pixels::blobs(area, |x, y| {
+                match (colourful(from, x, y), colourful(&look.shot, x, y)) {
+                    (Some((a, _)), Some((b, true))) => {
+                        a.iter().zip(b).map(|(a, b)| a.abs_diff(b)).max().unwrap_or(0) > 48
+                    }
+                    _ => false,
+                }
             })
         };
         let from_start = changes(before);
@@ -601,16 +606,7 @@ fn own_reaction(rig: &mut Rig<'_>) -> SandboxResult {
         .ok_or("React's click opened no menu")?;
     save_shot(rig, &open, "qa666-react-menu")?;
     // its first picture (Like): the leftmost colourful blob in the menu
-    let colourful = |x: i32, y: i32| {
-        let (Ok(x), Ok(y)) = (u32::try_from(x), u32::try_from(y)) else {
-            return false;
-        };
-        x < open.width() && y < open.height() && {
-            let p = open.get_pixel(x, y).0;
-            p.iter().max().unwrap_or(&0) - p.iter().min().unwrap_or(&0) > 80
-        }
-    };
-    let mut pictures: Vec<Rect> = pixels::blobs(menu, colourful)
+    let mut pictures: Vec<Rect> = pixels::blobs(menu, |x, y| colourful(&open, x, y).is_some_and(|(_, colour)| colour))
         .into_iter()
         .map(|blob| blob.bounds)
         .filter(|bounds| bounds.w >= 8 && bounds.h >= 8)

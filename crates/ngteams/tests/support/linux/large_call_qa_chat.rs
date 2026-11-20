@@ -30,8 +30,8 @@ use super::pixels::{self, Rect};
 use super::qa_order::{qa_call, speak};
 use super::{Rig, SETTLE, TOOLBAR_BAND, View, say};
 
-/// The width of the call's side pane (320 px) and the room around it, at the window's right.
-const PANE_BESIDE: i32 = 340;
+/// The width of the call's Chat pane (360 px) and the room around it, at the window's right.
+const PANE_BESIDE: i32 = 380;
 /// The bubble's size, as Teams draws it.
 const BUBBLE: (i32, i32) = (320, 70);
 
