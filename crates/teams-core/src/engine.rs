@@ -151,7 +151,9 @@ use crate::calling::{
 };
 use crate::emoticons::{Animations, Strip};
 use crate::file_content::{FileContents, FileStream};
-use crate::outbox::{Command, Outbox, OutboxError, Sent, Transient, TransientSent, create_chat, enqueue, now_ms};
+use crate::outbox::{
+    Command, Outbox, OutboxError, Sent, Transient, TransientSent, create_chat, enqueue, now_ms, replace_older_marks,
+};
 use crate::pictures::{Disk, PictureBytes, Pictures};
 use crate::presence::{Availability, PRESENCE_POLL, PRESENCE_POLL_SUBSCRIBED, PresenceDone, Presences};
 use crate::profiles::{PROFILE_RETRY, Person, Profiles};
@@ -3235,11 +3237,14 @@ where
         self.queue_mark(&command, 0)
     }
 
-    /// Queues a mark's row and keeps its `arrival` (0: no mark) in the store as of the row's time; a read-only engine
-    /// keeps nothing, as its row is refused.
+    /// Queues a mark's row in place of the chat's older pending marks and keeps its `arrival` (0: no mark) in the
+    /// store as of the row's time; a read-only engine keeps nothing, as its row is refused.
     fn queue_mark(&mut self, command: &Command, arrival: i64) -> Result<OutboxEntry, EngineError> {
         let row = enqueue(&mut self.store, command)?;
         self.emit(Event::Queued(row.clone()));
+        for replaced in replace_older_marks(&mut self.store, &row)? {
+            self.emit(Event::Outbox(replaced));
+        }
         if !self.outbox.is_read_only()
             && let Some(conversation) = command.conversation()
         {

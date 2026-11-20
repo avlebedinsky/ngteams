@@ -214,8 +214,9 @@ in a lab team's General channel. Each write is the account's own property: nobod
   the newest of the post's thread (its newest reply), not the post. The read horizon (`consumptionhorizon`) doesn't
   move.
 - **At once**: the chat list's row is bold with its dot, the rail's count of unread chats goes up by one, and a "Last
-  read" line stands before the marked message, its sender's name and time shown again over it. A channel's post shows
-  "New". The chat stays open and stays unread: a click in it sends nothing.
+  read" line stands before the marked message, its sender's name and time shown again over it. A channel's post gets
+  the "Last read" line over it and "New" at its header's right end. The chat stays open and stays unread: a click in it
+  sends nothing.
 - **The chat list's row** has "More chat options" ("..." on hover). Its menu starts with "Mark as unread" (glasses with
   a slash) on a read chat and "Mark as read" (glasses) on an unread one, then Move to section, Mute, Notify when
   available, Manage apps, Set workflows, Copy link, Remove chat history and Hide. "Mark as unread" there puts the
@@ -225,7 +226,10 @@ in a lab team's General channel. Each write is the account's own property: nobod
   with the horizon at the newest message already, no `consumptionhorizon`. The line stayed where the mark was.
 - The native client keeps the bookmark's arrival in the store and counts a marked chat's messages from others after it
   (at least 1) unless it marked all read later. It ends the mark when the chat is shown after it opened marked, or shown
-  again after it was marked there, and sends no read receipt while the chat stays shown after a mark made there.
+  again after it was marked there, and sends no read receipt while the chat stays shown after a mark made there. A
+  mark (or its end) that gets no answer (the network down, or a 5xx) stays queued and goes out once the service answers:
+  set again, the bookmark does no harm. A newer mark of the chat replaces an older one still queued, so only the newest
+  goes out.
 - Not seen: the push delivery of a bookmark to the account's other endpoints (the own server sends a
   `ConversationUpdate` naming `consumptionHorizonBookmark`; the native client stores a bookmark from any
   `ConversationUpdate`), and a channel row's or a thread's own mark.

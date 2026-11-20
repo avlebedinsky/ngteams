@@ -20,8 +20,8 @@ use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_core::{
     CHECK_RETRY_WAIT, Clock, Command, ConversationSync, MAX_ATTEMPTS, MAX_FAILED_CHECKS, MAX_TRANSIENT_WAIT, Outbox,
-    OutboxError, Sent, SyncError, Transient, TransientSent, create_chat, enqueue, new_client_message_id,
-    outcome_unknown,
+    OutboxError, RESEND_MAX_WAIT, RESEND_WAIT, Sent, SyncError, Transient, TransientSent, create_chat, enqueue,
+    new_client_message_id, outcome_unknown, replace_older_marks,
 };
 use teams_proto::Mri;
 use teams_proto::chat::MessageText;
@@ -86,6 +86,8 @@ enum Fault {
     LoseAnswer,
     /// The post times out before it reaches the service.
     DropRequest,
+    /// The token request for the write gets no answer: nothing goes out.
+    NoTokenAnswer,
 }
 
 /// The HTTP transport with scripted faults on its writes.
@@ -114,8 +116,19 @@ impl Transport for Flaky {
                 Err(HttpError::Failed(Failure::Timeout))
             }
             Some(Fault::DropRequest) => Err(HttpError::Failed(Failure::Timeout)),
+            Some(Fault::NoTokenAnswer) => Err(HttpError::Credentials(TokenError::Http(unanswered().await))),
         }
     }
+}
+
+/// A request error as a network that is down gives it: a connection to a closed local port.
+async fn unanswered() -> reqwest::Error {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    reqwest::get(format!("http://127.0.0.1:{port}/")).await.unwrap_err()
 }
 
 /// The chat service's sync as the outbox's check sees it: each call stores, as our messages, the `clientmessageid`s
@@ -1885,4 +1898,146 @@ async fn a_stored_file_for_another_cloud_is_refused_before_delivery() {
         Some("a file is stored outside this account's cloud")
     );
     assert!(setup.server.received_requests().await.unwrap().is_empty());
+}
+
+// --- an unread mark waits for the network ---
+
+fn mark(message_id: Option<&str>) -> Command {
+    Command::UnreadMark {
+        conversation: CHAT.to_owned(),
+        message_id: message_id.map(str::to_owned),
+        client_message_id: message_id.map(|_| "1111111111111111111".to_owned()),
+    }
+}
+
+/// The bookmarks the service received, in order.
+async fn bookmarks(setup: &Setup) -> Vec<String> {
+    requests_at(setup, PROPERTIES)
+        .await
+        .into_iter()
+        .filter_map(|(_, body)| body["consumptionHorizonBookmark"].as_str().map(str::to_owned))
+        .collect()
+}
+
+#[tokio::test]
+async fn an_unread_mark_stays_pending_while_the_network_is_down_and_goes_out_when_it_is_back() {
+    let setup = setup().await;
+    answered(&setup, "PUT", PROPERTIES).await;
+    let mut store = setup.open_store();
+    let row = enqueue(&mut store, &mark(Some("1760000000005"))).unwrap();
+    let mut waits = Vec::new();
+    for attempt in 0..MAX_ATTEMPTS + 2 {
+        setup.fault(if attempt % 2 == 0 {
+            Fault::DropRequest
+        } else {
+            Fault::NoTokenAnswer
+        });
+        let waiting = send(&setup, &mut store, &row).await;
+        assert_eq!(waiting.state, OutboxState::Pending, "{waiting:?}");
+        assert!(!outcome_unknown(&waiting), "{waiting:?}");
+        let not_before = waiting.not_before.unwrap();
+        waits.push(not_before - setup.now());
+        assert_eq!(send(&setup, &mut store, &row).await, waiting, "not due before its wait");
+        setup.clock.store(not_before, Ordering::SeqCst);
+    }
+    assert_eq!(
+        waits,
+        [1, 2, 4, 6, 6, 6, 6].map(|steps| millis(RESEND_WAIT) * steps),
+        "doubled up to {RESEND_MAX_WAIT:?}"
+    );
+    assert!(bookmarks(&setup).await.is_empty(), "nothing reached the service");
+
+    let sent = send(&setup, &mut store, &row).await;
+
+    assert_eq!(sent.state, OutboxState::Sent, "{sent:?}");
+    let sent = bookmarks(&setup).await;
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(sent[0].starts_with("1760000000004;"), "{sent:?}");
+    assert!(setup.sync.calls().is_empty(), "a mark isn't looked for");
+}
+
+#[tokio::test]
+async fn an_unread_mark_answered_with_a_5xx_is_tried_again_later() {
+    let setup = setup().await;
+    Mock::given(method("PUT"))
+        .and(path(PROPERTIES))
+        .respond_with(ResponseTemplate::new(502))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&setup.server)
+        .await;
+    answered(&setup, "PUT", PROPERTIES).await;
+    let mut store = setup.open_store();
+    let row = enqueue(&mut store, &mark(None)).unwrap();
+
+    let waiting = send(&setup, &mut store, &row).await;
+    assert_eq!(waiting.state, OutboxState::Pending, "{waiting:?}");
+    assert_eq!(waiting.not_before, Some(START + millis(RESEND_WAIT)));
+    setup.advance(RESEND_WAIT);
+    let sent = send(&setup, &mut store, &row).await;
+
+    assert_eq!(sent.state, OutboxState::Sent, "{sent:?}");
+    assert_eq!(bookmarks(&setup).await.len(), 2);
+}
+
+#[tokio::test]
+async fn an_unread_mark_the_service_refuses_is_failed() {
+    let setup = setup().await;
+    Mock::given(method("PUT"))
+        .and(path(PROPERTIES))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&setup.server)
+        .await;
+    let mut store = setup.open_store();
+    let row = enqueue(&mut store, &mark(Some("1760000000005"))).unwrap();
+
+    let failed = send(&setup, &mut store, &row).await;
+
+    assert_eq!(failed.state, OutboxState::Failed, "{failed:?}");
+    assert_eq!(failed.last_error.as_deref(), Some("HTTP 403"));
+}
+
+#[tokio::test]
+async fn a_newer_unread_mark_of_a_chat_replaces_the_older_pending_ones_and_only_it_goes_out() {
+    let setup = setup().await;
+    answered(&setup, "PUT", PROPERTIES).await;
+    let mut store = setup.open_store();
+    setup.fault(Fault::DropRequest);
+    let first = enqueue(&mut store, &mark(Some("1760000000005"))).unwrap();
+    let first = send(&setup, &mut store, &first).await;
+    assert_eq!(first.state, OutboxState::Pending);
+    let receipt = enqueue(&mut store, &read_up_to("1760000000006")).unwrap();
+    let elsewhere = enqueue(
+        &mut store,
+        &Command::UnreadMark {
+            conversation: "19:another-chat@thread.v2".to_owned(),
+            message_id: None,
+            client_message_id: None,
+        },
+    )
+    .unwrap();
+    let second = enqueue(&mut store, &mark(Some("1760000000007"))).unwrap();
+    let end = enqueue(&mut store, &mark(None)).unwrap();
+
+    assert!(
+        replace_older_marks(&mut store, &receipt).unwrap().is_empty(),
+        "not a mark"
+    );
+    let replaced = replace_older_marks(&mut store, &end).unwrap();
+
+    assert_eq!(
+        replaced.iter().map(|row| row.id).collect::<Vec<_>>(),
+        [first.id, second.id]
+    );
+    for row in &replaced {
+        assert_eq!(row.state, OutboxState::Failed, "{row:?}");
+        assert!(!outcome_unknown(row), "{row:?}");
+        assert!(row.last_error.as_deref().unwrap().contains("newer mark"), "{row:?}");
+    }
+    let pending: Vec<i64> = store.outbox_due(i64::MAX).unwrap().iter().map(|row| row.id).collect();
+    assert_eq!(pending, [receipt.id, elsewhere.id, end.id]);
+    assert!(
+        replace_older_marks(&mut store, &end).unwrap().is_empty(),
+        "nothing older pending"
+    );
 }

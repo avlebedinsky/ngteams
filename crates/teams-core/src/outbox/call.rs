@@ -145,7 +145,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         match self.deliver(write).await {
             Tried::Answered(answer) => CallTried::Answered(answer),
             Tried::Denied(denied) => CallTried::Denied(denied.clone()),
-            Tried::NotSent(why) => CallTried::NotSent(why),
+            Tried::NotSent(why) | Tried::Offline(why) => CallTried::NotSent(why),
             Tried::Throttled { wait, .. } => CallTried::Throttled(wait),
             Tried::Uncertain(why) => CallTried::Uncertain(why),
         }
@@ -160,7 +160,7 @@ fn routed(sent: Option<Result<Response, HttpError>>, kind: &str) -> CallTried {
         Some(Err(error)) => match super::from_transport(error) {
             Tried::Answered(answer) => CallTried::Answered(answer),
             Tried::Denied(reason) => CallTried::Denied(reason),
-            Tried::NotSent(reason) => CallTried::NotSent(reason),
+            Tried::NotSent(reason) | Tried::Offline(reason) => CallTried::NotSent(reason),
             Tried::Uncertain(reason) => CallTried::Uncertain(reason),
             Tried::Throttled { wait, .. } => CallTried::Throttled(wait),
         },

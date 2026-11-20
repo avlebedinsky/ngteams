@@ -492,6 +492,28 @@ impl Store {
         Ok(updated)
     }
 
+    /// Fails one of this run's pending rows without an attempt, for `error`: a newer row of the caller's makes it out
+    /// of date (a newer unread mark of the same chat), so it is never sent.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::UnknownOutboxEntry`] for no such row, [`StoreError::OutboxNotSendable`] for a row that isn't
+    /// pending or belongs to another run, [`StoreError::Sqlite`] when the write fails.
+    pub fn outbox_replaced(&mut self, id: i64, error: &str) -> Result<OutboxEntry, StoreError> {
+        let tx = self.conn.transaction()?;
+        let row = entry(&tx, id)?;
+        if row.state != OutboxState::Pending || row.run_id != self.run_id {
+            return Err(StoreError::OutboxNotSendable { id, state: row.state });
+        }
+        tx.execute(
+            "UPDATE outbox SET state = ?2, not_before = NULL, last_error = ?3, updated_at = ?4 WHERE id = ?1",
+            params![id, OutboxState::Failed, error, now_ms()],
+        )?;
+        let updated = entry(&tx, id)?;
+        tx.commit()?;
+        Ok(updated)
+    }
+
     /// Records that a read met an entry it couldn't read at all carrying the row's `clientmessageid`, at `at`
     /// (milliseconds): its message may have arrived ([`OutboxEntry::may_have_arrived`]). The first sighting's time is
     /// kept. A row of any run is recorded, whatever its state; one already `sent` stays as it is.

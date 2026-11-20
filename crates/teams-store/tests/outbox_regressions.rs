@@ -592,3 +592,36 @@ fn a_file_in_place_of_the_run_directory_is_preserved_and_no_store_is_created() {
     assert_eq!(fs::read(&runs).expect("unchanged file"), b"synthetic unrelated file");
     assert!(!path.exists());
 }
+
+#[test]
+fn a_replaced_row_is_failed_without_an_attempt_and_only_while_it_is_this_runs_pending_row() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("store.sqlite");
+    let mut owner = Store::open(&path).expect("owner");
+    let pending = owner.enqueue(&command()).expect("enqueue");
+    let mut observer = Store::open(&path).expect("second run");
+
+    let error = observer
+        .outbox_replaced(pending.id, "synthetic newer row")
+        .expect_err("not this run's command");
+    assert!(matches!(error, StoreError::OutboxNotSendable { id, state: OutboxState::Pending } if id == pending.id));
+
+    let replaced = owner
+        .outbox_replaced(pending.id, "synthetic newer row")
+        .expect("replaced");
+    assert_eq!(replaced.state, OutboxState::Failed);
+    assert_eq!(replaced.attempts, 0);
+    assert_eq!(replaced.not_before, None);
+    assert_eq!(replaced.last_error.as_deref(), Some("synthetic newer row"));
+
+    let error = owner
+        .outbox_replaced(pending.id, "again")
+        .expect_err("no longer pending");
+    assert!(matches!(
+        error,
+        StoreError::OutboxNotSendable {
+            state: OutboxState::Failed,
+            ..
+        }
+    ));
+}
