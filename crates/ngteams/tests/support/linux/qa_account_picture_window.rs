@@ -12,7 +12,11 @@
 //!   deletes b's file. The run after it adds b again: its profile picture shows.
 //! - `initials`: c has no profile picture: after "Use profile picture" it shows its initials.
 //! - `settings`: Settings > Accounts, its Tab order and its buttons, in Light, Dark and a font of 20 px.
-//! - `narrow`: a window 480 px wide: the rail, the menu and Settings > Accounts in Light and Dark.
+//! - `narrow`: a window 480 px wide: the rail, the menu and Settings > Accounts in Light and Dark. The title bar's
+//!   face and its presence dot show whole, with the same space at their right as at 1280 px.
+//!
+//! Each file chooser of "Change picture" has a title that names a picture, shows the picture files by default and
+//! offers all files too.
 //!
 //! `QA_AP_EVIDENCE` names a directory that gets the screenshots and notes too; they also go to
 //! `target/ui-shots/qa670-*.png`. Without weston 15, niri or `dbus-daemon` it says so and passes, unless
@@ -51,6 +55,16 @@ const TITLE: u32 = 48;
 const MIN_FACE: usize = 250;
 /// How far a pixel may be from a synthetic colour.
 const TOLERANCE: i32 = 26;
+/// The space right of the title bar's face, px: as at 1280 px wide.
+const TITLE_GAP: u32 = 14;
+/// [`TITLE_GAP`] at a font of 20 px, as at 1280 px wide: the title bar's padding grows with the font.
+const TITLE_GAP_FONT_20: u32 = 19;
+/// Available's green: the presence dot.
+const AVAILABLE: Rgb = [0x6b, 0xb7, 0x00];
+/// The title of the picture's file chooser.
+const PICTURE_TITLE: &str = "Choose a picture";
+/// The picture files the chooser shows by default.
+const PICTURE_GLOBS: [&str; 5] = ["*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp"];
 
 pub(super) fn main() -> ExitCode {
     let outcome = match std::env::var(child::CHILD_ENV) {
@@ -172,9 +186,32 @@ fn menu_restart_remove() -> SandboxResult {
     }
     if let Some(first) = asked.first() {
         note(&format!(
-            "file chooser: title {:?}, accept label {:?}, filters offered {}",
-            first.title, first.accept_label, first.filters
+            "file chooser: title {:?}, accept label {:?}, filters {:?}, current filter {:?}",
+            first.title, first.accept_label, first.filters, first.current_filter
         ));
+    }
+    expect_picture_chooser(&asked)
+}
+
+/// Each file chooser of "Change picture": its title names a picture, it shows the picture files when it opens, and it
+/// offers all files too.
+fn expect_picture_chooser(asked: &[portal::Asked]) -> SandboxResult {
+    ensure(!asked.is_empty(), || "no file chooser opened".to_owned())?;
+    for call in asked {
+        let pictures = call.filters.first();
+        let shows_pictures = pictures.is_some_and(|filter| {
+            PICTURE_GLOBS
+                .iter()
+                .all(|glob| filter.rules.iter().any(|rule| rule == glob))
+        });
+        let all_files = call
+            .filters
+            .iter()
+            .any(|filter| filter.name == "All files" && filter.rules.iter().any(|rule| rule == "*"));
+        ensure(
+            call.title == PICTURE_TITLE && shows_pictures && call.current_filter.as_ref() == pictures && all_files,
+            || format!("the picture's file chooser: {call:?}"),
+        )?;
     }
     Ok(())
 }
@@ -476,7 +513,7 @@ fn settings_page() -> SandboxResult {
         user.shot("settings-font-20-dark")?;
         user.ask("font 14")?;
         user.ask("theme light")?;
-        Ok(())
+        expect_picture_chooser(&user.chooser.asked())
     })();
     user.finish(outcome)
 }
@@ -555,6 +592,10 @@ fn narrow() -> SandboxResult {
         user.until("b chose", |state| tile(state, "b")["chosen"] == true)?;
         user.wait_rail(1, "png")?;
         user.both_themes("narrow-rail")?;
+        user.expect_title_whole("png", TITLE_GAP)?;
+        user.ask("theme dark")?;
+        user.expect_title_whole("png", TITLE_GAP)?;
+        user.ask("theme light")?;
         user.open_menu_on_rail(1)?;
         user.both_themes("narrow-menu")?;
         user.keys(&["escape"])?;
@@ -562,6 +603,8 @@ fn narrow() -> SandboxResult {
         user.both_themes("narrow-settings")?;
         user.ask("font 20")?;
         user.shot("narrow-settings-font-20")?;
+        user.expect_title_whole("png", TITLE_GAP_FONT_20)?;
+        user.ask("font 14")?;
         Ok(())
     })();
     user.finish(outcome)
@@ -703,6 +746,25 @@ fn blobs(image: &RgbImage, area: Rect, colour: Rgb) -> Vec<Blob> {
     }
     found.sort_by_key(|blob| blob.y0);
     found
+}
+
+/// The box of every pixel of `colour` in `area`: a small mark such as a presence dot.
+fn spot(image: &RgbImage, area: Rect, colour: Rgb) -> Option<Blob> {
+    let mut blob = Blob {
+        x0: u32::MAX,
+        y0: u32::MAX,
+        x1: 0,
+        y1: 0,
+        count: 0,
+    };
+    for y in area.y..area.y + area.h {
+        for x in area.x..area.x + area.w {
+            if near(image.get_pixel(x, y).0, colour) {
+                grow(&mut blob, x, y);
+            }
+        }
+    }
+    (blob.count > 0).then_some(blob)
 }
 
 fn grow(blob: &mut Blob, x: u32, y: u32) {
@@ -943,11 +1005,43 @@ impl<'a> User<'a> {
         }
     }
 
+    /// The title bar shows one face, `name`, whole and with [`TITLE_GAP`] at its right.
     fn expect_title(&mut self, name: &str) -> SandboxResult {
+        self.expect_title_gap(name, TITLE_GAP)
+    }
+
+    /// The title bar shows one face, `name`, whole and with `wanted` px at its right.
+    fn expect_title_gap(&mut self, name: &str, wanted: u32) -> SandboxResult {
         let image = self.image()?;
         let title = faces(&image, Rect::title(&image));
         let names: Vec<&str> = title.iter().map(|(name, _)| *name).collect();
-        ensure(names == [name], || format!("the title bar shows {names:?}, not {name}"))
+        ensure(names == [name], || format!("the title bar shows {names:?}, not {name}"))?;
+        let gap = title.first().map(|(_, face)| image.width() - 1 - face.x1);
+        ensure(gap.is_some_and(|gap| gap.abs_diff(wanted) <= 1), || {
+            format!("the title bar's face has {gap:?} px at its right, not {wanted}: {title:?}")
+        })
+    }
+
+    /// [`Self::expect_title_gap`], and the face's presence dot shows whole at its lower right, inside the window.
+    fn expect_title_whole(&mut self, name: &str, gap: u32) -> SandboxResult {
+        self.park()?;
+        thread::sleep(SETTLE);
+        self.expect_title_gap(name, gap)?;
+        let image = self.image()?;
+        let area = Rect::title(&image);
+        let face = faces(&image, area).first().map(|(_, face)| *face);
+        let dot = spot(&image, area, AVAILABLE);
+        let whole = face.zip(dot).is_some_and(|(face, dot)| {
+            let (cx, cy) = face.centre();
+            dot.width() >= 6
+                && dot.width().abs_diff(dot.height()) <= 1
+                && dot.x0 > cx
+                && dot.y0 > cy
+                && dot.x1 + 1 < image.width()
+        });
+        ensure(whole, || {
+            format!("the title bar's presence dot isn't whole: face {face:?}, dot {dot:?}")
+        })
     }
 
     /// The shown account's rail face of `colour` is a full disc: the centre, not the whole picture squeezed.

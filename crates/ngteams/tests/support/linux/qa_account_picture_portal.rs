@@ -3,8 +3,8 @@
 //!
 //! The sandbox's bus has no file chooser, so GPUI's `prompt_for_paths` (ashpd's `OpenFile`) reaches this fake. It
 //! answers each `OpenFile` at once with the next answer the test queued: a file (its `file://` URI, as the real portal
-//! gives it) or a cancel (response 1). It records each call with its title, its accept label and whether it offered
-//! filters.
+//! gives it) or a cancel (response 1). It records each call with its title, its accept label, the filters it offered
+//! and the filter chosen when it opened.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -29,12 +29,20 @@ pub enum Answer {
     Cancel,
 }
 
+/// A filter of the chooser: its name and its rules (a glob such as `*.png` or a MIME type such as `image/png`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Filter {
+    pub name: String,
+    pub rules: Vec<String>,
+}
+
 /// One `OpenFile` call.
 #[derive(Clone, Debug)]
 pub struct Asked {
     pub title: String,
     pub accept_label: Option<String>,
-    pub filters: bool,
+    pub filters: Vec<Filter>,
+    pub current_filter: Option<Filter>,
     pub answered: String,
 }
 
@@ -97,6 +105,38 @@ fn sender(header: &Header<'_>) -> String {
     header.sender().map(ToString::to_string).unwrap_or_default()
 }
 
+/// A filter as the portal gets it: `(sa(us))`, its name and its rules.
+fn filter_of(value: &Value<'_>) -> Option<Filter> {
+    let Value::Structure(filter) = value else {
+        return None;
+    };
+    let [Value::Str(name), Value::Array(rules)] = filter.fields() else {
+        return None;
+    };
+    let rules = rules
+        .inner()
+        .iter()
+        .filter_map(|rule| match rule {
+            Value::Structure(rule) => match rule.fields() {
+                [Value::U32(_), Value::Str(pattern)] => Some(pattern.as_str().to_owned()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    Some(Filter {
+        name: name.as_str().to_owned(),
+        rules,
+    })
+}
+
+fn filters_of(options: &HashMap<&str, Value<'_>>) -> Vec<Filter> {
+    match options.get("filters") {
+        Some(Value::Array(filters)) => filters.inner().iter().filter_map(filter_of).collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn failed(error: impl std::fmt::Display) -> zbus::fdo::Error {
     zbus::fdo::Error::Failed(error.to_string())
 }
@@ -138,7 +178,8 @@ impl FileChooser {
         lock(&self.state).asked.push(Asked {
             title: title.to_owned(),
             accept_label,
-            filters: options.contains_key("filters"),
+            filters: filters_of(&options),
+            current_filter: options.get("current_filter").and_then(filter_of),
             answered,
         });
         let mut results: HashMap<&str, Value<'_>> = HashMap::new();
