@@ -82,7 +82,7 @@ impl CallStage {
         } else {
             self.gallery_stage(active, tiles, (area, in_gallery), palette, cx)
         };
-        if self.speakers.lost_sight(sight_before.as_deref()) {
+        if self.speakers.lost_sight(&sight_before) {
             self.look_at_speakers(None, cx);
         }
         let own = if self.self_hidden || shared || in_gallery || in_strip {

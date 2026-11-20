@@ -11,7 +11,7 @@ use teams_store::Applied;
 use teams_ui::call_stage::BUBBLE_FOR;
 
 use super::{AB, LAB_A, LAB_B, Rig, TRIO, call_windows, click, draw, drawn, in_group_call, registered, shell_window};
-use super::{stage, status, trace};
+use super::{now_ms, stage, status, trace};
 
 /// The store counts `count` unread in `chat`, and the engine tells the chat changed.
 fn unread(rig: &Rig, chat: &str, count: u64) {
@@ -53,14 +53,6 @@ fn brought(rig: &Rig, chat: &str, (from, arrival, text): (&str, i64, &str), (cou
         source,
     });
     unread(rig, chat, count);
-}
-
-/// Now, in Unix ms.
-fn now_ms() -> i64 {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap();
-    i64::try_from(now.as_millis()).unwrap()
 }
 
 fn dot(stage: &mut VisualTestContext) -> Option<gpui::Bounds<gpui::Pixels>> {
